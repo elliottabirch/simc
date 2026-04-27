@@ -15,6 +15,7 @@
 #include "sim/plot.hpp"
 #include "sim/reforge_plot.hpp"
 #include "sim/profileset.hpp"
+#include "sim/apl_json.hpp"
 #include "sim/sim.hpp"
 #include "sim/scale_factor_control.hpp"
 #include "sim/sim_control.hpp"
@@ -332,6 +333,18 @@ int sim_t::main( const std::vector<std::string>& args )
       catch ( const std::exception& )
       {
         std::throw_with_nested( std::runtime_error( "Spell query error" ) );
+      }
+    }
+    else if ( !apl_json_file_str.empty() )
+    {
+      try
+      {
+        init();
+        apl_json::dump( *this, apl_json_file_str );
+      }
+      catch ( const std::exception& )
+      {
+        std::throw_with_nested( std::runtime_error( "APL JSON generation" ) );
       }
     }
     else if ( need_to_save_profiles( this ) )
