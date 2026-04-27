@@ -546,6 +546,7 @@ struct sim_t : private sc_thread_t
   std::map<double, std::vector<double> > divisor_timeline_cache;
   std::vector<report::json::report_configuration_t> json_reports;
   std::string output_file_str, html_file_str, json_file_str;
+  std::string apl_json_file_str;
   std::string reforge_plot_output_file_str;
   std::map<error_level_e, std::unordered_set<std::string>> error_list;
   int display_build;  // 0: none, 1: normal (default), 2: version + hotfix only

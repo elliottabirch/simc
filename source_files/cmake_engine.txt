@@ -149,6 +149,7 @@ sim/cooldown.hpp
 sim/cooldown_waste_data.hpp
 sim/event.hpp
 sim/event_manager.hpp
+sim/apl_json.hpp
 sim/expressions.hpp
 sim/gain.hpp
 sim/iteration_data_entry.hpp
@@ -342,6 +343,7 @@ sim/cooldown.cpp
 sim/cooldown_waste_data.cpp
 sim/event.cpp
 sim/event_manager.cpp
+sim/apl_json.cpp
 sim/expressions.cpp
 sim/gear_stats.cpp
 sim/option.cpp
