@@ -1181,8 +1181,16 @@ void print_html_( report::sc_html_stream& os, sim_t& sim )
   }
   catch ( const std::runtime_error& )
   {
-    // backup spelling for CI
-    std::locale::global( std::locale( "en_US.utf8" ) );
+    try
+    {
+      // backup spelling for CI
+      std::locale::global( std::locale( "en_US.utf8" ) );
+    }
+    catch ( const std::runtime_error& )
+    {
+      // fallback to classic locale if en_US is unavailable
+      std::locale::global( std::locale::classic() );
+    }
   }
 
   // Set floating point formatting
