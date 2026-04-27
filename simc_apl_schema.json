@@ -1,0 +1,793 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SimulationCraft APL Expression Schema",
+  "description": "Static schema of all APL expressions, operators, actions, and options extracted from the SimC C++ source. Dynamic names (buff names, spell names, etc.) are data-driven and marked with <name> placeholders.",
+  "version": "1.0.0",
+  "source_files": {
+    "expressions":        "engine/sim/expressions.hpp",
+    "sim_expressions":    "engine/sim/sim.cpp:3457",
+    "player_expressions": "engine/player/player.cpp:11983",
+    "action_expressions": "engine/action/action.cpp:3187",
+    "buff_expressions":   "engine/buff/buff.cpp:334",
+    "cooldown_expressions": "engine/sim/cooldown.cpp:520",
+    "dot_expressions":    "engine/action/dot.cpp:408",
+    "resource_expressions": "engine/player/player.cpp:12734",
+    "variable_operations": "engine/action/variable.hpp:22"
+  },
+
+  "operators": {
+    "unary": {
+      "+":       { "token": "TOK_PLUS",  "description": "Unary plus" },
+      "-":       { "token": "TOK_MINUS", "description": "Unary minus (negation)" },
+      "!":       { "token": "TOK_NOT",   "description": "Logical NOT" },
+      "@":       { "token": "TOK_ABS",   "description": "Absolute value" },
+      "floor()": { "token": "TOK_FLOOR", "description": "Floor (round down)" },
+      "ceil()":  { "token": "TOK_CEIL",  "description": "Ceiling (round up)" }
+    },
+    "binary": {
+      "+":  { "token": "TOK_ADD",   "description": "Addition" },
+      "-":  { "token": "TOK_SUB",   "description": "Subtraction" },
+      "*":  { "token": "TOK_MULT",  "description": "Multiplication" },
+      "%":  { "token": "TOK_DIV",   "description": "Division (NOTE: not modulus!)" },
+      "%%": { "token": "TOK_MOD",   "description": "Modulus" },
+      "&&": { "token": "TOK_AND",   "description": "Logical AND" },
+      "||": { "token": "TOK_OR",    "description": "Logical OR" },
+      "^":  { "token": "TOK_XOR",   "description": "Logical XOR (also ^^)" },
+      "==": { "token": "TOK_EQ",    "description": "Equal" },
+      "!=": { "token": "TOK_NOTEQ", "description": "Not equal" },
+      "<":  { "token": "TOK_LT",    "description": "Less than" },
+      "<=": { "token": "TOK_LTEQ",  "description": "Less than or equal" },
+      ">":  { "token": "TOK_GT",    "description": "Greater than" },
+      ">=": { "token": "TOK_GTEQ",  "description": "Greater than or equal" },
+      "~":  { "token": "TOK_IN",    "description": "In set" },
+      "!~": { "token": "TOK_NOTIN", "description": "Not in set" },
+      "<?": { "token": "TOK_MIN",   "description": "Minimum of two values" },
+      ">?": { "token": "TOK_MAX",   "description": "Maximum of two values" }
+    },
+    "grouping": {
+      "(": { "token": "TOK_LPAR", "description": "Left parenthesis" },
+      ")": { "token": "TOK_RPAR", "description": "Right parenthesis" }
+    }
+  },
+
+  "expressions": {
+    "sim_level": {
+      "_source": "engine/sim/sim.cpp:3457",
+      "keywords": {
+        "time":                           { "type": "number", "description": "Current simulation time in seconds" },
+        "fight_remains":                  { "type": "number", "description": "Expected remaining fight time in seconds" },
+        "interpolated_fight_remains":     { "type": "number", "description": "Interpolated remaining fight time" },
+        "expected_combat_length":         { "type": "number", "description": "Expected total iteration time" },
+        "desired_targets":                { "type": "number", "description": "Configured desired target count" },
+        "desired_tank_targets":           { "type": "number", "description": "Configured desired tank target count" },
+        "initial_targets":                { "type": "number", "description": "Number of initial targets in the sim" },
+        "enemies":                        { "type": "number", "description": "Total number of enemy targets" },
+        "active_enemies":                 { "type": "number", "description": "Currently active (non-sleeping) enemies" },
+        "active_allies":                  { "type": "number", "description": "Currently active allies" },
+        "active_allied_augmentations":    { "type": "number", "description": "Number of active Augmentation Evokers" },
+        "channel_lag":                    { "type": "number", "description": "Mean channel lag" },
+        "channel_lag_stddev":             { "type": "number", "description": "Channel lag standard deviation" },
+        "nonexecute_actors_pct":          { "type": "number", "description": "Percentage of actors without execute abilities" },
+        "target":                         { "type": "number", "description": "Primary sim target actor index" }
+      },
+      "prefixes": {
+        "fight_style.<style_name>":       { "type": "boolean", "description": "Check if current fight style matches" },
+        "aura.<name>.<suffix>":           { "type": "varies", "description": "Sim-wide aura/buff expression (uses buff suffixes)" },
+        "actors.<name>.<expression>":     { "type": "varies", "description": "Access another actor's expressions" },
+        "raid_event.<type>.<filter>":     { "type": "number", "description": "Query upcoming raid events" }
+      }
+    },
+
+    "raid_event_filters": {
+      "_source": "engine/sim/raid_event.cpp:2367",
+      "description": "Filters available for raid_event.<type>.<filter> expressions",
+      "filters": {
+        "in":           { "type": "number", "description": "Time until next event of this type" },
+        "cooldown":     { "type": "number", "description": "Cooldown of event" },
+        "exists":       { "type": "boolean", "description": "Whether this event type exists" },
+        "remains":      { "type": "number", "description": "Remaining duration of active event" },
+        "up":           { "type": "boolean", "description": "Whether event is currently active" },
+        "duration":     { "type": "number", "description": "Duration of the event" },
+        "distance":     { "type": "number", "description": "Distance of the event" },
+        "distance_min": { "type": "number", "description": "Minimum distance" },
+        "distance_max": { "type": "number", "description": "Maximum distance" },
+        "amount":       { "type": "number", "description": "Amount/count of event" },
+        "to_pct":       { "type": "number", "description": "Target percentage of event" },
+        "count":        { "type": "number", "description": "Number of event occurrences" },
+        "has_boss":     { "type": "boolean", "description": "Whether event has a boss" }
+      }
+    },
+
+    "player_level": {
+      "_source": "engine/player/player.cpp:11983",
+      "keywords": {
+        "level":                { "type": "number", "description": "Player true level" },
+        "name":                 { "type": "number", "description": "Player actor index" },
+        "self":                 { "type": "number", "description": "Player actor index" },
+        "target":               { "type": "number", "description": "Current target actor index" },
+        "in_combat":            { "type": "boolean", "description": "Whether player is in combat" },
+        "in_boss_encounter":    { "type": "boolean", "description": "Whether in a boss encounter" },
+        "ptr":                  { "type": "boolean", "description": "Whether using PTR data" },
+        "bugs":                 { "type": "boolean", "description": "Whether bugs simulation is enabled" },
+        "is_add":               { "type": "boolean", "description": "Whether this actor is an add" },
+        "is_boss":              { "type": "boolean", "description": "Whether this actor is a boss" },
+        "is_enemy":             { "type": "boolean", "description": "Whether this actor is an enemy" },
+        "attack_haste":         { "type": "number", "description": "Current attack haste multiplier" },
+        "auto_attack_speed":    { "type": "number", "description": "Current auto attack speed multiplier" },
+        "spell_haste":          { "type": "number", "description": "Current spell haste multiplier" },
+        "spell_cast_speed":     { "type": "number", "description": "Current spell cast speed multiplier" },
+        "mastery_value":        { "type": "number", "description": "Current mastery value" },
+        "attack_crit":          { "type": "number", "description": "Current attack crit chance" },
+        "spell_crit":           { "type": "number", "description": "Current spell crit chance" },
+        "parry_chance":         { "type": "number", "description": "Current parry chance" },
+        "dodge_chance":         { "type": "number", "description": "Current dodge chance" },
+        "block_chance":         { "type": "number", "description": "Current block chance" },
+        "position_front":       { "type": "boolean", "description": "Whether at front of target" },
+        "position_back":        { "type": "boolean", "description": "Whether at back of target" },
+        "time_to_bloodlust":    { "type": "number", "description": "Time until bloodlust in seconds" },
+        "raw_haste_pct":        { "type": "number", "description": "Raw initial haste percentage from rating" }
+      },
+      "dynamic_keywords": {
+        "time_to_die":                    { "type": "number", "description": "Estimated time until target dies" },
+        "time_to_pct_<value>":            { "type": "number", "description": "Estimated time until target reaches <value> percent health" },
+        "incoming_damage_<duration>":     { "type": "number", "description": "Total incoming damage in last <duration> seconds (or <duration>ms for milliseconds)" },
+        "incoming_magic_damage_<duration>": { "type": "number", "description": "Total incoming magic damage in last <duration> seconds" }
+      }
+    },
+
+    "buff": {
+      "_source": "engine/buff/buff.cpp:334",
+      "syntax": "buff.<name>.<suffix>",
+      "also_applies_to": "debuff.<name>.<suffix>",
+      "property_normalization": {
+        "description": "In JSON AST output, aliased buff/debuff properties are normalized to canonical forms. When normalization occurs, the original property is preserved in the 'original_property' field.",
+        "mappings": {
+          "up":            { "canonical": "stack", "reason": "check() > 0 — boolean of stack count" },
+          "down":          { "canonical": "stack", "reason": "check() <= 0 — negated boolean of stack count" },
+          "stack":         { "canonical": "stack", "reason": "Identity (already canonical)" },
+          "stack_pct":     { "canonical": "stack", "reason": "100 * check() / max_stack() — derived from stack" },
+          "at_max_stacks": { "canonical": "stack", "reason": "check() == max_stack() — derived from stack" },
+          "react":         { "canonical": "react", "reason": "Identity (already canonical)" },
+          "react_pct":     { "canonical": "react", "reason": "100 * stack_react() / max_stack() — derived from react" }
+        },
+        "example": {
+          "input":  "buff.X.down",
+          "output": { "property": "stack", "original_property": "down", "spell_id": 365362 }
+        }
+      },
+      "suffixes": {
+        "up":                           { "type": "boolean", "description": "Buff is active (stack > 0)", "canonical_property": "stack" },
+        "down":                         { "type": "boolean", "description": "Buff is not active (stack <= 0)", "canonical_property": "stack" },
+        "stack":                        { "type": "number",  "description": "Current stack count", "canonical_property": "stack" },
+        "stack_pct":                    { "type": "number",  "description": "Current stacks as percentage of max stacks", "canonical_property": "stack" },
+        "max_stack":                    { "type": "number",  "description": "Maximum possible stacks" },
+        "at_max_stacks":                { "type": "boolean", "description": "Whether at maximum stacks", "canonical_property": "stack" },
+        "remains":                      { "type": "number",  "description": "Time remaining in seconds" },
+        "duration":                     { "type": "number",  "description": "Full buff duration in seconds" },
+        "elapsed":                      { "type": "number",  "description": "Time elapsed since application" },
+        "tick_time":                    { "type": "number",  "description": "Time between buff ticks" },
+        "tick_time_remains":            { "type": "number",  "description": "Time until next buff tick" },
+        "cooldown_remains":             { "type": "number",  "description": "Buff internal cooldown remaining" },
+        "internal_cooldown_remains":    { "type": "number",  "description": "Buff internal cooldown remaining (from ICD)" },
+        "value":                        { "type": "number",  "description": "Current buff value" },
+        "default_value":                { "type": "number",  "description": "Default buff value" },
+        "stack_value":                  { "type": "number",  "description": "Value per stack times current stacks" },
+        "react":                        { "type": "number",  "description": "Reactive stack count (accounts for reaction time)", "canonical_property": "react" },
+        "react_pct":                    { "type": "number",  "description": "Reactive stacks as percentage of max", "canonical_property": "react" },
+        "cooldown_react":               { "type": "number",  "description": "Cooldown remaining accounting for reaction time" },
+        "last_trigger":                 { "type": "number",  "description": "Time since buff was last triggered" },
+        "last_expire":                  { "type": "number",  "description": "Time since buff last expired" },
+        "expiration_delay_remains":     { "type": "number",  "description": "Remaining expiration delay time" }
+      }
+    },
+
+    "cooldown": {
+      "_source": "engine/sim/cooldown.cpp:520",
+      "syntax": "cooldown.<name>.<suffix>",
+      "property_normalization": {
+        "description": "In JSON AST output, aliased cooldown properties are normalized to canonical forms.",
+        "mappings": {
+          "ready":            { "canonical": "up", "reason": "Exact alias for up" },
+          "remains_guess":    { "canonical": "remains_expected", "reason": "Exact alias for remains_expected" },
+          "duration_guess":   { "canonical": "duration_expected", "reason": "Exact alias for duration_expected" }
+        }
+      },
+      "suffixes": {
+        "remains":              { "type": "number",  "description": "Time remaining on cooldown" },
+        "up":                   { "type": "boolean", "description": "Cooldown is ready", "canonical_property": "up" },
+        "ready":                { "type": "boolean", "description": "Cooldown is ready (alias of up)", "canonical_property": "up" },
+        "duration":             { "type": "number",  "description": "Current cooldown duration (with recharge multiplier)" },
+        "base_duration":        { "type": "number",  "description": "Base cooldown duration" },
+        "charges":              { "type": "number",  "description": "Current available charges" },
+        "charges_fractional":   { "type": "number",  "description": "Fractional charge count (including partial recharge)" },
+        "max_charges":          { "type": "number",  "description": "Maximum charges" },
+        "recharge_time":        { "type": "number",  "description": "Time until next charge is ready" },
+        "full_recharge_time":   { "type": "number",  "description": "Time until all charges are ready" },
+        "remains_expected":     { "type": "number",  "description": "Estimated remaining cooldown accounting for CDR", "canonical_property": "remains_expected" },
+        "remains_guess":        { "type": "number",  "description": "Estimated remaining cooldown accounting for CDR (alias of remains_expected)", "canonical_property": "remains_expected" },
+        "duration_expected":    { "type": "number",  "description": "Estimated total cooldown duration accounting for CDR", "canonical_property": "duration_expected" },
+        "duration_guess":       { "type": "number",  "description": "Estimated total cooldown duration accounting for CDR (alias of duration_expected)", "canonical_property": "duration_expected" }
+      }
+    },
+
+    "dot": {
+      "_source": "engine/action/dot.cpp:408",
+      "syntax": "dot.<name>.<suffix>",
+      "suffixes": {
+        "ticking":                  { "type": "boolean", "description": "Whether the DoT is active" },
+        "remains":                  { "type": "number",  "description": "Time remaining on DoT" },
+        "ticks":                    { "type": "number",  "description": "Current tick count since application" },
+        "current_ticks":            { "type": "number",  "description": "Total number of ticks for current application" },
+        "ticks_remain":             { "type": "number",  "description": "Whole ticks remaining" },
+        "ticks_remain_fractional":  { "type": "number",  "description": "Fractional ticks remaining" },
+        "duration":                 { "type": "number",  "description": "Full DoT duration" },
+        "tick_time_remains":        { "type": "number",  "description": "Time until next tick" },
+        "tick_dmg":                 { "type": "number",  "description": "Estimated hit tick damage" },
+        "crit_dmg":                 { "type": "number",  "description": "Estimated crit tick damage" },
+        "crit_pct":                 { "type": "number",  "description": "Crit chance of DoT snapshot" },
+        "extended_time":            { "type": "number",  "description": "Extra time added via extensions" },
+        "refreshable":              { "type": "boolean", "description": "Whether the DoT is refreshable (pandemic window)" },
+        "spell_power":              { "type": "number",  "description": "Spell power snapshot on the DoT" },
+        "attack_power":             { "type": "number",  "description": "Attack power snapshot on the DoT" },
+        "multiplier":               { "type": "number",  "description": "Target ability multiplier snapshot" },
+        "pmultiplier":              { "type": "number",  "description": "Persistent multiplier snapshot" },
+        "haste_pct":                { "type": "number",  "description": "Haste percentage of snapshot" },
+        "haste_pct_next_tick":      { "type": "number",  "description": "Haste percentage at next tick evaluation" },
+        "stack":                    { "type": "number",  "description": "Current DoT stack count" },
+        "max_stacks":               { "type": "number",  "description": "Maximum DoT stacks" }
+      }
+    },
+
+    "action": {
+      "_source": "engine/action/action.cpp:3187",
+      "syntax": "action.<name>.<suffix>",
+      "description": "When used without 'action.' prefix, these apply to the current action in context",
+      "suffixes": {
+        "cast_time":            { "type": "number",  "description": "Cast time of the action" },
+        "execute_time":         { "type": "number",  "description": "Execution time (max of cast time and GCD, or channel duration)" },
+        "ready":                { "type": "boolean", "description": "Action is ready to be used" },
+        "usable":               { "type": "boolean", "description": "Action cooldown is ready" },
+        "usable_in":            { "type": "number",  "description": "Time in seconds until action is usable" },
+        "cost":                 { "type": "number",  "description": "Resource cost of the action" },
+        "cost_affordable":      { "type": "boolean", "description": "Whether the cost is currently affordable" },
+        "target":               { "type": "number",  "description": "Current target actor index" },
+        "gcd":                  { "type": "number",  "description": "GCD triggered by this action" },
+        "cooldown":             { "type": "number",  "description": "Cooldown duration of the action" },
+        "travel_time":          { "type": "number",  "description": "Projectile travel time" },
+        "available_targets":    { "type": "number",  "description": "Number of available targets" },
+        "tick_time":            { "type": "number",  "description": "Tick time of the active DoT" },
+        "new_tick_time":        { "type": "number",  "description": "Tick time if reapplied now" },
+        "tick_multiplier":      { "type": "number",  "description": "Composite tick ability multiplier" },
+        "crit_pct_current":     { "type": "number",  "description": "Current crit percentage (0-100)" },
+        "energize_amount":      { "type": "number",  "description": "Resource generated by this action" },
+        "persistent_multiplier": { "type": "number", "description": "Persistent multiplier for snapshotting" },
+        "damage":               { "type": "number",  "description": "Estimated direct damage (average of hit/crit)" },
+        "hit_damage":           { "type": "number",  "description": "Estimated direct hit damage" },
+        "crit_damage":          { "type": "number",  "description": "Estimated direct crit damage" },
+        "hit_heal":             { "type": "number",  "description": "Estimated direct hit heal" },
+        "crit_heal":            { "type": "number",  "description": "Estimated direct crit heal" },
+        "tick_damage":          { "type": "number",  "description": "Estimated tick damage (average of hit/crit)" },
+        "hit_tick_damage":      { "type": "number",  "description": "Estimated hit tick damage" },
+        "crit_tick_damage":     { "type": "number",  "description": "Estimated crit tick damage" },
+        "tick_heal":            { "type": "number",  "description": "Estimated hit tick heal" },
+        "crit_tick_heal":       { "type": "number",  "description": "Estimated crit tick heal" },
+        "multiplier":           { "type": "number",  "description": "Highest school multiplier for the action" },
+        "primary_target":       { "type": "boolean", "description": "Whether current target is the player's primary target" },
+        "enabled":              { "type": "boolean", "description": "Whether the action's spell data is found/valid" },
+        "casting":              { "type": "boolean", "description": "Currently casting this action" },
+        "cast_remains":         { "type": "number",  "description": "Remaining cast time of this action" },
+        "channeling":           { "type": "boolean", "description": "Currently channeling this action" },
+        "channel_remains":      { "type": "number",  "description": "Remaining channel time" },
+        "executing":            { "type": "boolean", "description": "Currently casting or channeling this action" },
+        "execute_remains":      { "type": "number",  "description": "Remaining execution time (cast or channel)" },
+        "last_used":            { "type": "number",  "description": "Time in seconds since action was last used" },
+        "cooldown_react":       { "type": "boolean", "description": "Cooldown is ready and reaction time has passed" },
+        "cast_delay":           { "type": "boolean", "description": "Whether cast delay reaction time has passed" },
+        "spell_targets":        { "type": "number",  "description": "Number of targets the spell would hit" },
+        "in_flight":            { "type": "boolean", "description": "Whether any projectile is in flight" },
+        "in_flight_count":      { "type": "number",  "description": "Number of projectiles in flight" },
+        "in_flight_to_target":  { "type": "boolean", "description": "Whether a projectile is in flight to current target" },
+        "in_flight_to_target_count": { "type": "number", "description": "Number of projectiles in flight to current target" },
+        "in_flight_remains":    { "type": "number",  "description": "Time until nearest projectile lands" },
+        "charges":              { "type": "number",  "description": "Available charges (delegates to cooldown)" },
+        "charges_fractional":   { "type": "number",  "description": "Fractional charges (delegates to cooldown)" },
+        "max_charges":          { "type": "number",  "description": "Maximum charges (delegates to cooldown)" },
+        "recharge_time":        { "type": "number",  "description": "Time to next charge (delegates to cooldown)" },
+        "full_recharge_time":   { "type": "number",  "description": "Time to full charges (delegates to cooldown)" }
+      },
+      "sub_expressions": {
+        "gcd.max":              { "type": "number", "description": "Maximum GCD duration (haste-adjusted with floor)" },
+        "gcd.remains":          { "type": "number", "description": "Time remaining on current GCD" }
+      },
+      "dot_suffixes_note": "All dot.* suffixes are also available directly on an action (e.g., action.moonfire.remains)"
+    },
+
+    "talent": {
+      "_source": "engine/player/player.cpp:12504",
+      "syntax": ["talent.<name>", "talent.<name>.<suffix>"],
+      "suffixes": {
+        "enabled":  { "type": "boolean", "description": "Talent is selected (default if no suffix)" },
+        "disabled": { "type": "boolean", "description": "Talent is not selected" },
+        "rank":     { "type": "number",  "description": "Talent rank (0 if not selected)" }
+      }
+    },
+
+    "apex": {
+      "_source": "engine/player/player.cpp:12508",
+      "syntax": ["apex.<index>", "apex.<index>.<suffix>"],
+      "description": "Tiered (apex) talent expressions, 1-indexed",
+      "suffixes": {
+        "enabled":  { "type": "boolean", "description": "Apex talent is selected" },
+        "disabled": { "type": "boolean", "description": "Apex talent is not selected" },
+        "rank":     { "type": "number",  "description": "Apex talent rank" }
+      }
+    },
+
+    "variable": {
+      "_source": "engine/player/player.cpp:12147",
+      "syntax": "variable.<name>",
+      "type": "number",
+      "description": "Value of a user-defined APL variable"
+    },
+
+    "resource": {
+      "_source": "engine/player/player.cpp:12734",
+      "syntax": ["<resource>", "<resource>.<suffix>"],
+      "resource_types": [
+        "health", "mana", "rage", "energy", "focus",
+        "runic_power", "rune", "soul_shard", "astral_power",
+        "holy_power", "chi", "combo_points", "maelstrom",
+        "fury", "insanity", "essence"
+      ],
+      "property_normalization": {
+        "description": "In JSON AST output, resource expressions are two-part (e.g. mana.pct). The 'percent' suffix is normalized to 'pct' in the name field, with the original preserved in 'original_name'.",
+        "mappings": {
+          "percent": { "canonical": "pct", "reason": "Exact alias for pct" }
+        }
+      },
+      "suffixes": {
+        "<bare>":       { "type": "number", "description": "Current resource amount (no suffix needed)" },
+        "deficit":      { "type": "number", "description": "max - current" },
+        "pct":          { "type": "number", "description": "Current as percentage of max (0-100)", "canonical_name": "pct" },
+        "percent":      { "type": "number", "description": "Alias for pct", "canonical_name": "pct" },
+        "max":          { "type": "number", "description": "Maximum resource amount" },
+        "max_nonproc":  { "type": "number", "description": "Buffed max resource (snapshot)" },
+        "pct_nonproc":  { "type": "number", "description": "Current as percentage of buffed max" },
+        "net_regen":    { "type": "number", "description": "Net resource regeneration per second" },
+        "regen":        { "type": "number", "description": "Resource regeneration rate per second" },
+        "time_to_max":  { "type": "number", "description": "Estimated seconds until resource is full" },
+        "time_to_<N>":  { "type": "number", "description": "Estimated seconds until resource reaches <N>" }
+      }
+    },
+
+    "pet": {
+      "_source": "engine/player/player.cpp:12580",
+      "syntax": "pet.<name>.<suffix>",
+      "suffixes": {
+        "active":   { "type": "boolean", "description": "Pet is currently active (not sleeping)" },
+        "remains":  { "type": "number",  "description": "Time remaining on pet duration" }
+      },
+      "notes": "pet.<name>.<player_expression> also works to access the pet's own expressions. pet.any.active checks if any pet is active."
+    },
+
+    "owner": {
+      "_source": "engine/player/player.cpp:12658",
+      "syntax": "owner.<expression>",
+      "description": "Access the pet owner's expressions (only valid for pet actors)"
+    },
+
+    "target_prefix": {
+      "_source": "engine/action/action.cpp:3991",
+      "syntax": "target.<expression>",
+      "special_suffixes": {
+        "distance": { "type": "number", "description": "Distance to target" }
+      },
+      "notes": "target.<expression> delegates to the target player's create_expression, so any player-level expression works (e.g., target.health.pct, target.time_to_die)"
+    },
+
+    "self_prefix": {
+      "_source": "engine/action/action.cpp:4247",
+      "syntax": "self.<expression>",
+      "description": "Access the player's own expressions from an action context. Useful for self.target.*, self.dot.*, etc."
+    },
+
+    "sim_prefix": {
+      "_source": "engine/action/action.cpp:4254",
+      "syntax": "sim.<expression>",
+      "description": "Access sim-level expressions from an action context"
+    },
+
+    "prev": {
+      "_source": "engine/action/action.cpp:3698",
+      "syntax": "prev.<action_name>",
+      "type": "boolean",
+      "description": "Whether the previous foreground action was <action_name>"
+    },
+
+    "prev_gcd": {
+      "_source": "engine/action/action.cpp:3884",
+      "syntax": "prev_gcd.<N>.<action_name>",
+      "type": "boolean",
+      "description": "Whether the Nth previous GCD action was <action_name> (1 = most recent)"
+    },
+
+    "prev_off_gcd": {
+      "_source": "engine/action/action.cpp:3720",
+      "syntax": "prev_off_gcd.<action_name>",
+      "type": "boolean",
+      "description": "Whether the specified action was used off-GCD during the previous GCD"
+    },
+
+    "active_dot": {
+      "_source": "engine/player/player.cpp:12319",
+      "syntax": "active_dot.<action_name>",
+      "type": "number",
+      "description": "Number of active DoTs of this type across all targets"
+    },
+
+    "active_enemies_within": {
+      "_source": "engine/action/action.cpp:3666",
+      "syntax": "active_enemies_within.<yards>",
+      "type": "number",
+      "description": "Number of active enemies within <yards> of the player (requires distance targeting)"
+    },
+
+    "spell_targets": {
+      "_source": "engine/action/action.cpp:3801",
+      "syntax": ["spell_targets", "spell_targets.<action_name>"],
+      "type": "number",
+      "description": "Number of targets a spell would hit"
+    },
+
+    "enemy_dot": {
+      "_source": "engine/action/action.cpp:3943",
+      "syntax": "enemy_dot.<dot_name>.<suffix>",
+      "description": "Access enemy-applied DoT expressions. Uses same suffixes as dot.*"
+    },
+
+    "equipped": {
+      "_source": "engine/player/player.cpp:12181",
+      "syntax": "equipped.<item_name_or_id>",
+      "type": "boolean",
+      "description": "Whether the player has the specified item equipped (by name, ID, or effect name)"
+    },
+
+    "weapon_type": {
+      "_source": "engine/player/player.cpp:12204",
+      "syntax": ["main_hand.2h", "main_hand.1h", "off_hand.2h", "off_hand.1h"],
+      "type": "boolean",
+      "description": "Check weapon type in the specified hand"
+    },
+
+    "race": {
+      "_source": "engine/player/player.cpp:12233",
+      "syntax": "race.<race_name>",
+      "type": "boolean",
+      "description": "Whether the player is the specified race"
+    },
+
+    "spec": {
+      "_source": "engine/player/player.cpp:12239",
+      "syntax": "spec.<spec_name>",
+      "type": "boolean",
+      "description": "Whether the player is the specified specialization"
+    },
+
+    "role": {
+      "_source": "engine/player/player.cpp:12245",
+      "syntax": "role.<role_name>",
+      "type": "boolean",
+      "description": "Whether the player's primary role matches"
+    },
+
+    "stat": {
+      "_source": "engine/player/player.cpp:12251",
+      "syntax": "stat.<stat_name>",
+      "stat_names": [
+        "spell_haste", "strength", "agility", "stamina", "intellect", "spirit",
+        "spell_power", "attack_power", "expertise_rating", "hit_rating",
+        "crit_rating", "haste_rating", "armor", "bonus_armor",
+        "dodge_rating", "parry_rating", "block_rating",
+        "mastery_rating", "versatility_rating"
+      ],
+      "type": "number",
+      "description": "Current value of the specified stat"
+    },
+
+    "set_bonus": {
+      "_source": "engine/player/player.cpp:12316",
+      "syntax": "set_bonus.<set_expression>",
+      "description": "Check set bonus status (e.g., set_bonus.tier31_2pc)"
+    },
+
+    "movement": {
+      "_source": "engine/player/player.cpp:12332",
+      "syntax": "movement.<suffix>",
+      "suffixes": {
+        "remains":  { "type": "number", "description": "Time remaining on movement" },
+        "distance": { "type": "number", "description": "Distance to move" },
+        "speed":    { "type": "number", "description": "Current movement speed" }
+      }
+    },
+
+    "swing": {
+      "_source": "engine/player/player.cpp:12463",
+      "syntax": "swing.<hand>.<suffix>",
+      "hands": ["mh", "mainhand", "main_hand", "oh", "offhand", "off_hand"],
+      "suffixes": {
+        "remains": { "type": "number", "description": "Time until next auto-attack swing" }
+      }
+    },
+
+    "hero_tree": {
+      "_source": "engine/player/player.cpp:12406",
+      "syntax": "hero_tree.<tree_name>",
+      "type": "boolean",
+      "description": "Whether the player has the specified hero talent tree active"
+    },
+
+    "using_apl": {
+      "_source": "engine/player/player.cpp:12313",
+      "syntax": "using_apl.<apl_name>",
+      "type": "boolean",
+      "description": "Whether the specified APL is in use"
+    },
+
+    "spell_exists": {
+      "_source": "engine/player/player.cpp:12495",
+      "syntax": "spell.<spell_name>.exists",
+      "type": "boolean",
+      "description": "Whether the specified spell exists in the player's spell data"
+    },
+
+    "trinket": {
+      "_source": "engine/player/player.cpp:12573",
+      "syntax": "trinket.<slot_or_name>.<suffix>",
+      "description": "Trinket expressions (handled by unique_gear::create_expression)"
+    },
+
+    "dbc": {
+      "_source": "engine/player/player.cpp:12681",
+      "syntax": "dbc.<type>.<id>.<field>",
+      "types": {
+        "spell":  { "description": "Access spell data fields by spell ID" },
+        "effect": { "description": "Access effect data fields by effect ID" },
+        "power":  { "description": "Access power data fields by power ID" }
+      }
+    },
+
+    "azerite": {
+      "_source": "engine/player/player.cpp:12716",
+      "syntax": "azerite.<expression>",
+      "description": "Azerite power expressions (legacy)"
+    },
+
+    "essence": {
+      "_source": "engine/player/player.cpp:12721",
+      "syntax": "essence.<expression>",
+      "description": "Azerite essence expressions (legacy)"
+    }
+  },
+
+  "special_actions": {
+    "_source": "engine/player/player.cpp:11350",
+    "description": "Built-in pseudo-actions available in all APLs",
+    "actions": {
+      "variable": {
+        "description": "Set, modify, or query a user-defined variable",
+        "options": {
+          "name":       { "required": true,  "description": "Variable name" },
+          "op":         { "required": false, "default": "set", "description": "Operation to perform" },
+          "value":      { "required": false, "description": "Expression for the value" },
+          "value_else": { "required": false, "description": "Else-value for setif operation" },
+          "condition":  { "required": false, "description": "Condition expression for setif operation" },
+          "default":    { "required": false, "description": "Default/initial value" },
+          "delay":      { "required": false, "description": "Delay before variable update" }
+        },
+        "operations": {
+          "set":    { "description": "Set variable to value" },
+          "add":    { "description": "Add value to variable" },
+          "sub":    { "description": "Subtract value from variable" },
+          "mul":    { "description": "Multiply variable by value" },
+          "div":    { "description": "Divide variable by value" },
+          "pow":    { "description": "Raise variable to power of value" },
+          "mod":    { "description": "Variable modulo value" },
+          "min":    { "description": "Assign minimum of variable and value" },
+          "max":    { "description": "Assign maximum of variable and value" },
+          "floor":  { "description": "Floor the variable value" },
+          "ceil":   { "description": "Ceil the variable value" },
+          "setif":  { "description": "Set variable to value if condition is true, else value_else" },
+          "reset":  { "description": "Reset variable to default value" },
+          "print":  { "description": "(Debug) Print variable to stdout" },
+          "report": { "description": "Report value changes in HTML output" }
+        }
+      },
+      "call_action_list": {
+        "description": "Call another action list (returns to caller when list is exhausted)",
+        "options": {
+          "name":   { "required": true, "description": "Name of the action list to call" },
+          "random": { "required": false, "description": "Randomize action order (int toggle)" }
+        }
+      },
+      "run_action_list": {
+        "description": "Run another action list (does not return to caller)",
+        "options": {
+          "name":   { "required": true, "description": "Name of the action list to run" },
+          "random": { "required": false, "description": "Randomize action order (int toggle)" }
+        }
+      },
+      "swap_action_list": {
+        "description": "Alias for run_action_list"
+      },
+      "use_item": {
+        "description": "Use an equipped item's on-use effect",
+        "options": {
+          "name":   { "required": false, "description": "Item name" },
+          "slot":   { "required": false, "description": "Equipment slot (e.g., trinket1, trinket2)" },
+          "effect_name": { "required": false, "description": "Special effect name to match" }
+        }
+      },
+      "use_items": {
+        "description": "Automatically use all usable items with on-use effects",
+        "options": {
+          "slots":           { "required": false, "description": "Pipe or colon-separated list of slot names (e.g., trinket1:trinket2)" },
+          "check_existing":  { "required": false, "default": true, "description": "Ignore slot if matching use_item already exists" }
+        }
+      },
+      "wait": {
+        "description": "Wait for a specified duration",
+        "options": {
+          "sec": { "required": false, "default": "1.0", "description": "Seconds to wait (can be an expression)" }
+        }
+      },
+      "pool_resource": {
+        "description": "Pool resources instead of using abilities",
+        "options": {
+          "for_next":      { "required": false, "description": "Pool for the next action in the list" },
+          "extra_amount":  { "required": false, "description": "Extra amount to pool beyond cost" },
+          "wait":          { "required": false, "description": "Override wait time" },
+          "force_wait":    { "required": false, "default": false, "description": "Force waiting (requires for_next=1)" },
+          "resource":      { "required": false, "description": "Resource type to pool (e.g., energy, focus)" }
+        }
+      },
+      "snapshot_stats": {
+        "description": "Snapshot player stats (typically used in precombat)"
+      },
+      "cancel_buff": {
+        "description": "Cancel an active buff",
+        "options": {
+          "name": { "required": true, "description": "Buff name to cancel" }
+        }
+      },
+      "sequence": {
+        "description": "Execute a fixed sequence of actions in order (sub-actions separated by colons)",
+        "options": {
+          "name": { "required": false, "description": "Sequence name" }
+        }
+      },
+      "strict_sequence": {
+        "description": "Execute a strict sequence of actions",
+        "options": {
+          "name":       { "required": false, "description": "Sequence name" },
+          "allow_skip": { "required": false, "default": false, "description": "Allow skipping actions that aren't ready" }
+        }
+      },
+      "restart_sequence": {
+        "description": "Restart a named sequence from the beginning",
+        "options": {
+          "name": { "required": true, "description": "Sequence name to restart" }
+        }
+      },
+      "cancel_action": {
+        "description": "Cancel the current action"
+      },
+      "dismiss_pet": {
+        "description": "Dismiss an active pet",
+        "options": {
+          "name": { "required": false, "description": "Pet name to dismiss" }
+        }
+      },
+      "invoke_external_buff": {
+        "description": "Invoke an external buff on the player",
+        "options": {
+          "name":     { "required": true, "description": "Buff name" },
+          "duration": { "required": false, "description": "Buff duration" },
+          "stacks":   { "required": false, "description": "Number of buff stacks" },
+          "use_pool": { "required": false, "default": true, "description": "Whether to use pool" }
+        }
+      },
+      "wait_until_ready": {
+        "description": "Wait until the player is ready to act",
+        "options": {
+          "sec": { "required": false, "default": "1.0", "description": "Seconds to wait (can be an expression)" }
+        }
+      },
+      "wait_for_cooldown": {
+        "description": "Wait for a specific cooldown to be ready",
+        "options": {
+          "name": { "required": true, "description": "Action/cooldown name to wait for" }
+        }
+      },
+      "cycling_variable": {
+        "description": "Set a variable while cycling through targets (inherits variable options)",
+        "options": {
+          "name":       { "required": true, "description": "Variable name" },
+          "op":         { "required": false, "default": "set", "description": "Operation to perform" },
+          "value":      { "required": false, "description": "Expression for the value" },
+          "value_else": { "required": false, "description": "Else-value for setif operation" },
+          "condition":  { "required": false, "description": "Condition expression for setif operation" },
+          "default":    { "required": false, "description": "Default/initial value" },
+          "delay":      { "required": false, "description": "Delay before variable update" }
+        }
+      },
+      "retarget_auto_attack": {
+        "description": "Retarget auto attacks to the current target"
+      },
+      "start_moving": {
+        "description": "Begin player movement"
+      },
+      "stop_moving": {
+        "description": "Stop player movement"
+      },
+      "restore_mana": {
+        "description": "Restore mana to the player",
+        "options": {
+          "mana": { "required": false, "default": 0, "description": "Amount of mana to restore" }
+        }
+      }
+    }
+  },
+
+  "action_options": {
+    "_source": "engine/action/action.cpp:542",
+    "description": "Options available on every action line in the APL",
+    "expression_options": {
+      "if":                               { "type": "expression", "description": "Condition expression; action only executes if true" },
+      "target_if":                        { "type": "expression", "description": "Target selection expression with optional mode prefix (min:/max:/first:)" },
+      "interrupt_if":                     { "type": "expression", "description": "Condition to interrupt current channel" },
+      "early_chain_if":                   { "type": "expression", "description": "Condition to early-chain a channel" },
+      "cancel_if":                        { "type": "expression", "description": "Condition to cancel the action" },
+      "can_have_one_button_penalty":      { "type": "expression", "description": "One-button penalty expression" },
+      "cooldown_allow_casting_success":   { "type": "expression", "description": "Allow cooldown start on cast success" }
+    },
+    "boolean_options": {
+      "interrupt":                        { "type": "boolean",    "description": "Allow interrupting channels for this action" },
+      "interrupt_global":                 { "type": "boolean",    "description": "Allow global interrupt" },
+      "interrupt_immediate":              { "type": "boolean",    "description": "Interrupt immediately rather than waiting for tick" },
+      "chain":                            { "type": "boolean",    "description": "Chain channel casts" },
+      "cycle_targets":                    { "type": "boolean",    "description": "Cycle through all available targets" },
+      "cycle_players":                    { "type": "boolean",    "description": "Cycle through all players" },
+      "moving":                           { "type": "boolean",    "description": "Only use while moving (1) or stationary (0)" },
+      "wait_on_ready":                    { "type": "boolean",    "description": "Wait for action to become ready instead of skipping" },
+      "use_off_gcd":                      { "type": "boolean",    "description": "Allow use during GCD" },
+      "use_while_casting":                { "type": "boolean",    "description": "Allow use while casting" }
+    },
+    "value_options": {
+      "target":                           { "type": "string",     "description": "Override action target" },
+      "sync":                             { "type": "string",     "description": "Sync with another action's cooldown" },
+      "max_cycle_targets":                { "type": "integer",    "description": "Maximum targets to cycle through" },
+      "line_cd":                          { "type": "timespan",   "description": "Per-line cooldown (e.g., line_cd=15)" },
+      "action_skill":                     { "type": "number",     "description": "Override action skill (0-1)" }
+    },
+    "target_if_modes": {
+      "description": "target_if can be prefixed with a mode: target_if=min:expr, target_if=max:expr, target_if=first:expr",
+      "modes": ["min", "max", "first"]
+    }
+  },
+
+  "apl_syntax": {
+    "description": "General APL file syntax rules",
+    "action_list_format": "actions[.list_name]+=/action_name[,option=value]*",
+    "comment_format": "# comment or actions+=/# comment",
+    "examples": [
+      "actions=auto_attack",
+      "actions+=/call_action_list,name=cooldowns,if=fight_remains>20",
+      "actions+=/fireball,if=buff.hot_streak.down&!prev_gcd.1.fireball",
+      "actions+=/variable,name=burn_phase,op=set,value=1,if=buff.arcane_power.up",
+      "actions+=/moonfire,target_if=refreshable",
+      "actions+=/use_item,slot=trinket1,if=cooldown.combustion.remains<5",
+      "actions.cooldowns=berserking,if=buff.power_infusion.up",
+      "actions.cooldowns+=/blood_fury"
+    ]
+  }
+}
