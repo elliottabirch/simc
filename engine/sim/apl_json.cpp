@@ -25,6 +25,7 @@
 
 #include <array>
 #include <cstdio>
+#include <iostream>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -259,21 +260,39 @@ std::string normalize_resource_name( const std::string& name )
 // Forward declarations — called from resolve_identifier for variable inlining
 void resolve_ast( apl_ast_node_t& node, const player_t& player, std::set<std::string>& resolving_vars );
 void desugar_ast( std::unique_ptr<apl_ast_node_t>& node_ptr );
+void substitute_raid_event_leaves( apl_ast_node_t& node,
+                                   const std::string& action_name = {},
+                                   const std::string& expr_text = {} );
 
 void resolve_and_desugar( std::unique_ptr<apl_ast_node_t>& ast, const player_t& player,
-                          std::set<std::string>& resolving_vars )
+                          std::set<std::string>& resolving_vars,
+                          const std::string& action_name = {},
+                          const std::string& expr_text = {} )
 {
   if ( !ast )
     return;
   resolve_ast( *ast, player, resolving_vars );
   desugar_ast( ast );
+  // Sim-only substitution: rewrite raid_event.* identifier leaves to NUMBER 0.
+  // Per .planning/notes/raid_event_substitution_policy.md (tstl-sylvanas Phase 78,
+  // requirements PIPE-01/02/03), the raid_event.* category has no real-game equivalent
+  // in the consumer runtime; substituting to literal 0 lets downstream boolean
+  // simplification collapse sim-only arms naturally while preserving real-game arms.
+  // Substitution runs AFTER resolve+desugar so it sees the canonical post-resolution AST,
+  // and BEFORE serialization so the emitted JSON contains zero "category": "raid_event"
+  // substrings. action_name + expr_text are passed through for the .in audit warning
+  // (see substitute_raid_event_leaves implementation for the refined CASE 1 / CASE 2
+  // algorithm).
+  substitute_raid_event_leaves( *ast, action_name, expr_text );
 }
 
 // Convenience overload — creates a fresh recursion guard
-void resolve_and_desugar( std::unique_ptr<apl_ast_node_t>& ast, const player_t& player )
+void resolve_and_desugar( std::unique_ptr<apl_ast_node_t>& ast, const player_t& player,
+                          const std::string& action_name = {},
+                          const std::string& expr_text = {} )
 {
   std::set<std::string> resolving_vars;
-  resolve_and_desugar( ast, player, resolving_vars );
+  resolve_and_desugar( ast, player, resolving_vars, action_name, expr_text );
 }
 
 // ============================================================================
@@ -332,18 +351,25 @@ void resolve_identifier( apl_ast_node_t& node, const player_t& player,
           apl_variable_action_t entry;
           entry.operation = std::string( variable_t::operation_str( va->operation ) );
 
+          // Decorate audit-log attribution with the variable name so any .in
+          // warning fired from inside a variable body is attributable to a
+          // specific variable rather than "<unknown>".
+          std::string var_action_name = "<variable:" + node.name + ">";
+
           if ( !va->option.if_expr_str.empty() )
           {
             entry.if_expr = va->option.if_expr_str;
             entry.if_ast = parse_expression_to_ast( va->option.if_expr_str );
-            resolve_and_desugar( entry.if_ast, player, resolving_vars );
+            resolve_and_desugar( entry.if_ast, player, resolving_vars,
+                                 var_action_name, va->option.if_expr_str );
           }
 
           if ( !va->value_str.empty() )
           {
             entry.value_expr = va->value_str;
             entry.value_ast = parse_expression_to_ast( va->value_str );
-            resolve_and_desugar( entry.value_ast, player, resolving_vars );
+            resolve_and_desugar( entry.value_ast, player, resolving_vars,
+                                 var_action_name, va->value_str );
           }
 
           if ( va->operation == OPERATION_SETIF )
@@ -352,13 +378,15 @@ void resolve_identifier( apl_ast_node_t& node, const player_t& player,
             {
               entry.condition_expr = va->condition_str;
               entry.condition_ast = parse_expression_to_ast( va->condition_str );
-              resolve_and_desugar( entry.condition_ast, player, resolving_vars );
+              resolve_and_desugar( entry.condition_ast, player, resolving_vars,
+                                   var_action_name, va->condition_str );
             }
             if ( !va->value_else_str.empty() )
             {
               entry.value_else_expr = va->value_else_str;
               entry.value_else_ast = parse_expression_to_ast( va->value_else_str );
-              resolve_and_desugar( entry.value_else_ast, player, resolving_vars );
+              resolve_and_desugar( entry.value_else_ast, player, resolving_vars,
+                                   var_action_name, va->value_else_str );
             }
           }
 
@@ -535,6 +563,277 @@ void desugar_ast( std::unique_ptr<apl_ast_node_t>& node_ptr )
 }
 
 // ============================================================================
+// Sim-only category substitution — raid_event.* leaves -> NUMBER(0)
+// ============================================================================
+//
+// Walks a resolved+desugared AST and rewrites every IDENTIFIER node whose
+// category is "raid_event" into a NUMBER node with value 0. The substitution
+// is uniform across all raid_event properties (.exists, .up, .remains, .in,
+// .count): downstream flattenApl.ts handles the boolean-vs-numeric context
+// distinction (0 reads as false in boolean context, 0 in numeric context).
+//
+// See tstl-sylvanas .planning/notes/raid_event_substitution_policy.md for the
+// full design rationale (substitution table, why .in = 0 is safe, .in
+// truthiness audit).
+//
+// Substitution is leaf-only — DO NOT walk parent operators or attempt boolean
+// simplification here; that is the flattener's job (Phase 78 D-01).
+//
+// Audit logging (Phase 78 D-06): During the recursive walk we track two pieces
+// of context — the disjunct list of the nearest enclosing OR-chain, and (when
+// inside a comparison) the OTHER operand of that comparison. When we encounter
+// a `raid_event.X.in` IDENTIFIER, we evaluate two trigger cases:
+//
+//   CASE 1 (.in inside an OR-chain): warn if the OR-chain does NOT contain a
+//     sibling disjunct that is exactly `!raid_event.<same X>.exists`. Such a
+//     sibling short-circuits the OR to true regardless of `.in`'s substituted
+//     value, making the substitution truthiness-preserving.
+//
+//   CASE 2 (.in standalone in a comparison vs a non-negative literal): warn.
+//     Substituting `.in -> 0` in `comp(.in, K)` only flips truthiness when
+//     K >= 0 (e.g. `.in > 5` becomes `0 > 5`). For K < 0 or non-literal RHS,
+//     substitution preserves truthiness.
+//
+// All other shapes (no OR-chain + no comparison; comparison vs negative literal;
+// comparison vs non-literal RHS) are NOT warned to avoid false positives. The
+// warning is informational — substitution always proceeds.
+
+// Walk an OR-chain (a tree of `||` operators) and collect ALL leaf disjuncts.
+// Stops at any non-`||` node, pushing it as a leaf of the chain.
+void flatten_or_chain( const apl_ast_node_t& node, std::vector<const apl_ast_node_t*>& out )
+{
+  if ( node.node_type == apl_ast_node_t::BINARY_OP && node.op == "||" )
+  {
+    if ( node.left )
+      flatten_or_chain( *node.left, out );
+    if ( node.right )
+      flatten_or_chain( *node.right, out );
+    return;
+  }
+  out.push_back( &node );
+}
+
+// Pre-scan an OR-chain's disjuncts to record which raid_event.<name> have a
+// sibling `!raid_event.<name>.exists` guard. The pre-scan happens BEFORE any
+// in-place substitution, so the snapshot of guarded names survives node
+// mutation during the substitution walk that follows.
+std::set<std::string> collect_guarded_raid_event_names( const std::vector<const apl_ast_node_t*>& disjuncts )
+{
+  std::set<std::string> guarded;
+  for ( const auto* d : disjuncts )
+  {
+    if ( !d || d->node_type != apl_ast_node_t::UNARY_OP || d->op != "!" )
+      continue;
+    if ( !d->operand )
+      continue;
+    const auto& inner = *d->operand;
+    if ( inner.node_type == apl_ast_node_t::IDENTIFIER &&
+         inner.category == "raid_event" &&
+         inner.property == "exists" )
+    {
+      guarded.insert( inner.name );
+    }
+  }
+  return guarded;
+}
+
+bool is_comparison_op( const std::string& op )
+{
+  return op == "<" || op == "<=" || op == ">" || op == ">=" ||
+         op == "==" || op == "!=";
+}
+
+// or_chain context tracking: instead of holding raw node pointers (which get
+// mutated by substitution), we pre-scan the OR-chain ONCE at chain entry and
+// snapshot the set of raid_event.<name> values that have a sibling
+// `!raid_event.<name>.exists` guard. The set value-type survives in-place
+// node mutation during the descent. inside_or_chain flags whether we are
+// currently anywhere inside an OR-chain (used to suppress CASE 2 standalone
+// detection — CASE 1 takes precedence whenever an OR-chain encloses the .in
+// reference, even if the chain has no relevant guards).
+
+void substitute_raid_event_leaves_impl( apl_ast_node_t& node,
+                                         const std::string& action_name,
+                                         const std::string& expr_text,
+                                         const std::set<std::string>& guarded_names,
+                                         bool inside_or_chain,
+                                         bool parent_is_or,
+                                         const apl_ast_node_t* comparison_other_side )
+{
+  switch ( node.node_type )
+  {
+    case apl_ast_node_t::IDENTIFIER:
+      if ( node.category == "raid_event" )
+      {
+        // Audit BEFORE rewriting — we need the original name/property still readable.
+        if ( node.property == "in" )
+        {
+          bool warn = false;
+          if ( inside_or_chain )
+          {
+            // CASE 1: inside an OR-chain. Warn iff this name is NOT in the
+            // pre-scanned guarded-names set.
+            if ( guarded_names.count( node.name ) == 0 )
+              warn = true;
+          }
+          else if ( comparison_other_side != nullptr )
+          {
+            // CASE 2: standalone .in inside a comparison. Warn iff the other side
+            // is a NUMBER literal whose value is >= 0 (substitution to 0 may flip
+            // truthiness for these comparisons).
+            if ( comparison_other_side->node_type == apl_ast_node_t::NUMBER &&
+                 comparison_other_side->value >= 0 )
+              warn = true;
+          }
+          // else: no enclosing OR and no enclosing comparison — substitution effect
+          // is not statically analyzable; omit warning to avoid noise.
+
+          if ( warn )
+          {
+            std::cerr << "warning: raid_event." << node.name << ".in reference at "
+                      << ( action_name.empty() ? "<unknown>" : action_name ) << ":"
+                      << ( expr_text.empty() ? "<unknown>" : expr_text )
+                      << " -- substitution to 0 may change evaluation "
+                         "(no sibling !raid_event." << node.name << ".exists guard "
+                         "in OR-chain, or standalone comparison vs non-negative literal)"
+                      << std::endl;
+          }
+        }
+
+        // Rewrite in-place: become a NUMBER(0) node and clear identifier metadata
+        // so the NUMBER serialization branch produces a clean { node_type: number,
+        // value: 0 } object with no leftover "category"/"name"/"property"/"raw" fields.
+        node.node_type = apl_ast_node_t::NUMBER;
+        node.value = 0;
+        node.raw.clear();
+        node.category.clear();
+        node.name.clear();
+        node.property.clear();
+        node.original_name.clear();
+        node.original_property.clear();
+        node.spell_id = 0;
+        node.variable_actions.clear();
+        return;
+      }
+      // For non-raid_event identifiers, also recurse into any inlined variable
+      // ASTs so substitution covers raid_event references reached through
+      // variable resolution. The OR-chain / comparison context for those
+      // sub-trees does not extend into the variable body — start fresh contexts
+      // for each variable AST. action_name + expr_text are decorated with the
+      // variable name so warnings inside variable bodies are attributable.
+      if ( !node.variable_actions.empty() )
+      {
+        std::set<std::string> empty_guarded;
+        std::string var_action_name = "<variable:" + node.name + ">";
+        for ( auto& va : node.variable_actions )
+        {
+          if ( va.if_ast )
+            substitute_raid_event_leaves_impl( *va.if_ast, var_action_name,
+                                                va.if_expr, empty_guarded,
+                                                false, false, nullptr );
+          if ( va.value_ast )
+            substitute_raid_event_leaves_impl( *va.value_ast, var_action_name,
+                                                va.value_expr, empty_guarded,
+                                                false, false, nullptr );
+          if ( va.condition_ast )
+            substitute_raid_event_leaves_impl( *va.condition_ast, var_action_name,
+                                                va.condition_expr, empty_guarded,
+                                                false, false, nullptr );
+          if ( va.value_else_ast )
+            substitute_raid_event_leaves_impl( *va.value_else_ast, var_action_name,
+                                                va.value_else_expr, empty_guarded,
+                                                false, false, nullptr );
+        }
+      }
+      break;
+    case apl_ast_node_t::UNARY_OP:
+      if ( node.operand )
+      {
+        // Unary nodes neither establish nor preserve comparison context; OR-chain
+        // context propagates unchanged (we only descend into a single operand).
+        substitute_raid_event_leaves_impl( *node.operand, action_name, expr_text,
+                                            guarded_names, inside_or_chain,
+                                            false, nullptr );
+      }
+      break;
+    case apl_ast_node_t::BINARY_OP:
+      if ( node.op == "||" )
+      {
+        // OR-chain handling: this `||` is the TOP of a new OR-chain only if our
+        // immediate parent is NOT also a `||`. If we ARE nested inside a parent
+        // `||`, we are mid-chain — keep the parent's already-snapshotted
+        // guarded_names set instead of recomputing a smaller subset that omits
+        // the outer siblings. This prevents the false-positive warning where
+        // `OR(A, OR(B, C))` looked at the inner OR's chain [B, C] and missed
+        // sibling A's `!raid_event.X.exists` guard.
+        if ( parent_is_or )
+        {
+          if ( node.left )
+            substitute_raid_event_leaves_impl( *node.left, action_name, expr_text,
+                                                guarded_names, true, true, nullptr );
+          if ( node.right )
+            substitute_raid_event_leaves_impl( *node.right, action_name, expr_text,
+                                                guarded_names, true, true, nullptr );
+        }
+        else
+        {
+          // New OR-chain: pre-scan disjuncts BEFORE any in-place substitution
+          // happens, snapshot guarded raid_event names into a set value-type.
+          std::vector<const apl_ast_node_t*> disjuncts;
+          flatten_or_chain( node, disjuncts );
+          std::set<std::string> new_guarded = collect_guarded_raid_event_names( disjuncts );
+          if ( node.left )
+            substitute_raid_event_leaves_impl( *node.left, action_name, expr_text,
+                                                new_guarded, true, true, nullptr );
+          if ( node.right )
+            substitute_raid_event_leaves_impl( *node.right, action_name, expr_text,
+                                                new_guarded, true, true, nullptr );
+        }
+      }
+      else if ( is_comparison_op( node.op ) )
+      {
+        // Establish comparison context: when descending into LHS, the OTHER operand
+        // is RHS; when descending into RHS, the OTHER operand is LHS. OR-chain
+        // context propagates unchanged.
+        if ( node.left )
+          substitute_raid_event_leaves_impl( *node.left, action_name, expr_text,
+                                              guarded_names, inside_or_chain,
+                                              false, node.right.get() );
+        if ( node.right )
+          substitute_raid_event_leaves_impl( *node.right, action_name, expr_text,
+                                              guarded_names, inside_or_chain,
+                                              false, node.left.get() );
+      }
+      else
+      {
+        // All other binary ops (&&, +, -, *, %, ^^, ~, !~, <?, >?, %%): no new
+        // OR-chain, no new comparison context. Propagate parent OR-chain context;
+        // clear comparison context (we are no longer the operand of a comparison).
+        if ( node.left )
+          substitute_raid_event_leaves_impl( *node.left, action_name, expr_text,
+                                              guarded_names, inside_or_chain,
+                                              false, nullptr );
+        if ( node.right )
+          substitute_raid_event_leaves_impl( *node.right, action_name, expr_text,
+                                              guarded_names, inside_or_chain,
+                                              false, nullptr );
+      }
+      break;
+    case apl_ast_node_t::NUMBER:
+      break;
+  }
+}
+
+void substitute_raid_event_leaves( apl_ast_node_t& node,
+                                   const std::string& action_name,
+                                   const std::string& expr_text )
+{
+  std::set<std::string> empty_guarded;
+  substitute_raid_event_leaves_impl( node, action_name, expr_text,
+                                      empty_guarded, false, false, nullptr );
+}
+
+// ============================================================================
 // Serialize AST node to JSON
 // ============================================================================
 
@@ -629,7 +928,10 @@ void serialize_condition( Document& doc, JsonOutput cond_root,
   {
     if ( !action_name.empty() )
       qualify_action_identifiers( *ast, action_name );
-    resolve_and_desugar( ast, player );
+    // Pass action_name + the raw condition text down so the raid_event.in audit
+    // warning (Phase 78 D-06) can attribute warnings to the action that owns
+    // the expression (e.g. "death_and_decay:cycle_of_death&raid_event.adds.in>5").
+    resolve_and_desugar( ast, player, action_name, std::string( raw_str ) );
     serialize_node( doc, cond_root[ "ast" ], *ast );
   }
 }
@@ -733,6 +1035,10 @@ void serialize_variables( Document& doc, JsonOutput vars_root, const player_t& p
     auto actions_arr = var_obj[ "actions" ];
     actions_arr.make_array();
 
+    // Decorate audit-log attribution with the variable name so warnings fired
+    // from inside variable bodies are attributable. (Phase 78 D-06.)
+    std::string var_action_name = "<variable:" + v->name_ + ">";
+
     for ( const auto* act : v->variable_actions )
     {
       auto* var_action = dynamic_cast<const variable_t*>( act );
@@ -746,7 +1052,8 @@ void serialize_variables( Document& doc, JsonOutput vars_root, const player_t& p
       {
         act_obj[ "if_expr" ] = var_action->option.if_expr_str;
         auto if_ast = parse_expression_to_ast( var_action->option.if_expr_str );
-        resolve_and_desugar( if_ast, player );
+        resolve_and_desugar( if_ast, player, var_action_name,
+                             var_action->option.if_expr_str );
         if ( if_ast )
           serialize_node( doc, act_obj[ "if_ast" ], *if_ast );
       }
@@ -755,7 +1062,8 @@ void serialize_variables( Document& doc, JsonOutput vars_root, const player_t& p
       {
         act_obj[ "value_expr" ] = var_action->value_str;
         auto val_ast = parse_expression_to_ast( var_action->value_str );
-        resolve_and_desugar( val_ast, player );
+        resolve_and_desugar( val_ast, player, var_action_name,
+                             var_action->value_str );
         if ( val_ast )
           serialize_node( doc, act_obj[ "value_ast" ], *val_ast );
       }
@@ -767,7 +1075,8 @@ void serialize_variables( Document& doc, JsonOutput vars_root, const player_t& p
         {
           act_obj[ "condition_expr" ] = var_action->condition_str;
           auto cond_ast = parse_expression_to_ast( var_action->condition_str );
-          resolve_and_desugar( cond_ast, player );
+          resolve_and_desugar( cond_ast, player, var_action_name,
+                               var_action->condition_str );
           if ( cond_ast )
             serialize_node( doc, act_obj[ "condition_ast" ], *cond_ast );
         }
@@ -776,7 +1085,8 @@ void serialize_variables( Document& doc, JsonOutput vars_root, const player_t& p
         {
           act_obj[ "value_else_expr" ] = var_action->value_else_str;
           auto else_ast = parse_expression_to_ast( var_action->value_else_str );
-          resolve_and_desugar( else_ast, player );
+          resolve_and_desugar( else_ast, player, var_action_name,
+                               var_action->value_else_str );
           if ( else_ast )
             serialize_node( doc, act_obj[ "value_else_ast" ], *else_ast );
         }
