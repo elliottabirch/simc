@@ -108,10 +108,15 @@ action_t* choose( player_t* p, action_t* apl_choice )
   req << ",\"apl_choice\":"
       << ( apl_choice ? ( "\"" + decision_dump::json_escape( apl_choice->name() ) + "\"" ) : std::string( "null" ) );
   // gcd_remains, swing_mh_remains, holy_power, cooldowns, buffs,
-  // target_debuffs, target_time_to_die -- identical to decision_dump's own
-  // per-decision line, factored into one shared emitter so the two hooks
-  // can never drift.
-  decision_dump::write_state_fields( req, p );
+  // target_debuffs, target_time_to_die, active_enemies, dots, gcd_length,
+  // auto_attack_interval, resolved_action -- identical to decision_dump's
+  // own per-decision line, factored into one shared emitter so the two
+  // hooks can never drift (116-02: signature widened to take the
+  // boundary's own action anchor, needed for the action-scoped
+  // gcd_length/resolved_action fields; `apl_choice` is the correct anchor
+  // here since the driver's reply hasn't resolved the actual cast yet at
+  // request-build time).
+  decision_dump::write_state_fields( req, p, apl_choice );
   req << "}\n";
   req.flush();
 
