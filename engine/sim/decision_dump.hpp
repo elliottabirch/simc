@@ -14,7 +14,9 @@
 
 #include "config.hpp"
 
+#include <ostream>
 #include <string>
+#include <string_view>
 
 struct player_t;
 struct action_t;
@@ -25,4 +27,17 @@ namespace decision_dump
 // APL/sequence has chosen (or failed to choose) an action, before that
 // action executes. `chosen` is nullptr on an idle/wait decision.
 void record( player_t* p, action_t* chosen );
+
+// Shared state-block emitter (P3b solver_control hook, simc-offline-
+// evaluation-pipeline phase 116, reuses this so the two decision-boundary
+// hooks never drift). Writes gcd_remains, swing_mh_remains, holy_power,
+// cooldowns, buffs, target_debuffs and target_time_to_die as trailing JSON
+// object members (each preceded by its own comma) -- the caller owns the
+// enclosing object's opening `{` and closing `}`.
+void write_state_fields( std::ostream& out, player_t* p );
+
+// JSON helpers shared with solver_control (P3b) so both hooks emit
+// byte-identical escaping/clamping for the same field kinds.
+std::string json_escape( std::string_view s );
+double clamp_nonneg( double v );
 }

@@ -55,6 +55,7 @@
 #include "sim/cooldown_waste_data.hpp"
 #include "sim/decision_dump.hpp"
 #include "sim/event.hpp"
+#include "sim/solver_control.hpp"
 #include "sim/expressions.hpp"
 #include "sim/plot.hpp"
 #include "sim/proc.hpp"
@@ -343,7 +344,22 @@ struct player_ready_event_t : public player_event_t
 
     if ( !p()->execute_action() )
     {
-      if ( p()->ready_type == READY_POLL )
+      // P3b fork hook (simc-offline-evaluation-pipeline phase 116, 116-01) -
+      // a "wait,sec=X" solver_control reply (the solver_control hook called
+      // from inside execute_action() above) means nothing executed THIS
+      // boundary, but a specific re-ready delay was
+      // requested rather than the engine's own default poll/threshold-based
+      // idle scheduling. Consumed exactly once here, replacing (never
+      // stacking with) the branches below -- schedule_ready() throws if
+      // `readying` is already non-null, so this must be the only
+      // schedule_ready() call in this block when the flag is set.
+      if ( sim().solver_control_has_pending_wait )
+      {
+        timespan_t x = timespan_t::from_seconds( sim().solver_control_pending_wait_s );
+        sim().solver_control_has_pending_wait = false;
+        p()->schedule_ready( x, true );
+      }
+      else if ( p()->ready_type == READY_POLL )
       {
         timespan_t x = p()->available();
 
@@ -7374,6 +7390,12 @@ action_t* player_t::execute_action()
   // paid, no cooldown started), so this is the read-state-then-decide
   // moment. No-op unless decision_dump=<file> is set.
   decision_dump::record( this, action );
+
+  // P3b fork hook (simc-offline-evaluation-pipeline phase 116, 116-01) -
+  // same decision boundary, immediately alongside decision_dump::record()
+  // above. No-op (returns `action` unchanged) unless solver_control=<prefix>
+  // is set; otherwise its reply REPLACES the executed action.
+  action = solver_control::choose( this, action );
 
   last_foreground_action = action;
 
