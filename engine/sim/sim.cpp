@@ -3481,6 +3481,17 @@ bool sim_t::execute()
   // on a reply-stream read never hangs on a failed/canceled iteration.
   solver_control::finish( this );
 
+  // Soft-fail fork hook (simc-offline-evaluation-pipeline phase 116, 116-05) -
+  // report the skip counter unconditionally (gated only on sim->log, which
+  // callers replaying the crash-seeds.json fixture always request) so a
+  // caller can distinguish a clean run from one that lost sequence entries,
+  // without needing sim->debug's much noisier per-skip lines. No-op unless
+  // sequence_soft_fail= was actually set.
+  if ( sequence_soft_fail )
+  {
+    print_log( "sequence_soft_fail: {} entries skipped", sequence_soft_fail_count );
+  }
+
   if ( success )
     analyze();
 
@@ -3864,6 +3875,7 @@ void sim_t::create_options()
   add_option( opt_string( "apl_json", apl_json_file_str ) );
   add_option( opt_string( "decision_dump", decision_dump_file_str ) );
   add_option( opt_string( "solver_control", solver_control_str ) );
+  add_option( opt_bool( "sequence_soft_fail", sequence_soft_fail ) );
   add_option( opt_bool( "hosted_html", hosted_html ) );
   add_option( opt_bool( "offline", offline ) );
   add_option( opt_int( "healing", healing ) );

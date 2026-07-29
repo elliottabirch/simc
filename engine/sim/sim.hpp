@@ -576,6 +576,19 @@ struct sim_t : private sc_thread_t
   // disabled (never touched).
   bool solver_control_auto_attack_started = false;
   std::string solver_control_last_reply_type;
+  // Soft-fail fork hook (simc-offline-evaluation-pipeline phase 116, 116-05) -
+  // sequence_soft_fail=<bool> makes sequence_t::schedule_execute() (see
+  // action/sequence.cpp) re-validate the current sub-action's readiness
+  // immediately before dispatch, using the same action_t::ready() predicate
+  // the APL selection path already relies on. A frozen `sequence` chain
+  // replayed at an unseen seed's RNG stream can find the charge/cooldown
+  // state it assumed has since changed; upstream calls straight into
+  // cooldown_t::start(), crashing on its current_charge>0 assertion
+  // (cooldown.cpp:435) instead of skipping. Default false = byte-identical
+  // to upstream (a single boolean check on the hot path). When true, a
+  // skipped entry is counted here and logged, never substituted or retried.
+  bool sequence_soft_fail = false;
+  uint64_t sequence_soft_fail_count = 0;
   std::string reforge_plot_output_file_str;
   std::map<error_level_e, std::unordered_set<std::string>> error_list;
   int display_build;  // 0: none, 1: normal (default), 2: version + hotfix only
