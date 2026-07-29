@@ -151,6 +151,7 @@ sim/event.hpp
 sim/event_manager.hpp
 sim/apl_json.hpp
 sim/decision_dump.hpp
+sim/solver_control.hpp
 sim/expressions.hpp
 sim/gain.hpp
 sim/iteration_data_entry.hpp
@@ -346,6 +347,7 @@ sim/event.cpp
 sim/event_manager.cpp
 sim/apl_json.cpp
 sim/decision_dump.cpp
+sim/solver_control.cpp
 sim/expressions.cpp
 sim/gear_stats.cpp
 sim/option.cpp

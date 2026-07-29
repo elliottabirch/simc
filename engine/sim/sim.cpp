@@ -30,6 +30,7 @@
 #include "sim/profileset.hpp"
 #include "sim/scale_factor_control.hpp"
 #include "sim/sim_control.hpp"
+#include "sim/solver_control.hpp"
 #include "sim/work_queue.hpp"
 #include "util/string_view.hpp"
 #include "util/xml.hpp"
@@ -3474,6 +3475,13 @@ bool sim_t::execute()
     success = iterate();
   }
 
+  // P3b fork hook (simc-offline-evaluation-pipeline phase 116, 116-01) - if a
+  // solver_control= channel was opened, tell the driver the episode is over
+  // (writes {"type":"bye"} and closes both FIFO streams). No-op if the
+  // channel was never opened. Regardless of `success`, so a driver blocked
+  // on a reply-stream read never hangs on a failed/canceled iteration.
+  solver_control::finish( this );
+
   if ( success )
     analyze();
 
@@ -3856,6 +3864,7 @@ void sim_t::create_options()
   add_option( opt_string( "html", html_file_str ) );
   add_option( opt_string( "apl_json", apl_json_file_str ) );
   add_option( opt_string( "decision_dump", decision_dump_file_str ) );
+  add_option( opt_string( "solver_control", solver_control_str ) );
   add_option( opt_bool( "hosted_html", hosted_html ) );
   add_option( opt_bool( "offline", offline ) );
   add_option( opt_int( "healing", healing ) );

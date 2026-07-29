@@ -553,6 +553,19 @@ struct sim_t : private sc_thread_t
   // sim/decision_dump.hpp. Empty string = disabled (default), zero overhead.
   std::string decision_dump_file_str;
   std::unique_ptr<io::ofstream> decision_dump_stream;
+  // P3b fork hook (simc-offline-evaluation-pipeline phase 116, 116-01) -
+  // solver_control=<prefix> opens an additive request/reply FIFO pair at the
+  // same execute_action() decision boundary as decision_dump=. Empty string
+  // = disabled (default), zero overhead. See sim/solver_control.hpp.
+  std::string solver_control_str;
+  std::unique_ptr<io::ofstream> solver_control_req_stream;
+  std::unique_ptr<std::ifstream> solver_control_rep_stream;
+  uint64_t solver_control_seq = 0;
+  // Set by solver_control::choose() on a "wait" reply; consumed once by
+  // player_ready_event_t::execute()'s idle-scheduling fallback (player.cpp)
+  // instead of the default poll/threshold-based wait duration.
+  bool solver_control_has_pending_wait = false;
+  double solver_control_pending_wait_s = 0.0;
   std::string reforge_plot_output_file_str;
   std::map<error_level_e, std::unordered_set<std::string>> error_list;
   int display_build;  // 0: none, 1: normal (default), 2: version + hotfix only
