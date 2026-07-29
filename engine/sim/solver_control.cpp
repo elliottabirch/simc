@@ -118,6 +118,39 @@ action_t* choose( player_t* p, action_t* apl_choice )
     sim->solver_control_auto_attack_started = true;
     if ( p->main_hand_attack && p->main_hand_attack->execute_event == nullptr )
       p->main_hand_attack->schedule_execute();
+
+    // Wave A acceptance fix (2026-07-29, post-116-04): yield back to the
+    // sim's event dispatcher HERE, before soliciting the actor's real first
+    // decision, instead of falling through to the synchronous FIFO
+    // round-trip below within this same execute_action() call. Evidenced in
+    // WAVE-A-ACCEPTANCE.md §1: the reference (vanilla, non-solver_control
+    // APL evaluation) flow naturally visits TWO player_t::execute_action()
+    // decision boundaries at t=0 -- one for the actor's own separate
+    // `actions=auto_attack` priority-list entry, one for the real
+    // sequence/plan entry -- and a same-timestamp scheduled raid event (e.g.
+    // Bloodlust at pull) gets processed by the sim's event queue in between
+    // them, so the SECOND boundary already sees it. Without a yield here,
+    // solver_control started auto-attack and solicited the real first
+    // decision inline, in the SAME boundary, with no chance for that
+    // same-tick event to land first, so the actor's real first decision was
+    // made against a NOT-YET-updated buff/haste state, and every decision
+    // after it inherited the resulting bifurcated GCD/cooldown timeline.
+    //
+    // Reuse the existing zero-second "pending wait" mechanism (the same one
+    // a `{"type":"wait","sec":0}` reply already drives via
+    // player_ready_event_t::execute()'s `solver_control_has_pending_wait`
+    // branch, player.cpp) rather than adding a new wire message: this
+    // schedules a fresh zero-delay Player-Ready event and returns, WITHOUT
+    // ever sending a request over the FIFO for this boundary -- the driver
+    // never sees it at all, so decision/wait counts on the wire are
+    // unaffected. That new event is appended to the sim's event queue AFTER
+    // any same-timestamp events already pending (event_manager_t::add_event
+    // orders same-timestamp entries by ascending insertion id), so it
+    // reproduces the reference flow's own two-boundary yield structurally,
+    // not by special-casing Bloodlust or any specific raid event/profile.
+    sim->solver_control_pending_wait_s = 0.0;
+    sim->solver_control_has_pending_wait = true;
+    return nullptr;
   }
 
   // Lazy-open, mirroring decision_dump's own convention. Pairing order
