@@ -3855,6 +3855,7 @@ void sim_t::create_options()
   add_option( opt_func( "json2", replace_json2 ) );
   add_option( opt_string( "html", html_file_str ) );
   add_option( opt_string( "apl_json", apl_json_file_str ) );
+  add_option( opt_string( "decision_dump", decision_dump_file_str ) );
   add_option( opt_bool( "hosted_html", hosted_html ) );
   add_option( opt_bool( "offline", offline ) );
   add_option( opt_int( "healing", healing ) );

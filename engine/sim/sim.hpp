@@ -13,6 +13,7 @@
 #include "sim_ostream.hpp"
 #include "sim/option.hpp"
 #include "util/concurrency.hpp"
+#include "util/io.hpp"
 #include "util/rng.hpp"
 #include "util/sample_data.hpp"
 #include "util/util.hpp"
@@ -547,6 +548,11 @@ struct sim_t : private sc_thread_t
   std::vector<report::json::report_configuration_t> json_reports;
   std::string output_file_str, html_file_str, json_file_str;
   std::string apl_json_file_str;
+  // P2 spike hook (simc-solver-spike-2026-07-29) - decision_dump=<file> emits
+  // one JSON line per player_t::execute_action() decision boundary. See
+  // sim/decision_dump.hpp. Empty string = disabled (default), zero overhead.
+  std::string decision_dump_file_str;
+  std::unique_ptr<io::ofstream> decision_dump_stream;
   std::string reforge_plot_output_file_str;
   std::map<error_level_e, std::unordered_set<std::string>> error_list;
   int display_build;  // 0: none, 1: normal (default), 2: version + hotfix only
