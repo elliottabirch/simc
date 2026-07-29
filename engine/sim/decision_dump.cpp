@@ -78,6 +78,24 @@ double clamp_nonneg( double v )
   return v < 0.0 ? 0.0 : v;
 }
 
+namespace
+{
+// Defect (c) fix (2026-07-29 fix bundle): a buff with no scheduled expiration
+// event (an indefinite/permanent buff, e.g. blessing_of_the_bronze,
+// lights_deliverance) reports `buff_t::remains() == timespan_t::min()` --
+// SimC's internal "no known expiry" sentinel -- which serializes as a huge
+// negative number (timespan_t::min().total_seconds(), ~-9223370000000000.0)
+// if dumped raw. Owner-decided wire representation: `remains:null` plus an
+// explicit `permanent:true` marker instead. Finite remains are unchanged.
+void write_buff_remains( std::ostream& out, timespan_t remains )
+{
+  if ( remains == timespan_t::min() )
+    out << "null,\"permanent\":true";
+  else
+    out << remains.total_seconds();
+}
+} // anonymous namespace
+
 // Shared decision-boundary state block -- see decision_dump.hpp. Reused
 // verbatim by solver_control's "decision" request line (phase 116,
 // simc-offline-evaluation-pipeline) so the two hooks can never drift.
@@ -134,7 +152,8 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
     first_buff = false;
     out << "\"" << json_escape( buff->name() ) << "\":{";
     out << "\"stacks\":" << buff->check();
-    out << ",\"remains\":" << buff->remains().total_seconds();
+    out << ",\"remains\":";
+    write_buff_remains( out, buff->remains() );
     out << "}";
   }
   out << "}";
@@ -154,7 +173,8 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
       first_debuff = false;
       out << "\"" << json_escape( buff->name() ) << "\":{";
       out << "\"stacks\":" << buff->check();
-      out << ",\"remains\":" << buff->remains().total_seconds();
+      out << ",\"remains\":";
+      write_buff_remains( out, buff->remains() );
       out << "}";
     }
     out << "},\"target_time_to_die\":" << p->target->time_to_percent( 0 ).total_seconds();
