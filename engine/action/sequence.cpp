@@ -107,6 +107,37 @@ void sequence_t::schedule_execute( action_state_t* state )
     return;
   }
 
+  // Soft-fail fork hook (simc-offline-evaluation-pipeline phase 116, 116-05) -
+  // re-validate current_action's readiness right before dispatch, using the
+  // same action_t::ready() predicate the APL selection path already relies
+  // on (never a new predicate, never reaching past ready()/the cooldown's
+  // own charge check). A frozen sequence replayed at an unseen seed can find
+  // the charge/cooldown state it assumed has since changed out from under
+  // it; upstream dispatches straight into cooldown_t::start() regardless,
+  // crashing on its current_charge>0 assertion. With the option unset this
+  // is a single boolean check and behavior is byte-identical to upstream.
+  if ( sim->sequence_soft_fail )
+  {
+    while ( as<std::size_t>( current_action ) < sub_actions.size() && !sub_actions[ current_action ]->ready() )
+    {
+      sim->print_debug( "{} sequence '{}' action #{} '{}' is no longer ready at dispatch time (t={:.3f}), "
+                        "soft-fail skipping",
+                        *player, name(), current_action, sub_actions[ current_action ]->name(),
+                        sim->current_time().total_seconds() );
+      ++sim->sequence_soft_fail_count;
+      ++current_action;
+    }
+
+    if ( as<std::size_t>( current_action ) >= sub_actions.size() )
+    {
+      // Every remaining entry was soft-failed away. Never substitute a
+      // different action and never retry a skipped one -- just let the
+      // player re-solve on the next ready event.
+      player->schedule_ready();
+      return;
+    }
+  }
+
   if ( sim->log )
   {
     sim->print_log( "Player {} executes Schedule {} action #{} '{}'", player->name(), name(), current_action,
