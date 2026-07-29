@@ -6,6 +6,7 @@
 #include "solver_control.hpp"
 
 #include "action/action.hpp"
+#include "action/attack.hpp"
 #include "decision_dump.hpp"
 #include "player/player.hpp"
 #include "sim/event.hpp"
@@ -23,7 +24,15 @@
 
 namespace
 {
-constexpr int SOLVER_CONTROL_PROTOCOL_VERSION = 1;
+// 2026-07-29 fix bundle: bumped 1 -> 2. Record-schema semantics changed on
+// the wire/dump side (defects (b): resolved_action is now solver-reply-gated
+// in decision_dump.jsonl; (c): permanent-buff remains sentinel representation
+// changed from a raw negative number to null+"permanent":true; (d):
+// gcd_length/auto_attack_interval are now player-scoped, not action-scoped) --
+// not purely additive, so this is a real version bump, not 116-02's
+// backward-compatible one. Both sides of the wire (this constant and
+// episode-driver.py's PROTOCOL_VERSION) must move in lockstep.
+constexpr int SOLVER_CONTROL_PROTOCOL_VERSION = 2;
 
 [[noreturn]] void protocol_abort( const std::string& msg )
 {
@@ -82,6 +91,35 @@ action_t* choose( player_t* p, action_t* apl_choice )
   if ( sim->solver_control_str.empty() )
     return apl_choice;
 
+  // Defect (a) fix (2026-07-29 fix bundle): in live play, melee auto-attack
+  // begins implicitly with combat -- the player never has to "choose" it via
+  // a priority list on some turn. Under solver_control, EVERY decision
+  // boundary's action is instead replaced wholesale by the driver's reply, so
+  // the placeholder `actions+=/auto_attack` entry this pipeline's generated
+  // episode .simc always carries is never castable through the normal
+  // `apl_choice`/"cast" path -- the solver's own spell catalog has no
+  // "auto_attack" spellName to map, so a "cast" reply can never name it, and
+  // even a stray "default"/"abstain" reply landing on it would only start the
+  // FIRST swing (see `ready()`'s "not swinging" guard below), never repeat.
+  // Without this, `p->main_hand_attack->execute_event` never gets scheduled
+  // at all: every decision record shows swing_mh_remains:null,
+  // auto_attack_interval effectively 0 (the swing-timer `melee_t` action
+  // class this fires through short-circuits its own execute_time() to 0 until
+  // the FIRST swing has actually landed -- see decision_dump.cpp's
+  // player-scoped replacement instead), no white damage ever lands, and no
+  // Crusading Strikes energize (which fires off the white-hit, not off a
+  // solver-chosen spell) ever triggers. Start it here, once, at the very
+  // first decision boundary this hook ever sees for this actor -- mirroring
+  // live's implicit-with-combat start using the exact same
+  // not-already-swinging guard the paladin's own `auto_melee_attack_t::execute()`
+  // uses (sc_paladin.cpp).
+  if ( !sim->solver_control_auto_attack_started )
+  {
+    sim->solver_control_auto_attack_started = true;
+    if ( p->main_hand_attack && p->main_hand_attack->execute_event == nullptr )
+      p->main_hand_attack->schedule_execute();
+  }
+
   // Lazy-open, mirroring decision_dump's own convention. Pairing order
   // matters: the engine opens the request stream (.out, write) BEFORE the
   // reply stream (.in, read); the driver opens them in the mirrored order
@@ -112,10 +150,16 @@ action_t* choose( player_t* p, action_t* apl_choice )
   // auto_attack_interval, resolved_action -- identical to decision_dump's
   // own per-decision line, factored into one shared emitter so the two
   // hooks can never drift (116-02: signature widened to take the
-  // boundary's own action anchor, needed for the action-scoped
-  // gcd_length/resolved_action fields; `apl_choice` is the correct anchor
-  // here since the driver's reply hasn't resolved the actual cast yet at
-  // request-build time).
+  // boundary's own action anchor, needed at the time for the then-
+  // action-scoped gcd_length/resolved_action fields; `apl_choice` is the
+  // correct anchor here since the driver's reply hasn't resolved the actual
+  // cast yet at request-build time). 2026-07-29 fix bundle, defect (d):
+  // gcd_length/auto_attack_interval are now PLAYER-scoped and no longer read
+  // this anchor at all; `apl_choice` still anchors `resolved_action` here.
+  // `solver_reply_gated` defaults false at this call site -- the wire
+  // request's own `resolved_action` stays pre-reply/`apl_choice`-based,
+  // exactly as PROTOCOL.md documents (the reply hasn't been read yet); only
+  // decision_dump::record()'s own call opts into reply-gating (defect (b)).
   decision_dump::write_state_fields( req, p, apl_choice );
   req << "}\n";
   req.flush();
@@ -138,6 +182,13 @@ action_t* choose( player_t* p, action_t* apl_choice )
     protocol_abort( "reply missing 'type': " + line );
 
   const std::string type = doc["type"].GetString();
+
+  // Defect (b) fix (2026-07-29 fix bundle): classify this decision boundary's
+  // reply BEFORE returning, so decision_dump::record() (called right after
+  // this function returns -- player.cpp's execute_action() was reordered for
+  // exactly this) can report the SOLVER's actual per-boundary resolution
+  // instead of the pre-reply APL/sequence placeholder pick.
+  sim->solver_control_last_reply_type = type;
 
   if ( type == "cast" )
   {

@@ -566,6 +566,16 @@ struct sim_t : private sc_thread_t
   // instead of the default poll/threshold-based wait duration.
   bool solver_control_has_pending_wait = false;
   double solver_control_pending_wait_s = 0.0;
+  // Set once per decision boundary at the top of solver_control::choose()'s
+  // reply handling (cast/wait/default/abstain); read immediately afterward by
+  // decision_dump::record() (player.cpp now calls solver_control::choose()
+  // BEFORE decision_dump::record(), reordered for exactly this reason) so the
+  // on-disk decision-dump.jsonl can report the SOLVER's actual per-boundary
+  // resolution (2026-07-29 fix bundle, defect (b)) instead of the pre-reply
+  // APL/sequence placeholder pick. Empty string when solver_control is
+  // disabled (never touched).
+  bool solver_control_auto_attack_started = false;
+  std::string solver_control_last_reply_type;
   std::string reforge_plot_output_file_str;
   std::map<error_level_e, std::unordered_set<std::string>> error_list;
   int display_build;  // 0: none, 1: normal (default), 2: version + hotfix only
