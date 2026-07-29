@@ -53,6 +53,7 @@
 #include "sim/benefit.hpp"
 #include "sim/cooldown.hpp"
 #include "sim/cooldown_waste_data.hpp"
+#include "sim/decision_dump.hpp"
 #include "sim/event.hpp"
 #include "sim/expressions.hpp"
 #include "sim/plot.hpp"
@@ -7367,6 +7368,12 @@ action_t* player_t::execute_action()
     visited_apls_ = 0;  // Reset visited apl list
     action = select_action( *active_action_list, execute_type::FOREGROUND );
   }
+
+  // P2 spike hook (simc-solver-spike-2026-07-29) - dump full decision-boundary
+  // state HERE: `action` is chosen but nothing has executed yet (no cost
+  // paid, no cooldown started), so this is the read-state-then-decide
+  // moment. No-op unless decision_dump=<file> is set.
+  decision_dump::record( this, action );
 
   last_foreground_action = action;
 
