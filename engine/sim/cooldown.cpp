@@ -440,6 +440,28 @@ void cooldown_t::start( action_t* a, timespan_t _override, timespan_t delay )
   // state besides removing a charge and adjusting ready.
   if ( recharge_event )
   {
+    // Soft-fail fork hook (simc-offline-evaluation-pipeline phase 116, 116-05) -
+    // current_charge can legitimately reach 0 here as a SYNCHRONOUS side effect
+    // of the very cast that is calling cooldown_t::start() (e.g. a
+    // shared-cooldown judgment_t-family action auto-triggered mid-resolution by
+    // the Divine Resonance talent, consuming a second charge of the same pool
+    // the primary cast just consumed the last of). action_t::ready()'s
+    // pre-dispatch check cannot see this coming -- the collision happens deep
+    // inside this function, after the caller already committed to casting.
+    // Upstream asserts unconditionally here. With sequence_soft_fail=1, treat
+    // this as a lost/skipped cooldown-start attempt instead: count it, log it,
+    // and return with no state change, rather than crash. Default false = a
+    // single boolean check, byte-identical to upstream.
+    if ( sim.sequence_soft_fail && current_charge <= 0 )
+    {
+      ++sim.sequence_soft_fail_count;
+      if ( sim.debug )
+      {
+        sim.print_debug( "{} cooldown_t::start() for '{}' found current_charge<=0 while already recharging -- "
+                         "soft-fail skipping (would have asserted)", *player, name_str );
+      }
+      return;
+    }
     assert( current_charge > 0 );
     current_charge--;
     // No charges left, the cooldown won't be ready until a recharge event
@@ -487,6 +509,21 @@ void cooldown_t::start( action_t* a, timespan_t _override, timespan_t delay )
   // through the event system.
   if ( charges > 1 )
   {
+    // Soft-fail fork hook (simc-offline-evaluation-pipeline phase 116, 116-05) -
+    // symmetric guard to the recharge_event branch above: current_charge<=1
+    // here (with recharge_event already known null, per the early return
+    // above) is the same class of caller-side charge-pool underflow. See that
+    // branch's comment for the full mechanism.
+    if ( sim.sequence_soft_fail && current_charge <= 1 )
+    {
+      ++sim.sequence_soft_fail_count;
+      if ( sim.debug )
+      {
+        sim.print_debug( "{} cooldown_t::start() for '{}' found current_charge<=1 with no active recharge -- "
+                         "soft-fail skipping (would have asserted)", *player, name_str );
+      }
+      return;
+    }
     assert( current_charge > 1 && !recharge_event );
     last_charged = 0_ms;
     current_charge--;
