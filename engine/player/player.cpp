@@ -7394,17 +7394,24 @@ action_t* player_t::execute_action()
     action = select_action( *active_action_list, execute_type::FOREGROUND );
   }
 
-  // P2 spike hook (simc-solver-spike-2026-07-29) - dump full decision-boundary
-  // state HERE: `action` is chosen but nothing has executed yet (no cost
-  // paid, no cooldown started), so this is the read-state-then-decide
-  // moment. No-op unless decision_dump=<file> is set.
-  decision_dump::record( this, action );
-
-  // P3b fork hook (simc-offline-evaluation-pipeline phase 116, 116-01) -
-  // same decision boundary, immediately alongside decision_dump::record()
-  // above. No-op (returns `action` unchanged) unless solver_control=<prefix>
-  // is set; otherwise its reply REPLACES the executed action.
+  // P3b fork hook (simc-offline-evaluation-pipeline phase 116, 116-01) - same
+  // decision boundary as decision_dump::record() below. No-op (returns
+  // `action` unchanged) unless solver_control=<prefix> is set; otherwise its
+  // reply REPLACES the executed action. Reordered BEFORE decision_dump::record()
+  // (2026-07-29 fix bundle, defect (b)) so the dump reflects the SOLVER's
+  // actual per-boundary resolution rather than the pre-reply APL/sequence
+  // placeholder pick -- neither call mutates any cost/cooldown/GCD state
+  // (that still only happens later, via `action->queue_execute()` below), so
+  // this reorder does not move the dump off its "read state, then decide"
+  // moment; it only changes WHICH action identity gets reported.
   action = solver_control::choose( this, action );
+
+  // P2 spike hook (simc-solver-spike-2026-07-29) - dump full decision-boundary
+  // state HERE: `action` is chosen (by the APL, or -- now -- already resolved
+  // by solver_control above) but nothing has executed yet (no cost paid, no
+  // cooldown started), so this is still the read-state-then-decide moment.
+  // No-op unless decision_dump=<file> is set.
+  decision_dump::record( this, action );
 
   last_foreground_action = action;
 

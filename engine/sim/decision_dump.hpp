@@ -32,18 +32,30 @@ void record( player_t* p, action_t* chosen );
 // evaluation-pipeline phase 116, reuses this so the two decision-boundary
 // hooks never drift). Writes gcd_remains, swing_mh_remains, holy_power,
 // cooldowns, buffs, target_debuffs, target_time_to_die, active_enemies,
-// dots, gcd_length, auto_attack_interval and resolved_action as trailing
-// JSON object members (each preceded by its own comma) -- the caller owns
-// the enclosing object's opening `{` and closing `}`.
+// dots, gcd_length, auto_attack_interval, resolved_action and (only when
+// `solver_reply_gated` is true) `solver_reply_type` as trailing JSON object
+// members (each preceded by its own comma) -- the caller owns the enclosing
+// object's opening `{` and closing `}`.
 //
 // `chosen` is the action about to execute at this boundary (nullptr on an
-// idle/wait decision) -- it backs both `gcd_length` (action-scoped, needs
-// an anchor) and `resolved_action` (116-02: the authoritative resolved
-// action identity, unwrapping a sequence/strict_sequence wrapper to its
-// real next sub-action; `chosen` at the call site's own top-level key is
-// kept for backward compatibility but is unreliable under a sequence-
-// driven run -- see PROTOCOL.md).
-void write_state_fields( std::ostream& out, player_t* p, action_t* chosen );
+// idle/wait decision) -- it backs `resolved_action` (116-02: the
+// authoritative resolved action identity, unwrapping a sequence/
+// strict_sequence wrapper to its real next sub-action; `chosen` at the call
+// site's own top-level key is kept for backward compatibility but is
+// unreliable under a sequence-driven run -- see PROTOCOL.md). `gcd_length`
+// and `auto_attack_interval` are PLAYER-scoped (2026-07-29 fix bundle,
+// defect (d)) and no longer read `chosen` at all.
+//
+// `solver_reply_gated` (2026-07-29 fix bundle, defect (b); default false,
+// only decision_dump::record() opts in, never solver_control's own
+// wire-request-building call) -- when true, `resolved_action` reflects
+// `sim->solver_control_last_reply_type` (set by solver_control::choose()
+// immediately before this runs): non-"cast" replies (wait/default/abstain)
+// force `resolved_action:null` plus an explicit `solver_reply_type` marker,
+// rather than resolving `chosen` (which, ungated, would show whatever the
+// pre-reply APL/sequence placeholder happened to pick -- the exact bug this
+// fix closes).
+void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool solver_reply_gated = false );
 
 // JSON helpers shared with solver_control (P3b) so both hooks emit
 // byte-identical escaping/clamping for the same field kinds.

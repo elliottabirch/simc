@@ -81,7 +81,7 @@ double clamp_nonneg( double v )
 // Shared decision-boundary state block -- see decision_dump.hpp. Reused
 // verbatim by solver_control's "decision" request line (phase 116,
 // simc-offline-evaluation-pipeline) so the two hooks can never drift.
-void write_state_fields( std::ostream& out, player_t* p, action_t* chosen )
+void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool solver_reply_gated )
 {
   sim_t* sim = p->sim;
 
@@ -202,28 +202,68 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen )
   out << "}";
 
   // Full GCD length (distinct from gcd_remains above, which is time-until-
-  // ready, not the total duration) - action-scoped, so only available when
-  // a real chosen action exists; 0 on an idle/wait decision (116-02,
-  // previously unwired -- P2-state-mapping.md §5).
-  out << ",\"gcd_length\":" << ( chosen ? chosen->gcd().total_seconds() : 0.0 );
+  // ready, not the total duration) - PLAYER-scoped (2026-07-29 fix bundle,
+  // defect (d)): the actor's own current haste-scaled standard GCD
+  // (`player_t::base_gcd`/`min_gcd`, ATTACK_HASTE-scaled), matching what the
+  // live TSTL context builder's `currentGcdInMs` means
+  // (`resources.getCurrentGcdInMs()` reads a live PLAYER-scoped GCD via the
+  // Sylvanas API's `core.spell_book.get_global_cooldown()`, not a specific
+  // spell's own gcd()). Previously action-scoped (`chosen->gcd()`), which
+  // degenerated to 0 whenever `chosen` was the zero-trigger_gcd auto_attack
+  // placeholder (the entire solver_control path before the (a) fix, since
+  // auto_attack never stopped being "ready") or null (any idle/wait
+  // decision) -- no longer reads `chosen` at all.
+  {
+    timespan_t player_gcd = p->base_gcd * p->cache.attack_haste();
+    if ( player_gcd < p->min_gcd )
+      player_gcd = p->min_gcd;
+    out << ",\"gcd_length\":" << player_gcd.total_seconds();
+  }
 
   // Full auto-attack swing interval (distinct from swing_mh_remains above,
-  // which is time-until-next-swing, not the full period) (116-02,
-  // previously unwired -- P2-state-mapping.md §5).
+  // which is time-until-next-swing, not the full period) - PLAYER-scoped
+  // (2026-07-29 fix bundle, defect (d)): computed directly from the main-hand
+  // weapon's swing time and the actor's current auto-attack-speed haste,
+  // rather than `attack_t::execute_time()` on the actual swing-timer action
+  // (`melee_t` in the paladin module) -- that action class deliberately
+  // special-cases its OWN execute_time() to 0 before the first swing has
+  // actually landed and to 10ms before combat starts (see
+  // `melee_t::execute_time()`, sc_paladin.cpp), which describes "time until
+  // the next scheduled swing" (swing_mh_remains already answers that), not
+  // "how long is a swing" -- the field this key is documented to mean.
   out << ",\"auto_attack_interval\":"
-      << ( p->main_hand_attack ? p->main_hand_attack->execute_time().total_seconds() : 0.0 );
+      << ( p->main_hand_attack ? ( p->main_hand_weapon.swing_time * p->cache.auto_attack_speed() ).total_seconds()
+                                : 0.0 );
 
-  // Resolved action identity (116-02) - the SimC-internal name_str of the
-  // action actually about to execute at this boundary, unwrapping a
-  // sequence/strict_sequence wrapper to its real next sub-action.
-  // Authoritative; the `chosen` top-level key emitted by record() below is
-  // kept unchanged for backward compatibility with the spike's own
-  // artefacts but is unreliable under a sequence-driven run -- see
-  // PROTOCOL.md.
-  if ( action_t* resolved = resolve_current_action( chosen ) )
-    out << ",\"resolved_action\":\"" << json_escape( resolved->name() ) << "\"";
-  else
+  // Resolved action identity (116-02; solver-path gating added 2026-07-29 fix
+  // bundle, defect (b)) - the SimC-internal name_str of the action actually
+  // about to execute at this boundary, unwrapping a sequence/strict_sequence
+  // wrapper to its real next sub-action. Authoritative; the `chosen`
+  // top-level key emitted by record() below is kept unchanged for backward
+  // compatibility with the spike's own artefacts but is unreliable under a
+  // sequence-driven run -- see PROTOCOL.md.
+  //
+  // `solver_reply_gated` (decision_dump::record()'s own call only, never
+  // solver_control's wire-request-building call) forces `resolved_action:null`
+  // plus an explicit `solver_reply_type` marker whenever the immediately-
+  // preceding solver_control reply was NOT a "cast" (i.e. "wait"/"default"/
+  // "abstain" -- none of those name a real cast action, so reporting
+  // whatever `chosen` happens to resolve to there is exactly the
+  // pre-resolution-placeholder bug this fix closes).
+  if ( solver_reply_gated && sim->solver_control_last_reply_type != "cast" )
+  {
     out << ",\"resolved_action\":null";
+    out << ",\"solver_reply_type\":\"" << json_escape( sim->solver_control_last_reply_type ) << "\"";
+  }
+  else
+  {
+    if ( action_t* resolved = resolve_current_action( chosen ) )
+      out << ",\"resolved_action\":\"" << json_escape( resolved->name() ) << "\"";
+    else
+      out << ",\"resolved_action\":null";
+    if ( solver_reply_gated )
+      out << ",\"solver_reply_type\":\"" << json_escape( sim->solver_control_last_reply_type ) << "\"";
+  }
 }
 
 void record( player_t* p, action_t* chosen )
@@ -247,7 +287,14 @@ void record( player_t* p, action_t* chosen )
   out << ",\"actor\":\"" << json_escape( p->name() ) << "\"";
   out << ",\"chosen\":" << ( chosen ? ( "\"" + json_escape( chosen->name() ) + "\"" ) : std::string( "null" ) );
 
-  write_state_fields( out, p, chosen );
+  // solver_reply_gated=true only when solver_control is active for this sim
+  // (2026-07-29 fix bundle, defect (b)) -- see write_state_fields' own doc
+  // comment above and decision_dump.hpp. `chosen` here is already the
+  // POST-solver_control-resolution action: player.cpp's execute_action() now
+  // calls solver_control::choose() BEFORE decision_dump::record() (reordered
+  // for exactly this fix), so `sim->solver_control_last_reply_type` reflects
+  // THIS boundary, not the previous one.
+  write_state_fields( out, p, chosen, !sim->solver_control_str.empty() );
 
   out << "}\n";
   out.flush();
