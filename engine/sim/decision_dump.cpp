@@ -14,7 +14,7 @@
 #include "sim/sim.hpp"
 #include "util/io.hpp"
 
-namespace
+namespace decision_dump
 {
 // Minimal JSON-string escaping - decision-boundary identifiers (action/buff/
 // cooldown name_str) are simc internal snake_case tokens; the only
@@ -38,30 +38,13 @@ double clamp_nonneg( double v )
 {
   return v < 0.0 ? 0.0 : v;
 }
-} // anonymous namespace
 
-namespace decision_dump
-{
-void record( player_t* p, action_t* chosen )
+// Shared decision-boundary state block -- see decision_dump.hpp. Reused
+// verbatim by solver_control's "decision" request line (phase 116,
+// simc-offline-evaluation-pipeline) so the two hooks can never drift.
+void write_state_fields( std::ostream& out, player_t* p )
 {
   sim_t* sim = p->sim;
-  if ( sim->decision_dump_file_str.empty() )
-    return;
-
-  if ( !sim->decision_dump_stream )
-  {
-    sim->decision_dump_stream = std::make_unique<io::ofstream>();
-    sim->decision_dump_stream->open( sim->decision_dump_file_str );
-  }
-  if ( !sim->decision_dump_stream->is_open() )
-    return;
-
-  io::ofstream& out = *sim->decision_dump_stream;
-
-  out << "{";
-  out << "\"t\":" << sim->current_time().total_seconds();
-  out << ",\"actor\":\"" << json_escape( p->name() ) << "\"";
-  out << ",\"chosen\":" << ( chosen ? ( "\"" + json_escape( chosen->name() ) + "\"" ) : std::string( "null" ) );
 
   // GCD remaining - same formula as action.cpp's gcd_remains_expr_t, read
   // directly since we have no action anchor when `chosen` is null (idle/wait
@@ -141,6 +124,30 @@ void record( player_t* p, action_t* chosen )
   {
     out << "},\"target_time_to_die\":null";
   }
+}
+
+void record( player_t* p, action_t* chosen )
+{
+  sim_t* sim = p->sim;
+  if ( sim->decision_dump_file_str.empty() )
+    return;
+
+  if ( !sim->decision_dump_stream )
+  {
+    sim->decision_dump_stream = std::make_unique<io::ofstream>();
+    sim->decision_dump_stream->open( sim->decision_dump_file_str );
+  }
+  if ( !sim->decision_dump_stream->is_open() )
+    return;
+
+  io::ofstream& out = *sim->decision_dump_stream;
+
+  out << "{";
+  out << "\"t\":" << sim->current_time().total_seconds();
+  out << ",\"actor\":\"" << json_escape( p->name() ) << "\"";
+  out << ",\"chosen\":" << ( chosen ? ( "\"" + json_escape( chosen->name() ) + "\"" ) : std::string( "null" ) );
+
+  write_state_fields( out, p );
 
   out << "}\n";
   out.flush();
