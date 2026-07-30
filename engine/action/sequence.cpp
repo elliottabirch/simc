@@ -6,6 +6,7 @@
 #include "sequence.hpp"
 
 #include "player/player.hpp"
+#include "sim/cooldown.hpp"
 #include "sim/option.hpp"
 #include "sim/sim.hpp"
 #include "util/util.hpp"
@@ -144,7 +145,22 @@ void sequence_t::schedule_execute( action_state_t* state )
                     sub_actions[ current_action ]->name() );
   }
 
-  sub_actions[ current_action++ ]->schedule_execute( state );
+  // Queue-delay fork hook (simc-offline-evaluation-pipeline phase 116, ad-hoc
+  // dispatch #2 item B) -- see sim_t::sequence_queue_delay's own doc comment
+  // (sim.hpp) for the full evidenced writeup. Only engages when the
+  // sub-action about to dispatch is queueable-but-not-yet-up (a genuine,
+  // positive queue_delay); an already-up() sub-action (the common case)
+  // takes the untouched schedule_execute(state) branch below, byte-identical
+  // to upstream.
+  action_t* next_action = sub_actions[ current_action++ ];
+  if ( sim->sequence_queue_delay && next_action->cooldown->queue_delay() > timespan_t::zero() )
+  {
+    next_action->queue_execute( execute_type::FOREGROUND );
+  }
+  else
+  {
+    next_action->schedule_execute( state );
+  }
 
   // No longer restarted
   restarted = false;
