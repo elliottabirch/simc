@@ -873,10 +873,16 @@ bool parse_set_bonus( sim_t* sim, std::string_view, std::string_view value )
 bool parse_initial_resource( sim_t* sim, std::string_view, std::string_view value )
 {
   player_t* player = sim->active_player;
-  auto opts        = util::string_split<std::string_view>( value, ":/" );
+  // Entries are '/'-separated; within an entry, the name:value pair accepts
+  // either '=' (original grammar, e.g. "holy_power=5") or ':' (added
+  // simc-offline-evaluation-pipeline phase 116, 116-07, to match the other
+  // three mid-fight seeding options' <name>:<value> grammar) so
+  // "holy_power:5" and "holy_power=5" both work, including chained as
+  // "holy_power:5/mana:100".
+  auto opts        = util::string_split<std::string_view>( value, "/" );
   for ( const auto& opt_str : opts )
   {
-    auto resource_split = util::string_split<std::string_view>( opt_str, "=" );
+    auto resource_split = util::string_split<std::string_view>( opt_str, "=:" );
     if ( resource_split.size() != 2 )
     {
       sim->error( "{} unknown initial_resources option '{}'", player->name(), opt_str );
@@ -6192,6 +6198,70 @@ void player_t::combat_begin()
   first_cast = false;
 
   sim->print_debug( "Combat begins for {}.", *this );
+
+  // Mid-fight episode seeding (simc-offline-evaluation-pipeline phase 116,
+  // 116-07) - initial_cooldown=/initial_buff=/initial_swing_offset= are
+  // applied once here, per iteration (this function runs once per iteration
+  // via sim_t::combat_begin(), after sim_t::reset() has already reset every
+  // buff/cooldown to its clean start-of-combat state, so seeding here is
+  // never immediately undone). This is the shared per-player insertion
+  // point every mid-fight seeding sub-need funnels through
+  // (P4-viability.md Task 3). initial_resource= is the fourth dimension and
+  // is applied earlier, in init_resources() -- see this class's
+  // ret-specific holy-power clamp override in
+  // class_modules/paladin/sc_paladin.cpp's combat_begin() for its
+  // now-conditional counterpart. Restricted to real actors the same way
+  // precombat_action_list is above -- never pets/adds/enemies; this eval
+  // pipeline is always a single real actor vs. a target dummy. All three
+  // vectors/the sentinel default empty/-1.0, so an unseeded run never
+  // enters this block's bodies (byte-identical to upstream).
+  if ( !is_pet() && !is_add() && !is_enemy() )
+  {
+    for ( const auto& seed : sim->initial_cooldown_opts )
+    {
+      cooldown_t* cd = find_cooldown( seed.name );
+      if ( !cd )
+      {
+        throw std::runtime_error( fmt::format(
+          "initial_cooldown: unknown cooldown '{}' for player '{}'", seed.name, name() ) );
+      }
+      cd->start( nullptr, timespan_t::from_seconds( seed.remaining_seconds ) );
+    }
+
+    for ( const auto& seed : sim->initial_buff_opts )
+    {
+      buff_t* buff = buff_t::find( this, seed.name );
+      if ( !buff && target )
+      {
+        buff = buff_t::find( target, seed.name, this );  // target-debuff sub-need
+      }
+      if ( !buff )
+      {
+        throw std::runtime_error( fmt::format(
+          "initial_buff: unknown buff '{}' for player '{}'", seed.name, name() ) );
+      }
+      buff->trigger( seed.stacks, buff_t::DEFAULT_VALUE(), -1.0,
+                     timespan_t::from_seconds( seed.remaining_seconds ) );
+    }
+
+    if ( sim->initial_swing_offset >= 0.0 && main_hand_attack )
+    {
+      // The natural first swing is only scheduled once the actor's own
+      // actions=auto_attack priority-list entry executes (its FIRST
+      // decision, not here) -- for a seeded run, force it started now so
+      // there is something to reschedule.
+      if ( !main_hand_attack->execute_event )
+        main_hand_attack->schedule_execute();
+
+      if ( main_hand_attack->execute_event )
+      {
+        timespan_t interval = main_hand_attack->execute_event->remains();
+        timespan_t offset = timespan_t::from_seconds( sim->initial_swing_offset );
+        timespan_t new_remains = offset < interval ? interval - offset : timespan_t::zero();
+        main_hand_attack->execute_event->reschedule( new_remains );
+      }
+    }
+  }
 
   if ( !precombat_action_list.empty() )
     enter_combat();

@@ -4896,11 +4896,22 @@ void paladin_t::combat_begin()
 {
   player_t::combat_begin();
 
-  auto hp_overflow = resources.current[ RESOURCE_HOLY_POWER ] - MAX_START_OF_COMBAT_HOLY_POWER;
-
-  if ( hp_overflow > 0 )
+  // Mid-fight episode seeding (simc-offline-evaluation-pipeline phase 116,
+  // 116-07) - this ret-specific start-of-combat holy-power clamp only
+  // applies when the run did NOT explicitly seed holy_power via
+  // initial_resource=holy_power:<value> (player.cpp's parse_initial_resource
+  // populates resources.initial_opt[RESOURCE_HOLY_POWER] with a value != -1
+  // when it did; the sentinel default -1.0 means "not seeded"). An unseeded
+  // run's behaviour is unchanged; a seeded run gets the full 0-5 range
+  // instead of being clamped back to MAX_START_OF_COMBAT_HOLY_POWER.
+  if ( resources.initial_opt[ RESOURCE_HOLY_POWER ] == -1.0 )
   {
-    resource_loss( RESOURCE_HOLY_POWER, hp_overflow );
+    auto hp_overflow = resources.current[ RESOURCE_HOLY_POWER ] - MAX_START_OF_COMBAT_HOLY_POWER;
+
+    if ( hp_overflow > 0 )
+    {
+      resource_loss( RESOURCE_HOLY_POWER, hp_overflow );
+    }
   }
 
   if ( options.starting_armament == "sacred_weapon" )
