@@ -6264,7 +6264,18 @@ void player_t::combat_begin()
 
       if ( main_hand_attack->execute_event )
       {
-        timespan_t interval = main_hand_attack->execute_event->remains();
+        // The true full swing interval, computed the same way
+        // decision_dump.cpp's own auto_attack_interval field is (weapon
+        // swing_time scaled by current auto-attack haste) -- NOT
+        // execute_event->remains() here. The swing-timer action class
+        // (melee_t in the paladin module, and its analogues in other
+        // modules) deliberately special-cases its own execute_time() to
+        // 10ms while !player->in_combat (true at this exact point in
+        // combat_begin(), before the caller sets in_combat), so the event
+        // schedule_execute() just created above is scheduled 10ms out, not
+        // a real interval out - reading remains() here would seed against
+        // that 10ms placeholder instead of the real interval.
+        timespan_t interval = main_hand_weapon.swing_time * cache.auto_attack_speed();
         timespan_t offset = timespan_t::from_seconds( sim->initial_swing_offset );
         timespan_t new_remains = offset < interval ? interval - offset : timespan_t::zero();
         main_hand_attack->execute_event->reschedule( new_remains );
