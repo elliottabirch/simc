@@ -589,6 +589,54 @@ struct sim_t : private sc_thread_t
   // skipped entry is counted here and logged, never substituted or retried.
   bool sequence_soft_fail = false;
   uint64_t sequence_soft_fail_count = 0;
+  // Queue-delay fork hook (simc-offline-evaluation-pipeline phase 116, ad-hoc
+  // dispatch #2 item B) - sequence_queue_delay=<bool> makes
+  // sequence_t::schedule_execute() (action/sequence.cpp) dispatch a
+  // sub-action that is only WITHIN cooldown_tolerance-of-ready
+  // (cooldown_t::queueable(), not literally cooldown_t::up()) through the
+  // sub-action's OWN action_t::queue_execute() -- the same "queue window"
+  // delay a normal, non-sequence foreground action already gets
+  // (action.cpp's own doc comment on queue_execute(): "Should be called only
+  // by foreground action executions") -- instead of dispatching it
+  // immediately via a direct schedule_execute() call.
+  //
+  // Upstream sequence_t::schedule_execute() always dispatches the current
+  // sub-action SYNCHRONOUSLY the instant it is selected, even when its own
+  // cooldown->remains() is still positive (up to player->cooldown_tolerance(),
+  // default 250ms) -- because cooldown_t::is_ready() legally permits
+  // queueing within that window, and sequence_t bypasses queue_execute()
+  // entirely for its sub-actions (calls schedule_execute() directly,
+  // action/sequence.cpp). For a scripted `sequence` chain (this eval
+  // pipeline's own checkpoint-replay reference loop, p3a-reference-loop.py)
+  // this let a sub-action fire UP TO 250ms EARLY relative to its real
+  // cooldown, unlike a normal (non-sequence) foreground action -- which is
+  // correctly delayed by exactly that amount via queue_execute()'s own
+  // queue_delay mechanism, the same mechanism the persistent
+  // solver_control-driven loop (episode-driver.py, which never uses
+  // `sequence`) always goes through.
+  //
+  // Evidenced empirically (2026-07-29, deferred-items.md 116-04 "second
+  // divergence"): decision_dump's own state snapshot at a decision boundary
+  // showed resolved_action="blade_of_justice" with
+  // cooldowns.blade_of_justice.remains still 0.243s -- both fields are
+  // individually correct reads of the SAME instant, but the sub-action then
+  // executed AT THAT SAME INSTANT anyway (confirmed via the text log's
+  // "performs...hits" line at the identical timestamp), rather than ~243ms
+  // later as a real queued button press (or the persistent loop's own
+  // non-sequence dispatch) would. This single-boundary ~243ms slip compounds
+  // across every subsequent decision (later cooldowns/GCDs are all offset by
+  // the same amount), producing the growing multi-second divergence
+  // equivalence-check.py's oracle measured (245ms at decision 11, several
+  // seconds by decision 37).
+  //
+  // Default false = byte-identical to upstream (a single boolean check plus
+  // one queue_delay()>0 branch on the sequence dispatch hot path, mirroring
+  // sequence_soft_fail's own discipline; the already-up() case -- the vast
+  // majority of sequence dispatches -- is completely untouched, still
+  // schedule_execute(state) synchronously). When true,
+  // p3a-reference-loop.py's own generated .simc opts in (mirroring its
+  // existing sequence_soft_fail=1 opt-in).
+  bool sequence_queue_delay = false;
   std::string reforge_plot_output_file_str;
   std::map<error_level_e, std::unordered_set<std::string>> error_list;
   int display_build;  // 0: none, 1: normal (default), 2: version + hotfix only
