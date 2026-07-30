@@ -45,13 +45,51 @@ constexpr int SOLVER_CONTROL_PROTOCOL_VERSION = 2;
 // solver_control only selects among what the actor's action list already
 // built at init time (every solver-catalog spell has an unconditional
 // actions+= entry in the generated episode .simc for exactly this reason).
-action_t* resolve_action( player_t* p, const std::string& name )
+// Scans p->action_list for the first entry whose name_str matches `name`,
+// preferring a player-CASTABLE (non-background) action_t over a same-name
+// background one. action_t::action_t() (action.cpp) unconditionally
+// self-registers EVERY constructed action into player->action_list --
+// including internal `background = true` helper actions class modules build
+// for buff-triggering/bookkeeping (e.g. sc_paladin.cpp's
+// `active.background_avenging_wrath`, constructed once per talent-init
+// regardless of whether the player's own APL/solver catalog also carries a
+// real, player-castable `avenging_wrath` actions+= entry) -- so a same-name
+// collision is possible whenever a class module ships both a background
+// helper and a real spell under identical name_str. A plain first-match
+// linear scan can therefore return the background helper (construction
+// order is init-sequence-dependent, not alphabetical or list-position
+// stable), which is never `ready()` the way solver_control's caller expects
+// and stalls the episode. Found live: sc_paladin.cpp:3327 constructs
+// `background_avenging_wrath` ahead of the player's real `avenging_wrath`
+// action in the action_list, so a `{"type":"cast","action":"avenging_wrath"}`
+// reply resolved to the background helper and never advanced. This
+// preference is deliberately general (no spell special-case): ANY class
+// module with a background/foreground name_str collision hits the same
+// fix.
+action_t* resolve_action_prefer_castable( player_t* p, const std::string& name )
 {
+  action_t* background_match = nullptr;
   for ( action_t* a : p->action_list )
   {
-    if ( a->name_str == name )
+    if ( a->name_str != name )
+      continue;
+    if ( !a->background )
       return a;
+    if ( !background_match )
+      background_match = a;
   }
+  // No player-castable match under this exact name -- fall back to a
+  // same-name background action rather than reporting unresolvable, in case
+  // some class module legitimately has no foreground counterpart for this
+  // token (keeps prior behavior for that case; resolved->ready() downstream
+  // still fails closed if it truly can't be cast).
+  return background_match;
+}
+
+action_t* resolve_action( player_t* p, const std::string& name )
+{
+  if ( action_t* resolved = resolve_action_prefer_castable( p, name ) )
+    return resolved;
 
   // Fallback for spells whose *constructed* action_t renames its own
   // name_str based on live talent state, even though the APL/sequence
@@ -72,11 +110,8 @@ action_t* resolve_action( player_t* p, const std::string& name )
   auto alias_it = NAME_STR_RENAME_ALIASES.find( name );
   if ( alias_it != NAME_STR_RENAME_ALIASES.end() )
   {
-    for ( action_t* a : p->action_list )
-    {
-      if ( a->name_str == alias_it->second )
-        return a;
-    }
+    if ( action_t* resolved = resolve_action_prefer_castable( p, alias_it->second ) )
+      return resolved;
   }
 
   return nullptr;
