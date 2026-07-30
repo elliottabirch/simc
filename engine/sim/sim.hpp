@@ -637,6 +637,46 @@ struct sim_t : private sc_thread_t
   // p3a-reference-loop.py's own generated .simc opts in (mirroring its
   // existing sequence_soft_fail=1 opt-in).
   bool sequence_queue_delay = false;
+  // Mid-fight episode seeding (simc-offline-evaluation-pipeline phase 116,
+  // 116-07) - four additive combat_begin()-time seeding hooks so an episode
+  // can start mid-fight instead of always at a pristine start-of-combat. All
+  // default empty/zero = byte-identical to upstream. See P4-viability.md
+  // Task 3 (mid-fight episode seeding survey) for the per-sub-need primitive
+  // survey this patch implements: `initial_resource=` already existed
+  // upstream (player.cpp's parse_initial_resource) and is extended in-place
+  // (grammar + the ret-specific holy-power clamp in sc_paladin.cpp made
+  // conditional on it); the three below are genuinely new.
+  //
+  // initial_cooldown=<name>:<remaining_seconds> - repeatable. Applied once
+  // per non-pet, non-add player at the top of player_t::combat_begin() via
+  // cooldown_t::start(), the shared insertion point every sub-need funnels
+  // through. An unresolvable cooldown name throws (hard error, never a
+  // silent no-op - see combat_begin()).
+  struct initial_cooldown_seed_t
+  {
+    std::string name;
+    double remaining_seconds;
+  };
+  std::vector<initial_cooldown_seed_t> initial_cooldown_opts;
+  // initial_buff=<name>:<stacks>:<remaining_seconds> - repeatable. Name
+  // resolved against the player's own buffs first, then the player's
+  // current target's debuffs (buff_t::find with source=player) - the
+  // target-debuff sub-need is the identical primitive (buff_t::trigger) one
+  // indirection further. An unresolvable name throws.
+  struct initial_buff_seed_t
+  {
+    std::string name;
+    int stacks;
+    double remaining_seconds;
+  };
+  std::vector<initial_buff_seed_t> initial_buff_opts;
+  // initial_swing_offset=<seconds> - sets the main-hand auto-attack phase so
+  // the first swing lands this far into the swing interval. Sentinel -1.0 =
+  // unset (default; a normal run's auto-attack is not force-started at
+  // combat_begin() at all, matching upstream - the actor's own
+  // actions=auto_attack priority-list entry starts it on its natural first
+  // decision instead). Any value >= 0.0 opts in.
+  double initial_swing_offset = -1.0;
   std::string reforge_plot_output_file_str;
   std::map<error_level_e, std::unordered_set<std::string>> error_list;
   int display_build;  // 0: none, 1: normal (default), 2: version + hotfix only

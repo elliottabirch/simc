@@ -224,6 +224,68 @@ bool replace_json2( sim_t* sim, util::string_view /*option_name*/, util::string_
   return parse_json_reports(sim, "json", fmt::format("{},version=2", value));
 }
 
+// parse_initial_cooldown ===================================================
+//
+// Mid-fight episode seeding (simc-offline-evaluation-pipeline phase 116,
+// 116-07) - initial_cooldown=<name>:<remaining_seconds>, repeatable. Only
+// PARSES and queues the request here (cooldown_t objects for named spells
+// do not exist yet at option-parse time, before player/action-list init) -
+// actually applied once per player at the shared player_t::combat_begin()
+// insertion point (player.cpp), where an unresolvable name throws a hard
+// error naming the token rather than silently doing nothing.
+
+bool parse_initial_cooldown( sim_t* sim, util::string_view, util::string_view value )
+{
+  auto parts = util::string_split<util::string_view>( value, ":" );
+  if ( parts.size() != 2 )
+  {
+    throw sc_invalid_sim_argument(
+      fmt::format( "initial_cooldown: malformed token '{}', expected <name>:<remaining_seconds>", value ) );
+  }
+
+  double remains = util::to_double( parts[ 1 ] );
+  if ( remains < 0 )
+  {
+    throw sc_invalid_sim_argument(
+      fmt::format( "initial_cooldown: negative remaining seconds in '{}'", value ) );
+  }
+
+  sim->initial_cooldown_opts.push_back( { std::string( parts[ 0 ] ), remains } );
+
+  return true;
+}
+
+// parse_initial_buff ========================================================
+//
+// Mid-fight episode seeding (simc-offline-evaluation-pipeline phase 116,
+// 116-07) - initial_buff=<name>:<stacks>:<remaining_seconds>, repeatable.
+// Same parse-now/apply-at-combat_begin() split as initial_cooldown above -
+// name resolution (player buff first, then the player's target's debuffs)
+// needs the player and its target to exist, so it happens in
+// player_t::combat_begin(), not here.
+
+bool parse_initial_buff( sim_t* sim, util::string_view, util::string_view value )
+{
+  auto parts = util::string_split<util::string_view>( value, ":" );
+  if ( parts.size() != 3 )
+  {
+    throw sc_invalid_sim_argument(
+      fmt::format( "initial_buff: malformed token '{}', expected <name>:<stacks>:<remaining_seconds>", value ) );
+  }
+
+  int stacks = util::to_int( parts[ 1 ] );
+  double remains = util::to_double( parts[ 2 ] );
+  if ( stacks < 1 || remains < 0 )
+  {
+    throw sc_invalid_sim_argument(
+      fmt::format( "initial_buff: invalid stacks/remaining_seconds in '{}'", value ) );
+  }
+
+  sim->initial_buff_opts.push_back( { std::string( parts[ 0 ] ), stacks, remains } );
+
+  return true;
+}
+
 // parse_ptr ================================================================
 
 bool parse_ptr( sim_t*             sim,
@@ -3878,6 +3940,13 @@ void sim_t::create_options()
   add_option( opt_string( "solver_control", solver_control_str ) );
   add_option( opt_bool( "sequence_soft_fail", sequence_soft_fail ) );
   add_option( opt_bool( "sequence_queue_delay", sequence_queue_delay ) );
+  // Mid-fight episode seeding (simc-offline-evaluation-pipeline phase 116,
+  // 116-07). initial_resource= already exists as a player option
+  // (player.cpp's parse_initial_resource); these three are new. See
+  // sim.hpp's initial_cooldown_opts/initial_buff_opts/initial_swing_offset.
+  add_option( opt_func( "initial_cooldown", parse_initial_cooldown ) );
+  add_option( opt_func( "initial_buff", parse_initial_buff ) );
+  add_option( opt_float( "initial_swing_offset", initial_swing_offset, 0.0, std::numeric_limits<double>::max() ) );
   add_option( opt_bool( "hosted_html", hosted_html ) );
   add_option( opt_bool( "offline", offline ) );
   add_option( opt_int( "healing", healing ) );
