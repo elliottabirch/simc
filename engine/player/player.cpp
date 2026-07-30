@@ -6237,12 +6237,38 @@ void player_t::combat_begin()
       cd->start( nullptr, timespan_t::from_seconds( seed.remaining_seconds ) );
     }
 
+    if ( !sim->initial_buff_opts.empty() && target )
+    {
+      // Force per-(player,target) debuff data into existence before
+      // resolving names below -- most spec modules build their
+      // target-scoped debuff buff_t objects lazily, the first time
+      // get_target_data(target) is called (normally triggered by this
+      // player's own first debuff-applying cast on this target, which for
+      // a mid-fight-seeded episode has never happened yet). The base
+      // player_t::get_target_data() default is a no-op returning nullptr,
+      // so this is harmless for specs/pets with no target-data type.
+      get_target_data( target );
+    }
+
     for ( const auto& seed : sim->initial_buff_opts )
     {
-      buff_t* buff = buff_t::find( this, seed.name );
-      if ( !buff && target )
+      // Target debuffs resolved FIRST, player's own buffs second (the
+      // reverse of this option's originally-planned order -- found during
+      // Task 2's debuff-active assertion authoring, see the fork commit
+      // message: many spec modules' own get_target_data() machinery
+      // constructs a SELF-targeted target-data object too (e.g. for
+      // self-referential APL expressions), which registers a same-named
+      // shadow debuff buff_t under the PLAYER's own buff_list -- a
+      // player-first search would silently resolve to that self-scoped
+      // shadow instead of the real enemy-target debuff of the same name
+      // (empirically confirmed for both "judgment" and "sanctify" on ret
+      // paladin). Real player-only buffs (e.g. avenging_wrath) are never
+      // registered on the target, so trying target first is safe and
+      // disambiguates correctly either way.
+      buff_t* buff = target ? buff_t::find( target, seed.name, this ) : nullptr;
+      if ( !buff )
       {
-        buff = buff_t::find( target, seed.name, this );  // target-debuff sub-need
+        buff = buff_t::find( this, seed.name );
       }
       if ( !buff )
       {
