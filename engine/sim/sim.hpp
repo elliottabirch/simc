@@ -637,6 +637,48 @@ struct sim_t : private sc_thread_t
   // p3a-reference-loop.py's own generated .simc opts in (mirroring its
   // existing sequence_soft_fail=1 opt-in).
   bool sequence_queue_delay = false;
+  // Deterministic proc-roll option (simc-offline-evaluation-pipeline phase
+  // 116, 116-19; design: .planning/research/wave-a-bar-v2-design-2026-07-31.md
+  // §3.2, owner ratification 2026-07-31 — scoped hash-based deterministic
+  // roll at the Divine Purpose call site ONLY, never a global sim_t::rng()
+  // hijack) - deterministic_proc_rolls=<bool> makes the Divine Purpose
+  // trigger roll (engine/class_modules/paladin/sc_paladin.hpp, the
+  // holy_power_consumer_t::execute() roll) a pure function of (sim seed,
+  // actor_index, a fixed hash of the proc key, a per-actor per-key
+  // monotonic trigger-attempt count) instead of the actor's RNG-stream
+  // read position at the moment of the roll.
+  //
+  // This closes the SEALED seed-50001 decision-equivalence divergence
+  // (.planning/research/seed-50001-divergence-2026-07-31.md §3): the
+  // checkpoint-replay reference oracle (p3a-reference-loop.py) and the
+  // continuous persistent solver_control-driven process
+  // (episode-driver.py) legitimately consume the same nominal per-actor RNG
+  // stream through structurally different call graphs, so a probabilistic
+  // buff proc that gates solver-visible state (hasBuffDivinePurpose's
+  // cost-waiver) can differ between the two harnesses even when both sides
+  // model everything else correctly — unfalsifiable divergence no lag/skew
+  // tolerance can close. Keying on trigger-ATTEMPT COUNT (not stream
+  // position) means both harnesses compute the identical key — and
+  // therefore the identical outcome — for the Nth attempt as long as their
+  // committed prefixes agree, which they do by construction up to any real
+  // fork.
+  //
+  // Deliberately NOT a general "make RNG deterministic" switch: the
+  // allowlist is exactly one call site (Divine Purpose). Every other rng()
+  // consumer (crit rolls, hit rolls, other procs) is completely untouched —
+  // broadening this would risk masking a real future crit/hit-modeling
+  // regression behind "equivalence mode changes RNG globally," and would
+  // violate the owner's oracle-independence ruling in spirit. If a future
+  // seed surfaces a different RNG-gated solver-visible buff as a fork
+  // mechanism, it must be added to the allowlist explicitly, not covered by
+  // broadening this option's scope.
+  //
+  // Default false = byte-identical to upstream (a single ternary check at
+  // the one call site, mirroring sequence_queue_delay's own discipline).
+  // Intent: equivalence-oracle use ONLY, wired into
+  // build_decision_equivalence_profile's overlay by 116-21 Task 2 — NEVER a
+  // production/driver default. This plan does not wire it into anything.
+  bool deterministic_proc_rolls = false;
   // Mid-fight episode seeding (simc-offline-evaluation-pipeline phase 116,
   // 116-07) - four additive combat_begin()-time seeding hooks so an episode
   // can start mid-fight instead of always at a pristine start-of-combat. All
