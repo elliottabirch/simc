@@ -3939,6 +3939,10 @@ void sim_t::create_options()
   add_option( opt_string( "solver_control", solver_control_str ) );
   add_option( opt_bool( "sequence_soft_fail", sequence_soft_fail ) );
   add_option( opt_bool( "sequence_queue_delay", sequence_queue_delay ) );
+  // Deterministic proc-roll option (simc-offline-evaluation-pipeline phase
+  // 116, 116-19). See sim.hpp's deterministic_proc_rolls doc comment for the
+  // full rationale.
+  add_option( opt_bool( "deterministic_proc_rolls", deterministic_proc_rolls ) );
   // Mid-fight episode seeding (simc-offline-evaluation-pipeline phase 116,
   // 116-07). initial_resource= already exists as a player option
   // (player.cpp's parse_initial_resource); these three are new. See

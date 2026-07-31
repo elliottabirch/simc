@@ -782,6 +782,15 @@ public:
 
   double reflection_of_radiance_proc_chance;
 
+  // Deterministic proc-roll counters (simc-offline-evaluation-pipeline
+  // phase 116, 116-19; see sim.hpp's deterministic_proc_rolls doc comment).
+  // Per-proc-key monotonic attempt count, incremented on EVERY evaluation
+  // of deterministic_proc_roll() below (not only on a successful trigger),
+  // so the Nth attempt for this actor+key gets an identical hash key
+  // regardless of RNG-stream position. Empty/unused unless
+  // sim->deterministic_proc_rolls is set.
+  std::unordered_map<std::string, uint64_t> deterministic_proc_counts;
+
   paladin_t( sim_t* sim, util::string_view name, race_e r = RACE_TAUREN );
 
   void init_assessors() override;
@@ -1430,6 +1439,45 @@ struct paladin_melee_attack_t : public paladin_action_t<melee_attack_t>
   }
 };
 
+// ==========================================================================
+// Deterministic proc-roll helper (simc-offline-evaluation-pipeline phase
+// 116, 116-19; design: .planning/research/wave-a-bar-v2-design-2026-07-31.md
+// §3.2, owner ratification 2026-07-31). ALLOWLIST OF EXACTLY ONE call site
+// today: the Divine Purpose trigger roll below. Do NOT call this from any
+// other rng()-consumer — see sim.hpp's deterministic_proc_rolls doc comment
+// for the full rationale (narrow blast radius over a blanket RNG hijack).
+//
+// Maps a splitmix64-style mix of (sim seed, actor_index, a fixed hash of
+// proc_key, a per-player per-proc-key monotonic attempt counter — NOT the
+// RNG stream position) to [0,1) and compares against chance. The counter is
+// incremented on EVERY evaluation of this function (whether or not the
+// mapped roll succeeds), so the Nth attempt for a given actor+key gets the
+// identical key regardless of how many OTHER rng() draws happened elsewhere
+// in between — this is what makes the outcome a pure function of committed
+// game-state progress instead of RNG-stream position (the exact
+// sensitivity that caused the sealed seed-50001 divergence,
+// seed-50001-divergence-2026-07-31.md §3).
+inline uint64_t deterministic_proc_roll_splitmix64( uint64_t x )
+{
+  x += 0x9E3779B97F4A7C15ULL;
+  x = ( x ^ ( x >> 30 ) ) * 0xBF58476D1CE4E5B9ULL;
+  x = ( x ^ ( x >> 27 ) ) * 0x94D049BB133111EBULL;
+  return x ^ ( x >> 31 );
+}
+
+inline bool deterministic_proc_roll( paladin_t* p, const char* proc_key, double chance )
+{
+  uint64_t key_hash  = std::hash<std::string>{}( proc_key );
+  uint64_t attempt   = p->deterministic_proc_counts[ proc_key ]++;
+  uint64_t mixed     = deterministic_proc_roll_splitmix64( p->sim->seed );
+  mixed              = deterministic_proc_roll_splitmix64( mixed ^ static_cast<uint64_t>( p->actor_index ) );
+  mixed              = deterministic_proc_roll_splitmix64( mixed ^ key_hash );
+  mixed              = deterministic_proc_roll_splitmix64( mixed ^ attempt );
+  // Top 53 bits -> [0,1), matching double's mantissa precision.
+  double mapped = static_cast<double>( mixed >> 11 ) * ( 1.0 / 9007199254740992.0 );  // 2^53
+  return mapped < chance;
+}
+
 // holy power consumption
 
 template <class Base>
@@ -1731,7 +1779,10 @@ public:
     // Roll for Divine Purpose
     // 2024-08-04 Damage event of Hammer of Light cannot proc Divine Purpose, if you're Ret
     // (Although it is also likely that the driver being able to proc Divine Purpose is also a bug, but who knows
-    if ( triggers_divine_purpose && !( p->bugs && !is_hammer_of_light_main && is_hammer_of_light_cleave && p->specialization() == PALADIN_RETRIBUTION ) && p->talents.divine_purpose->ok() && this->rng().roll( p->talents.divine_purpose->effectN( 1 ).percent() ) )
+    if ( triggers_divine_purpose && !( p->bugs && !is_hammer_of_light_main && is_hammer_of_light_cleave && p->specialization() == PALADIN_RETRIBUTION ) && p->talents.divine_purpose->ok() &&
+         ( p->sim->deterministic_proc_rolls
+               ? deterministic_proc_roll( p, "divine_purpose", p->talents.divine_purpose->effectN( 1 ).percent() )
+               : this->rng().roll( p->talents.divine_purpose->effectN( 1 ).percent() ) ) )
     {
       p->buffs.divine_purpose->trigger();
       p->procs.divine_purpose->occur();
