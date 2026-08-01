@@ -954,6 +954,22 @@ struct melee_t : public paladin_melee_attack_t
       execute_action = crusading_strike;
       weapon_multiplier = 0.0;
 
+      // [Fork] 120-22: melee_t is an invisible, 0-damage wrapper whose only job is to
+      // invoke crusading_strike_t (execute_action) on the swing timer. Upstream leaves
+      // this wrapper's own avoidance roll active, so a miss/dodge/parry on melee_t's roll
+      // silently skips invoking crusading_strike_t -- withholding the Holy Power grant --
+      // even though the swing timer still resets on schedule. That is a second,
+      // independent avoidance check the live game does not exhibit (1412/1412
+      // SPELL_CAST_SUCCESS->SPELL_ENERGIZE, zero misses of any kind in the same window;
+      // see .planning/phases/120-offline-harness-fidelity/120-22-RESEARCH-aa-hp-generation.md
+      // in the tstl-sylvanas-solver-v2 repo). Force this wrapper's roll to never produce a
+      // non-hit result so execute_action always fires; crusading_strike_t's own single roll
+      // remains the sole hit/crit/damage/Holy-Power gate, matching the real game's one
+      // visible cast per swing.
+      may_miss = false;
+      may_dodge = false;
+      may_parry = false;
+
       if ( p->talents.blessed_champion->ok() )
       {
         base_aoe_multiplier *= 1.0 - p->talents.blessed_champion->effectN( 3 ).percent();
