@@ -997,7 +997,15 @@ struct melee_t : public paladin_melee_attack_t
           {
             aow_proc_chance *= 1.0 + p()->talents.art_of_war->effectN( 2 ).percent();
           }
-          if ( rng().roll( aow_proc_chance ) )
+          // deterministic_proc_rolls allowlist, entry 2 (simc-offline-evaluation-pipeline
+          // arm-flip-asymmetry investigation, 2026-08-01; see sim.hpp's
+          // deterministic_proc_rolls doc comment). aow_proc_chance here is already the
+          // FINAL computed chance (crit modifier from effectN(2) applied above, if any) —
+          // deterministic_proc_roll() must receive the post-modifier value, not the base
+          // effectN(1) chance, or the hashed roll would silently ignore the crit bonus.
+          if ( p()->sim->deterministic_proc_rolls
+                   ? deterministic_proc_roll( p(), "art_of_war", aow_proc_chance )
+                   : rng().roll( aow_proc_chance ) )
           {
             if ( p()->buffs.art_of_war->up() )
               p()->procs.art_of_war_wasted->occur();
