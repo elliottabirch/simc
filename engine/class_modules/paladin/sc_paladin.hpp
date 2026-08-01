@@ -1429,15 +1429,34 @@ struct paladin_melee_attack_t : public paladin_action_t<melee_attack_t>
 // Deterministic proc-roll helper (simc-offline-evaluation-pipeline phase
 // 116, 116-19; design: .planning/research/wave-a-bar-v2-design-2026-07-31.md
 // §3.2, owner ratification 2026-07-31). ALLOWLIST, as of the 2026-08-01
-// arm-flip-asymmetry investigation, is exactly TWO call sites: the Divine
-// Purpose trigger roll below, and the Art of War proc roll
-// (sc_paladin.cpp, melee_t::execute() — Art of War was found to directly
-// reset Blade of Justice's cooldown and land at the exact millisecond of a
-// named decision-equivalence fork; see
-// .planning/research/2026-08-01-arm-flip-asymmetry.md §2d). Do NOT call
-// this from any other rng()-consumer without updating this allowlist and
-// the doc comment in sim.hpp — see that comment for the full rationale
-// (narrow, explicitly-tracked blast radius over a blanket RNG hijack).
+// Empyrean Power / Righteous Cause extension
+// (.planning/research/2026-08-01-empyrean-power-righteous-cause-determinism.md),
+// is exactly SIX call sites:
+//   1. Divine Purpose trigger roll below (holy_power_consumer_t::execute()).
+//   2. Art of War proc roll (sc_paladin.cpp, melee_t::execute() — Art of War
+//      was found to directly reset Blade of Justice's cooldown and land at
+//      the exact millisecond of a named decision-equivalence fork; see
+//      .planning/research/2026-08-01-arm-flip-asymmetry.md §2d).
+//   3. Righteous Cause trigger roll below (holy_power_consumer_t::execute())
+//      — key "righteous_cause". Currently inert on the run profiles (neither
+//      talented); added for future-proofing, zero measured blast radius as
+//      of the 2026-08-01 investigation (see research doc §5).
+//   4. Empyrean Power @ Crusading Strike (sc_paladin.cpp,
+//      crusading_strike_t::execute()) — key "empyrean_power_crusading_strike".
+//   5. Empyrean Power @ Crusader Strike (sc_paladin.cpp,
+//      crusader_strike_t::execute()) — key "empyrean_power_crusader_strike".
+//   6. Empyrean Power @ Templar Strike/Slash (sc_paladin_retribution.cpp,
+//      base_templar_strike_t::execute(), shared by both) — key
+//      "empyrean_power_templar_strike". Sites 4-6 are structurally mutually
+//      exclusive per build (only one is ever non-background at a time — see
+//      research doc §1) and use distinct keys per-site rather than one
+//      shared "empyrean_power" key, so a malformed/edge-case talent
+//      combination cannot make two sites silently share one counter
+//      sequence.
+// Do NOT call this from any other rng()-consumer without updating this
+// allowlist and the doc comment in sim.hpp — see that comment for the full
+// rationale (narrow, explicitly-tracked blast radius over a blanket RNG
+// hijack).
 //
 // Maps a splitmix64-style mix of (sim seed, actor_index, a fixed hash of
 // proc_key, a per-player per-proc-key monotonic attempt counter — NOT the
@@ -1645,7 +1664,16 @@ public:
       unsigned base_cost = as<int>( ab::base_cost() );
       for ( unsigned i = 0; i < base_cost; i++ )
       {
-        if ( ab::rng().roll( p->talents.righteous_cause->effectN( 1 ).percent() ) )
+        // deterministic_proc_rolls allowlist entry: righteous_cause. The chance
+        // here (effectN(1).percent()) is already final -- no crit/other modifier
+        // applies before this read (see research doc §4). NOTE: this roll can
+        // execute up to base_cost times per single execute() call (one attempt
+        // per Holy Power point, breaking on first success) -- each iteration is
+        // a genuine distinct attempt and must get its own counter increment, so
+        // the substitution goes INSIDE the loop, not hoisted above it.
+        if ( p->sim->deterministic_proc_rolls
+                 ? deterministic_proc_roll( p, "righteous_cause", p->talents.righteous_cause->effectN( 1 ).percent() )
+                 : ab::rng().roll( p->talents.righteous_cause->effectN( 1 ).percent() ) )
         {
           p->procs.righteous_cause->occur();
           p->cooldowns.blade_of_justice->reset( true );
