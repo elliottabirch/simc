@@ -663,18 +663,29 @@ struct sim_t : private sc_thread_t
   // committed prefixes agree, which they do by construction up to any real
   // fork.
   //
-  // Allowlist, as of the 2026-08-01 arm-flip-asymmetry investigation
-  // (.planning/research/2026-08-01-arm-flip-asymmetry.md), is exactly TWO
-  // call sites: Divine Purpose (holy_power_consumer_t::execute(), the
-  // original 116-19 site) and Art of War (melee_t::execute(),
-  // sc_paladin.cpp — added because Art of War directly resets Blade of
-  // Justice's cooldown and was traced to the exact millisecond of a named
-  // decision-equivalence fork). Every other rng() consumer (crit rolls, hit
+  // Allowlist, as of the 2026-08-01 Empyrean Power / Righteous Cause
+  // extension
+  // (.planning/research/2026-08-01-empyrean-power-righteous-cause-determinism.md),
+  // is exactly SIX call sites: Divine Purpose (holy_power_consumer_t::execute(),
+  // the original 116-19 site), Art of War (melee_t::execute(), sc_paladin.cpp
+  // — added because Art of War directly resets Blade of Justice's cooldown
+  // and was traced to the exact millisecond of a named decision-equivalence
+  // fork), Righteous Cause (holy_power_consumer_t::execute(), key
+  // "righteous_cause" — currently inert on the run profiles, neither talent
+  // taken; added for future-proofing with zero measured blast radius as of
+  // the 2026-08-01 investigation), and three Empyrean Power sites, each
+  // structurally mutually exclusive per build and each with its own key:
+  // Crusading Strike ("empyrean_power_crusading_strike",
+  // crusading_strike_t::execute(), sc_paladin.cpp), Crusader Strike
+  // ("empyrean_power_crusader_strike", crusader_strike_t::execute(),
+  // sc_paladin.cpp), and Templar Strike/Slash
+  // ("empyrean_power_templar_strike", base_templar_strike_t::execute(),
+  // sc_paladin_retribution.cpp). Every other rng() consumer (crit rolls, hit
   // rolls, other procs — including at least three OTHER channels the
-  // 2026-08-01 investigation found already decorrelated: both
-  // Nalorakk's-trinket rows and Blessing of the Capybara) is deliberately
-  // left untouched pending a separate decision — broadening this
-  // indiscriminately would risk masking a real future crit/hit-modeling
+  // 2026-08-01 arm-flip-asymmetry investigation found already decorrelated:
+  // both Nalorakk's-trinket rows and Blessing of the Capybara) is
+  // deliberately left untouched pending a separate decision — broadening
+  // this indiscriminately would risk masking a real future crit/hit-modeling
   // regression behind "equivalence mode changes RNG globally," and would
   // violate the owner's oracle-independence ruling in spirit. If a future
   // seed surfaces another RNG-gated solver-visible mechanism as a fork

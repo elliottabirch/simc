@@ -974,7 +974,13 @@ struct base_templar_strike_t : public paladin_melee_attack_t
     paladin_melee_attack_t::execute();
     if ( result_is_hit( execute_state->result ) && p()->talents.empyrean_power->ok() )
     {
-      if ( rng().roll( p()->talents.empyrean_power->effectN( 1 ).percent() ) )
+      // deterministic_proc_rolls allowlist entry: empyrean_power_templar_strike.
+      // effectN(1).percent() is already the final chance -- no inline modifier
+      // applies before this read (see 2026-08-01 EP/RC determinism research §4).
+      if ( p()->sim->deterministic_proc_rolls
+               ? deterministic_proc_roll( p(), "empyrean_power_templar_strike",
+                                           p()->talents.empyrean_power->effectN( 1 ).percent() )
+               : rng().roll( p()->talents.empyrean_power->effectN( 1 ).percent() ) )
       {
         p()->procs.empyrean_power->occur();
         p()->buffs.empyrean_power->trigger();
