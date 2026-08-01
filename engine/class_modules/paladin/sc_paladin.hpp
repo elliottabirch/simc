@@ -1442,10 +1442,16 @@ struct paladin_melee_attack_t : public paladin_action_t<melee_attack_t>
 // ==========================================================================
 // Deterministic proc-roll helper (simc-offline-evaluation-pipeline phase
 // 116, 116-19; design: .planning/research/wave-a-bar-v2-design-2026-07-31.md
-// §3.2, owner ratification 2026-07-31). ALLOWLIST OF EXACTLY ONE call site
-// today: the Divine Purpose trigger roll below. Do NOT call this from any
-// other rng()-consumer — see sim.hpp's deterministic_proc_rolls doc comment
-// for the full rationale (narrow blast radius over a blanket RNG hijack).
+// §3.2, owner ratification 2026-07-31). ALLOWLIST, as of the 2026-08-01
+// arm-flip-asymmetry investigation, is exactly TWO call sites: the Divine
+// Purpose trigger roll below, and the Art of War proc roll
+// (sc_paladin.cpp, melee_t::execute() — Art of War was found to directly
+// reset Blade of Justice's cooldown and land at the exact millisecond of a
+// named decision-equivalence fork; see
+// .planning/research/2026-08-01-arm-flip-asymmetry.md §2d). Do NOT call
+// this from any other rng()-consumer without updating this allowlist and
+// the doc comment in sim.hpp — see that comment for the full rationale
+// (narrow, explicitly-tracked blast radius over a blanket RNG hijack).
 //
 // Maps a splitmix64-style mix of (sim seed, actor_index, a fixed hash of
 // proc_key, a per-player per-proc-key monotonic attempt counter — NOT the

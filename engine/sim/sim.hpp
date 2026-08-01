@@ -640,13 +640,13 @@ struct sim_t : private sc_thread_t
   // Deterministic proc-roll option (simc-offline-evaluation-pipeline phase
   // 116, 116-19; design: .planning/research/wave-a-bar-v2-design-2026-07-31.md
   // §3.2, owner ratification 2026-07-31 — scoped hash-based deterministic
-  // roll at the Divine Purpose call site ONLY, never a global sim_t::rng()
-  // hijack) - deterministic_proc_rolls=<bool> makes the Divine Purpose
-  // trigger roll (engine/class_modules/paladin/sc_paladin.hpp, the
-  // holy_power_consumer_t::execute() roll) a pure function of (sim seed,
-  // actor_index, a fixed hash of the proc key, a per-actor per-key
-  // monotonic trigger-attempt count) instead of the actor's RNG-stream
-  // read position at the moment of the roll.
+  // roll at an explicit allowlist of call sites, never a global sim_t::rng()
+  // hijack) - deterministic_proc_rolls=<bool> makes each allowlisted
+  // probabilistic proc roll (engine/class_modules/paladin/sc_paladin.hpp,
+  // deterministic_proc_roll()) a pure function of (sim seed, actor_index, a
+  // fixed hash of the proc key, a per-actor per-key monotonic trigger-attempt
+  // count) instead of the actor's RNG-stream read position at the moment of
+  // the roll.
   //
   // This closes the SEALED seed-50001 decision-equivalence divergence
   // (.planning/research/seed-50001-divergence-2026-07-31.md §3): the
@@ -663,18 +663,35 @@ struct sim_t : private sc_thread_t
   // committed prefixes agree, which they do by construction up to any real
   // fork.
   //
-  // Deliberately NOT a general "make RNG deterministic" switch: the
-  // allowlist is exactly one call site (Divine Purpose). Every other rng()
-  // consumer (crit rolls, hit rolls, other procs) is completely untouched —
-  // broadening this would risk masking a real future crit/hit-modeling
+  // Allowlist, as of the 2026-08-01 arm-flip-asymmetry investigation
+  // (.planning/research/2026-08-01-arm-flip-asymmetry.md), is exactly TWO
+  // call sites: Divine Purpose (holy_power_consumer_t::execute(), the
+  // original 116-19 site) and Art of War (melee_t::execute(),
+  // sc_paladin.cpp — added because Art of War directly resets Blade of
+  // Justice's cooldown and was traced to the exact millisecond of a named
+  // decision-equivalence fork). Every other rng() consumer (crit rolls, hit
+  // rolls, other procs — including at least three OTHER channels the
+  // 2026-08-01 investigation found already decorrelated: both
+  // Nalorakk's-trinket rows and Blessing of the Capybara) is deliberately
+  // left untouched pending a separate decision — broadening this
+  // indiscriminately would risk masking a real future crit/hit-modeling
   // regression behind "equivalence mode changes RNG globally," and would
   // violate the owner's oracle-independence ruling in spirit. If a future
-  // seed surfaces a different RNG-gated solver-visible buff as a fork
-  // mechanism, it must be added to the allowlist explicitly, not covered by
+  // seed surfaces another RNG-gated solver-visible mechanism as a fork
+  // cause, it must be added to the allowlist explicitly, not covered by
   // broadening this option's scope.
   //
-  // Default false = byte-identical to upstream (a single ternary check at
-  // the one call site, mirroring sequence_queue_delay's own discipline).
+  // Note on the flag's OWN semantics as the allowlist grows: turning this on
+  // now removes MORE than one shared-RNG-stream draw per eligible cast
+  // sequence (one for Divine Purpose, plus one per melee-hit Art-of-War
+  // check — far more frequent). This shifts the ON-arm's own shared-stream
+  // read position for every remaining unneutralized channel relative to
+  // prior single-entry-allowlist ON-arm measurements; any historical ON-arm
+  // baseline captured before this entry was added is NOT bit-comparable to
+  // ON-arm runs captured after.
+  //
+  // Default false = byte-identical to upstream (a ternary check at each
+  // allowlisted call site, mirroring sequence_queue_delay's own discipline).
   // Intent: equivalence-oracle use ONLY, wired into
   // build_decision_equivalence_profile's overlay by 116-21 Task 2 — NEVER a
   // production/driver default. This plan does not wire it into anything.
