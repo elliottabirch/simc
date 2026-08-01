@@ -274,8 +274,8 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   // `resolved_spell_id` (owner-ratified decision chain, step 2, 2026-08-01) -
   // added alongside `resolved_action` because the name alone is not a stable
   // comparison key: SimC renames the action's own `name_str` at construction
-  // time based on live talent state, but does NOT swap the underlying spell
-  // id in step with it for every case (see sc_paladin_retribution.cpp:663-668
+  // time based on live talent state, so the STRING is talent-dependent while
+  // the spell id carries the real identity (see sc_paladin_retribution.cpp:663-668
   // -- `templars_verdict_t` picks between `find_spell(383328)` and
   // `find_specialization_spell("Templar's Verdict")` (85256) based on
   // `p->talents.final_verdict->ok()`, so `action_t::data().id()` reliably
