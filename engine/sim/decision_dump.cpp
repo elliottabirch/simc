@@ -270,17 +270,46 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   // "abstain" -- none of those name a real cast action, so reporting
   // whatever `chosen` happens to resolve to there is exactly the
   // pre-resolution-placeholder bug this fix closes).
+  //
+  // `resolved_spell_id` (owner-ratified decision chain, step 2, 2026-08-01) -
+  // added alongside `resolved_action` because the name alone is not a stable
+  // comparison key: SimC renames the action's own `name_str` at construction
+  // time based on live talent state, but does NOT swap the underlying spell
+  // id in step with it for every case (see sc_paladin_retribution.cpp:663-668
+  // -- `templars_verdict_t` picks between `find_spell(383328)` and
+  // `find_specialization_spell("Templar's Verdict")` (85256) based on
+  // `p->talents.final_verdict->ok()`, so `action_t::data().id()` reliably
+  // discriminates Templar's Verdict vs Final Verdict even where the name_str
+  // does not, or where a future rename changes the string without changing
+  // the id). This is exactly why three alias tables exist today purely to
+  // paper over the name-string instability: `NAME_STR_RENAME_ALIASES`
+  // (solver_control.cpp:107), `RUNTIME_NAME_ALIASES`
+  // (scripts/simc-eval/equivalence-check.py:205), and the rename entries in
+  // scripts/simc-eval/name-map.json. This commit only EMITS the id field so
+  // it can be measured; deciding whether the comparison key should switch to
+  // id (and retiring/collapsing those alias tables) is step 3 of the chain,
+  // deliberately NOT done here. Emitted in all three exits below (mirroring
+  // `resolved_action`'s null in exit 1) so the field is never silently
+  // absent -- null wherever `resolved_action` is null, a JSON number
+  // (unquoted) wherever it is a string.
   if ( solver_reply_gated && sim->solver_control_last_reply_type != "cast" )
   {
     out << ",\"resolved_action\":null";
+    out << ",\"resolved_spell_id\":null";
     out << ",\"solver_reply_type\":\"" << json_escape( sim->solver_control_last_reply_type ) << "\"";
   }
   else
   {
     if ( action_t* resolved = resolve_current_action( chosen ) )
+    {
       out << ",\"resolved_action\":\"" << json_escape( resolved->name() ) << "\"";
+      out << ",\"resolved_spell_id\":" << resolved->data().id();
+    }
     else
+    {
       out << ",\"resolved_action\":null";
+      out << ",\"resolved_spell_id\":null";
+    }
     if ( solver_reply_gated )
       out << ",\"solver_reply_type\":\"" << json_escape( sim->solver_control_last_reply_type ) << "\"";
   }
