@@ -655,6 +655,33 @@ public:
   // return s_data_reporting if available, otherwise fallback to s_data
   const spell_data_t& data_reporting() const;
 
+  /**
+   * @brief Read-only item back-pointer for reporting/introspection.
+   *
+   * Default implementation just returns the base `item` member. Some action
+   * types (currently only `use_item_t`, player.cpp) declare their own
+   * `item_t*` member that SHADOWS this base member instead of assigning it
+   * (2026-08-01 id0 investigation). An earlier version of this fix
+   * retroactively assigned the base member from use_item_t::init() instead
+   * of adding this accessor; that was reverted not because it was proven to
+   * change simulation behavior (a full before/after decision-dump diff
+   * across 8 seeded runs later showed it was byte-identical either way --
+   * the apparent discrepancy that first raised the concern turned out to be
+   * an incomplete comparison set on the investigator's part, not a real
+   * effect) but on architectural grounds: `action_t::item` genuinely feeds
+   * damage-scaling decisions elsewhere in the engine
+   * (parse_effect_data's `item_scaling` check, action.cpp) for OTHER action
+   * types, so a field with real gameplay-affecting reads should not be
+   * repurposed for a reporting-only need even in a case where doing so
+   * happens to be inert today. This virtual accessor is purely additive and
+   * provably read-only -- it changes no simulation state by construction,
+   * not merely by measurement -- so `use_item_t` can override it to expose
+   * its own shadowed `item` member for reporting purposes (decision_dump's
+   * `resolved_item_id`) without touching the base member at all.
+   */
+  virtual const item_t* used_item() const
+  { return item; }
+
   dot_t* find_dot( player_t* target ) const;
 
   buff_t* find_debuff( player_t* target ) const;

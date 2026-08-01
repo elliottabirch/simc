@@ -10,11 +10,14 @@
 #include "action/dot.hpp"
 #include "action/sequence.hpp"
 #include "buff/buff.hpp"
+#include "item/item.hpp"
 #include "player/player.hpp"
 #include "sim/cooldown.hpp"
 #include "sim/event.hpp"
 #include "sim/sim.hpp"
 #include "util/io.hpp"
+
+#include <set>
 
 namespace
 {
@@ -50,6 +53,204 @@ action_t* resolve_current_action( action_t* a )
   }
 
   return a;
+}
+
+// ---------------------------------------------------------------------------
+// resolved_spell_id identity resolution (2026-08-01 id0 investigation --
+// .planning/research/2026-08-01-simc-action-identity-id0.md and
+// -id0-census.md in the consuming project). Measured fact: a plain
+// `action_t::data().id()` read collides at 0 for FOUR distinct action names
+// observed at real decision boundaries -- auto_attack, potion,
+// use_item_algethar_puzzle_box, wait -- because all four are constructed
+// with `spell_data_t::nil()`, which value-initializes `_id` to 0 by design
+// (action.hpp:642-650). The tiered resolver below recovers a real id where
+// one genuinely exists (potion/flask/food/augmentation -- consumable.cpp
+// populates `s_data_reporting`, never `s_data`) and assigns a stable,
+// per-action-name sentinel where no id exists anywhere in the engine's own
+// model (auto_attack, wait, run_action_list, ...).
+
+// Tier-4a sentinel band for engine actions that carry NO spell id anywhere --
+// not in data(), not in data_reporting(), not in the plain `id` member -- AND
+// have a fixed, literal name_str that a static table can key on. Reserved
+// band: 9,000,000-9,000,999. (Tier 4b, immediately below, reserves its own
+// non-overlapping 9,100,000-9,899,999 sub-band for the use_item family,
+// whose name_str is dynamically item-suffixed and cannot live in this static
+// table; RESOLVED_ID_UNMAPPED reserves 9,999,999.)
+//
+// Why the 9,000,000+ space specifically:
+//  - Every real Blizzard spell id observed against this fork's ret paladin
+//    dataset tops out at 1,261,562 (SHIELD_OF_VENGEANCE,
+//    2026-08-01-our-side-action-identity.md); nine million is comfortably
+//    outside any spell id space Blizzard has allocated to date.
+//  - The TSTL project that consumes this dump (tstl-sylvanas-solver-v2)
+//    already has ITS OWN sentinel convention in the 999,000-999,999 band
+//    (DEC-013, e.g. `POTION = 999001` in
+//    src/ext_rotation_paladin_ret_bb/spellIds.ts), but that band is
+//    per-rotation and explicitly NOT globally unique -- 999001 means POTION
+//    in the ret paladin rotation and TRINKET_1_USE in the frost mage
+//    rotation (same research doc, section 1.2). Reusing 999xxx here, a
+//    SimC-fork-level identity with no rotation scoping at all, would risk
+//    exactly the kind of silent cross-namespace aliasing that band's own
+//    design tolerates internally but this dump must not reproduce. A
+//    completely different band (9,000,000+) makes that conflation
+//    structurally impossible rather than merely unlikely.
+//
+// Keyed by the action's own name_str (SimC's stable APL/report token), NOT
+// its C++ class -- two distinct id-less action TYPES that happen to share a
+// sentinel would silently reintroduce the exact injectivity bug this table
+// exists to close. Conversely, `wait` and `wait_until_ready` intentionally
+// resolve to the SAME sentinel: `wait_until_ready_t` is constructed via
+// `wait_fixed_t`'s own ctor and therefore inherits the literal name "wait"
+// (player.cpp:9939-9945) -- they really are the same name-identity, so
+// sharing a sentinel here is correct, not a collision.
+struct sentinel_entry_t
+{
+  const char* name;
+  unsigned id;
+};
+
+constexpr sentinel_entry_t RESOLVED_ID_SENTINELS[] = {
+  // Melee/swing actions -- constructed with spell_data_t::nil() explicitly
+  // (sc_paladin.cpp:985,1073); SimC's swing math is hardcoded off the
+  // weapon table, never spell-record-driven, on every class checked.
+  { "auto_attack", 9000001u },
+  { "melee", 9000002u },
+  // Wait family -- action_t(..., spell_data_t::nil()) explicit
+  // (player.cpp:9839-9845). Pure engine bookkeeping, no in-game spell
+  // correlate.
+  { "wait", 9000010u },
+  { "wait_for_cooldown", 9000011u },
+  // Control-flow actions -- no spell data passed to the ctor at all
+  // (action.cpp:4634,4682,4728). call_action_list is structurally excluded
+  // from ever being `chosen` (player.cpp select_action() recurses through
+  // it transparently) but is included here for completeness/defense.
+  { "call_action_list", 9000020u },
+  { "run_action_list", 9000021u },
+  { "swap_action_list", 9000022u },
+  // Bookkeeping/utility actions -- action_t(ACTION_OTHER, name, p), no
+  // spell data (snapshot_stats.cpp:17, player.cpp:10785). variable is
+  // structurally excluded from ever being `chosen` (consumed inline by
+  // select_action()) but included for the same defensive reason as
+  // call_action_list.
+  { "snapshot_stats", 9000030u },
+  { "pool_resource", 9000040u },
+  { "variable", 9000050u },
+  // mana_potion_t is, unlike potion_t/flask_t/food_t/augmentation_t, NOT a
+  // dbc_consumable_base_t subclass -- it never calls initialize_consumable()
+  // and so never gets a driver()-populated id or s_data_reporting
+  // (consumable.cpp:186-230). Not reachable by the ret paladin (mana-resource
+  // classes only) but included defensively per the id0 research doc's note.
+  { "mana_potion", 9000060u },
+};
+
+// Marker for an action that reached Tier 5: no id anywhere, no item, and no
+// registered Tier-4 sentinel -- i.e. a genuinely NEW id-less action class
+// this table has never seen. Distinct from (and far outside) both the real
+// spell-id space and the 9,000,000-9,000,999 Tier-4 band above, so it can
+// never be confused with either. This is deliberately a SINGLE shared value
+// across all unmapped names, not a per-name sentinel -- unlike Tier 4, this
+// is a "go add this to the table" alarm, not a stable identity two
+// unmapped actions could be safely compared against each other with.
+constexpr unsigned RESOLVED_ID_UNMAPPED = 9999999u;
+
+const sentinel_entry_t* find_sentinel( std::string_view name )
+{
+  for ( const auto& entry : RESOLVED_ID_SENTINELS )
+  {
+    if ( name == entry.name )
+      return &entry;
+  }
+  return nullptr;
+}
+
+// Tiered resolution of a stable, non-colliding numeric identity for
+// `resolved`. See the comment block above for the full rationale.
+unsigned resolve_spell_id( action_t* resolved, sim_t* sim )
+{
+  // Tier 1: data_reporting() returns *s_data_reporting when that pointer is
+  // non-nil, otherwise falls back to *s_data (action.cpp:4851-4856) -- so
+  // this read is a strict superset of the old data().id() read: identical
+  // result for every ordinary spell-backed action (s_data_reporting stays
+  // nil() for those, action.cpp:340), and additionally recovers the real
+  // triggered-spell id for potion/flask/food/augmentation, which
+  // consumable.cpp:951-953 populates into s_data_reporting (and the `id`
+  // member below) but deliberately never into s_data.
+  if ( unsigned id = resolved->data_reporting().id() )
+    return id;
+
+  // Tier 2: belt-and-braces for any action that populated action_t::id
+  // directly without going through s_data_reporting. Currently redundant
+  // with Tier 1 for every action type this fork's research covered (potion
+  // sets both id and s_data_reporting from the same driver()), but this is
+  // strictly cheap insurance against a future/unaudited action type that
+  // sets one and not the other.
+  if ( resolved->id != 0 )
+    return resolved->id;
+
+  // Tier 3 (item ids) is intentionally NOT folded in here -- see the
+  // separate resolved_item_id field emitted by the caller. Item ids and
+  // spell ids are different DBC content-id namespaces; a shared numeric
+  // space risks a genuine (if currently unobserved) collision between an
+  // item id and a real spell id.
+
+  // Tier 4a: genuinely id-less engine actions with a fixed, literal
+  // name_str.
+  if ( const sentinel_entry_t* entry = find_sentinel( resolved->name() ) )
+    return entry->id;
+
+  // Tier 4b: use_item family. use_item_t's name_str is NOT a fixed literal
+  // -- it is item-name-suffixed at construction time
+  // (player.cpp:10011,10037,10064: "use_item" + "_" + item_name), so a
+  // static name->sentinel table (Tier 4a) can never cover it; measured
+  // directly ("use_item_algethar_puzzle_box" fell through to Tier 5 on the
+  // first verification run of this fix). use_item_t has no spell id
+  // anywhere (bare `action_t(ACTION_OTHER, "use_item", player)`,
+  // player.cpp:9989) but DOES have a resolved item id reachable via
+  // `used_item()` -- a read-only virtual accessor (action.hpp) that
+  // use_item_t overrides to expose its own item pointer WITHOUT writing to
+  // the base `action_t::item` member (that member feeds real damage-scaling
+  // decisions elsewhere in the engine -- action.cpp's `item_scaling` check
+  // -- for OTHER action types; see action_t::used_item()'s own doc comment
+  // for why a reporting-only need should not repurpose a gameplay-affecting
+  // field even where doing so is inert today). Derive a stable, per-item sentinel
+  // from that item id instead of a per-name table entry -- this still gives
+  // each DISTINCT trinket its own distinct value (two different
+  // `use_item,name=...` actions in the same run cannot alias each other),
+  // matching the granularity of every other Tier 4 entry (auto_attack IS a
+  // specific action, not a generic "no-id" bucket).
+  //
+  // Reserved sub-band: 9,100,000-9,899,999 (800,000 slots), computed as
+  // 9,100,000 + item_id. Chosen to sit inside the same "SimC-fork sentinel"
+  // 9,000,000+ space as Tier 4a/RESOLVED_ID_UNMAPPED but in its own
+  // non-overlapping slice; current DBC item ids are well under 800,000 (the
+  // two trinkets seen in this fork's ret paladin profiles are 193701 and
+  // 249343), guarded below rather than assumed.
+  if ( const item_t* used = resolved->used_item() )
+  {
+    unsigned item_id = used->parsed.data.id;
+    if ( item_id > 0 && item_id < 800000u )
+      return 9100000u + item_id;
+  }
+
+  // Tier 5: reached here with no id, no Tier 4a/4b sentinel -- a NEW
+  // id-less action this table has never seen (or a use_item action whose
+  // item id fell outside the guarded Tier 4b range). Do not silently
+  // rejoin the id-0 collision bucket. Surface it loudly (once per unique
+  // unmapped name, not every decision tick) via sim_t::errorf, which prints
+  // directly to stderr (sim.cpp:3302-3311) -- visible in-run, not buried in
+  // a JSONL file no one reads until later.
+  static std::set<std::string> warned_unmapped_names;
+  std::string name = resolved->name();
+  if ( warned_unmapped_names.insert( name ).second )
+  {
+    sim->errorf(
+        "decision_dump: action '%s' has no spell id, no reporting id, no registered Tier-4a name "
+        "sentinel, and no usable Tier-4b item id in decision_dump.cpp -- resolved_spell_id is "
+        "falling back to the RESOLVED_ID_UNMAPPED marker (%u). Add '%s' to RESOLVED_ID_SENTINELS "
+        "or investigate why its item id (if any) fell outside the guarded range.",
+        name.c_str(), RESOLVED_ID_UNMAPPED, name.c_str() );
+  }
+  return RESOLVED_ID_UNMAPPED;
 }
 } // anonymous namespace
 
@@ -292,10 +493,34 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   // `resolved_action`'s null in exit 1) so the field is never silently
   // absent -- null wherever `resolved_action` is null, a JSON number
   // (unquoted) wherever it is a string.
+  //
+  // 2026-08-01 tiering update: `resolved_spell_id` was measured to still
+  // collide at 0 across FOUR distinct action names (auto_attack, potion,
+  // use_item_algethar_puzzle_box, wait -- see 2026-08-01-id0-census.md), a
+  // direct violation of the "unique, non-colliding identity" goal this field
+  // exists for. `resolve_spell_id()` (top of this file) replaces the bare
+  // `data().id()` read with a 5-tier resolution (data_reporting() -> plain
+  // `id` member -> [item id handled separately below] -> per-name sentinel
+  // -> loud unmapped marker) that recovers potion/flask/food/augmentation's
+  // real id and gives every other genuinely id-less action its own distinct,
+  // reserved-band sentinel so no two DIFFERENT action names can ever share a
+  // value again.
+  //
+  // `resolved_item_id` (added alongside, same commit) - the resolved
+  // action's backing item id (`used_item()->parsed.data.id`), for actions
+  // whose `used_item()` (action.hpp -- a read-only virtual accessor, see its
+  // own doc comment for why it exists instead of the base `action_t::item`
+  // member) returns non-null (trinket/use_item actions). Deliberately a
+  // SEPARATE field, not folded into `resolved_spell_id`: item ids and spell
+  // ids are different DBC namespaces, and a numeric collision between a real
+  // item id and a real spell id is possible in principle. null for every
+  // action that isn't item-backed. Paired with `resolved_action` exactly
+  // like `resolved_spell_id` is (null iff `resolved_action` is null).
   if ( solver_reply_gated && sim->solver_control_last_reply_type != "cast" )
   {
     out << ",\"resolved_action\":null";
     out << ",\"resolved_spell_id\":null";
+    out << ",\"resolved_item_id\":null";
     out << ",\"solver_reply_type\":\"" << json_escape( sim->solver_control_last_reply_type ) << "\"";
   }
   else
@@ -303,12 +528,17 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
     if ( action_t* resolved = resolve_current_action( chosen ) )
     {
       out << ",\"resolved_action\":\"" << json_escape( resolved->name() ) << "\"";
-      out << ",\"resolved_spell_id\":" << resolved->data().id();
+      out << ",\"resolved_spell_id\":" << resolve_spell_id( resolved, sim );
+      if ( const item_t* used = resolved->used_item() )
+        out << ",\"resolved_item_id\":" << used->parsed.data.id;
+      else
+        out << ",\"resolved_item_id\":null";
     }
     else
     {
       out << ",\"resolved_action\":null";
       out << ",\"resolved_spell_id\":null";
+      out << ",\"resolved_item_id\":null";
     }
     if ( solver_reply_gated )
       out << ",\"solver_reply_type\":\"" << json_escape( sim->solver_control_last_reply_type ) << "\"";
