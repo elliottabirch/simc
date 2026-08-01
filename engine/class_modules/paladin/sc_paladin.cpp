@@ -963,7 +963,13 @@ struct crusading_strike_t : public paladin_melee_attack_t
 
     if ( result_is_hit( execute_state->result ) && p()->talents.empyrean_power->ok() )
     {
-      if ( rng().roll( p()->talents.empyrean_power->effectN( 2 ).percent() ) )
+      // deterministic_proc_rolls allowlist entry: empyrean_power_crusading_strike.
+      // effectN(2).percent() is already the final chance -- no inline modifier
+      // applies before this read (see 2026-08-01 EP/RC determinism research §4).
+      if ( p()->sim->deterministic_proc_rolls
+               ? deterministic_proc_roll( p(), "empyrean_power_crusading_strike",
+                                           p()->talents.empyrean_power->effectN( 2 ).percent() )
+               : rng().roll( p()->talents.empyrean_power->effectN( 2 ).percent() ) )
       {
         p()->procs.empyrean_power->occur();
         p()->buffs.empyrean_power->trigger();
@@ -1153,7 +1159,13 @@ struct crusader_strike_t : public paladin_melee_attack_t
 
     if ( result_is_hit( execute_state->result ) && p()->talents.empyrean_power->ok() )
     {
-      if ( rng().roll( p()->talents.empyrean_power->effectN( 1 ).percent() ) )
+      // deterministic_proc_rolls allowlist entry: empyrean_power_crusader_strike.
+      // effectN(1).percent() is already the final chance -- no inline modifier
+      // applies before this read (see 2026-08-01 EP/RC determinism research §4).
+      if ( p()->sim->deterministic_proc_rolls
+               ? deterministic_proc_roll( p(), "empyrean_power_crusader_strike",
+                                           p()->talents.empyrean_power->effectN( 1 ).percent() )
+               : rng().roll( p()->talents.empyrean_power->effectN( 1 ).percent() ) )
       {
         p()->procs.empyrean_power->occur();
         p()->buffs.empyrean_power->trigger();
