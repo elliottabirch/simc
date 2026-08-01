@@ -32,10 +32,11 @@ void record( player_t* p, action_t* chosen );
 // evaluation-pipeline phase 116, reuses this so the two decision-boundary
 // hooks never drift). Writes gcd_remains, swing_mh_remains, holy_power,
 // cooldowns, buffs, target_debuffs, target_time_to_die, active_enemies,
-// dots, gcd_length, auto_attack_interval, resolved_action and (only when
-// `solver_reply_gated` is true) `solver_reply_type` as trailing JSON object
-// members (each preceded by its own comma) -- the caller owns the enclosing
-// object's opening `{` and closing `}`.
+// dots, gcd_length, auto_attack_interval, resolved_action,
+// resolved_spell_id and (only when `solver_reply_gated` is true)
+// `solver_reply_type` as trailing JSON object members (each preceded by its
+// own comma) -- the caller owns the enclosing object's opening `{` and
+// closing `}`.
 //
 // `chosen` is the action about to execute at this boundary (nullptr on an
 // idle/wait decision) -- it backs `resolved_action` (116-02: the
@@ -45,6 +46,16 @@ void record( player_t* p, action_t* chosen );
 // unreliable under a sequence-driven run -- see PROTOCOL.md). `gcd_length`
 // and `auto_attack_interval` are PLAYER-scoped (2026-07-29 fix bundle,
 // defect (d)) and no longer read `chosen` at all.
+//
+// `resolved_spell_id` (owner-ratified decision chain, step 2, 2026-08-01) is
+// the resolved action's `data().id()` -- the numeric spell id backing the
+// same action `resolved_action` names, paired 1:1 with it (null exactly
+// when `resolved_action` is null, a JSON number never a string otherwise).
+// Added because `resolved_action`'s name_str can rename at construction
+// time based on live talent state (see sc_paladin_retribution.cpp:663-668)
+// while the id is stable, or vice versa -- see decision_dump.cpp's inline
+// comment at the emit site for the full rationale and the three alias
+// tables this divergence forces today.
 //
 // `solver_reply_gated` (2026-07-29 fix bundle, defect (b); default false,
 // only decision_dump::record() opts in, never solver_control's own
