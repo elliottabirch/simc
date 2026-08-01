@@ -9996,6 +9996,13 @@ struct use_item_t : public action_t
   timespan_t cooldown_group_duration;
   std::string item_name, item_slot, effect_name;
 
+  // Reporting-only accessor exposing THIS class's own shadowed `item`
+  // member (distinct from the never-assigned base `action_t::item` -- see
+  // action_t::used_item()'s doc comment for why the base member is
+  // deliberately left untouched here).
+  const item_t* used_item() const override
+  { return item; }
+
   use_item_t( player_t* player, util::string_view options_str ) :
     action_t( ACTION_OTHER, "use_item", player ),
     item( nullptr ),
