@@ -14,6 +14,7 @@
 #include "player/player.hpp"
 #include "sim/cooldown.hpp"
 #include "sim/event.hpp"
+#include "sim/gain.hpp"
 #include "sim/sim.hpp"
 #include "util/io.hpp"
 
@@ -319,6 +320,45 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   // dumped by enum value directly rather than iterating RESOURCE_MAX to
   // keep the line small and the field self-describing for the spike.
   out << ",\"holy_power\":" << p->resources.current[ RESOURCE_HOLY_POWER ];
+
+  // Rage (143 D-09/D-10, arms-clean-room) - additive, scoped to
+  // rage-primary actors only (p->primary_resource() == RESOURCE_RAGE) so
+  // paladin/holy_power records stay byte-identical to the pre-change
+  // output (SC-5). A future generic resources-block emission (iterating
+  // RESOURCE_MAX like `holy_power` does not) is the more durable long-term
+  // shape but would change ret's record bytes too -- deliberately deferred.
+  if ( p->primary_resource() == RESOURCE_RAGE )
+  {
+    out << ",\"rage\":" << p->resources.current[ RESOURCE_RAGE ];
+
+    // Per-named-gain ledger (143 D-09) - cumulative actual/overflow/count
+    // for the actor's primary resource, one bucket per named gain_t SimC
+    // already maintains (gain.melee_main_hand, gain.melee_crit, etc). Same
+    // rage-primary scoping predicate as the `rage` field above. Between-
+    // record deltas on this ledger give the smoke exact swing counts split
+    // by crit outcome plus overcap, with no swing-timer reconstruction and
+    // no crit inference (see 143-RESEARCH.md "Recommended resolution").
+    // All-zero buckets are skipped to keep the line small.
+    out << ",\"rage_gains\":{";
+    bool first_gain = true;
+    for ( gain_t* g : p->gain_list )
+    {
+      double actual = g->actual[ RESOURCE_RAGE ];
+      double overflow = g->overflow[ RESOURCE_RAGE ];
+      double count = g->count[ RESOURCE_RAGE ];
+      if ( actual == 0.0 && overflow == 0.0 && count == 0.0 )
+        continue;
+      if ( !first_gain )
+        out << ",";
+      first_gain = false;
+      out << "\"" << json_escape( g->name_str ) << "\":{";
+      out << "\"actual\":" << actual;
+      out << ",\"overflow\":" << overflow;
+      out << ",\"count\":" << count;
+      out << "}";
+    }
+    out << "}";
+  }
 
   // Cooldowns - every named cooldown with a nonzero base recharge (skips
   // the zero-duration bookkeeping cooldowns SimC creates internally).

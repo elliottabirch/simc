@@ -36,7 +36,12 @@ void record( player_t* p, action_t* chosen );
 // resolved_spell_id, resolved_item_id and (only when `solver_reply_gated` is
 // true) `solver_reply_type` as trailing JSON object members (each preceded
 // by its own comma) -- the caller owns the enclosing object's opening `{`
-// and closing `}`.
+// and closing `}`. Additionally, for rage-primary actors only (143 D-09/
+// D-10, arms-clean-room -- `p->primary_resource() == RESOURCE_RAGE`, so
+// paladin/holy_power records are byte-identical to the pre-143 output):
+// `rage` (current rage) and `rage_gains` (a per-named-gain_t ledger of
+// cumulative `actual`/`overflow`/`count` for the primary resource, all-zero
+// buckets skipped).
 //
 // `chosen` is the action about to execute at this boundary (nullptr on an
 // idle/wait decision) -- it backs `resolved_action` (116-02: the
