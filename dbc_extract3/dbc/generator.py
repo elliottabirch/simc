@@ -5031,6 +5031,25 @@ class TraitGenerator(DataGenerator):
         )
         """
 
+class TraitEdgeGenerator(DataGenerator):
+    # 131.3-05 (D-31): TraitNode prerequisite edges. SimC never extracts TraitEdge and the
+    # engine never validates trait prerequisites (zero engine references) -- this generator is
+    # extractor-only tooling for an offline talent-graph JSON build, not engine data. Shaped on
+    # TraitGenerator above but far simpler: TraitEdge has no cross-references that need
+    # resolving, so a plain CSV-style dump of the raw rows is sufficient (there is no C++
+    # consumer to satisfy).
+    def filter(self):
+        return None
+
+    def generate(self, data=None):
+        edges = sorted(self.db('TraitEdge').values(), key=lambda e: e.id)
+
+        self._out.write('// TraitNode prerequisite edges, wow build {}\n'.format(self._options.build))
+        self._out.write('// id, visual_style, id_left_trait_node, id_right_trait_node, type\n')
+        for e in edges:
+            self._out.write('{},{},{},{},{}\n'.format(
+                e.id, e.visual_style, e.id_left_trait_node, e.id_right_trait_node, e.type))
+
 class PermanentEnchantItemGenerator(DataGenerator):
     def filter(self):
         return PermanentEnchantItemSet(self._options).get()
