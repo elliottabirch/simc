@@ -1,16 +1,37 @@
 #!/bin/bash
 # SimulationCraft Build Script (bash/MSYS2 wrapper)
-# Usage:  ./build.sh [debug|release] [configure|rebuild|clean]
+# Usage:  ./build.sh [release|fast|debug] [configure|rebuild|clean]
+#
+#   release  (default)  -O3, assertions ON   -- optimized and still self-checking
+#   fast                -O3 -DNDEBUG         -- max throughput, assertions STRIPPED
+#   debug                -O0 -g, assertions ON
+#
+# Assertions stay on in the default build on purpose. CMake's stock Release
+# config appends -DNDEBUG, which deletes all ~1035 assert() call sites in
+# engine/ -- including cooldown_t::start()'s `current_charge > 0` guard. Those
+# assertions are the engine's own early-warning system: with them stripped, the
+# same corrupt state does not crash, it decrements an int past zero and silently
+# poisons every downstream decision. For a pipeline whose output is training/eval
+# data, silent bad data is far more expensive than a loud abort.
+#
+# Measured cost of keeping them (MID1_Paladin_Retribution, 2000 iterations,
+# 3 runs each): 5.10s -> 8.72s CPU, i.e. 1.71x. Still ~1.9x faster than an
+# unoptimized build, which is what this tree was being built as before -- so the
+# default gets both the speedup and the visibility that build had.
+#
+# Use `fast` only for runs whose correctness you are not depending on.
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BUILD_TYPE="Debug"
+BUILD_TYPE="Release"
+RELEASE_FLAGS="-O3"
 ACTION="build"
 
 for arg in "$@"; do
     case "${arg,,}" in
-        release)   BUILD_TYPE="Release" ;;
+        release)   BUILD_TYPE="Release"; RELEASE_FLAGS="-O3" ;;
+        fast)      BUILD_TYPE="Release"; RELEASE_FLAGS="-O3 -DNDEBUG" ;;
         debug)     BUILD_TYPE="Debug" ;;
         configure) ACTION="configure" ;;
         rebuild)   ACTION="rebuild" ;;
@@ -57,11 +78,27 @@ configure_args=(
     -DCMAKE_CXX_STANDARD=17
 )
 
+# Overriding CMAKE_CXX_FLAGS_RELEASE is the only way to drop the -DNDEBUG that
+# CMake's stock Release config hardcodes. It cannot be undone via CMAKE_CXX_FLAGS
+# (-UNDEBUG there is emitted BEFORE the per-config flags, so the later -DNDEBUG
+# just wins).
+if [[ "$BUILD_TYPE" == "Release" ]]; then
+    configure_args+=( -DCMAKE_CXX_FLAGS_RELEASE="$RELEASE_FLAGS" )
+fi
+
+assert_state() {
+    case "$1" in
+        *-DNDEBUG*) echo "STRIPPED" ;;
+        *)          echo "on" ;;
+    esac
+}
+
 need_configure=0
 
 if [[ -f "$CACHE_FILE" ]]; then
     existing_gen="$(cache_value CMAKE_GENERATOR || true)"
     existing_type="$(cache_value CMAKE_BUILD_TYPE || true)"
+    existing_relflags="$(cache_value CMAKE_CXX_FLAGS_RELEASE || true)"
 
     if [[ -z "$existing_gen" ]]; then
         echo "ERROR: $CACHE_FILE exists but names no generator (partial or corrupt configure)." >&2
@@ -81,6 +118,13 @@ if [[ -f "$CACHE_FILE" ]]; then
     # rather than letting it look like a spuriously slow incremental build.
     if [[ "$existing_type" != "$BUILD_TYPE" ]]; then
         echo "Build type: ${existing_type:-<unset>} -> $BUILD_TYPE (reconfiguring, forces a full rebuild)"
+        need_configure=1
+    elif [[ "$BUILD_TYPE" == "Release" && "$existing_relflags" != "$RELEASE_FLAGS" ]]; then
+        # Same CMAKE_BUILD_TYPE, different flags -- this is the release/fast
+        # switch, and comparing build type alone would silently keep the wrong
+        # assertion setting.
+        echo "Release flags: '${existing_relflags}' -> '${RELEASE_FLAGS}' (reconfiguring, forces a full rebuild)"
+        echo "  assertions: $(assert_state "$existing_relflags") -> $(assert_state "$RELEASE_FLAGS")"
         need_configure=1
     fi
 else
@@ -132,7 +176,11 @@ if [[ "$ACTION" == "configure" ]]; then
     exit 0
 fi
 
-echo "Building simc [$BUILD_TYPE]..."
+if [[ "$BUILD_TYPE" == "Release" ]]; then
+    echo "Building simc [Release, assertions $(assert_state "$RELEASE_FLAGS")]..."
+else
+    echo "Building simc [$BUILD_TYPE]..."
+fi
 if ! cmake --build "$BUILD_DIR" -j "$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"; then
     echo "ERROR: Build failed." >&2
     exit 1
