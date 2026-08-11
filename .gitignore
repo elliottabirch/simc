@@ -158,6 +158,7 @@ libsimcengine.prl
 .claude/
 
 # Local generated reports & APL exporter outputs
+/solver-runs/
 /reports/
 /unholy_*.html
 /unholy_*.txt
