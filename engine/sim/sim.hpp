@@ -552,7 +552,19 @@ struct sim_t : private sc_thread_t
   // one JSON line per player_t::execute_action() decision boundary. See
   // sim/decision_dump.hpp. Empty string = disabled (default), zero overhead.
   std::string decision_dump_file_str;
+  // Both members are only ever touched on the ROOT sim_t (thread workers and
+  // profileset sims walk their `parent` chain to reach it -- see
+  // decision_dump::record()). Every worker gets its own sim_t via
+  // setup(parent->control), so `decision_dump_file_str` is non-empty in ALL of
+  // them; if each opened its own stream on that shared path they would each
+  // open with (out|trunc) and clobber one another, and the dump would retain
+  // only ~1/threads of the decisions (measured: 30789 rows at threads=1 vs
+  // 4431 at threads=8 for the same iteration count) plus torn part-lines where
+  // two writes interleaved mid-record. A per-sim mutex would not help -- each
+  // child would lock its own. One root-owned stream + one root-owned mutex is
+  // what makes the single-file `decision_dump=<path>` contract hold.
   std::unique_ptr<io::ofstream> decision_dump_stream;
+  mutex_t decision_dump_mutex;
   // P3b fork hook (simc-offline-evaluation-pipeline phase 116, 116-01) -
   // solver_control=<prefix> opens an additive request/reply FIFO pair at the
   // same execute_action() decision boundary as decision_dump=. Empty string
