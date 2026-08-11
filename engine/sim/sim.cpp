@@ -4493,6 +4493,51 @@ void sim_t::setup( sim_control_t* c )
     threads = 1;
   }
 
+  // solver_control= is a strictly synchronous one-request/one-reply channel over
+  // a single FIFO pair, so it admits exactly one decision stream. Clamped here
+  // (rather than in partition()) because this runs on the parent BEFORE
+  // partition(), which only spawns workers when threads > 1 -- so forcing the
+  // value here is what prevents the extra sim_t's from ever existing.
+  //
+  // Sharing one channel across workers cannot be made safe by serializing the
+  // writes: solver_control_seq is a per-sim_t counter, so every worker would
+  // emit seq=1, seq=2, ... in near-lockstep on the same wire, and each would
+  // accept a reply computed for a DIFFERENT worker's state because the seq
+  // guard in solver_control::choose() would still match. Same profile, same
+  // actor name -- the driver could not tell them apart either. That is a silent
+  // wrong answer, which this hook exists to never produce. For throughput, run
+  // N independent simc processes with distinct solver_control= prefixes.
+  //
+  // Clamp rather than error because adjust_threads() above defaults threads to
+  // the host CPU count, so erroring would reject even `simc ... solver_control=x`
+  // with no threads= at all. The notice keeps it from being silent.
+  if ( !solver_control_str.empty() )
+  {
+    if ( threads > 1 )
+    {
+      fmt::print( stderr,
+                  "Notice: solver_control= requires a single decision stream; forcing threads=1 "
+                  "(was {}). Run multiple simc processes with distinct prefixes to parallelize.\n",
+                  threads );
+      std::fflush( stderr );
+    }
+    threads = 1;
+
+    // Profilesets are the other multiplier and get no clamp: each one runs in
+    // its own child sim_t (sim.cpp's create_sims/partition path) that inherits
+    // this same non-empty prefix, so they would collide on the FIFO pair exactly
+    // as threads do. Unlike threads there is no safe value to force -- silently
+    // dropping the user's profileset definitions would be worse than refusing.
+    if ( !profileset_map.empty() )
+    {
+      throw sc_runtime_error(
+          fmt::format( "solver_control= cannot be combined with profilesets ({} defined): each profileset "
+                       "runs in its own sim and they would share one FIFO pair. Run one simc process per "
+                       "profile with a distinct solver_control= prefix instead.",
+                       profileset_map.size() ) );
+    }
+  }
+
   if ( iterations <= 0 )
   {
     iterations = 1000000; // limited by relative standard error
