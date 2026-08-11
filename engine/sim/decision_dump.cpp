@@ -16,9 +16,11 @@
 #include "sim/event.hpp"
 #include "sim/gain.hpp"
 #include "sim/sim.hpp"
+#include "util/concurrency.hpp"
 #include "util/io.hpp"
 
 #include <set>
+#include <sstream>
 
 namespace
 {
@@ -591,20 +593,31 @@ void record( player_t* p, action_t* chosen )
   if ( sim->decision_dump_file_str.empty() )
     return;
 
-  if ( !sim->decision_dump_stream )
-  {
-    sim->decision_dump_stream = std::make_unique<io::ofstream>();
-    sim->decision_dump_stream->open( sim->decision_dump_file_str );
-  }
-  if ( !sim->decision_dump_stream->is_open() )
-    return;
+  // The stream and its mutex live on the ROOT sim only (see sim.hpp) -- with
+  // threads>1 every worker sim_t inherits the same decision_dump_file_str via
+  // setup(parent->control), so opening one stream per sim_t would mean N
+  // handles each opened (out|trunc) against the same path, silently discarding
+  // most of the dump. Walk to the root and share a single writer instead.
+  sim_t* root = sim;
+  while ( root->parent )
+    root = root->parent;
 
-  io::ofstream& out = *sim->decision_dump_stream;
+  // Line is built into a local buffer FIRST, so the locked region is one
+  // string write: holding the mutex across ~20 individual operator<< calls
+  // (several of which walk buff/cooldown/dot lists) would serialize every
+  // worker on the full state-collection cost, not just on the write.
+  std::ostringstream line;
 
-  out << "{";
-  out << "\"t\":" << sim->current_time().total_seconds();
-  out << ",\"actor\":\"" << json_escape( p->name() ) << "\"";
-  out << ",\"chosen\":" << ( chosen ? ( "\"" + json_escape( chosen->name() ) + "\"" ) : std::string( "null" ) );
+  line << "{";
+  line << "\"t\":" << sim->current_time().total_seconds();
+  // Iteration + thread identity: `t` restarts every iteration, so once several
+  // workers share one file a consumer cannot otherwise tell which decisions
+  // belong to the same combat. Emitted unconditionally to keep the schema
+  // stable between threads=1 and threads>1 runs.
+  line << ",\"iteration\":" << sim->current_iteration;
+  line << ",\"thread\":" << sim->thread_index;
+  line << ",\"actor\":\"" << json_escape( p->name() ) << "\"";
+  line << ",\"chosen\":" << ( chosen ? ( "\"" + json_escape( chosen->name() ) + "\"" ) : std::string( "null" ) );
 
   // solver_reply_gated=true only when solver_control is active for this sim
   // (2026-07-29 fix bundle, defect (b)) -- see write_state_fields' own doc
@@ -613,9 +626,27 @@ void record( player_t* p, action_t* chosen )
   // calls solver_control::choose() BEFORE decision_dump::record() (reordered
   // for exactly this fix), so `sim->solver_control_last_reply_type` reflects
   // THIS boundary, not the previous one.
-  write_state_fields( out, p, chosen, !sim->solver_control_str.empty() );
+  write_state_fields( line, p, chosen, !sim->solver_control_str.empty() );
 
-  out << "}\n";
-  out.flush();
+  line << "}\n";
+
+  {
+    auto_lock_t lock( root->decision_dump_mutex );
+
+    // Lazy open stays INSIDE the lock: two workers reaching a first decision
+    // boundary concurrently would otherwise both see a null unique_ptr and
+    // both construct/open, with the loser's stream destructing under the
+    // winner's writes.
+    if ( !root->decision_dump_stream )
+    {
+      root->decision_dump_stream = std::make_unique<io::ofstream>();
+      root->decision_dump_stream->open( root->decision_dump_file_str );
+    }
+    if ( !root->decision_dump_stream->is_open() )
+      return;
+
+    *root->decision_dump_stream << line.str();
+    root->decision_dump_stream->flush();
+  }
 }
 } // namespace decision_dump
