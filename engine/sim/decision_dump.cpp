@@ -19,6 +19,8 @@
 #include "util/concurrency.hpp"
 #include "util/io.hpp"
 
+#include <map>
+
 #include <set>
 #include <sstream>
 
@@ -303,6 +305,19 @@ void write_buff_remains( std::ostream& out, timespan_t remains )
 // Shared decision-boundary state block -- see decision_dump.hpp. Reused
 // verbatim by solver_control's "decision" request line (phase 116,
 // simc-offline-evaluation-pipeline) so the two hooks can never drift.
+//
+// Shaman-scoped additions (tstl-sylvanas phase 165-01, elemental shaman
+// parity judge): `maelstrom`/`maelstrom_max` (top-level), `charges_fractional`
+// (per cooldown bucket), `duration`/`refreshable` (per dot bucket), and
+// `enemy_debuff_counts` (top-level) are ALL additive and gated on the single
+// predicate `p->resources.is_active( RESOURCE_MAELSTROM )` -- true only for
+// actors whose primary resource is Maelstrom (shaman). Byte-neutrality
+// contract (SC-5): every non-maelstrom actor's record bytes are UNCHANGED --
+// ret (Holy Power) and arms (Rage) records are byte-identical before and
+// after this patch; verified this session via `diff -rq` against both
+// committed fixture corpora plus RUN_ARMS_DRIFT=1 replay. Four consumers:
+// `maelstrom.deficit`, `cooldown.lava_burst.charges_fractional`,
+// `dot.flame_shock.refreshable`, `lightning_rod` (via enemy_debuff_counts).
 void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool solver_reply_gated )
 {
   sim_t* sim = p->sim;
@@ -362,6 +377,25 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
     out << "}";
   }
 
+  // Maelstrom (phase 165-01, tstl-sylvanas elemental shaman parity judge) -
+  // additive, scoped to actors with an active Maelstrom resource via
+  // p->resources.is_active( RESOURCE_MAELSTROM ). Deliberately NOT the
+  // player's own declared primary-resource accessor (shaman_t overrides
+  // that accessor to report RESOURCE_MANA -- sc_shaman.cpp:2167-2170 -- so
+  // comparing it against RESOURCE_MAELSTROM would silently emit nothing for
+  // every shaman actor) so ret/arms/every non-maelstrom actor's record
+  // bytes stay byte-identical (SC-5). `charges_fractional` on the cooldown
+  // block and `duration`/`refreshable` on the dot block below share this same
+  // predicate for the same reason -- consumers: `maelstrom.deficit`,
+  // `cooldown.lava_burst.charges_fractional`, `dot.flame_shock.refreshable`,
+  // `lightning_rod` (enemy_debuff_counts, emitted after the dots block).
+  const bool emit_maelstrom_ext = p->resources.is_active( RESOURCE_MAELSTROM );
+  if ( emit_maelstrom_ext )
+  {
+    out << ",\"maelstrom\":" << p->resources.current[ RESOURCE_MAELSTROM ];
+    out << ",\"maelstrom_max\":" << p->resources.max[ RESOURCE_MAELSTROM ];
+  }
+
   // Cooldowns - every named cooldown with a nonzero base recharge (skips
   // the zero-duration bookkeeping cooldowns SimC creates internally).
   out << ",\"cooldowns\":{";
@@ -378,6 +412,8 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
     out << ",\"charges\":" << cd->current_charge;
     out << ",\"max_charges\":" << cd->charges;
     out << ",\"recharge_time\":" << ( cd->recharge_event ? cd->recharge_event->remains().total_seconds() : 0.0 );
+    if ( emit_maelstrom_ext )
+      out << ",\"charges_fractional\":" << cd->charges_fractional();
     out << "}";
   }
   out << "}";
@@ -459,10 +495,53 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
       out << "\"" << json_escape( dot->name() ) << "\":{";
       out << "\"ticking\":" << ( dot->is_ticking() ? "true" : "false" );
       out << ",\"remains\":" << dot->remains().total_seconds();
+      if ( emit_maelstrom_ext )
+      {
+        // duration/refreshable (phase 165-01) - the same dot_refreshable()
+        // call the "refreshable" APL expression makes (dot.cpp:458-478),
+        // evaluated against the dot's OWN current snapshot state
+        // (dot->current_action, dot->state) instead of freshly re-snapshotting
+        // a throwaway action_state_t the way the live expression does -- a
+        // single documented approximation, acceptable because decision_dump
+        // records a boundary, not a live re-snapshot.
+        out << ",\"duration\":" << dot->duration().total_seconds();
+        bool dot_refreshable_val = dot->current_action != nullptr &&
+            dot->current_action->dot_refreshable( dot, dot->current_action->composite_dot_duration( dot->state ) );
+        out << ",\"refreshable\":" << ( dot_refreshable_val ? "true" : "false" );
+      }
       out << "}";
     }
   }
   out << "}";
+
+  // Enemy debuff census (phase 165-01) - counts, across every actor in
+  // sim->target_list, how many carry an active (check()>0) buff/debuff this
+  // player (p) is the source of. Answers "how many enemies have my X up"
+  // (e.g. lightning_rod) without needing a per-enemy target_debuffs block.
+  // Deterministic std::map ordering keeps output byte-stable across runs.
+  if ( emit_maelstrom_ext )
+  {
+    out << ",\"enemy_debuff_counts\":{";
+    std::map<std::string, int> debuff_counts;
+    for ( player_t* t : sim->target_list )
+    {
+      for ( buff_t* b : t->buff_list )
+      {
+        if ( b->source != p || b->check() <= 0 )
+          continue;
+        debuff_counts[ b->name() ]++;
+      }
+    }
+    bool first_edc = true;
+    for ( const auto& kv : debuff_counts )
+    {
+      if ( !first_edc )
+        out << ",";
+      first_edc = false;
+      out << "\"" << json_escape( kv.first ) << "\":" << kv.second;
+    }
+    out << "}";
+  }
 
   // Full GCD length (distinct from gcd_remains above, which is time-until-
   // ready, not the total duration) - PLAYER-scoped (2026-07-29 fix bundle,
