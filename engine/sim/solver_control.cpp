@@ -338,6 +338,32 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     return nullptr;
   }
 
+  if ( type == "noop" )
+  {
+    // CR-08 fix (2026-08-21, owner ruling): a legal "decline" reply at ANY
+    // boundary, including under solver_control_mode=training. Before this,
+    // the only replies that returned nullptr / declined to act were "wait"
+    // (FOREGROUND-only, refused above at a non-FOREGROUND boundary) and
+    // "abstain" (a hard protocol_abort under training mode, by design --
+    // see below). That left a training-mode agent with NO way to decline
+    // an off_gcd/cast_while_casting poll without either aborting the
+    // episode or falling through to "default" and conceding the APL's own
+    // choice (e.g. firing a trinket the agent did not want used) -- exactly
+    // the co-actor confound training mode exists to remove, reopened at the
+    // one boundary this phase added. "noop" closes it: nothing executes
+    // this boundary, unconditionally, in every solver_control_mode, and
+    // -- unlike "wait" -- it never touches solver_control_pending_wait_s
+    // (there is nothing to reschedule; the actor's normal readiness timing
+    // is untouched, so this is legal at a FOREGROUND boundary too, though
+    // "wait" remains the correct reply there whenever a real re-poll delay
+    // is wanted). Deliberately NOT a PROTOCOL_VERSION bump (see PROTOCOL.md
+    // "Version history") -- an old client simply never emits this string;
+    // a new client talking to an old engine gets the existing
+    // unknown-reply-type hard error below, which is the real compatibility
+    // contract (paired with the binary sha256 pin), not the version field.
+    return nullptr;
+  }
+
   if ( type == "default" )
   {
     // Execute the APL's own choice unchanged, in every mode.

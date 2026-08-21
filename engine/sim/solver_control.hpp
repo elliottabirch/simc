@@ -57,15 +57,20 @@ namespace solver_control
 // among the actor's own constructed actions by SimC internal name_str), or
 // nullptr for a "wait" reply (nothing executes this boundary; the actor's
 // readiness is rescheduled for the reply's requested `sec`) -- LEGAL ONLY AT
-// A FOREGROUND BOUNDARY (see below). A "default" reply returns apl_choice
+// A FOREGROUND BOUNDARY (see below) -- or nullptr for a "noop" reply
+// (CR-08, 2026-08-21 owner ruling: nothing executes this boundary, legal at
+// ANY boundary including under training mode, and never touches
+// solver_control_pending_wait_s). A "default" reply returns apl_choice
 // unchanged unconditionally. An "abstain" reply returns apl_choice unchanged
 // under sim_t::solver_control_mode_str=="verify" (the default), or is a hard
 // protocol_abort under =="training" (D-06/D-07) -- the two are no longer
-// synonyms (see PROTOCOL.md). A malformed or out-of-sequence reply (bad
-// JSON, `v` mismatch, `seq` mismatch, an unresolvable or not-ready action
-// name, an unknown `type`, or a "wait" at a non-FOREGROUND boundary) is a
-// hard error: a one-line diagnostic is written to stderr and the sim aborts
-// -- never a silent wrong answer.
+// synonyms (see PROTOCOL.md); "noop" is the mode-independent decline that
+// closes the hole this leaves at a non-FOREGROUND boundary under training
+// mode. A malformed or out-of-sequence reply (bad JSON, `v` mismatch, `seq`
+// mismatch, an unresolvable or not-ready action name, an unknown `type`, or
+// a "wait" at a non-FOREGROUND boundary) is a hard error: a one-line
+// diagnostic is written to stderr and the sim aborts -- never a silent
+// wrong answer.
 action_t* choose( player_t* p, action_t* apl_choice, execute_type et = execute_type::FOREGROUND );
 
 // Called once at sim end (sim_t::execute(), after iterate() completes).
