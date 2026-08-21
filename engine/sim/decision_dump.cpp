@@ -20,6 +20,7 @@
 #include "util/io.hpp"
 
 #include <map>
+#include <stdexcept>
 
 #include <set>
 #include <sstream>
@@ -273,7 +274,17 @@ std::string boundary_name( execute_type et )
     case execute_type::OFF_GCD: return "off_gcd";
     case execute_type::CAST_WHILE_CASTING: return "cast_while_casting";
   }
-  return "foreground"; // unreachable -- execute_type has exactly 3 values
+  // WR-06 (2026-08-21): an unhandled execute_type must NEVER silently
+  // re-label as "foreground" -- that would fold an un-comparable new
+  // boundary INTO criterion 2's boundary=="foreground" projection instead
+  // of out of it, turning a real divergence into an unexplained hash
+  // mismatch. Fail loudly instead: this switch is exhaustive over
+  // execute_type's three current values (sc_enums.hpp), so reaching here
+  // means execute_type gained a value this helper was not updated for.
+  throw std::runtime_error(
+      "decision_dump::boundary_name: unhandled execute_type -- add a case "
+      "here (and to solver_control.cpp's own boundary handling) before "
+      "adding a new execute_type value" );
 }
 
 // Minimal JSON-string escaping - decision-boundary identifiers (action/buff/
