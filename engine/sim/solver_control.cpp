@@ -148,32 +148,36 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
   // live's implicit-with-combat start using the exact same
   // not-already-swinging guard the paladin's own `auto_melee_attack_t::execute()`
   // uses (sc_paladin.cpp).
-  // Phase 200-04 (FORK-01/R-8) gate: this block must fire ONLY at the
-  // actor's true first in-combat FOREGROUND decision, mirroring live's
-  // implicit-with-combat auto-attack start (see the block's own doc comment
-  // below). Two widened-surface hazards, both closed here:
+  // Phase 200-04 (FORK-01/R-8) gate, corrected 2026-08-21 (CR-01): this
+  // block must fire ONLY at the actor's true first in-combat FOREGROUND
+  // decision, mirroring live's implicit-with-combat auto-attack start (see
+  // the block's own doc comment below). One widened-surface hazard is
+  // closed here:
   //   1. et == execute_type::FOREGROUND excludes an off-GCD/cast-while-
   //      casting poll from ever being "the first boundary this hook sees" --
   //      without it, an idle off-GCD poll firing before the real first
   //      foreground decision would yield in the wrong place and shift the
   //      whole timeline (200-RESEARCH.md Pitfall 3).
-  //   2. p->in_combat additionally excludes a PRECOMBAT boundary (also
-  //      tagged FOREGROUND, since precombat resolution is structurally a
-  //      foreground decision -- see player_t::combat_begin()'s own call
-  //      site). p->in_combat is deliberately false throughout the entire
-  //      precombat loop (player.cpp's own comment at the initial_swing_offset
-  //      block: "true at this exact point in combat_begin(), before the
-  //      caller sets in_combat"; it flips true either via
-  //      action_t::execute()'s own `if (harmful && !player->in_combat)
-  //      player->enter_combat();` when a harmful precombat action fires, or
-  //      via combat_begin()'s own unconditional `enter_combat()` call
-  //      immediately after the precombat loop returns) -- without this
-  //      second guard, the FIRST ready precombat action (a trinket/potion
-  //      use, typically) would trigger this block, consume that boundary
-  //      (returning nullptr), and the precombat loop has no retry: the
-  //      action is silently dropped forever, a real DPS divergence under
-  //      solver_control, not merely a wrong-timeline shift.
-  if ( et == execute_type::FOREGROUND && p->in_combat && !sim->solver_control_auto_attack_started )
+  // A second conjunct, `p->in_combat`, previously lived here to additionally
+  // exclude a hooked PRECOMBAT boundary. It was REMOVED (not merely
+  // rendered inert) by this fix: the precombat hook itself was already
+  // removed the same day (see PROTOCOL.md "Version history",
+  // 200-04-ad-hoc), so there is no longer a precombat boundary for the
+  // conjunct to exclude -- but the stated justification for leaving it in
+  // place ("harmless ... p->in_combat is already true by the time this gate
+  // is ever evaluated") was itself wrong for any episode whose .simc
+  // carries an explicit `actions=` list (every episode-driver.py episode):
+  // player.cpp:6325 only calls enter_combat() from combat_begin() when
+  // `!precombat_action_list.empty()`, and an explicit actions= list
+  // suppresses the class module's default APL (and therefore its precombat
+  // list) entirely, so p->in_combat is FALSE at the actor's first real
+  // foreground decision. With the conjunct present, this yield block never
+  // fired at t=0 for that shape, and the entire episode ran one decision
+  // boundary short of the reference stream (measured: 45 -> 46 executed
+  // foreground actions, seed 20260821, bbpaladin_armory profile; see CR-01
+  // in 200-REVIEW.md and the re-measurement in the repo's fork-repin
+  // receipt). Dropping the conjunct restores the pre-200-04 boundary count.
+  if ( et == execute_type::FOREGROUND && !sim->solver_control_auto_attack_started )
   {
     sim->solver_control_auto_attack_started = true;
     if ( p->main_hand_attack && p->main_hand_attack->execute_event == nullptr )
