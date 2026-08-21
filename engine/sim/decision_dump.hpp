@@ -29,9 +29,13 @@ namespace decision_dump
 // before that action executes. `chosen` is nullptr on an idle/wait decision.
 // `et` carries the boundary kind (phase 200-04, FORK-01/R-8 -- widened
 // control surface) and defaults to FOREGROUND so the pre-existing foreground
-// call site (player_t::execute_action()) needs no change; the two NEW call
-// sites (special_execute_event_t::execute_action(), player_t::combat_begin()'s
-// precombat loop) pass it explicitly. Emits an additive `"boundary"` field
+// call site (player_t::execute_action()) needs no change; the ONE NEW call
+// site (special_execute_event_t::execute_action()) passes it explicitly.
+// Corrected 2026-08-21 (WR-05): player_t::combat_begin()'s precombat loop
+// was originally also hooked here but that leg was removed the same day
+// (see PROTOCOL.md "Version history", 200-04-ad-hoc) -- it never calls
+// decision_dump::record() and is not one of the widened call sites. Emits
+// an additive `"boundary"` field
 // (see boundary_name() below) naming `et` on every dump line -- per R-9
 // (owner ruling 2026-08-21), every boundary is recorded, tagged, and
 // criterion 2's byte-identity receipt is redefined as a projection over

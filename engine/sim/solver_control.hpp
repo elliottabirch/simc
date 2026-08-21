@@ -27,17 +27,20 @@ struct sim_t;
 
 namespace solver_control
 {
-// Called at a decision boundary, from one of THREE call sites (phase 200-04,
-// FORK-01/R-8 -- widened from the original single foreground-only call):
+// Called at a decision boundary, from one of TWO call sites (phase 200-04,
+// FORK-01/R-8 -- widened from the original single foreground-only call;
+// corrected 2026-08-21, WR-05: the precombat leg documented here as a third
+// call site was removed the same day it was added -- see PROTOCOL.md
+// "Version history", 200-04-ad-hoc -- and never shipped):
 //   1. player_t::execute_action() (FOREGROUND), immediately before
 //      decision_dump::record(), same as before this phase.
 //   2. special_execute_event_t::execute_action() (OFF_GCD or
 //      CAST_WHILE_CASTING, via that event's own type()), the poll-event
 //      bypass this phase closes.
-//   3. player_t::combat_begin()'s precombat loop (boundary FOREGROUND --
-//      precombat resolution is a single-shot action-by-action selection,
-//      structurally the same shape as a foreground decision), the second
-//      bypass this phase closes.
+// player_t::combat_begin()'s precombat loop does NOT call solver_control::
+// choose() -- it executes `action` directly, exactly as before this phase.
+// This is the ROADMAP-criterion-1 accepted residual bypass (owner ruling:
+// "dont bring in precombat"), not an oversight.
 // `apl_choice` is whatever the actor's own action-list evaluation chose
 // (nullptr on an idle/wait decision). `et` carries the boundary kind and
 // defaults to FOREGROUND so the pre-existing foreground call site needs no
