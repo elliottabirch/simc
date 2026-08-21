@@ -6194,34 +6194,11 @@ void player_t::combat_begin()
         {
           if ( first_cast )
           {
-            // P4 fork hook (phase 200-04, FORK-01/R-8) - the SECOND measured
-            // bypass (200-RESEARCH.md "The Before/After Census": the
-            // algethar_puzzle_box census's missing boundary). Precombat
-            // executed every ready() action directly, with no
-            // solver_control/decision_dump hook at all. Mirrors the
-            // foreground pair using boundary FOREGROUND -- precombat
-            // resolution is a single-shot action-by-action selection,
-            // structurally the same shape as a foreground decision, just
-            // not event-scheduled. A separate local (`resolved`, not a
-            // reassignment of the loop's own `action` reference) is
-            // required here: `action` is `auto& : precombat_action_list`, a
-            // reference into the list's own storage -- reassigning it in
-            // place (the pattern the true foreground call site uses, where
-            // `action` is a plain local) would permanently corrupt
-            // precombat_action_list itself. See solver_control.cpp's own
-            // auto-attack-yield gate comment for why p->in_combat matters
-            // here: it stays false throughout this entire loop, so this
-            // hook never trips that gate for a genuine precombat action.
-            action_t* resolved = solver_control::choose( this, action, execute_type::FOREGROUND );
-            decision_dump::record( this, resolved, execute_type::FOREGROUND );
-            if ( resolved )
-            {
-              if ( !is_enemy() )
-                sequence_add( resolved, resolved->target );
+            if ( !is_enemy() )
+              sequence_add( action, action->target );
 
-              resolved->execute();
-              first_cast = false;
-            }
+            action->execute();
+            first_cast = false;
           }
           else
           {
@@ -6230,15 +6207,10 @@ void player_t::combat_begin()
         }
         else
         {
-          action_t* resolved = solver_control::choose( this, action, execute_type::FOREGROUND );
-          decision_dump::record( this, resolved, execute_type::FOREGROUND );
-          if ( resolved )
-          {
-            if ( !is_enemy() )
-              sequence_add( resolved, resolved->target );
+          if ( !is_enemy() )
+            sequence_add( action, action->target );
 
-            resolved->execute();
-          }
+          action->execute();
         }
       }
       if ( in_combat && ( action->channeled || action->travel_time() == timespan_t::zero() ) )
