@@ -13,6 +13,7 @@
 #pragma once
 
 #include "config.hpp"
+#include "sc_enums.hpp"
 
 #include <ostream>
 #include <string>
@@ -23,10 +24,29 @@ struct action_t;
 
 namespace decision_dump
 {
-// Called once per player_t::execute_action() invocation, right after the
-// APL/sequence has chosen (or failed to choose) an action, before that
-// action executes. `chosen` is nullptr on an idle/wait decision.
-void record( player_t* p, action_t* chosen );
+// Called once per decision boundary, right after the APL/sequence/
+// solver_control resolution has chosen (or failed to choose) an action,
+// before that action executes. `chosen` is nullptr on an idle/wait decision.
+// `et` carries the boundary kind (phase 200-04, FORK-01/R-8 -- widened
+// control surface) and defaults to FOREGROUND so the pre-existing foreground
+// call site (player_t::execute_action()) needs no change; the two NEW call
+// sites (special_execute_event_t::execute_action(), player_t::combat_begin()'s
+// precombat loop) pass it explicitly. Emits an additive `"boundary"` field
+// (see boundary_name() below) naming `et` on every dump line -- per R-9
+// (owner ruling 2026-08-21), every boundary is recorded, tagged, and
+// criterion 2's byte-identity receipt is redefined as a projection over
+// `boundary=="foreground"` lines rather than raw dump identity. A dump line
+// with NO `boundary` field (every pre-change record) is treated as
+// foreground by every downstream reader.
+void record( player_t* p, action_t* chosen, execute_type et = execute_type::FOREGROUND );
+
+// Boundary-kind label shared between decision_dump and solver_control (phase
+// 200-04) so the wire's own `"boundary"` field (solver_control.cpp's request
+// line) and the dump's own `"boundary"` field can never disagree about the
+// name for the same `execute_type` value. Returns "foreground", "off_gcd" or
+// "cast_while_casting" -- execute_type (sc_enums.hpp) has exactly these three
+// values; this switch is exhaustive.
+std::string boundary_name( execute_type et );
 
 // Shared state-block emitter (P3b solver_control hook, simc-offline-
 // evaluation-pipeline phase 116, reuses this so the two decision-boundary

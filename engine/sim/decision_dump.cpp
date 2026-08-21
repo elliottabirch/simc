@@ -261,6 +261,21 @@ unsigned resolve_spell_id( action_t* resolved, sim_t* sim )
 
 namespace decision_dump
 {
+// Boundary-kind label (phase 200-04, FORK-01/R-8 -- widened control
+// surface). Shared with solver_control.cpp's own request-line builder (see
+// decision_dump.hpp's doc comment) so the wire and the dump can never
+// disagree about the name for the same execute_type value.
+std::string boundary_name( execute_type et )
+{
+  switch ( et )
+  {
+    case execute_type::FOREGROUND: return "foreground";
+    case execute_type::OFF_GCD: return "off_gcd";
+    case execute_type::CAST_WHILE_CASTING: return "cast_while_casting";
+  }
+  return "foreground"; // unreachable -- execute_type has exactly 3 values
+}
+
 // Minimal JSON-string escaping - decision-boundary identifiers (action/buff/
 // cooldown name_str) are simc internal snake_case tokens; the only
 // real-world tokens seen with punctuation are spell display names, which
@@ -666,7 +681,7 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   }
 }
 
-void record( player_t* p, action_t* chosen )
+void record( player_t* p, action_t* chosen, execute_type et )
 {
   sim_t* sim = p->sim;
   if ( sim->decision_dump_file_str.empty() )
@@ -695,6 +710,10 @@ void record( player_t* p, action_t* chosen )
   // stable between threads=1 and threads>1 runs.
   line << ",\"iteration\":" << sim->current_iteration;
   line << ",\"thread\":" << sim->thread_index;
+  // Boundary kind (phase 200-04, FORK-01/R-8, R-9) -- additive; absent on
+  // every pre-change record, which every downstream reader treats as
+  // "foreground". See boundary_name()'s own doc comment above.
+  line << ",\"boundary\":\"" << boundary_name( et ) << "\"";
   line << ",\"actor\":\"" << json_escape( p->name() ) << "\"";
   line << ",\"chosen\":" << ( chosen ? ( "\"" + json_escape( chosen->name() ) + "\"" ) : std::string( "null" ) );
 

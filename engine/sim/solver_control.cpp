@@ -120,7 +120,7 @@ action_t* resolve_action( player_t* p, const std::string& name )
 
 namespace solver_control
 {
-action_t* choose( player_t* p, action_t* apl_choice )
+action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
 {
   sim_t* sim = p->sim;
   if ( sim->solver_control_str.empty() )
@@ -148,7 +148,32 @@ action_t* choose( player_t* p, action_t* apl_choice )
   // live's implicit-with-combat start using the exact same
   // not-already-swinging guard the paladin's own `auto_melee_attack_t::execute()`
   // uses (sc_paladin.cpp).
-  if ( !sim->solver_control_auto_attack_started )
+  // Phase 200-04 (FORK-01/R-8) gate: this block must fire ONLY at the
+  // actor's true first in-combat FOREGROUND decision, mirroring live's
+  // implicit-with-combat auto-attack start (see the block's own doc comment
+  // below). Two widened-surface hazards, both closed here:
+  //   1. et == execute_type::FOREGROUND excludes an off-GCD/cast-while-
+  //      casting poll from ever being "the first boundary this hook sees" --
+  //      without it, an idle off-GCD poll firing before the real first
+  //      foreground decision would yield in the wrong place and shift the
+  //      whole timeline (200-RESEARCH.md Pitfall 3).
+  //   2. p->in_combat additionally excludes a PRECOMBAT boundary (also
+  //      tagged FOREGROUND, since precombat resolution is structurally a
+  //      foreground decision -- see player_t::combat_begin()'s own call
+  //      site). p->in_combat is deliberately false throughout the entire
+  //      precombat loop (player.cpp's own comment at the initial_swing_offset
+  //      block: "true at this exact point in combat_begin(), before the
+  //      caller sets in_combat"; it flips true either via
+  //      action_t::execute()'s own `if (harmful && !player->in_combat)
+  //      player->enter_combat();` when a harmful precombat action fires, or
+  //      via combat_begin()'s own unconditional `enter_combat()` call
+  //      immediately after the precombat loop returns) -- without this
+  //      second guard, the FIRST ready precombat action (a trinket/potion
+  //      use, typically) would trigger this block, consume that boundary
+  //      (returning nullptr), and the precombat loop has no retry: the
+  //      action is silently dropped forever, a real DPS divergence under
+  //      solver_control, not merely a wrong-timeline shift.
+  if ( et == execute_type::FOREGROUND && p->in_combat && !sim->solver_control_auto_attack_started )
   {
     sim->solver_control_auto_attack_started = true;
     if ( p->main_hand_attack && p->main_hand_attack->execute_event == nullptr )
@@ -213,6 +238,13 @@ action_t* choose( player_t* p, action_t* apl_choice )
   req << ",\"actor\":\"" << decision_dump::json_escape( p->name() ) << "\"";
   req << ",\"apl_choice\":"
       << ( apl_choice ? ( "\"" + decision_dump::json_escape( apl_choice->name() ) + "\"" ) : std::string( "null" ) );
+  // Boundary kind (phase 200-04, FORK-01/R-8, R-9) -- additive, no
+  // SOLVER_CONTROL_PROTOCOL_VERSION bump (see the version-history note at
+  // the top of scripts/simc-eval/PROTOCOL.md). Shared name table with
+  // decision_dump::record()'s own "boundary" field via
+  // decision_dump::boundary_name() so the wire and the dump can never
+  // disagree.
+  req << ",\"boundary\":\"" << decision_dump::boundary_name( et ) << "\"";
   // gcd_remains, swing_mh_remains, holy_power, cooldowns, buffs,
   // target_debuffs, target_time_to_die, active_enemies, dots, gcd_length,
   // auto_attack_interval, resolved_action -- identical to decision_dump's
@@ -275,6 +307,16 @@ action_t* choose( player_t* p, action_t* apl_choice )
 
   if ( type == "wait" )
   {
+    // Phase 200-04 (FORK-01/R-8): "wait" sets solver_control_pending_wait_s,
+    // consumed ONLY by player_ready_event_t::execute()'s "nothing chosen"
+    // branch (player.cpp) -- a FOREGROUND-only consumer. An off-GCD/
+    // cast-while-casting poll has no such consumer, so a "wait" reply there
+    // would set a flag that silently leaks into the NEXT foreground
+    // boundary as an unexplained idle gap (T-200-11). Refuse it here,
+    // engine-side, the same way the `v` mismatch is refused above.
+    if ( et != execute_type::FOREGROUND )
+      protocol_abort( "'wait' reply is illegal at a non-FOREGROUND boundary (boundary=" +
+                       decision_dump::boundary_name( et ) + ", seq=" + std::to_string( seq ) + "): " + line );
     if ( !doc.HasMember( "sec" ) || !doc["sec"].IsNumber() )
       protocol_abort( "'wait' reply missing numeric 'sec' (seq=" + std::to_string( seq ) + "): " + line );
     double sec = doc["sec"].GetDouble();
@@ -292,10 +334,29 @@ action_t* choose( player_t* p, action_t* apl_choice )
     return nullptr;
   }
 
-  if ( type == "default" || type == "abstain" )
+  if ( type == "default" )
   {
-    // Execute the APL's own choice unchanged -- abstain is handled
-    // identically to default per the protocol contract.
+    // Execute the APL's own choice unchanged, in every mode.
+    return apl_choice;
+  }
+
+  if ( type == "abstain" )
+  {
+    // D-06/D-07 (phase 200-04): "default" and "abstain" are NO LONGER
+    // synonyms. Under solver_control_mode=training (T-200-12), an abstain
+    // is a hard protocol_abort -- the whole point of the training-mode
+    // check is to catch a client that is SILENTLY abstaining at every
+    // boundary (which would hand control back to the APL while producing a
+    // plausible-looking episode, reintroducing exactly the co-actor
+    // confound R-8 exists to remove). The check lives engine-side on
+    // purpose: if the client owned the mode, the buggy client would also
+    // own the check. Under the default "verify" mode (empty
+    // solver_control_mode_str also means "verify"), abstain falls through
+    // to the APL's own choice unchanged -- this is what makes criterion 2's
+    // byte-identity receipt a real, runnable mode.
+    if ( sim->solver_control_mode_str == "training" )
+      protocol_abort( "'abstain' reply is a hard error under solver_control_mode=training (seq=" +
+                       std::to_string( seq ) + "): " + line );
     return apl_choice;
   }
 

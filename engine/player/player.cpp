@@ -193,6 +193,19 @@ struct special_execute_event_t : public player_event_t
 
     action_t* a = p()->select_action( apl(), type() );
 
+    // P4 fork hook (phase 200-04, FORK-01/R-8) - the first measured bypass
+    // (200-RESEARCH.md "The C++ Change"): this poll event (OFF_GCD or
+    // CAST_WHILE_CASTING, via type()) selected and executed an action with
+    // no solver_control/decision_dump hook at all. Mirrors the foreground
+    // pair (player_t::execute_action(), below) verbatim, passing type() as
+    // the boundary kind so an idle off-GCD poll (a == nullptr) is also a
+    // boundary the client can act on. solver_control::choose() refuses a
+    // "wait" reply at this non-FOREGROUND boundary (protocol_abort) --
+    // solver_control_pending_wait_s has no consumer here, only in
+    // player_ready_event_t::execute()'s "nothing chosen" branch.
+    a = solver_control::choose( p(), a, type() );
+    decision_dump::record( p(), a, type() );
+
     if ( p()->restore_action_list != nullptr )
     {
       p()->activate_action_list( p()->restore_action_list, p()->restore_action_list_type );
@@ -6181,11 +6194,34 @@ void player_t::combat_begin()
         {
           if ( first_cast )
           {
-            if ( !is_enemy() )
-              sequence_add( action, action->target );
+            // P4 fork hook (phase 200-04, FORK-01/R-8) - the SECOND measured
+            // bypass (200-RESEARCH.md "The Before/After Census": the
+            // algethar_puzzle_box census's missing boundary). Precombat
+            // executed every ready() action directly, with no
+            // solver_control/decision_dump hook at all. Mirrors the
+            // foreground pair using boundary FOREGROUND -- precombat
+            // resolution is a single-shot action-by-action selection,
+            // structurally the same shape as a foreground decision, just
+            // not event-scheduled. A separate local (`resolved`, not a
+            // reassignment of the loop's own `action` reference) is
+            // required here: `action` is `auto& : precombat_action_list`, a
+            // reference into the list's own storage -- reassigning it in
+            // place (the pattern the true foreground call site uses, where
+            // `action` is a plain local) would permanently corrupt
+            // precombat_action_list itself. See solver_control.cpp's own
+            // auto-attack-yield gate comment for why p->in_combat matters
+            // here: it stays false throughout this entire loop, so this
+            // hook never trips that gate for a genuine precombat action.
+            action_t* resolved = solver_control::choose( this, action, execute_type::FOREGROUND );
+            decision_dump::record( this, resolved, execute_type::FOREGROUND );
+            if ( resolved )
+            {
+              if ( !is_enemy() )
+                sequence_add( resolved, resolved->target );
 
-            action->execute();
-            first_cast = false;
+              resolved->execute();
+              first_cast = false;
+            }
           }
           else
           {
@@ -6194,10 +6230,15 @@ void player_t::combat_begin()
         }
         else
         {
-          if ( !is_enemy() )
-            sequence_add( action, action->target );
+          action_t* resolved = solver_control::choose( this, action, execute_type::FOREGROUND );
+          decision_dump::record( this, resolved, execute_type::FOREGROUND );
+          if ( resolved )
+          {
+            if ( !is_enemy() )
+              sequence_add( resolved, resolved->target );
 
-          action->execute();
+            resolved->execute();
+          }
         }
       }
       if ( in_combat && ( action->channeled || action->travel_time() == timespan_t::zero() ) )

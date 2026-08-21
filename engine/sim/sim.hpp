@@ -570,6 +570,16 @@ struct sim_t : private sc_thread_t
   // same execute_action() decision boundary as decision_dump=. Empty string
   // = disabled (default), zero overhead. See sim/solver_control.hpp.
   std::string solver_control_str;
+  // Verify-vs-training mode (phase 200-04, FORK-01/R-8, D-06/D-07). Empty
+  // string and "verify" are equivalent (the default) -- abstain falls
+  // through to the APL's own choice. "training" makes an abstain reply a
+  // hard protocol_abort, engine-side, so a silently-abstaining client
+  // cannot suppress the check. A sim option (not an env var) deliberately --
+  // it is written into episode.simc and therefore lands in the committed
+  // run artifact automatically. Validated (empty/"verify"/"training" only)
+  // inside the existing `if (!solver_control_str.empty())` fail-closed
+  // block in sim.cpp.
+  std::string solver_control_mode_str;
   std::unique_ptr<io::ofstream> solver_control_req_stream;
   std::unique_ptr<std::ifstream> solver_control_rep_stream;
   uint64_t solver_control_seq = 0;

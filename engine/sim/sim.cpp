@@ -3938,6 +3938,10 @@ void sim_t::create_options()
   add_option( opt_string( "apl_json", apl_json_file_str ) );
   add_option( opt_string( "decision_dump", decision_dump_file_str ) );
   add_option( opt_string( "solver_control", solver_control_str ) );
+  // Phase 200-04 (FORK-01/R-8, D-06/D-07) -- verify-vs-training abstain
+  // mode. Validated below, inside the existing solver_control_str
+  // fail-closed block.
+  add_option( opt_string( "solver_control_mode", solver_control_mode_str ) );
   add_option( opt_bool( "sequence_soft_fail", sequence_soft_fail ) );
   add_option( opt_bool( "sequence_queue_delay", sequence_queue_delay ) );
   // Deterministic proc-roll option (simc-offline-evaluation-pipeline phase
@@ -4535,6 +4539,18 @@ void sim_t::setup( sim_control_t* c )
                        "runs in its own sim and they would share one FIFO pair. Run one simc process per "
                        "profile with a distinct solver_control= prefix instead.",
                        profileset_map.size() ) );
+    }
+
+    // solver_control_mode validation (phase 200-04, D-06/D-07) -- empty
+    // defaults to "verify"; anything other than "verify"/"training" joins
+    // this block's fail-closed family with a clear error, never a silent
+    // default.
+    if ( !solver_control_mode_str.empty() && solver_control_mode_str != "verify" &&
+         solver_control_mode_str != "training" )
+    {
+      throw sc_runtime_error(
+          fmt::format( "solver_control_mode= must be 'verify' or 'training' (got '{}').",
+                       solver_control_mode_str ) );
     }
   }
 
