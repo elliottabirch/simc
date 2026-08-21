@@ -59,10 +59,8 @@ void shadow( player_t* p )
   precombat->add_action( "variable,name=max_vts,default=12,op=reset" );
   precombat->add_action( "variable,name=is_vt_possible,default=0,op=reset" );
   precombat->add_action( "arcane_torrent" );
-  if ( p->sim->dbc->wowv() >= wowv_t( 12, 1, 0 ) )
-  {
-    precombat->add_action( "mind_blast,if=set_bonus.mid2_4pc", "Crushing Void from Tentacle Slam is reset on pull, open with Mind Blast instead." );
-  }
+  precombat->add_action( "potion,if=potion.liquid_luster" );
+  precombat->add_action( "mind_blast,if=set_bonus.mid2_4pc", "Crushing Void from Tentacle Slam is reset on pull, open with Mind Blast instead." );
   precombat->add_action( "tentacle_slam" );
 
   default_->add_action( "variable,name=holding_tentacle_slam,op=set,value=raid_event.adds.in<15" );
@@ -85,14 +83,13 @@ void shadow( player_t* p )
   cds->add_action( "ancestral_call,if=((buff.voidform.up|!talent.voidform)&buff.power_infusion.up)|fight_remains<=15" );
   cds->add_action( "invoke_external_buff,name=power_infusion,if=(buff.voidform.up|!talent.voidform)&!buff.power_infusion.up" );
   cds->add_action( "invoke_external_buff,name=bloodlust,if=buff.power_infusion.up&fight_remains<120|fight_remains<=40" );
-  cds->add_action( "flash_heal,if=equipped.nexuskings_command&buff.oathbound.up&(!buff.boon_of_the_oathsworn.up|buff.boon_of_the_oathsworn.remains<3)&((talent.voidform&(buff.voidform.up|cooldown.voidform.up))|cooldown.halo.up|cooldown.void_torrent.up)", "Use Flash Heal to proc Nexus-King's Command trinket" );
   cds->add_action( "power_infusion,if=(buff.voidform.up|!talent.voidform)&!buff.power_infusion.up", "Sync Power Infusion with Voidform or Dark Ascension" );
   cds->add_action( "halo" );
   cds->add_action( "voidform,if=active_dot.shadow_word_pain>=active_dot.vampiric_touch" );
   cds->add_action( "call_action_list,name=trinkets" );
   cds->add_action( "desperate_prayer,if=health.pct<=75", "Use Desperate Prayer to heal up should Shadow Word: Death or other damage bring you below 75%" );
 
-  heal_for_tof->add_action( "holy_nova,if=talent.lightburst", "Use Halo to acquire Twist of Fate if an ally can be healed for it and it is not currently up." );
+  heal_for_tof->add_action( "holy_nova,if=talent.lightburst", "Use Holy Nova during Halo to acquire Twist of Fate when Lightburst can heal an ally and Twist of Fate is not active." );
 
   main->add_action( "variable,name=dots_up,op=set,value=active_dot.vampiric_touch=active_enemies&active_dot.shadow_word_pain>=active_dot.vampiric_touch,if=active_enemies<3" );
   main->add_action( "call_action_list,name=cds,if=fight_remains<30|target.time_to_die>15&(!variable.holding_tentacle_slam|active_enemies>2)&variable.dots_up" );
@@ -103,7 +100,7 @@ void shadow( player_t* p )
   main->add_action( "void_torrent,target_if=max:(dot.shadow_word_madness.remains*1000+target.time_to_die),if=!variable.holding_tentacle_slam&variable.dots_up", "Use Void Torrent if it will get near full Mastery Value" );
   main->add_action( "shadow_word_pain,target_if=max:(refreshable*100000+target.time_to_die+dot.vampiric_touch.ticking*10000),if=talent.invoked_nightmare&refreshable&target.time_to_die>12&(dot.vampiric_touch.ticking|action.tentacle_slam.in_flight)", "Put out Shadow Word: Pain on enemies that will live at least 12s as a filler when talented into Invoked Nightmare." );
   main->add_action( "void_volley,if=cooldown.voidform.up" );
-  main->add_action( "mind_blast,target_if=max:dot.shadow_word_madness.remains,if=(!buff.mind_devourer.react|!talent.mind_devourer)", "Use all charges of Mind Blast if Vampiric Touch and Shadow Word: Pain are active and Mind Devourer is not active or you are prepping Void Eruption" );
+  main->add_action( "mind_blast,target_if=max:dot.shadow_word_madness.remains,if=(!buff.mind_devourer.react|!talent.mind_devourer)", "Spend Mind Blast charges unless the Mind Devourer proc is reaction-ready" );
   main->add_action( "mind_flay_insanity,target_if=max:dot.shadow_word_madness.remains" );
   main->add_action( "tentacle_slam,target_if=min:dot.vampiric_touch.remains,if=(talent.void_apparitions|talent.maddening_tentacles)&(raid_event.adds.in>30|raid_event.adds.in>5&cooldown.tentacle_slam.full_recharge_time<=gcd.max*2)", "Use Tentacle Slam for Void Apparitions or Maddening Tentacles value, holding for adds if needed" );
   main->add_action( "vampiric_touch,target_if=max:(refreshable*10000+target.time_to_die)*(dot.vampiric_touch.ticking|!variable.dots_up),if=refreshable&target.time_to_die>12&(dot.vampiric_touch.ticking|!variable.dots_up)&(variable.max_vts>0|active_enemies=1)&(action.tentacle_slam.usable_in>=dot.vampiric_touch.remains|variable.holding_tentacle_slam|!action.tentacle_slam.enabled)", "Put out Vampiric Touch on enemies that will live at least 12s and Tentacle Slam is not available soon" );
@@ -111,7 +108,7 @@ void shadow( player_t* p )
   main->add_action( "vampiric_touch,target_if=max:(refreshable*10000+target.time_to_die),if=refreshable&target.time_to_die>12", "Put out Vampiric Touch on enemies that will live at least 12s as a filler action." );
   main->add_action( "shadow_word_death,target_if=min:target.health.pct,if=(pet.mindbender.active|pet.voidwraith.active|pet.shadowfiend.active)&talent.inescapable_torment|target.health.pct<(20+15*talent.deathspeaker)&talent.shadowfiend&talent.idol_of_yshaarj" );
   main->add_action( "shadow_word_death,target_if=min:target.health.pct,if=(target.health.pct<(20+15*talent.deathspeaker))" );
-  main->add_action( "void_volley,if=!talent.resonant_energy|cooldown.voidform.remains<60|buff.voidform.up|buff.resonant_energy_damage.up|buff.crushing_void.stack>=4|fight_remains<45", "Bank Void Volley charges for the Resonant Energy window, dumping once Voidform is within a Halo cycle, in Voidform, or if charges would overcap" );
+  main->add_action( "void_volley,if=!talent.resonant_energy|cooldown.voidform.remains<60|buff.voidform.up|buff.resonant_energy_damage.react|buff.crushing_void.stack>=4|fight_remains<45", "Bank Void Volley charges for Resonant Energy, spending them after the proc is reaction-ready, during Voidform, near the next Voidform, at four Crushing Void stacks, or near fight end" );
   main->add_action( "mind_flay,target_if=max:dot.shadow_word_madness.remains,chain=1,interrupt_immediate=1,interrupt_if=ticks>=2,interrupt_global=1" );
   main->add_action( "tentacle_slam,if=raid_event.adds.in>20", "Use Tentacle Slam while moving as a low-priority action when adds will not spawn in 20 seconds." );
   main->add_action( "shadow_word_death,target_if=target.health.pct<20", "Use Shadow Word: Death while moving as a low-priority action in execute" );
@@ -119,10 +116,9 @@ void shadow( player_t* p )
   main->add_action( "shadow_word_pain,target_if=min:remains", "Use Shadow Word: Pain while moving as a low-priority action" );
 
   trinkets->add_action( "use_item,name=galactic_gladiators_badge_of_ferocity,if=(buff.voidform.up|buff.power_infusion.remains>=10|(talent.voidform&cooldown.voidform.remains>10))|fight_remains<20" );
-  if ( p->sim->dbc->wowv() >= wowv_t( 12, 1, 0 ) )
-  {
-    trinkets->add_action( "use_item,name=hex_lords_dooming_idol,if=buff.power_infusion.up&buff.hex_lords_doom.stack>5|fight_remains<=30" );
-  }
+  trinkets->add_action( "use_item,name=hex_lords_dooming_idol,if=buff.power_infusion.up&buff.hex_lords_doom.stack>5|fight_remains<=30" );
+  trinkets->add_action( "use_item,name=font_of_venomous_rage" );
+  trinkets->add_action( "use_item,name=vexhuls_everflowing_gland" );
   trinkets->add_action( "use_items,if=(buff.voidform.up|buff.power_infusion.remains>=10|equipped.neural_synapse_enhancer&buff.entropic_rift.up)|fight_remains<20" );
 }
 //shadow_apl_end
@@ -147,6 +143,7 @@ void shadow_ptr( player_t* p )
   precombat->add_action( "variable,name=max_vts,default=12,op=reset" );
   precombat->add_action( "variable,name=is_vt_possible,default=0,op=reset" );
   precombat->add_action( "arcane_torrent" );
+  precombat->add_action( "potion,if=potion.liquid_luster" );
   precombat->add_action( "mind_blast,if=set_bonus.mid2_4pc", "Crushing Void from Tentacle Slam is reset on pull, open with Mind Blast instead." );
   precombat->add_action( "tentacle_slam" );
 
@@ -170,14 +167,13 @@ void shadow_ptr( player_t* p )
   cds->add_action( "ancestral_call,if=((buff.voidform.up|!talent.voidform)&buff.power_infusion.up)|fight_remains<=15" );
   cds->add_action( "invoke_external_buff,name=power_infusion,if=(buff.voidform.up|!talent.voidform)&!buff.power_infusion.up" );
   cds->add_action( "invoke_external_buff,name=bloodlust,if=buff.power_infusion.up&fight_remains<120|fight_remains<=40" );
-  cds->add_action( "flash_heal,if=equipped.nexuskings_command&buff.oathbound.up&(!buff.boon_of_the_oathsworn.up|buff.boon_of_the_oathsworn.remains<3)&((talent.voidform&(buff.voidform.up|cooldown.voidform.up))|cooldown.halo.up|cooldown.void_torrent.up)", "Use Flash Heal to proc Nexus-King's Command trinket" );
   cds->add_action( "power_infusion,if=(buff.voidform.up|!talent.voidform)&!buff.power_infusion.up", "Sync Power Infusion with Voidform or Dark Ascension" );
   cds->add_action( "halo" );
   cds->add_action( "voidform,if=active_dot.shadow_word_pain>=active_dot.vampiric_touch" );
   cds->add_action( "call_action_list,name=trinkets" );
   cds->add_action( "desperate_prayer,if=health.pct<=75", "Use Desperate Prayer to heal up should Shadow Word: Death or other damage bring you below 75%" );
 
-  heal_for_tof->add_action( "holy_nova,if=talent.lightburst", "Use Halo to acquire Twist of Fate if an ally can be healed for it and it is not currently up." );
+  heal_for_tof->add_action( "holy_nova,if=talent.lightburst", "Use Holy Nova during Halo to acquire Twist of Fate when Lightburst can heal an ally and Twist of Fate is not active." );
 
   main->add_action( "variable,name=dots_up,op=set,value=active_dot.vampiric_touch=active_enemies&active_dot.shadow_word_pain>=active_dot.vampiric_touch,if=active_enemies<3" );
   main->add_action( "call_action_list,name=cds,if=fight_remains<30|target.time_to_die>15&(!variable.holding_tentacle_slam|active_enemies>2)&variable.dots_up" );
@@ -188,7 +184,7 @@ void shadow_ptr( player_t* p )
   main->add_action( "void_torrent,target_if=max:(dot.shadow_word_madness.remains*1000+target.time_to_die),if=!variable.holding_tentacle_slam&variable.dots_up", "Use Void Torrent if it will get near full Mastery Value" );
   main->add_action( "shadow_word_pain,target_if=max:(refreshable*100000+target.time_to_die+dot.vampiric_touch.ticking*10000),if=talent.invoked_nightmare&refreshable&target.time_to_die>12&(dot.vampiric_touch.ticking|action.tentacle_slam.in_flight)", "Put out Shadow Word: Pain on enemies that will live at least 12s as a filler when talented into Invoked Nightmare." );
   main->add_action( "void_volley,if=cooldown.voidform.up" );
-  main->add_action( "mind_blast,target_if=max:dot.shadow_word_madness.remains,if=(!buff.mind_devourer.react|!talent.mind_devourer)", "Use all charges of Mind Blast if Vampiric Touch and Shadow Word: Pain are active and Mind Devourer is not active or you are prepping Void Eruption" );
+  main->add_action( "mind_blast,target_if=max:dot.shadow_word_madness.remains,if=(!buff.mind_devourer.react|!talent.mind_devourer)", "Spend Mind Blast charges unless the Mind Devourer proc is reaction-ready" );
   main->add_action( "mind_flay_insanity,target_if=max:dot.shadow_word_madness.remains" );
   main->add_action( "tentacle_slam,target_if=min:dot.vampiric_touch.remains,if=(talent.void_apparitions|talent.maddening_tentacles)&(raid_event.adds.in>30|raid_event.adds.in>5&cooldown.tentacle_slam.full_recharge_time<=gcd.max*2)", "Use Tentacle Slam for Void Apparitions or Maddening Tentacles value, holding for adds if needed" );
   main->add_action( "vampiric_touch,target_if=max:(refreshable*10000+target.time_to_die)*(dot.vampiric_touch.ticking|!variable.dots_up),if=refreshable&target.time_to_die>12&(dot.vampiric_touch.ticking|!variable.dots_up)&(variable.max_vts>0|active_enemies=1)&(action.tentacle_slam.usable_in>=dot.vampiric_touch.remains|variable.holding_tentacle_slam|!action.tentacle_slam.enabled)", "Put out Vampiric Touch on enemies that will live at least 12s and Tentacle Slam is not available soon" );
@@ -196,7 +192,7 @@ void shadow_ptr( player_t* p )
   main->add_action( "vampiric_touch,target_if=max:(refreshable*10000+target.time_to_die),if=refreshable&target.time_to_die>12", "Put out Vampiric Touch on enemies that will live at least 12s as a filler action." );
   main->add_action( "shadow_word_death,target_if=min:target.health.pct,if=(pet.mindbender.active|pet.voidwraith.active|pet.shadowfiend.active)&talent.inescapable_torment|target.health.pct<(20+15*talent.deathspeaker)&talent.shadowfiend&talent.idol_of_yshaarj" );
   main->add_action( "shadow_word_death,target_if=min:target.health.pct,if=(target.health.pct<(20+15*talent.deathspeaker))" );
-  main->add_action( "void_volley,if=!talent.resonant_energy|cooldown.voidform.remains<60|buff.voidform.up|buff.resonant_energy_damage.up|buff.crushing_void.stack>=4|fight_remains<45", "Bank Void Volley charges for the Resonant Energy window, dumping once Voidform is within a Halo cycle, in Voidform, or if charges would overcap" );
+  main->add_action( "void_volley,if=!talent.resonant_energy|cooldown.voidform.remains<60|buff.voidform.up|buff.resonant_energy_damage.react|buff.crushing_void.stack>=4|fight_remains<45", "Bank Void Volley charges for Resonant Energy, spending them after the proc is reaction-ready, during Voidform, near the next Voidform, at four Crushing Void stacks, or near fight end" );
   main->add_action( "mind_flay,target_if=max:dot.shadow_word_madness.remains,chain=1,interrupt_immediate=1,interrupt_if=ticks>=2,interrupt_global=1" );
   main->add_action( "tentacle_slam,if=raid_event.adds.in>20", "Use Tentacle Slam while moving as a low-priority action when adds will not spawn in 20 seconds." );
   main->add_action( "shadow_word_death,target_if=target.health.pct<20", "Use Shadow Word: Death while moving as a low-priority action in execute" );
@@ -204,10 +200,9 @@ void shadow_ptr( player_t* p )
   main->add_action( "shadow_word_pain,target_if=min:remains", "Use Shadow Word: Pain while moving as a low-priority action" );
 
   trinkets->add_action( "use_item,name=galactic_gladiators_badge_of_ferocity,if=(buff.voidform.up|buff.power_infusion.remains>=10|(talent.voidform&cooldown.voidform.remains>10))|fight_remains<20" );
-  if ( p->sim->dbc->wowv() >= wowv_t( 12, 1, 0 ) )
-  {
-    trinkets->add_action( "use_item,name=hex_lords_dooming_idol,if=buff.power_infusion.up&buff.hex_lords_doom.stack>5|fight_remains<=30" );
-  }
+  trinkets->add_action( "use_item,name=hex_lords_dooming_idol,if=buff.power_infusion.up&buff.hex_lords_doom.stack>5|fight_remains<=30" );
+  trinkets->add_action( "use_item,name=font_of_venomous_rage" );
+  trinkets->add_action( "use_item,name=vexhuls_everflowing_gland" );
   trinkets->add_action( "use_items,if=(buff.voidform.up|buff.power_infusion.remains>=10|equipped.neural_synapse_enhancer&buff.entropic_rift.up)|fight_remains<20" );
 }
 //shadow_ptr_apl_end

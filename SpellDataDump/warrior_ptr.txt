@@ -1,4 +1,4 @@
-SimulationCraft 1210-01 for World of Warcraft 12.1.0.69299 PTR
+SimulationCraft 1210-01 for World of Warcraft 12.1.0.69382 PTR
 Name             : Vanguard (id=71) [Spell Family (4), Passive] 
 Class            : Protection Warrior
 School           : Physical
@@ -7380,7 +7380,7 @@ Labels           : 16: Class Spells
 Stacks           : 10 maximum
 Proc Chance      : 101%
 Triggered By     : Frenzy (335077)
-Attributes       : Aura Points On Client (268), Asynchronous Buff (490)
+Attributes       : Aura Points On Client (268), Asynchronous Aura (490)
 Effects          :
 #1 (id=831419)   : Apply Aura (6) | Modify All Haste% (193)
                    Base Value: 0 | Scaled Value: 0 | Target: Self (1)
@@ -13161,23 +13161,20 @@ Labels           : 16: Class Spells
 Stacks           : 5 maximum
 Proc Chance      : 101%
 Triggered By     : Slayer's Strike (445579)
-Attributes       : Aura Points On Client (268), Asynchronous Buff (490)
+Attributes       : Aura Points On Client (268), Asynchronous Aura (490)
 Effects          :
 #1 (id=1142521)  : Apply Aura (6) | Add Percent Modifier (108): Spell Direct Amount (0)
                    Base Value: 3 | Scaled Value: 3 | PvP Coefficient: 0.33334 | Target: Self (1)
                    Affected Spells: Execute Off-Hand (163558), Execute (260798), Execute (280849), Condemn (317483), Condemn (317488), Condemn Off-Hand (317489), Arms Execute FX Test (463815), Fury Execute FX Test (463816), Fury Execute Off-Hand FX Test (463817)
                    Family Flags: 115, 116
-Hotfixed         : Affects Spells
 #2 (id=1142883)  : Apply Aura (6) | Add Flat Modifier (107): Spell Critical Chance (7)
                    Base Value: 3 | Scaled Value: 3 | PvP Coefficient: 0.33334 | Misc Value: 7 | Target: Self (1)
                    Affected Spells: Execute Off-Hand (163558), Execute (260798), Execute (280849), Condemn (317483), Condemn (317488), Condemn Off-Hand (317489), Arms Execute FX Test (463815), Fury Execute FX Test (463816), Fury Execute Off-Hand FX Test (463817)
                    Family Flags: 115, 116
-Hotfixed         : Affects Spells
 #3 (id=1142884)  : Apply Aura (6) | Add Percent Modifier (108): Spell Critical Bonus Multiplier (15)
                    Base Value: 3 | Scaled Value: 3 | PvP Coefficient: 0.33334 | Misc Value: 15 | Target: Self (1)
                    Affected Spells: Execute Off-Hand (163558), Execute (260798), Execute (280849), Condemn (317483), Condemn (317488), Condemn Off-Hand (317489), Arms Execute FX Test (463815), Fury Execute FX Test (463816), Fury Execute Off-Hand FX Test (463817)
                    Family Flags: 115, 116
-Hotfixed         : Affects Spells
 Description      : $@spelldesc444767
 
 Tooltip          : Execute damage$?e1[, critical strike chance, and critical strike damage][] increased by $w1%.
@@ -15895,7 +15892,7 @@ Labels           : 16: Class Spells
 Stacks           : 10 maximum
 Proc Chance      : 101%
 Triggered By     : Rampaging Berserker (1269308)
-Attributes       : Aura Points On Client (268), Asynchronous Buff (490)
+Attributes       : Aura Points On Client (268), Asynchronous Aura (490)
 Aura Interrupt   : Login (29), Change Specialization (38), Raid Encounter Start or M+ Start (40), Change Talent (46)
 Effects          :
 #1 (id=1281122)  : Apply Aura (6) | Modify Total Stat% (137)
@@ -15961,7 +15958,7 @@ Labels           : 16: Class Spells
 Stacks           : 10 maximum
 Proc Chance      : 101%
 Triggered By     : Heroic Strike (1269383)
-Attributes       : Aura Points On Client (268), Allow Class Ability Procs (416), Asynchronous Buff (490)
+Attributes       : Aura Points On Client (268), Allow Class Ability Procs (416), Asynchronous Aura (490)
 Aura Interrupt   : Login (29), Change Specialization (38), Raid Encounter Start or M+ Start (40), Change Talent (46)
 Effects          :
 #1 (id=1281196)  : Apply Aura (6) | Modify Target Armor% (280)
