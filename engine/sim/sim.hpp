@@ -577,8 +577,9 @@ struct sim_t : private sc_thread_t
   // cannot suppress the check. A sim option (not an env var) deliberately --
   // it is written into episode.simc and therefore lands in the committed
   // run artifact automatically. Validated (empty/"verify"/"training" only)
-  // inside the existing `if (!solver_control_str.empty())` fail-closed
-  // block in sim.cpp.
+  // UNCONDITIONALLY in sim.cpp (hoisted 2026-08-21, WR-08, out of the
+  // `if (!solver_control_str.empty())` guard -- a typo'd mode value used to
+  // be accepted silently whenever solver_control= itself was unset).
   std::string solver_control_mode_str;
   std::unique_ptr<io::ofstream> solver_control_req_stream;
   std::unique_ptr<std::ifstream> solver_control_rep_stream;

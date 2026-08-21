@@ -4512,6 +4512,28 @@ void sim_t::setup( sim_control_t* c )
   // wrong answer, which this hook exists to never produce. For throughput, run
   // N independent simc processes with distinct solver_control= prefixes.
   //
+  // solver_control_mode validation (phase 200-04, D-06/D-07; hoisted
+  // 2026-08-21, WR-08). Previously nested inside the `!solver_control_str.
+  // empty()` guard below, which meant `solver_control_mode=trainng` (a
+  // typo) with NO `solver_control=` set was accepted silently -- the
+  // opposite of the fail-closed family this comment already claimed
+  // membership in. Validate the value unconditionally; only the "does the
+  // mode do anything" question depends on solver_control_str being set.
+  if ( !solver_control_mode_str.empty() && solver_control_mode_str != "verify" &&
+       solver_control_mode_str != "training" )
+  {
+    throw sc_runtime_error(
+        fmt::format( "solver_control_mode= must be 'verify' or 'training' (got '{}').",
+                     solver_control_mode_str ) );
+  }
+  if ( !solver_control_mode_str.empty() && solver_control_str.empty() )
+  {
+    fmt::print( stderr,
+                "Notice: solver_control_mode={} has no effect without solver_control= also set.\n",
+                solver_control_mode_str );
+    std::fflush( stderr );
+  }
+
   // Clamp rather than error because adjust_threads() above defaults threads to
   // the host CPU count, so erroring would reject even `simc ... solver_control=x`
   // with no threads= at all. The notice keeps it from being silent.
@@ -4539,18 +4561,6 @@ void sim_t::setup( sim_control_t* c )
                        "runs in its own sim and they would share one FIFO pair. Run one simc process per "
                        "profile with a distinct solver_control= prefix instead.",
                        profileset_map.size() ) );
-    }
-
-    // solver_control_mode validation (phase 200-04, D-06/D-07) -- empty
-    // defaults to "verify"; anything other than "verify"/"training" joins
-    // this block's fail-closed family with a clear error, never a silent
-    // default.
-    if ( !solver_control_mode_str.empty() && solver_control_mode_str != "verify" &&
-         solver_control_mode_str != "training" )
-    {
-      throw sc_runtime_error(
-          fmt::format( "solver_control_mode= must be 'verify' or 'training' (got '{}').",
-                       solver_control_mode_str ) );
     }
   }
 
