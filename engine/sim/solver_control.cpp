@@ -249,9 +249,10 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
   // decision_dump::boundary_name() so the wire and the dump can never
   // disagree.
   req << ",\"boundary\":\"" << decision_dump::boundary_name( et ) << "\"";
-  // gcd_remains, swing_mh_remains, holy_power, cooldowns, buffs,
-  // target_debuffs, target_time_to_die, active_enemies, dots, gcd_length,
-  // auto_attack_interval, resolved_action -- identical to decision_dump's
+  // solver_damage_so_far, gcd_remains, swing_mh_remains, holy_power,
+  // cooldowns, buffs, target_debuffs, target_time_to_die, active_enemies,
+  // dots, gcd_length, auto_attack_interval, resolved_action -- identical to
+  // decision_dump's
   // own per-decision line, factored into one shared emitter so the two
   // hooks can never drift (116-02: signature widened to take the
   // boundary's own action anchor, needed at the time for the then-

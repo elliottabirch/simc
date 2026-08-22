@@ -427,6 +427,12 @@ struct player_t : public actor_t
 
   // Damage
   double iteration_dmg, priority_iteration_dmg, iteration_dmg_taken; // temporary accumulators
+  // Per-iteration cumulative kit damage read exactly as the RL reward
+  // source at each decision boundary (FORK-03, tstl-sylvanas phase 205,
+  // owner ruling OQ-1 2026-08-22). Pets included per D-05 -- see
+  // stats_t::add_result's pet->owner routing. Reset every iteration in
+  // player_t::datacollection_begin() alongside iteration_dmg above.
+  double solver_damage_so_far;
   double dpr;
   struct incoming_damage_entry_t {
     timespan_t time;

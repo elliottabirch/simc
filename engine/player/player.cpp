@@ -1134,6 +1134,7 @@ player_t::player_t( sim_t* s, player_e t, util::string_view n, race_e r )
     iteration_dmg( 0 ),
     priority_iteration_dmg( 0 ),
     iteration_dmg_taken( 0 ),
+    solver_damage_so_far( 0 ),
     dpr( 0 ),
     // Heal
     iteration_heal( 0 ),
@@ -6407,6 +6408,7 @@ void player_t::datacollection_begin()
   iteration_executed_foreground_actions = 0;
   iteration_dmg                         = 0;
   priority_iteration_dmg                = 0;
+  solver_damage_so_far                  = 0;
   iteration_heal                        = 0;
   iteration_absorb                      = 0.0;
   iteration_absorb_taken                = 0.0;

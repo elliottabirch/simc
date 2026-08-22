@@ -353,6 +353,17 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   // decision).
   out << ",\"gcd_remains\":" << clamp_nonneg( ( p->gcd_ready - sim->current_time() ).total_seconds() );
 
+  // solver_damage_so_far (FORK-03, tstl-sylvanas phase 205, owner ruling
+  // OQ-1 2026-08-22) -- cumulative kit damage (pets included, D-05) since
+  // the start of the current iteration, read exactly (no fractional bucket
+  // apportionment) as the RL reward source at each decision boundary;
+  // timeline_dmg apportionment demotes to this field's probe cross-check.
+  // Additive; absent on every pre-change record, which every downstream
+  // reader treats as 0 (no damage attributable since the previous
+  // reward-source read). Emitted unconditionally -- universal across every
+  // actor, unlike the resource-scoped fields below.
+  out << ",\"solver_damage_so_far\":" << p->solver_damage_so_far;
+
   // Swing timer (main-hand only - ret paladin has no meaningful OH state).
   if ( p->main_hand_attack && p->main_hand_attack->execute_event )
     out << ",\"swing_mh_remains\":" << p->main_hand_attack->execute_event->remains().total_seconds();

@@ -178,6 +178,30 @@ void stats_t::add_result( double act_amount,
       }
     }
   }
+
+  // solver_damage_so_far (FORK-03, tstl-sylvanas phase 205, owner ruling
+  // OQ-1 2026-08-22) -- a per-iteration cumulative-damage accumulator read
+  // exactly (no fractional bucket apportionment) as the RL reward source at
+  // each decision boundary. Independent of report_details/timeline_amount
+  // above (which only gate the REPORTING timeline), so this always
+  // increments using the SAME quantity (act_amount, never tot_amount) and
+  // the SAME pet->owner routing D-05 requires: a pet's damage rolls to its
+  // owner so the agent's reward reflects total-kit damage, never just the
+  // pet's own; when pets are ALSO reported separately
+  // (sim.report_pets_separately) the pet's own accumulator is credited too,
+  // mirroring the timeline_dmg block above exactly.
+  if ( ! player -> is_pet() )
+  {
+    player -> solver_damage_so_far += act_amount;
+  }
+  else
+  {
+    player -> cast_pet() -> owner -> solver_damage_so_far += act_amount;
+    if ( sim.report_pets_separately )
+    {
+      player -> solver_damage_so_far += act_amount;
+    }
+  }
 }
 
 // stats_t::add_execute =====================================================

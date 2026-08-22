@@ -142,6 +142,13 @@ std::string boundary_name( execute_type et );
 // rather than resolving `chosen` (which, ungated, would show whatever the
 // pre-reply APL/sequence placeholder happened to pick -- the exact bug this
 // fix closes).
+//
+// `solver_damage_so_far` (FORK-03, tstl-sylvanas phase 205, owner ruling
+// OQ-1 2026-08-22) -- p->solver_damage_so_far read exactly, cumulative kit
+// damage (pets included, D-05) since the current iteration began. The RL
+// reward source at each decision boundary; additive on both call sites
+// (decision_dump::record() and solver_control's request line) since both
+// share this function.
 void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool solver_reply_gated = false );
 
 // JSON helpers shared with solver_control (P3b) so both hooks emit
