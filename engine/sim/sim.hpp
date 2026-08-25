@@ -663,6 +663,20 @@ struct sim_t : private sc_thread_t
   // disabled (never touched).
   bool solver_control_auto_attack_started = false;
   std::string solver_control_last_reply_type;
+  // In-process exploration draw (Phase 213, D-08, ruling 213-G17). A
+  // DEDICATED stream, re-seeded once per fight from that fight's own seed
+  // (solver_control::reset_iteration()) -- it must NEVER be the engine's
+  // own generator (`_rng` above, an actor's `p->rng()`, or any other).
+  // Drawing exploration from the engine's own stream would make every
+  // crit and proc a function of the exploration schedule and destroy
+  // same-seed comparability -- the hard constraint D-08 exists to
+  // protect. Accepted cost, recorded rather than papered over: exploration
+  // and fight randomness are now locked together -- the same fight cannot
+  // be replayed with a different exploration draw, and holding exploration
+  // fixed while varying the fight is not possible either. A separate,
+  // explicit seed option would buy that diagnostic back; adding it later
+  // is purely additive (D-08's rejected alternative).
+  rng::rng_t solver_explore_rng;
   // Soft-fail fork hook (simc-offline-evaluation-pipeline phase 116, 116-05) -
   // sequence_soft_fail=<bool> makes sequence_t::schedule_execute() (see
   // action/sequence.cpp) re-validate the current sub-action's readiness

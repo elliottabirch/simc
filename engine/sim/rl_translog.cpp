@@ -12,6 +12,7 @@
 #include "sim/rl_translog.hpp"
 
 #include "player/player.hpp"
+#include "sim/rl_policy.hpp"
 #include "sim/sim.hpp"
 #include "util/io.hpp"
 #include "util/util.hpp"
@@ -151,7 +152,22 @@ void open_and_write_header( sim_t* sim )
   h.format_version = FORMAT_VERSION;
   h.record_size = RECORD_SIZE;
   h.header_size = HEADER_SIZE;
-  h.reserved0 = 0;
+  // Phase 213 D-08/213-G17: populate both from the loaded weights when a
+  // policy was loaded (root->solver_policy_weights non-null); zero
+  // otherwise. A null pointer means the log was written by a run with no
+  // policy loaded, so zero is the truthful value for both fields -- and
+  // every pre-213 log reads the same way for the same reason: the dial
+  // really was zero, because the loader refused anything else.
+  if ( root->solver_policy_weights )
+  {
+    h.exploration = root->solver_policy_weights->exploration;
+    h.round_index = root->solver_policy_weights->generation;
+  }
+  else
+  {
+    h.exploration = 0.0f;
+    h.round_index = 0;
+  }
   h.reserved1 = 0;
   std::strncpy( h.obs_schema_sha, RL_OBS_SCHEMA_SHA, sizeof( h.obs_schema_sha ) - 1 );
   std::strncpy( h.mask_rules_sha, RL_MASK_RULES_SHA, sizeof( h.mask_rules_sha ) - 1 );
@@ -164,7 +180,7 @@ void open_and_write_header( sim_t* sim )
 
 void record_decision( sim_t* sim, const player_t* p, std::uint64_t seq, const float obs[ RL_OBS_DIM ],
                        const std::uint8_t mask[ RL_ACTION_DIM ], int action_index, float q_margin,
-                       bool wait_floored )
+                       bool wait_floored, bool exploratory )
 {
   sim_t* root = root_of( sim );
   if ( root->rl_translog_file_str.empty() )
@@ -195,7 +211,12 @@ void record_decision( sim_t* sim, const player_t* p, std::uint64_t seq, const fl
   }
   r.mask = packed_mask;
   r.action = static_cast<std::uint8_t>( action_index );
-  r.flags = wait_floored ? FLAG_WAIT_FLOORED : 0;
+  // Phase 213 D-08: bit 3 (FLAG_EXPLORATORY) had no writer until now --
+  // OR'd in whenever the random-action branch fired, regardless of
+  // whether the drawn index happened to equal the greedy one (the bit
+  // means "a random action fired", never "the action differed").
+  r.flags = static_cast<std::uint8_t>( ( wait_floored ? FLAG_WAIT_FLOORED : 0 ) |
+                                        ( exploratory ? FLAG_EXPLORATORY : 0 ) );
   r.thread = static_cast<std::uint8_t>( sim->thread_index );
   r.kind = KIND_DECISION;
   r.reserved = 0;

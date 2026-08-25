@@ -158,9 +158,14 @@ struct footer_record
   std::uint8_t reserved;                 // @47 -- written zero
 };
 
-// The header. `reserved1` exists purely to keep the three fingerprint
-// character arrays eight-aligned starting at offset 32 -- it carries no
-// data.
+// The header. The two fields at @20/@24 used to be pure alignment padding
+// (`reserved0`/`reserved1`, carrying no data) that kept the three
+// fingerprint character arrays eight-aligned starting at offset 32. Phase
+// 213 (D-08/213-G17) repurposes them: this is a RENAME plus a TYPE CHANGE,
+// never a relayout -- the offsets themselves (20, 24, 28) do not move, so
+// every pre-213 log (which wrote both zero) still reads as dial 0.0 /
+// round 0, which is the truth about it: the loader refused any other dial
+// value until this same phase's commit.
 //
 // Why 80 and 72, not 64 each: the observation fingerprint is not a bare
 // digest -- it is the 74-character prefixed form "rl-obs-v1:<64 hex>"
@@ -171,15 +176,26 @@ struct footer_record
 // constants header already spells, NUL-terminated and zero-filled to the
 // end of the array -- that is what makes D-04's "each refusal names which
 // config drifted" a direct string comparison on the reader side.
-struct file_header
+// `alignas(8)`: the struct used to get its natural 8-byte alignment for
+// free from the old `std::uint64_t reserved1` member. Splitting that
+// member into two `std::uint32_t`s (above) removed the only member that
+// forced it, so the requirement is now stated explicitly -- this changes
+// nothing about member offsets (all of which stay exactly where the
+// comment says), only the compiler-enforced alignment of the type itself.
+struct alignas( 8 ) file_header
 {
   char magic[ 4 ];                    // @0   -- MAGIC, not NUL-terminated
   std::uint32_t endian_canary;        // @4   -- ENDIAN_CANARY
   std::uint32_t format_version;       // @8   -- FORMAT_VERSION
   std::uint32_t record_size;          // @12  -- RECORD_SIZE
   std::uint32_t header_size;          // @16  -- HEADER_SIZE
-  std::uint32_t reserved0;            // @20
-  std::uint64_t reserved1;            // @24  -- alignment padding only, see above
+  float exploration;                   // @20  -- Phase 213 D-08: the dial value this run was
+                                        //         launched with; 0.0 when no policy was loaded (a
+                                        //         null solver_policy_weights) -- the truthful value,
+                                        //         since the loader refuses anything else at dial 0.0
+  std::uint32_t round_index;          // @24  -- Phase 213: the round (generation) index the loaded
+                                        //         weights blob declared; 0 when no policy was loaded
+  std::uint32_t reserved1;            // @28  -- still reserved, written zero
   char obs_schema_sha[ 80 ];          // @32  -- RL_OBS_SCHEMA_SHA, "rl-obs-v1:<64 hex>"
   char mask_rules_sha[ 72 ];          // @112 -- RL_MASK_RULES_SHA, bare 64 hex
   char action_space_sha[ 72 ];        // @184 -- RL_ACTION_SPACE_SHA, bare 64 hex
@@ -256,8 +272,9 @@ static_assert( offsetof( file_header, endian_canary ) == 4 );
 static_assert( offsetof( file_header, format_version ) == 8 );
 static_assert( offsetof( file_header, record_size ) == 12 );
 static_assert( offsetof( file_header, header_size ) == 16 );
-static_assert( offsetof( file_header, reserved0 ) == 20 );
-static_assert( offsetof( file_header, reserved1 ) == 24 );
+static_assert( offsetof( file_header, exploration ) == 20 );
+static_assert( offsetof( file_header, round_index ) == 24 );
+static_assert( offsetof( file_header, reserved1 ) == 28 );
 static_assert( offsetof( file_header, obs_schema_sha ) == 32 );
 static_assert( offsetof( file_header, mask_rules_sha ) == 112 );
 static_assert( offsetof( file_header, action_space_sha ) == 184 );
@@ -301,9 +318,12 @@ void open_and_write_header( sim_t* sim );
 // Called from inside the in-process arm of solver_control::choose(), once
 // per decision boundary that arm answers. Appends only -- no flush; the
 // fight's close row flushes the whole fight at once (D-13).
+// `exploratory` (Phase 213, D-08): true whenever the random-action branch
+// fired, even when the drawn index happened to equal the greedy one -- the
+// bit means "a random action fired", not "the action differed".
 void record_decision( sim_t* sim, const player_t* p, std::uint64_t seq,
                        const float obs[ RL_OBS_DIM ], const std::uint8_t mask[ RL_ACTION_DIM ],
-                       int action_index, float q_margin, bool wait_floored );
+                       int action_index, float q_margin, bool wait_floored, bool exploratory );
 
 // Called from sim_t::combat_end(), after datacollection_end(). Builds and
 // appends the close row, then flushes the buffered rows for this fight to

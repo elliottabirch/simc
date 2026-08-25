@@ -41,6 +41,7 @@
 #include "util/util.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -277,14 +278,23 @@ rl_weights_t load_rlw1( const std::string& path )
         path, RL_ACTION_SPACE_SHA, w.action_space_sha ) );
   }
 
-  // Refusal: exploration (D-01). Compared against exact zero -- the
-  // fixture minter writes this field as an exact 0.0f, so an epsilon band
-  // would only hide a real non-zero value. In-process exploration is not
-  // implemented in this phase; it arrives with Phase 213's generation
-  // trainer. Written as a single guarded line, nothing else interleaved,
-  // so 213-01 can lift it out (or delete it, once C++ exploration lands)
-  // in one clean edit (ruling 213-G17).
-  if ( w.exploration != 0.0f ) { throw sc_runtime_error( fmt::format( "rl_policy::load_rlw1: file '{}' declares exploration={} -- in-process exploration is not implemented in this phase (arrives with Phase 213's generation trainer); the weights blob must carry exploration=0.0", path, w.exploration ) ); }
+  // Refusal: exploration VALIDITY (Phase 213, ruling 213-G17). Phase 210's
+  // placeholder rejected any exploration value other than exact zero,
+  // written as a single guarded line so this phase could lift it out in
+  // one clean edit once the C++ draw itself existed -- it now does
+  // (solver_control.cpp's in-process arm, below), so the honest guard is a
+  // RANGE check, matching the writer-side half in
+  // scripts/rl/weights_export.py: not finite, below zero, or above one is
+  // refused by name, same message shape as the three fingerprint refusals
+  // above. This lift and the draw land in the same commit -- a lift
+  // without a draw would be an engine that silently ignores the dial.
+  if ( !std::isfinite( w.exploration ) || w.exploration < 0.0f || w.exploration > 1.0f )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' declares exploration={}, which must be finite and within "
+        "[0.0, 1.0]",
+        path, w.exploration ) );
+  }
 
   // WR-02 fix, cheap half (210-CR-FIX): size forward()'s hidden-layer
   // scratch buffers ONCE, here at load time -- w.layers.size() == 3 is

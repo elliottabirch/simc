@@ -25,6 +25,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace
 {
@@ -479,7 +480,49 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     float q[ RL_ACTION_DIM ];
     rl_policy::forward( *sim->solver_policy_weights, obs, q );
 
-    const int idx = rl_policy::masked_argmax( q, mask );
+    const int greedy_idx = rl_policy::masked_argmax( q, mask );
+    int idx = greedy_idx;
+    bool exploratory = false;
+
+    // Phase 213 D-08: the random-action dial. Tested against zero BEFORE
+    // touching the generator -- at a dial of exactly zero the engine takes
+    // ZERO draws, which is what keeps every scoring run and every pre-213
+    // run byte-identical to what it was, mirroring the Python side's own
+    // zero guard.
+    const float exploration = sim->solver_policy_weights->exploration;
+    if ( exploration > 0.0f )
+    {
+      // ONE draw decides whether to explore at all.
+      if ( sim->solver_explore_rng.real() < exploration )
+      {
+        // Collect the SAME legality list the greedy pick just read above --
+        // never a freshly built one -- and draw uniformly among the legal
+        // indices. If none is legal, masked_argmax() already owns that
+        // degenerate case (it falls back to index 0); this block must not
+        // invent a second answer for it, so the greedy index is left alone
+        // and the flag is NOT set.
+        std::vector<int> legal_indices;
+        for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+        {
+          if ( mask[ i ] )
+            legal_indices.push_back( static_cast<int>( i ) );
+        }
+        if ( !legal_indices.empty() )
+        {
+          const int pick = static_cast<int>(
+              sim->solver_explore_rng.range( 0.0, static_cast<double>( legal_indices.size() ) ) );
+          idx = legal_indices[ static_cast<std::size_t>( pick ) ];
+          // Set whenever the random branch fired, even when the drawn
+          // index happens to equal the greedy one -- the bit means "a
+          // random action fired", not "the action differed". Phase
+          // 213-02's staleness watch splits recorded decisions into ones
+          // the recording policy chose on purpose and ones it rolled for,
+          // and that split is only well-defined under this reading.
+          exploratory = true;
+        }
+      }
+    }
+
     const rl_action_desc& action = RL_ACTIONS[ idx ];
 
     // Confidence gap (Phase 212, plan 212-01, TLOG-02): the largest legal Q
@@ -537,7 +580,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       // channel is being built (rulings 210-G21/212-G5); this comment
       // exists so the next reader does not go looking for a field that
       // was never there.
-      rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, false );
+      rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, false, exploratory );
       // 212-CR-FIX WR-06: accept_cast() can refuse a not-ready action via
       // protocol_abort() (a throw), which unwinds past combat_end()'s
       // record_close() hook entirely for this fight -- without this catch,
@@ -564,7 +607,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // flag bit's only source -- it says the wait length came from the
     // floor rather than from a real timer. No-op when rl_translog= is
     // unset.
-    rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, wr.floored );
+    rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, wr.floored, exploratory );
     // 212-CR-FIX WR-06: same reasoning as the cast branch above -- flush on
     // an abort out of accept_wait() so the decision row already appended
     // survives it.
@@ -612,5 +655,22 @@ void reset_iteration( sim_t* sim )
   sim->solver_control_last_reply_type.clear();
   // solver_control_seq is DELIBERATELY NOT cleared -- see the header
   // comment. Stream handles are likewise untouched.
+
+  // Phase 213 D-08: re-seed the DEDICATED exploration stream once per
+  // fight. Derived from three values the sim already holds -- its own
+  // seed, the current fight index, and the writer (thread) index --
+  // combined so adjacent fights start far apart (the fight index is
+  // multiplied by a large odd constant before adding). The fight index has
+  // to be part of this derivation: without it, every fight in a
+  // multi-fight launch would draw the identical exploration sequence at
+  // the identical decision positions, which is not exploration, it is one
+  // pattern repeated N times. `rng::rng_t::seed()` runs the result through
+  // its own 64-bit mixer, so this derivation only needs to spread the
+  // input apart, not pre-mix it.
+  constexpr std::uint64_t EXPLORE_SEED_FIGHT_SPREAD = 0x9E3779B97F4A7C15ull;
+  const std::uint64_t explore_seed = sim->seed
+      + static_cast<std::uint64_t>( sim->current_iteration ) * EXPLORE_SEED_FIGHT_SPREAD
+      + static_cast<std::uint64_t>( sim->thread_index );
+  sim->solver_explore_rng.seed( explore_seed );
 }
 } // namespace solver_control
