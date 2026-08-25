@@ -1939,6 +1939,11 @@ void sim_t::combat_begin()
 
   reset();
 
+  // [214-01 C1] per-fight solver_control state reset -- see the function's
+  // own doc comment in sim/solver_control.hpp for why this hook (not
+  // reset() itself) and exactly which four members it clears.
+  solver_control::reset_iteration( this );
+
   // Debug seed needs to be done _after_ sim reset, because deterministic=1 will reseed in
   // sim_t::reset()
   if ( !debug_seed.empty() )

@@ -315,6 +315,11 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     req << ",\"type\":\"decision\"";
     req << ",\"seq\":" << seq;
     req << ",\"t\":" << sim->current_time().total_seconds();
+    // 214-01 C2: the fight index, additive (no SOLVER_CONTROL_PROTOCOL_VERSION
+    // bump, same reasoning as "boundary" below) -- lets a client tag a
+    // decision with its fight without inferring one from `t` running
+    // backwards across a multi-fight (`iterations>1`) launch.
+    req << ",\"iteration\":" << sim->current_iteration;
     req << ",\"actor\":\"" << decision_dump::json_escape( p->name() ) << "\"";
     req << ",\"apl_choice\":"
         << ( apl_choice ? ( "\"" + decision_dump::json_escape( apl_choice->name() ) + "\"" ) : std::string( "null" ) );
@@ -566,5 +571,20 @@ void finish( sim_t* sim )
 
   if ( sim->solver_control_rep_stream && sim->solver_control_rep_stream->is_open() )
     sim->solver_control_rep_stream->close();
+}
+
+// 214-01 C1. See the declaration's own doc comment in solver_control.hpp
+// for the full justification; this body is deliberately just the clear.
+void reset_iteration( sim_t* sim )
+{
+  if ( sim->solver_control_str.empty() && sim->solver_policy_str.empty() )
+    return;
+
+  sim->solver_control_auto_attack_started = false;
+  sim->solver_control_has_pending_wait = false;
+  sim->solver_control_pending_wait_s = 0.0;
+  sim->solver_control_last_reply_type.clear();
+  // solver_control_seq is DELIBERATELY NOT cleared -- see the header
+  // comment. Stream handles are likewise untouched.
 }
 } // namespace solver_control

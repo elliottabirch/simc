@@ -78,4 +78,35 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et = execute_t
 // No-op if the channel was never opened (solver_control= unset, or no
 // decision boundary was ever reached).
 void finish( sim_t* sim );
+
+// tstl-sylvanas phase 214, plan 01 (C1). Called once per FIGHT, from
+// sim_t::combat_begin() immediately after reset() -- see the call site's own
+// comment for why that hook (not sim_t::reset() itself, which also runs
+// during construction/reset outside a fight) is the right one. A no-op
+// (single early-return check) when both solver_control_str and
+// solver_policy_str are empty, mirroring choose()'s own widened entry guard.
+//
+// Clears exactly the four per-fight members that choose()'s t=0 yield block
+// and wait-reply path populate: solver_control_auto_attack_started,
+// solver_control_has_pending_wait, solver_control_pending_wait_s and
+// solver_control_last_reply_type. Left uncleared without this function,
+// _auto_attack_started never being false again means fights 1..N-1 of a
+// multi-fight (`iterations>1`) launch never start the character's melee
+// swing and never take the zero-delay yield at t=0 -- so those fights land
+// no white damage and make their first decision against a not-yet-updated
+// buff state; a leftover _has_pending_wait/_pending_wait_s pair leaks an
+// unconsumed wait into the next fight's first ready event. Neither throws.
+// Both produce a complete, plausible-looking fight with wrong numbers --
+// this is the actual defect .planning/todos/pending/2026-08-25-solver-
+// policy-zero-damage-multi-iteration.md measured and root-caused.
+//
+// solver_control_seq is DELIBERATELY NOT cleared here, and must never be:
+// the FIFO arm refuses a reply whose "seq" does not match the request's
+// (choose()'s own protocol_abort on mismatch), and that refusal is only
+// meaningful because the counter never restarts -- restarting it once per
+// fight would make a stale reply from the previous fight look valid. The
+// two stream handles (solver_control_req_stream/_rep_stream) are likewise
+// never touched here -- the channel is one continuous stream across every
+// fight of a launch, by design.
+void reset_iteration( sim_t* sim );
 }
