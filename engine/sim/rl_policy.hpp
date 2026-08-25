@@ -77,7 +77,20 @@ struct rl_state_t
   const cooldown_reading* find_cooldown( const char* name ) const;
 };
 
-struct wait_result { double seconds = 0.0; const char* source = "floor"; bool floored = false; };
+// WR-05 fix (210-CR-FIX): `source` is a `std::string`, not a `const char*`
+// into shared storage. `wait_result` is part of the pinned POD interface --
+// a `const char*` here previously pointed into a function-local `static
+// thread_local std::string` inside build_wait() that the NEXT build_wait()
+// call on the same thread overwrites (and may reallocate); safe only while
+// exactly one `wait_result` is alive at a time and consumed synchronously.
+// That invariant is not enforced by the type, so the first future caller to
+// hold two `wait_result`s concurrently (Phase 212's logger, or any wait-arm
+// caller beyond solver_control::choose()'s single current one) would dangle
+// silently, with a plausible-looking string, since the storage is reused
+// rather than freed. This is the wait arm, not the hot path -- one
+// allocation here is fine; the invariant is worth removing entirely rather
+// than documenting.
+struct wait_result { double seconds = 0.0; std::string source = "floor"; bool floored = false; };
 
 // ---- Stage 1: needs the engine. NOT exercised by the standalone test executable. ----
 rl_state_t read_state( const player_t* p, bool boundary_is_foreground );

@@ -549,24 +549,16 @@ wait_result build_wait( const rl_state_t& s )
 
   const wait_candidate& winner = candidates[ best ];
 
-  // `source` is a `const char*` in the pinned interface; a cooldown-row
-  // label ("cooldown:<row>") is dynamically formatted and must outlive the
-  // immediate caller. A thread_local buffer is sufficient here: threads=1
-  // is a hard clamp for solver_policy= (XPORT-01/AP-3), and the caller
-  // (solver_control::choose()'s in-process arm) consumes this result
-  // synchronously, before any other call on this thread could reuse the
-  // buffer.
-  static thread_local std::string label_storage;
-  const char* source;
+  // WR-05 fix (210-CR-FIX): `source` is a `std::string` in `wait_result`
+  // now, so a cooldown-row label ("cooldown:<row>") is built directly into
+  // the return value -- no thread_local buffer, no lifetime invariant tying
+  // this to "exactly one wait_result alive at a time, consumed
+  // synchronously". One allocation on the wait arm only, not the hot path.
+  std::string source;
   if ( winner.is_cooldown )
-  {
-    label_storage = "cooldown:" + *winner.row_name;
-    source = label_storage.c_str();
-  }
+    source = "cooldown:" + *winner.row_name;
   else
-  {
     source = winner.literal_source;
-  }
 
   const bool floored = winner.seconds < RL_WAIT_FLOOR_SECONDS;
   const double seconds = std::max( winner.seconds, RL_WAIT_FLOOR_SECONDS );
