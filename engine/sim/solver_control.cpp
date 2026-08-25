@@ -11,6 +11,7 @@
 #include "player/player.hpp"
 #include "sim/event.hpp"
 #include "sim/rl_policy.hpp"
+#include "sim/rl_translog.hpp"
 #include "sim/sim.hpp"
 #include "util/io.hpp"
 
@@ -20,6 +21,7 @@
 
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -475,12 +477,62 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     const int idx = rl_policy::masked_argmax( q, mask );
     const rl_action_desc& action = RL_ACTIONS[ idx ];
 
+    // Confidence gap (Phase 212, plan 212-01, TLOG-02): the largest legal Q
+    // minus the second largest, considering only entries whose mask byte is
+    // non-zero. If fewer than two actions were legal there is no second
+    // place -- write a quiet NaN rather than substituting zero. Zero is a
+    // legitimate gap (a genuine tie); conflating "tied" with "no
+    // alternative existed" would destroy the one number that tells the two
+    // apart. Kept in float, matching what forward() produced.
+    float best = -std::numeric_limits<float>::infinity();
+    float second_best = -std::numeric_limits<float>::infinity();
+    int legal_count = 0;
+    for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+    {
+      if ( !mask[ i ] )
+        continue;
+      ++legal_count;
+      if ( q[ i ] > best )
+      {
+        second_best = best;
+        best = q[ i ];
+      }
+      else if ( q[ i ] > second_best )
+      {
+        second_best = q[ i ];
+      }
+    }
+    const float q_margin =
+        legal_count >= 2 ? ( best - second_best ) : std::numeric_limits<float>::quiet_NaN();
+
     if ( action.kind == rl_action_kind::cast )
     {
       // 210-G23: set the same member the FIFO arm sets at its own
       // reply-type write above -- decision_dump::record() reads this and
       // the dumps must be honest whether or not anything ever diffs them.
       sim->solver_control_last_reply_type = "cast";
+      // Flight recorder decision row (Phase 212, plan 212-01, TLOG-02).
+      // Written BEFORE accept_cast(), not after: accept_cast() can refuse
+      // a not-ready action and abort the run, and a decision that was made
+      // and then refused is exactly the decision a later investigation
+      // would most want to see. No-op when rl_translog= is unset.
+      //
+      // Corrected join premise (D-01, refuted premise R-1): 212-CONTEXT's
+      // D-01 said this log and decision_dump could be joined on a shared
+      // decision counter. They cannot -- decision_dump::record() writes t,
+      // iteration, thread, boundary, actor and chosen, and no decision
+      // counter at all (decision_dump.cpp's record()); the only three
+      // occurrences of solver_control_seq in the whole engine are this
+      // arm's `seq` above, sim.hpp's member declaration, and a comment in
+      // sim.cpp. If a join is ever needed the key is (thread, iteration,
+      // t), with both sides' times rounded to the millisecond grid the
+      // simulator actually runs on -- float32 near t=300s resolves to
+      // about 3e-5s, roughly 33x finer than a millisecond, so the rounding
+      // is exact rather than approximate. Nothing joins today and no side
+      // channel is being built (rulings 210-G21/212-G5); this comment
+      // exists so the next reader does not go looking for a field that
+      // was never there.
+      rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, false );
       return accept_cast( p, action.token, seq );
     }
 
@@ -488,6 +540,11 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // RL_ACTIONS' own comment in rl_policy_constants.h).
     sim->solver_control_last_reply_type = "wait";
     const rl_policy::wait_result wr = rl_policy::build_wait( state );
+    // Flight recorder decision row, wait branch. wr.floored is the fifth
+    // flag bit's only source -- it says the wait length came from the
+    // floor rather than from a real timer. No-op when rl_translog= is
+    // unset.
+    rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, wr.floored );
     accept_wait( sim, et, wr.seconds,
                  "in-process (seq=" + std::to_string( seq ) + ", source=" + wr.source + ")" );
     return nullptr;
