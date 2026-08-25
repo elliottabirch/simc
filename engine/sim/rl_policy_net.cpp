@@ -202,7 +202,59 @@ rl_weights_t load_rlw1( const std::string& path )
         path, w.layers.back().out_features, RL_ACTION_DIM ) );
   }
 
-  // [210-06] D-01 exploration + D-02 fingerprint refusals land here.
+  // D-01/D-02 (210-05R Task 3): four load-time refusals, named per
+  // condition. This C++ implements the format `scripts/rl/rlw1.py`
+  // (this repo) writes -- that Python module is the format's normative
+  // counterpart.
+
+  // Refusal: obs schema fingerprint. Byte-exact string comparison against
+  // the FULL stored string -- deliberately NOT stripping the "rl-obs-v1:"
+  // scheme prefix before comparing. The scheme string carries the encoder
+  // version (obs.py:78-81), so comparing the full string automatically
+  // also compares encoder versions; stripping it would silently permit an
+  // encoderVersion bump with an unchanged digest, which ruling N-3 exists
+  // to freeze against.
+  if ( w.obs_schema_sha != RL_OBS_SCHEMA_SHA )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' obs schema fingerprint mismatch -- expected '{}', found "
+        "'{}'. Re-mint the weights blob (or regenerate rl_policy_constants.h) so both describe the "
+        "same observation registry.",
+        path, RL_OBS_SCHEMA_SHA, w.obs_schema_sha ) );
+  }
+
+  // Refusal: mask-rules fingerprint.
+  if ( w.mask_rules_sha != RL_MASK_RULES_SHA )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' mask rules fingerprint mismatch -- expected '{}', found "
+        "'{}'. Re-mint the weights blob (or regenerate rl_policy_constants.h) so both describe the "
+        "same mask rules.",
+        path, RL_MASK_RULES_SHA, w.mask_rules_sha ) );
+  }
+
+  // Refusal: action-space fingerprint. Exists even though ROADMAP
+  // criterion 4 names only the observation sha: a reordered action list
+  // means argmax index 2 resolves to a different spell, the run still
+  // completes, the damage is still plausible, and nothing else errors --
+  // this is the only control that catches that class of drift.
+  if ( w.action_space_sha != RL_ACTION_SPACE_SHA )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' action space fingerprint mismatch -- expected '{}', found "
+        "'{}'. Re-mint the weights blob (or regenerate rl_policy_constants.h) so both describe the "
+        "same action space.",
+        path, RL_ACTION_SPACE_SHA, w.action_space_sha ) );
+  }
+
+  // Refusal: exploration (D-01). Compared against exact zero -- the
+  // fixture minter writes this field as an exact 0.0f, so an epsilon band
+  // would only hide a real non-zero value. In-process exploration is not
+  // implemented in this phase; it arrives with Phase 213's generation
+  // trainer. Written as a single guarded line, nothing else interleaved,
+  // so 213-01 can lift it out (or delete it, once C++ exploration lands)
+  // in one clean edit (ruling 213-G17).
+  if ( w.exploration != 0.0f ) { throw sc_runtime_error( fmt::format( "rl_policy::load_rlw1: file '{}' declares exploration={} -- in-process exploration is not implemented in this phase (arrives with Phase 213's generation trainer); the weights blob must carry exploration=0.0", path, w.exploration ) ); }
 
   return w;
 }
