@@ -177,6 +177,12 @@ void record_decision( sim_t* sim, const player_t* p, std::uint64_t seq, const fl
   r.t = static_cast<float>( sim->current_time().total_seconds() );
   std::memcpy( r.obs, obs, sizeof( r.obs ) );
   r.q_margin = q_margin;
+  // 212-CR-FIX NT-02: narrowed 64->32 bits silently, unlike iteration/thread
+  // above and below, which assert_write_site_ranges() refuses loudly rather
+  // than truncate. Deliberate asymmetry, not an oversight: 2^32 decisions is
+  // not reachable in practice (assert_write_site_ranges guards the fields
+  // that ARE reachable in practice), so this is a documented exception
+  // rather than a matching loud refusal.
   r.seq = static_cast<std::uint32_t>( seq );
   r.iteration = static_cast<std::uint16_t>( sim->current_iteration );
 
@@ -295,6 +301,13 @@ void write_footer( sim_t* sim )
   sim_t* root = root_of( sim );
   if ( root->rl_translog_file_str.empty() )
     return;
+
+  // 212-CR-FIX NT-04: record_decision() and record_close() both call this;
+  // write_footer() previously did not, and still writes
+  // r.thread = sim->thread_index unchecked below. Harmless today (the
+  // footer is written by the root, thread_index == 0), but this was the one
+  // write site outside the guard.
+  assert_write_site_ranges( sim );
 
   // 212-CR-FIX WR-03: deliberately ROOT here, not SIM -- the footer reads
   // the ROOT's own merged run-level collected_data below, so it must

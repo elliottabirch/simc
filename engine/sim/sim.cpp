@@ -4720,9 +4720,29 @@ void sim_t::setup( sim_control_t* c )
                        profileset_map.size() ) );
     }
 
+    // 212-CR-FIX NT-03 (also closes WR-03's reachable half / NT-05):
+    // a non-root sim reaching this point with a non-empty
+    // rl_translog_file_str -- a profileset's OWN option block setting
+    // rl_translog= on just that one profile (profileset_map is empty on
+    // the CHILD sim, so the refusal above never fires for it), or a
+    // calculate_scale_factors=1/dps_plot_stats=/reforge_plot_stat= child
+    // that inherited the string via setup(parent->control) -- would
+    // otherwise fall through to "Root only" below and silently write
+    // nothing: the option looks accepted, and the run reports success,
+    // but no bytes for that child's fights ever reach disk. Refuse
+    // instead of a silent partial recording.
+    if ( parent )
+    {
+      throw sc_runtime_error(
+          "rl_translog= is set on a non-root sim (a profileset's own option block, or a "
+          "calculate_scale_factors=1/dps_plot_stats=/reforge_plot_stat= child sim): only the root "
+          "sim ever opens the recorder stream, so this option would be silently accepted while "
+          "nothing is ever written for this sim's fights. Set rl_translog= on the top-level sim "
+          "options only, and run those analyses without it." );
+    }
+
     // Root only -- see sim.hpp's rl_translog member comment.
-    if ( !parent )
-      rl_translog::open_and_write_header( this );
+    rl_translog::open_and_write_header( this );
   }
 
   if ( iterations <= 0 )
