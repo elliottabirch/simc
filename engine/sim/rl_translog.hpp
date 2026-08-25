@@ -31,6 +31,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 struct sim_t;
 struct player_t;
@@ -120,23 +121,41 @@ struct close_record
   std::uint8_t reserved;              // @47 -- written zero
 };
 
+// 212-CR-FIX BL-01: this footer carries two DIFFERENT populations of fight,
+// and the field names below say which is which so a reader never has to
+// guess. `engine_run_aggregate` and `mean_collected_fight_length` are the
+// engine's OWN run-level numbers (p->collected_data.*.mean()), which only
+// ever accumulate COLLECTED fights -- sim.cpp's datacollection_end() guard
+// skips the discarded warm-up fight entirely. `fight_count` and
+// `summed_close_damage`, by contrast, are the writer's own running totals
+// from record_close(), which runs for EVERY fight including the warm-up.
+// `collected_fight_count` is the fourth number that makes this checkable:
+// it is incremented in record_close() under the exact same predicate that
+// sets a close row's FLAG_COLLECTED, so it counts the SAME population
+// `engine_run_aggregate`/`mean_collected_fight_length` were computed over.
+// A reader wanting `summed_close_damage / fight_count` as a check against
+// `engine_run_aggregate` must instead sum only the close rows with
+// FLAG_COLLECTED set and divide by `collected_fight_count` -- mixing the
+// two populations (as the pre-fix footer silently invited) is guaranteed
+// to disagree for any run with iterations > 1, for a reason that has
+// nothing to do with a wrong field, a wrong offset or a missed fight.
 struct footer_record
 {
-  double engine_run_aggregate;       // @0  -- p->collected_data.compound_dmg.mean()
-  float total_sim_seconds;            // @8  -- p->collected_data.fight_length.mean()
-  std::uint32_t fight_count;          // @12
-  std::uint32_t row_count;            // @16 -- INCLUDES the footer row itself
-  std::uint32_t footer_source;        // @20 -- FOOTER_SOURCE_PER_FIGHT_ACCUMULATOR
-  double summed_close_damage;         // @24 -- writer's own running sum of close-row damage
-  std::uint32_t zero32;                // @32
-  std::uint32_t zero36;                // @36
-  std::uint16_t iteration;             // @40 -- written 0xFFFF, a sentinel: no fight owns the footer
-  std::uint8_t zero42;                  // @42
-  std::uint8_t zero43;                  // @43
-  std::uint8_t flags;                   // @44 -- written zero
-  std::uint8_t thread;                  // @45
-  std::uint8_t kind;                    // @46 -- KIND_FOOTER
-  std::uint8_t reserved;                // @47 -- written zero
+  double engine_run_aggregate;         // @0  -- p->collected_data.compound_dmg.mean(); COLLECTED fights only
+  float mean_collected_fight_length;   // @8  -- p->collected_data.fight_length.mean(); COLLECTED fights only
+  std::uint32_t fight_count;           // @12 -- ALL fights, warm-up included
+  std::uint32_t row_count;             // @16 -- INCLUDES the footer row itself
+  std::uint32_t footer_source;         // @20 -- FOOTER_SOURCE_PER_FIGHT_ACCUMULATOR
+  double summed_close_damage;          // @24 -- writer's own running sum of close-row damage; ALL fights, warm-up included
+  std::uint32_t collected_fight_count; // @32 -- count of close rows with FLAG_COLLECTED set (excludes warm-up); was the unused `zero32` slot
+  std::uint32_t zero36;                 // @36
+  std::uint16_t iteration;              // @40 -- written 0xFFFF, a sentinel: no fight owns the footer
+  std::uint8_t zero42;                   // @42
+  std::uint8_t zero43;                   // @43
+  std::uint8_t flags;                    // @44 -- written zero
+  std::uint8_t thread;                   // @45
+  std::uint8_t kind;                     // @46 -- KIND_FOOTER
+  std::uint8_t reserved;                 // @47 -- written zero
 };
 
 // The header. `reserved1` exists purely to keep the three fingerprint
@@ -168,13 +187,23 @@ struct file_header
 
 // ---- Compile-time proof (D-20): the build itself is the proof ----
 
-static_assert( sizeof( decision_record ) == 48, "decision_record must be exactly 48 bytes" );
+// 212-CR-FIX WR-01: these four assertions tie RECORD_SIZE/HEADER_SIZE --
+// the free-standing literals append_row()'s memcpy actually copies and
+// open_and_write_header() stamps into the file -- to the structs' own
+// sizeof. Before this fix RECORD_SIZE=48u and HEADER_SIZE=256u were
+// separate literals that merely happened to agree with every struct's
+// sizeof; nothing tied them together, so a future layout edit that changed
+// one struct's size without also updating RECORD_SIZE would compile clean
+// while append_row() silently over-read (or truncated) every row of that
+// kind. This is the one hole D-20's "a disagreeing layout cannot compile"
+// premise did not already close.
+static_assert( sizeof( decision_record ) == RECORD_SIZE, "decision_record must be exactly RECORD_SIZE bytes" );
 static_assert( alignof( decision_record ) == 8, "decision_record must be 8-aligned" );
-static_assert( sizeof( close_record ) == 48, "close_record must be exactly 48 bytes" );
+static_assert( sizeof( close_record ) == RECORD_SIZE, "close_record must be exactly RECORD_SIZE bytes" );
 static_assert( alignof( close_record ) == 8, "close_record must be 8-aligned" );
-static_assert( sizeof( footer_record ) == 48, "footer_record must be exactly 48 bytes" );
+static_assert( sizeof( footer_record ) == RECORD_SIZE, "footer_record must be exactly RECORD_SIZE bytes" );
 static_assert( alignof( footer_record ) == 8, "footer_record must be 8-aligned" );
-static_assert( sizeof( file_header ) == 256, "file_header must be exactly 256 bytes" );
+static_assert( sizeof( file_header ) == HEADER_SIZE, "file_header must be exactly HEADER_SIZE bytes" );
 static_assert( alignof( file_header ) == 8, "file_header must be 8-aligned" );
 
 // decision_record field offsets
@@ -206,12 +235,12 @@ static_assert( offsetof( close_record, reserved ) == 47 );
 
 // footer_record field offsets
 static_assert( offsetof( footer_record, engine_run_aggregate ) == 0 );
-static_assert( offsetof( footer_record, total_sim_seconds ) == 8 );
+static_assert( offsetof( footer_record, mean_collected_fight_length ) == 8 );
 static_assert( offsetof( footer_record, fight_count ) == 12 );
 static_assert( offsetof( footer_record, row_count ) == 16 );
 static_assert( offsetof( footer_record, footer_source ) == 20 );
 static_assert( offsetof( footer_record, summed_close_damage ) == 24 );
-static_assert( offsetof( footer_record, zero32 ) == 32 );
+static_assert( offsetof( footer_record, collected_fight_count ) == 32 );
 static_assert( offsetof( footer_record, zero36 ) == 36 );
 static_assert( offsetof( footer_record, iteration ) == 40 );
 static_assert( offsetof( footer_record, zero42 ) == 42 );
@@ -247,7 +276,23 @@ static_assert( offsetof( decision_record, reserved ) == 47 );
 static_assert( RL_ACTION_DIM <= 8, "the legality bitfield is one byte; a wider action set must fail the build" );
 static_assert( RL_OBS_DIM == 5, "the row reserves exactly five float32 obs slots at offset 12" );
 
-// ---- Writer interface. All four are no-ops when rl_translog= is unset. ----
+// 212-CR-FIX WR-07: the three fingerprint strings are generated
+// (rl_policy_constants.h) and NOT under this file's control -- nothing
+// stopped them from growing past their fixed-width header fields. Before
+// this fix, open_and_write_header()'s std::strncpy truncated silently on
+// overflow (guaranteed NUL-terminated by value-initialisation, but
+// truncated all the same), which would turn D-04's fingerprint refusal
+// into a permanently misleading "config drifted" message naming a config
+// that did not actually drift -- just got cut short. `< 80`/`< 72` (not
+// `<=`) because strncpy's destination needs room for the trailing NUL.
+static_assert( std::string_view( RL_OBS_SCHEMA_SHA ).size() < 80,
+               "RL_OBS_SCHEMA_SHA must fit file_header::obs_schema_sha with room for its NUL" );
+static_assert( std::string_view( RL_MASK_RULES_SHA ).size() < 72,
+               "RL_MASK_RULES_SHA must fit file_header::mask_rules_sha with room for its NUL" );
+static_assert( std::string_view( RL_ACTION_SPACE_SHA ).size() < 72,
+               "RL_ACTION_SPACE_SHA must fit file_header::action_space_sha with room for its NUL" );
+
+// ---- Writer interface. All five are no-ops when rl_translog= is unset. ----
 
 // Root only -- called once, from sim_t::setup(). Opens the stream and
 // writes the 256-byte header.
@@ -270,5 +315,18 @@ void record_close( sim_t* sim );
 // existing `if ( success )` guard. Appends the footer row, flushes and
 // closes the stream.
 void write_footer( sim_t* sim );
+
+// 212-CR-FIX WR-06: called from the in-process arm's cast/wait epilogues
+// (solver_control.cpp) when accept_cast()/accept_wait() throws. On that
+// path record_close() never runs for the in-flight fight -- the exception
+// unwinds past combat_end()'s hook entirely -- so without this call the
+// buffered rows, INCLUDING the decision that was made and then refused
+// (the one thing the write-before-accept ordering exists to preserve),
+// would be lost with the process, and the file that survives has no
+// footer, so D-14 makes the reader refuse it whole anyway. Writes whatever
+// is currently buffered to disk and clears the buffer; does NOT append a
+// close or footer row, because the fight did not actually end. No-op when
+// rl_translog= is unset or nothing is buffered.
+void flush_pending( sim_t* sim );
 
 } // namespace rl_translog

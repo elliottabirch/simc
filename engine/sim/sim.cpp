@@ -2081,11 +2081,24 @@ void sim_t::combat_end()
     datacollection_end();
 
   // Flight recorder close row (phase 212, plan 212-01, TLOG-02, D-07/D-08).
-  // Placement AFTER datacollection_end() is load-bearing: iteration_fight_length
-  // is only finalised there (player.cpp's datacollection_end path), and this
-  // hook lives in combat_end() itself -- outside both solver_control::choose()
-  // transport arms -- so the close row is written on BOTH transports and with
-  // neither (D-08). No-op when rl_translog= is unset.
+  // 212-CR-FIX WR-08: the placement AFTER datacollection_end() is NOT
+  // load-bearing for iteration_fight_length the way an earlier comment here
+  // claimed -- p->combat_end() above (which every player_t reaches
+  // unconditionally, warm-up fight included) calls player_t::demise(),
+  // which ALSO does `iteration_fight_length += current_time() - arise_time`
+  // and clears arise_time, independent of the SIM-level
+  // `iterations==1||current_iteration>=1` guard that skips
+  // datacollection_end() for the warm-up fight. Measured proof: 212-RECEIPT.md's
+  // fight-0 row reports fight_length=300.000, not 0.0, under the DEFAULT
+  // APL with no translog code involved at all. `solver_damage_so_far` is
+  // likewise untouched by datacollection_end(). The hook stays here for
+  // consistency with datacollection_end()'s own collected/warm-up guard
+  // (so both this row and the reader's FLAG_COLLECTED bit are decided at
+  // the same point in combat_end()), not because either field it reads
+  // requires this exact placement. This hook lives in combat_end() itself
+  // -- outside both solver_control::choose() transport arms -- so the
+  // close row is written on BOTH transports and with neither (D-08).
+  // No-op when rl_translog= is unset.
   rl_translog::record_close( this );
 
   //assert( active_enemies == 0 );

@@ -70,6 +70,24 @@ void assert_write_site_ranges( sim_t* sim )
   }
 }
 
+// 212-CR-FIX WR-04: a stream that has entered a failed state (badbit/
+// failbit, e.g. an out-of-space write) does not throw on write()/flush() --
+// it silently no-ops on every call from that point on. Without this check,
+// a full disk mid-run yields a footerless file that D-14 makes the reader
+// refuse whole, with exit code 0 and nothing printed anywhere pointing at
+// the disk. Call this immediately after every flush().
+void assert_stream_ok( sim_t* root, const char* where )
+{
+  if ( !*root->rl_translog_stream )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_translog: write to '{}' failed in {} after {} rows -- the stream entered a failed "
+        "state (disk full, permissions, or similar); refusing to continue silently, the file on "
+        "disk is now incomplete and D-14 will refuse it whole on read.",
+        root->rl_translog_file_str, where, root->rl_translog_row_count ) );
+  }
+}
+
 // ruling 212-G9: the one actor whose fight this recorder describes. Nothing
 // in the fork records which player the in-process policy drove, so "the
 // only non-pet player" is the one unambiguous answer -- asserting it here
@@ -79,16 +97,26 @@ void assert_write_site_ranges( sim_t* sim )
 // there), which is why 212-RESEARCH's "validated in sim_t::init()"
 // placement does not work. combat_end() of the first fight is still
 // seconds into the run -- actors exist there.
-player_t* solo_actor( sim_t* root )
+//
+// 212-CR-FIX WR-03: takes the CALLER's own sim_t*, not necessarily the
+// root. record_close() (below) now passes the SIM whose fight just ended --
+// each sim_t owns its own player_no_pet_list (player.cpp), so a worker
+// sim's close row must resolve its actor from that same worker, never from
+// the root's (a different player_t object, last written by a different
+// fight or never). write_footer() deliberately keeps passing the ROOT: it
+// reads the root's own merged run-level collected_data, so it must resolve
+// the root's own actor object. That asymmetry is intentional, not an
+// inconsistency -- see write_footer()'s own call site below.
+player_t* solo_actor( sim_t* s )
 {
-  if ( root->player_no_pet_list.size() != 1 )
+  if ( s->player_no_pet_list.size() != 1 )
   {
     throw sc_runtime_error( fmt::format(
         "rl_translog= describes one actor's fight; this sim has {} non-pet players. A raid "
         "simulation is not something this recorder can describe.",
-        root->player_no_pet_list.size() ) );
+        s->player_no_pet_list.size() ) );
   }
-  return root->player_no_pet_list[ 0 ];
+  return s->player_no_pet_list[ 0 ];
 }
 
 } // anonymous namespace
@@ -131,6 +159,7 @@ void open_and_write_header( sim_t* sim )
 
   root->rl_translog_stream->write( reinterpret_cast<const char*>( &h ), sizeof( h ) );
   root->rl_translog_stream->flush();
+  assert_stream_ok( root, "open_and_write_header" );
 }
 
 void record_decision( sim_t* sim, const player_t* p, std::uint64_t seq, const float obs[ RL_OBS_DIM ],
@@ -179,7 +208,10 @@ void record_close( sim_t* sim )
 
   assert_write_site_ranges( sim );
 
-  player_t* p = solo_actor( root );
+  // 212-CR-FIX WR-03: resolve the actor from SIM (the fight that just
+  // ended), not ROOT. See solo_actor()'s own doc comment for why this
+  // differs from write_footer()'s call below.
+  player_t* p = solo_actor( sim );
 
   close_record r{};
   r.final_damage_total = p->solver_damage_so_far;
@@ -202,7 +234,8 @@ void record_close( sim_t* sim )
   // datacollection_end() guard, so a discarded first fight is explicit
   // data rather than something the reader re-derives from a fight number.
   std::uint8_t flags = 0;
-  if ( sim->iterations == 1 || sim->current_iteration >= 1 )
+  const bool collected = ( sim->iterations == 1 || sim->current_iteration >= 1 );
+  if ( collected )
     flags |= FLAG_COLLECTED;
   r.flags = flags;
   r.thread = static_cast<std::uint8_t>( sim->thread_index );
@@ -213,6 +246,13 @@ void record_close( sim_t* sim )
   root->rl_translog_pending_decisions = 0;
   root->rl_translog_summed_close_damage += r.final_damage_total;
   ++root->rl_translog_fight_count;
+  // 212-CR-FIX BL-01: counts the SAME population the engine's own
+  // collected_data.*.mean() (read in write_footer(), below) is computed
+  // over -- the footer's collected_fight_count field. Incremented under
+  // the exact same predicate that just set FLAG_COLLECTED above, so the
+  // two can never drift apart.
+  if ( collected )
+    ++root->rl_translog_collected_fight_count;
 
   // The one write and one flush per fight D-13 asks for, against
   // decision_dump's ~300-600 per fight. This is a syscall-cost argument
@@ -223,6 +263,30 @@ void record_close( sim_t* sim )
       reinterpret_cast<const char*>( root->rl_translog_buffer.data() ),
       static_cast<std::streamsize>( root->rl_translog_buffer.size() ) );
   root->rl_translog_stream->flush();
+  assert_stream_ok( root, "record_close" );
+  root->rl_translog_buffer.clear();
+}
+
+// 212-CR-FIX WR-06: writes whatever is currently buffered to disk without
+// appending a close or footer row -- called from the in-process arm's
+// cast/wait epilogues (solver_control.cpp) when accept_cast()/accept_wait()
+// throws, so the rows this fight has already appended (including the
+// decision that was made and then refused) survive the abort instead of
+// being lost with the process. No-op when the option is unset or nothing
+// is buffered.
+void flush_pending( sim_t* sim )
+{
+  sim_t* root = root_of( sim );
+  if ( root->rl_translog_file_str.empty() )
+    return;
+  if ( root->rl_translog_buffer.empty() )
+    return;
+
+  root->rl_translog_stream->write(
+      reinterpret_cast<const char*>( root->rl_translog_buffer.data() ),
+      static_cast<std::streamsize>( root->rl_translog_buffer.size() ) );
+  root->rl_translog_stream->flush();
+  assert_stream_ok( root, "flush_pending" );
   root->rl_translog_buffer.clear();
 }
 
@@ -232,14 +296,22 @@ void write_footer( sim_t* sim )
   if ( root->rl_translog_file_str.empty() )
     return;
 
+  // 212-CR-FIX WR-03: deliberately ROOT here, not SIM -- the footer reads
+  // the ROOT's own merged run-level collected_data below, so it must
+  // resolve the root's own actor object. See solo_actor()'s doc comment.
   player_t* p = solo_actor( root );
 
   footer_record r{};
   // The engine's OWN run-level numbers -- what makes the footer an
   // independent catch for a wrong field, a wrong offset or a missed
   // fight, rather than a bare echo of the writer's own bookkeeping.
+  // 212-CR-FIX BL-01: both of these are COLLECTED-fights-only (the guarded
+  // datacollection_end() call skips the warm-up fight), unlike fight_count/
+  // summed_close_damage below which include it -- see collected_fight_count
+  // and the struct-level doc comment in rl_translog.hpp for how a reader
+  // tells the two populations apart.
   r.engine_run_aggregate = p->collected_data.compound_dmg.mean();
-  r.total_sim_seconds = static_cast<float>( p->collected_data.fight_length.mean() );
+  r.mean_collected_fight_length = static_cast<float>( p->collected_data.fight_length.mean() );
   r.fight_count = root->rl_translog_fight_count;
   // row_count must count the footer row ITSELF -- "does the total
   // include the footer" is exactly the kind of off-by-one that costs an
@@ -247,7 +319,7 @@ void write_footer( sim_t* sim )
   r.row_count = root->rl_translog_row_count + 1;
   r.footer_source = FOOTER_SOURCE_PER_FIGHT_ACCUMULATOR;
   r.summed_close_damage = root->rl_translog_summed_close_damage;
-  r.zero32 = 0;
+  r.collected_fight_count = root->rl_translog_collected_fight_count;
   r.zero36 = 0;
   r.iteration = 0xFFFF;
   r.zero42 = 0;
@@ -262,6 +334,7 @@ void write_footer( sim_t* sim )
       reinterpret_cast<const char*>( root->rl_translog_buffer.data() ),
       static_cast<std::streamsize>( root->rl_translog_buffer.size() ) );
   root->rl_translog_stream->flush();
+  assert_stream_ok( root, "write_footer" );
   root->rl_translog_buffer.clear();
   root->rl_translog_stream->close();
 }

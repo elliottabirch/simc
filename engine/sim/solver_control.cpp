@@ -538,7 +538,22 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       // exists so the next reader does not go looking for a field that
       // was never there.
       rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, false );
-      return accept_cast( p, action.token, seq );
+      // 212-CR-FIX WR-06: accept_cast() can refuse a not-ready action via
+      // protocol_abort() (a throw), which unwinds past combat_end()'s
+      // record_close() hook entirely for this fight -- without this catch,
+      // the decision row just written above (the one thing the
+      // write-before-accept ordering exists to preserve) would be buffered
+      // in memory and lost with the process. Flush what is pending, then
+      // propagate the original exception unchanged.
+      try
+      {
+        return accept_cast( p, action.token, seq );
+      }
+      catch ( ... )
+      {
+        rl_translog::flush_pending( sim );
+        throw;
+      }
     }
 
     // rl_action_kind::wait -- action.token is null for this entry (see
@@ -550,8 +565,19 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // floor rather than from a real timer. No-op when rl_translog= is
     // unset.
     rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, wr.floored );
-    accept_wait( sim, et, wr.seconds,
-                 "in-process (seq=" + std::to_string( seq ) + ", source=" + wr.source + ")" );
+    // 212-CR-FIX WR-06: same reasoning as the cast branch above -- flush on
+    // an abort out of accept_wait() so the decision row already appended
+    // survives it.
+    try
+    {
+      accept_wait( sim, et, wr.seconds,
+                   "in-process (seq=" + std::to_string( seq ) + ", source=" + wr.source + ")" );
+    }
+    catch ( ... )
+    {
+      rl_translog::flush_pending( sim );
+      throw;
+    }
     return nullptr;
   }
 }

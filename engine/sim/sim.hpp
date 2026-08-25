@@ -574,25 +574,46 @@ struct sim_t : private sc_thread_t
   // what makes the single-file `decision_dump=<path>` contract hold.
   std::unique_ptr<io::ofstream> decision_dump_stream;
   mutex_t decision_dump_mutex;
-  // Flight recorder (tstl-sylvanas phase 212, plan 212-01, TLOG-01/02/03).
-  // rl_translog=<path> writes a binary row for every in-process-transport
-  // decision, a row for every fight's close-out and a footer proving the
-  // run reached the end -- see sim/rl_translog.hpp for the layout. These
-  // members live on the ROOT sim_t ONLY, for the identical reason
-  // decision_dump_stream/decision_dump_mutex do just above: every worker
-  // sim_t inherits the same non-empty rl_translog_file_str via
-  // setup(parent->control), so opening one stream per worker would mean N
-  // handles each opened (out|trunc) against the same path, silently
-  // truncating one another. The clamp in setup() below forces threads=1
-  // whenever rl_translog= is set, so in practice only the root ever
-  // writes -- but the ownership still lives here, not per-sim_t, to keep
-  // the invariant explicit rather than incidental.
+  // Flight recorder (tstl-sylvanas phase 212, plan 212-01, TLOG-01/02/03;
+  // fix wave 212-CR-FIX). rl_translog=<path> writes a binary row for every
+  // in-process-transport decision, a row for every fight's close-out and a
+  // footer proving the run reached the end -- see sim/rl_translog.hpp for
+  // the layout. These members live on the ROOT sim_t ONLY, for the
+  // identical reason decision_dump_stream/decision_dump_mutex do just
+  // above: every worker sim_t inherits the same non-empty
+  // rl_translog_file_str via setup(parent->control), so opening one stream
+  // per worker would mean N handles each opened (out|trunc) against the
+  // same path, silently truncating one another. The clamp in setup() below
+  // forces threads=1 whenever rl_translog= is set, so in practice only the
+  // root ever writes -- but the ownership still lives here, not per-sim_t,
+  // to keep the invariant explicit rather than incidental.
+  //
+  // 212-CR-FIX WR-02: unlike decision_dump above, there is deliberately NO
+  // mutex here. Single-writer is enforced entirely by the threads=1 clamp
+  // (setup() below forces threads=1 whenever rl_translog_file_str is
+  // non-empty, so sim_t::partition() creates zero worker sims and only the
+  // root ever calls into rl_translog::*). A mutex member that nothing ever
+  // locks reads as "this is synchronised" to the next person who relaxes
+  // the clamp; the actual result on relaxing it would be concurrent
+  // std::vector::insert on one buffer -- heap corruption, not a wrong
+  // number. Lifting the clamp (Phase 215, DEFERRED under N-8) must add
+  // real locking around every rl_translog_buffer/stream mutation at the
+  // same time it removes this clamp -- it does not get to reuse a
+  // never-tested mutex that happened to already be declared.
   std::string rl_translog_file_str;
   std::unique_ptr<io::ofstream> rl_translog_stream;
-  mutex_t rl_translog_mutex;
   std::vector<unsigned char> rl_translog_buffer;      // whole rows, flushed at each fight end
   std::uint32_t rl_translog_row_count = 0;
   std::uint32_t rl_translog_fight_count = 0;
+  // 212-CR-FIX BL-01: the count of fights whose FLAG_COLLECTED bit was set
+  // (i.e. NOT the discarded warm-up fight) -- the population that
+  // p->collected_data.*.mean() (read into the footer's
+  // engine_run_aggregate/mean_collected_fight_length below) is itself
+  // computed over. rl_translog_fight_count above counts ALL fights,
+  // warm-up included; this counts only the collected ones, so a reader can
+  // tell the two populations in the footer apart instead of silently
+  // dividing one by the other.
+  std::uint32_t rl_translog_collected_fight_count = 0;
   std::uint32_t rl_translog_pending_decisions = 0;    // decision rows since the last close, reset there
   double rl_translog_summed_close_damage = 0.0;
   // P3b fork hook (simc-offline-evaluation-pipeline phase 116, 116-01) -
