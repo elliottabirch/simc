@@ -4,17 +4,18 @@
 // ==========================================================================
 //
 // In-process RL transport, Stage 1 (read_state) and Stage 2 (build_obs/
-// build_mask/build_wait) -- tstl-sylvanas phase 210, plan 210-04. See
-// rl_policy.hpp's own header comment for the NORMATIVE-source note: this
-// file is an implementation of `scripts/rl/obs.py` and `scripts/rl/mask.py`
-// (this repo), never the other way around.
+// build_mask/build_wait) -- tstl-sylvanas phase 210, plans 210-04/210-05R/
+// 210-CR-FIX. See rl_policy.hpp's own header comment for the
+// NORMATIVE-source note: this file is an implementation of
+// `scripts/rl/obs.py` and `scripts/rl/mask.py` (this repo), never the
+// other way around.
 //
-// TWO DELIBERATE GAPS IN THIS SLICE (objective, 210-04-PLAN.md):
-//   - build_obs takes the "absent" branch for every non-derived field --
-//     plan 210-05 adds the `_lookup` tri-state (present/permanent) into
-//     this same loop, at the marked comment below.
-//   - build_mask/build_wait/cd_ready_now are REAL, not stubbed -- the mask
-//     is what prevents a not-ready cast from reaching protocol_abort.
+// The "TWO DELIBERATE GAPS IN THIS SLICE" this comment used to describe
+// (plan 210-04's objective) were closed by 210-05R (commit 1b66cde740):
+// build_obs is REAL over all three lookup_status outcomes
+// (present/permanent/absent), not merely "absent" for every non-derived
+// field. build_mask/build_wait/cd_ready_now were already real as of
+// 210-04. Nothing in this file is stubbed.
 
 #include "sim/rl_policy.hpp"
 
