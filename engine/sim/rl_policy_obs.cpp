@@ -199,9 +199,9 @@ double encode_bucket_ordinal( double raw, const double* buckets, std::size_t n )
 // (ruling 210-G14/Pattern 2 -- the generator pre-splits the source so this
 // C++ never parses a string at runtime). Three outcomes:
 //   absent    -- the named buff/cooldown row (or scalar leaf) does not
-//                exist, or exists but the requested leaf has no value and
-//                is not permanent (WR-04's conflation -- deliberate, no
-//                fourth status).
+//                exist, or exists but the requested (RECOGNISED) leaf has
+//                no value and is not permanent (WR-04's conflation --
+//                deliberate, no fourth status).
 //   present   -- the leaf has a real value, written to `out_val`.
 //   permanent -- (buff only) the leaf is null but its containing buff
 //                object carries `permanent == true` (PROTOCOL.md's
@@ -209,9 +209,32 @@ double encode_bucket_ordinal( double raw, const double* buckets, std::size_t n )
 //                left unwritten -- callers branch on the returned status,
 //                never on `out_val`, for this case (mirrors _lookup's own
 //                `value` being `None` here).
+//
+// WR-03(b) fix (210-CR-FIX): an UNRECOGNISED leaf name -- a string this
+// switch has not been taught, as opposed to a recognised leaf that simply
+// has no value right now -- used to fail open to `absent` in every branch
+// below. That is the wrong default for a value the net consumes: a future
+// registry field this loader has not been taught yet would regenerate the
+// header (fingerprints all stay green, since none of the three hashes this
+// loader's own C-string literals) and then silently encode as the field's
+// `missing` sentinel forever, with both transports reporting success while
+// disagreeing on the observation vector. Every genuinely-unrecognised-leaf
+// fallthrough below now throws, naming the slot/container/key/leaf, instead
+// of returning `absent` -- WR-04's conflation (a RECOGNISED leaf whose
+// value is not currently populated) is untouched, since that is a real,
+// intentional encoding, not a registry/loader mismatch.
 // ---------------------------------------------------------------------------
 
 enum class lookup_status { absent, present, permanent };
+
+[[noreturn]] void throw_unrecognised_leaf( const rl_obs_field& f, const char* container_name )
+{
+  throw sc_runtime_error( fmt::format(
+      "rl_policy::lookup_leaf: observation field slot={} container='{}' key='{}' names "
+      "unrecognised leaf '{}' -- this loader has not been taught this leaf name; a silent "
+      "'absent' here would let the net see a wrong number instead of a loud stop (WR-03)",
+      f.slot, container_name, f.key, f.leaf ) );
+}
 
 lookup_status lookup_leaf( const rl_state_t& s, const rl_obs_field& f, double& out_val )
 {
@@ -222,13 +245,8 @@ lookup_status lookup_leaf( const rl_state_t& s, const rl_obs_field& f, double& o
       // `key` is unused for scalar fields (there is no container object to
       // key into); `leaf` names a top-level scalar of rl_state_t directly.
       // `fight_remains` is `derived` and never reaches this function (see
-      // build_obs' own dispatch below). An unrecognised scalar leaf is
-      // `absent` -- matching _lookup's "any missing segment => absent" --
-      // not an error; this schema has exactly one registered scalar leaf
-      // today (`active_enemies`), so this is reachable only if a future
-      // registry adds a scalar slot this loader has not been taught yet,
-      // and silently reading it as absent (rather than crashing the sim)
-      // is the correct fail-open default for an as-yet-unknown field.
+      // build_obs' own dispatch below). This schema has exactly one
+      // registered scalar leaf today (`active_enemies`).
       if ( std::strcmp( f.leaf, "active_enemies" ) == 0 )
       {
         if ( s.has_active_enemies )
@@ -236,9 +254,12 @@ lookup_status lookup_leaf( const rl_state_t& s, const rl_obs_field& f, double& o
           out_val = s.active_enemies;
           return lookup_status::present;
         }
+        // Recognised leaf, no value yet -- WR-04's conflation, not WR-03's
+        // unrecognised-leaf case.
         return lookup_status::absent;
       }
-      return lookup_status::absent;
+      throw_unrecognised_leaf( f, "scalar" );
+      return lookup_status::absent;   // unreachable -- throw_unrecognised_leaf always throws
     }
 
     case rl_container::buff:
@@ -246,20 +267,31 @@ lookup_status lookup_leaf( const rl_state_t& s, const rl_obs_field& f, double& o
       const buff_reading* b = s.find_buff( f.key );
       if ( !b )
         return lookup_status::absent;
-      if ( b->permanent )
-        return lookup_status::permanent;
-      // This schema's only buff leaf is "stacks" today; matched by name
-      // (registry data, not a literal spell/leaf hardcode) so a future
-      // registry adding a second buff leaf fails open to `absent` here
-      // rather than silently reusing the wrong value.
-      if ( std::strcmp( f.leaf, "stacks" ) == 0 && b->has_stacks )
+      // WR-01 fix (210-CR-FIX): the leaf is read FIRST, `permanent` tested
+      // only once the leaf itself has no value -- matching obs.py::_lookup
+      // (obs.py:146-165), which reaches `node.get("permanent")` only after
+      // `leaf is None`. The prior C++ order tested `permanent` before ever
+      // looking at the leaf, so a buff row with `permanent == true` AND a
+      // real `stacks` value (the exact shape decision_dump.cpp:325-328
+      // emits -- `"remains":null,"permanent":true` alongside a live
+      // `"stacks":N`) encoded to RL_PERMANENT_SATURATION here while Python
+      // encoded the real stacks value. This schema's only buff leaf is
+      // "stacks" today.
+      if ( std::strcmp( f.leaf, "stacks" ) == 0 )
       {
-        out_val = b->stacks;
-        return lookup_status::present;
+        if ( b->has_stacks )
+        {
+          out_val = b->stacks;
+          return lookup_status::present;
+        }
+        if ( b->permanent )
+          return lookup_status::permanent;
+        // Found, but the requested leaf has no value and the buff is not
+        // permanent -- WR-04's conflation, deliberate, no fourth status.
+        return lookup_status::absent;
       }
-      // Found, but the requested leaf has no value and the buff is not
-      // permanent -- WR-04's conflation, deliberate, no fourth status.
-      return lookup_status::absent;
+      throw_unrecognised_leaf( f, "buff" );
+      return lookup_status::absent;   // unreachable -- throw_unrecognised_leaf always throws
     }
 
     case rl_container::cooldown:
@@ -271,25 +303,41 @@ lookup_status lookup_leaf( const rl_state_t& s, const rl_obs_field& f, double& o
       // `node.get("permanent")` on the CONTAINING object, and only buff
       // objects carry it (rl_policy.hpp's cooldown_reading has no such
       // field at all).
-      if ( std::strcmp( f.leaf, "charges_fractional" ) == 0 && c->has_charges_fractional )
+      if ( std::strcmp( f.leaf, "charges_fractional" ) == 0 )
       {
-        out_val = c->charges_fractional;
-        return lookup_status::present;
+        if ( c->has_charges_fractional )
+        {
+          out_val = c->charges_fractional;
+          return lookup_status::present;
+        }
+        return lookup_status::absent;   // WR-04's conflation
       }
-      if ( std::strcmp( f.leaf, "remains" ) == 0 && c->has_remains )
+      if ( std::strcmp( f.leaf, "remains" ) == 0 )
       {
-        out_val = c->remains;
-        return lookup_status::present;
+        if ( c->has_remains )
+        {
+          out_val = c->remains;
+          return lookup_status::present;
+        }
+        return lookup_status::absent;   // WR-04's conflation
       }
-      if ( std::strcmp( f.leaf, "recharge_time" ) == 0 && c->has_recharge_time )
+      if ( std::strcmp( f.leaf, "recharge_time" ) == 0 )
       {
-        out_val = c->recharge_time;
-        return lookup_status::present;
+        if ( c->has_recharge_time )
+        {
+          out_val = c->recharge_time;
+          return lookup_status::present;
+        }
+        return lookup_status::absent;   // WR-04's conflation
       }
-      if ( std::strcmp( f.leaf, "charges" ) == 0 && c->has_charges )
+      if ( std::strcmp( f.leaf, "charges" ) == 0 )
       {
-        out_val = c->charges;
-        return lookup_status::present;
+        if ( c->has_charges )
+        {
+          out_val = c->charges;
+          return lookup_status::present;
+        }
+        return lookup_status::absent;   // WR-04's conflation
       }
       if ( std::strcmp( f.leaf, "max_charges" ) == 0 )
       {
@@ -299,10 +347,16 @@ lookup_status lookup_leaf( const rl_state_t& s, const rl_obs_field& f, double& o
         out_val = static_cast<double>( c->max_charges );
         return lookup_status::present;
       }
-      return lookup_status::absent;
+      throw_unrecognised_leaf( f, "cooldown" );
+      return lookup_status::absent;   // unreachable -- throw_unrecognised_leaf always throws
     }
   }
-  return lookup_status::absent;
+  // Unreachable: rl_container is a 3-value enum class and every case above
+  // either returns or throws. No trailing `return absent` -- an unhandled
+  // enumerator is a compiler warning (-Wswitch), not a silent absent.
+  throw sc_runtime_error( fmt::format(
+      "rl_policy::lookup_leaf: observation field slot={} has an unhandled container enumerator",
+      f.slot ) );
 }
 } // anonymous namespace
 
