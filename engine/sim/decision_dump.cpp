@@ -746,7 +746,13 @@ void record( player_t* p, action_t* chosen, execute_type et )
   // calls solver_control::choose() BEFORE decision_dump::record() (reordered
   // for exactly this fix), so `sim->solver_control_last_reply_type` reflects
   // THIS boundary, not the previous one.
-  write_state_fields( line, p, chosen, !sim->solver_control_str.empty() );
+  // Widened 210-05R Task 1: gate on EITHER transport being active, not
+  // just the FIFO one -- left unwidened, an in-process dump emits a
+  // PRE-reply `resolved_action` with no `solver_reply_type`, and every
+  // downstream reader (including this phase's own smoke receipt) breaks
+  // silently. Nothing else in this function changes; `write_state_fields`
+  // itself stays byte-frozen.
+  write_state_fields( line, p, chosen, !sim->solver_control_str.empty() || !sim->solver_policy_str.empty() );
 
   line << "}\n";
 
