@@ -202,6 +202,36 @@ rl_weights_t load_rlw1( const std::string& path )
         path, w.layers.back().out_features, RL_ACTION_DIM ) );
   }
 
+  // CR-02 fix (210-CR-FIX): forward() is a fixed three-layer MLP -- it
+  // hard-codes w.layers[0]/[1]/[2] via operator[], never .at() -- so
+  // anything other than exactly 3 layers is unchecked UB there (a
+  // n_layers=1 or n_layers=2 blob still passes both endpoint checks above,
+  // since front()/back() alias the same one or two elements). Refuse here,
+  // at load time, where an out-of-range value is a named error instead of a
+  // heap read past the vector.
+  if ( w.layers.size() != 3 )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' declares {} layers, but this build's forward() "
+        "implements exactly 3 (in -> h0 -> h1 -> out)",
+        path, w.layers.size() ) );
+  }
+
+  // Interior dimensions must chain -- nothing else checks this, and
+  // forward() indexes h0/h1 by the NEXT layer's in_features, so a mismatch
+  // here is a heap over-read (h0/h1 sized off ONE layer's out_features,
+  // walked using the FOLLOWING layer's in_features) rather than an error.
+  for ( std::size_t i = 1; i < w.layers.size(); ++i )
+  {
+    if ( w.layers[ i ].in_features != w.layers[ i - 1 ].out_features )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' layer {} in_features={} does not match layer {} "
+          "out_features={}",
+          path, i, w.layers[ i ].in_features, i - 1, w.layers[ i - 1 ].out_features ) );
+    }
+  }
+
   // D-01/D-02 (210-05R Task 3): four load-time refusals, named per
   // condition. This C++ implements the format `scripts/rl/rlw1.py`
   // (this repo) writes -- that Python module is the format's normative
