@@ -96,8 +96,24 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground )
   // Buffs -- same walk decision_dump's emitter uses, skipping
   // buff->check() <= 0 exactly as it does. `permanent` cannot currently be
   // produced by this live walk for this spec (R4 SS1.4) -- always false
-  // here; the hand-written corpus (plan 210-07) is what exercises the
-  // `permanent` leaf.
+  // here. Documentation fix (210-CR-FIX, per 210-VERIFICATION.md's own
+  // finding at rl_policy_obs.cpp:97-100): this comment used to point at
+  // plan 210-07's hand-written 20-case corpus as "what exercises the
+  // `permanent` leaf" -- 210-07 was SUPERSEDED outright under ruling N-8
+  // (210-05R-PLAN.md frontmatter) and will never be built, so that named a
+  // non-existent future exerciser. The `permanent` leg is DELIBERATELY
+  // unexercised for this MVP: `absent`/`present` are exercised by every
+  // live decision boundary (200-616 per smoke seed), but nothing in this
+  // phase or planned after it currently drives a buff row with
+  // `permanent == true` through this walk. See 210-VERIFICATION.md's
+  // `behavior_unverified_items` for the full paper trail; this is a
+  // recorded gap, not an oversight.
+  //
+  // WR-02 fix, cheap half (210-CR-FIX): reserve() against the actor's full
+  // buff_list size (an upper bound -- not every entry passes the
+  // buff->check() <= 0 filter below) so push_back() below never reallocates
+  // on this per-boundary hot path.
+  s.buffs.reserve( p->buff_list.size() );
   for ( buff_t* buff : p->buff_list )
   {
     if ( buff->check() <= 0 )
@@ -114,6 +130,22 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground )
   // Cooldowns -- same walk decision_dump's emitter uses (every named
   // cooldown with a nonzero base recharge; skips the zero-duration
   // bookkeeping cooldowns SimC creates internally).
+  //
+  // WR-04 fix (210-CR-FIX): decision_dump::write_state_fields
+  // (decision_dump.cpp:429/451) gates `charges_fractional` on
+  // `emit_maelstrom_ext = p->resources.is_active( RESOURCE_MAELSTROM )` --
+  // the SC-5 byte-neutrality contract. This walk used to write it
+  // unconditionally, so obs slot 1 (`cooldown.strike.charges_fractional`,
+  // missing=2.0, div=2) could read the live value for a non-maelstrom
+  // actor where the FIFO transport's wire request would have omitted the
+  // key entirely (-> `absent` -> `1.0`), a second cross-transport
+  // divergence source under the same green fingerprints. Mirror the same
+  // predicate here so `read_state` is honest about "the same walk
+  // decision_dump's emitter uses" for every field it claims to share, not
+  // just the ones CR-01's actor filter happens to make reachable today.
+  // WR-02 fix, cheap half: same reserve() treatment as buffs above.
+  const bool emit_maelstrom_ext = p->resources.is_active( RESOURCE_MAELSTROM );
+  s.cooldowns.reserve( p->cooldown_list.size() );
   for ( cooldown_t* cd : p->cooldown_list )
   {
     if ( cd->duration <= timespan_t::zero() && cd->base_duration <= timespan_t::zero() )
@@ -127,8 +159,11 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground )
     c.has_recharge_time = true;
     c.charges = static_cast<double>( cd->current_charge );
     c.has_charges = true;
-    c.charges_fractional = cd->charges_fractional();
-    c.has_charges_fractional = true;
+    if ( emit_maelstrom_ext )
+    {
+      c.charges_fractional = cd->charges_fractional();
+      c.has_charges_fractional = true;
+    }
     c.max_charges = cd->charges;
     s.cooldowns.push_back( std::move( c ) );
   }
