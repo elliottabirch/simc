@@ -59,6 +59,7 @@ struct rl_buff_gate
 // ---- Scalar constants ----
 
 inline constexpr const char* RL_REGISTRY_ID = "enhancement";
+inline constexpr const char* RL_ACTOR_NAME = "MID2_Shaman_Enhancement_Stormbringer";
 inline constexpr int RL_ENCODER_VERSION = 1;
 inline constexpr std::size_t RL_OBS_DIM = 5;
 inline constexpr std::size_t RL_ACTION_DIM = 4;

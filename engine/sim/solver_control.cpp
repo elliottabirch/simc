@@ -18,6 +18,7 @@
 
 #include "fmt/format.h"
 
+#include <cstring>
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -254,6 +255,27 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     sim->solver_control_has_pending_wait = true;
     return nullptr;
   }
+
+  // CR-01 fix (210-CR-FIX): in-process transport actor filter, mirroring
+  // the FIFO driver's own D-11/B-3 Python-side filter (episode.py:591-596).
+  // The in-process policy's action space belongs to ONE actor
+  // (RL_ACTOR_NAME, generated from the registry's own `actorName` --
+  // rl_policy_constants.h -- never a literal here, per R-4/D-12); every
+  // other player_t reaching this hook (pets, guardians, enemy actors) must
+  // run its own APL unchanged, exactly as the FIFO driver's "default" reply
+  // already does for them. Gated on `solver_control_str.empty()`: the entry
+  // guard above already proved at least one of solver_control_str/
+  // solver_policy_str is non-empty, so an empty solver_control_str here
+  // means the in-process transport (not FIFO) is about to answer this
+  // boundary -- the FIFO arm's own wire-level filtering is untouched.
+  // Placed BEFORE the seq increment below (not at read_state, as the
+  // review's illustrative snippet showed) so `seq` -- the counter Phase
+  // 212's log keys off -- counts the agent's own decisions only, never a
+  // pet's. Exact string equality, never a prefix match: the registry's own
+  // $actorNameComment warns a prefix match over the actor's name also
+  // matches every one of its pet records.
+  if ( sim->solver_control_str.empty() && std::strcmp( p->name(), RL_ACTOR_NAME ) != 0 )
+    return apl_choice;
 
   // Shared across both transports (210-05R Task 1) -- incremented exactly
   // once per decision boundary regardless of which transport answers it.
