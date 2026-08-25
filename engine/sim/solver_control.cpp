@@ -224,6 +224,47 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     sim->solver_control_auto_attack_started = true;
     if ( p->main_hand_attack && p->main_hand_attack->execute_event == nullptr )
       p->main_hand_attack->schedule_execute();
+    // Off-hand (2026-08-25). Everything above this line was written and
+    // measured against `bbpaladin_armory` -- a TWO-HANDED actor, for which
+    // `player_t::off_hand_attack` is permanently nullptr -- so the omission
+    // was invisible for the entire life of the hook. It stops being
+    // invisible the moment a DUAL-WIELDING actor is driven through here:
+    // enhancement shaman built `off_hand_attack` (sc_shaman.cpp, the
+    // `auto_attack_t` ctor's `p()->off_hand_attack = p()->melee_oh` branch)
+    // but nothing ever started it swinging, because -- exactly as the long
+    // comment above explains for the main hand -- the placeholder
+    // `actions+=/auto_attack` entry is never reachable through a
+    // solver-driven boundary. Measured on the enhancement/stormbringer
+    // profile at iterations=10000: main-hand executes 69.5, off-hand
+    // executes 0.0, at 1, 2 and 5 targets alike, against 74.6 / 105.6 for
+    // the same rotation run as a plain APL. The lost white damage and its
+    // knock-on Flametongue procs are worth ~2,061 DPS.
+    //
+    // Mirror the class module's own `auto_attack_t::execute()`, which
+    // schedules the off-hand immediately after the main hand with no delay
+    // of its own (sc_shaman.cpp: `p()->main_hand_attack->schedule_execute();
+    // if ( p()->off_hand_attack ) p()->off_hand_attack->schedule_execute();`).
+    // The half-swing offset a dual-wielder needs is NOT applied here and
+    // must not be: `melee_t::execute_time()` already returns `t / 2` for
+    // SLOT_OFF_HAND while its own `first` flag is set, and that flag is
+    // restored by `melee_t::reset()` on every iteration.
+    //
+    // Null guard is the main hand's, verbatim in shape: a two-handed actor
+    // short-circuits on the first conjunct, schedules nothing, and draws no
+    // RNG -- the ret paladin path is bit-for-bit unaffected (verified: same
+    // DPS, same executed-action count, same boundary count).
+    //
+    // No second "started" flag: `solver_control_auto_attack_started` is
+    // cleared per fight by reset_iteration() (below), which sim.cpp calls
+    // from combat_begin() AFTER sim_t::reset() has already cleared both
+    // melee actions' `execute_event` and restored their `first` flags. Both
+    // hands are therefore scheduled together, from a clean state, on the
+    // first FOREGROUND boundary of every iteration. They also cannot
+    // diverge: `off_hand_attack` is assigned at action-construction time,
+    // so its nullness is fixed for the whole sim and cannot become true
+    // after the flag has already been consumed by the main hand.
+    if ( p->off_hand_attack && p->off_hand_attack->execute_event == nullptr )
+      p->off_hand_attack->schedule_execute();
 
     // Wave A acceptance fix (2026-07-29, post-116-04): yield back to the
     // sim's event dispatcher HERE, before soliciting the actor's real first
