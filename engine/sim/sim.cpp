@@ -29,6 +29,7 @@
 #include "sim/option.hpp"
 #include "sim/profileset.hpp"
 #include "sim/rl_policy.hpp"
+#include "sim/rl_translog.hpp"
 #include "sim/scale_factor_control.hpp"
 #include "sim/sim_control.hpp"
 #include "sim/solver_control.hpp"
@@ -2074,6 +2075,14 @@ void sim_t::combat_end()
   if ( iterations == 1 || current_iteration >= 1 )
     datacollection_end();
 
+  // Flight recorder close row (phase 212, plan 212-01, TLOG-02, D-07/D-08).
+  // Placement AFTER datacollection_end() is load-bearing: iteration_fight_length
+  // is only finalised there (player.cpp's datacollection_end path), and this
+  // hook lives in combat_end() itself -- outside both solver_control::choose()
+  // transport arms -- so the close row is written on BOTH transports and with
+  // neither (D-08). No-op when rl_translog= is unset.
+  rl_translog::record_close( this );
+
   //assert( active_enemies == 0 );
   //assert( active_allies == 0 );
 
@@ -3557,7 +3566,17 @@ bool sim_t::execute()
   }
 
   if ( success )
+  {
     analyze();
+
+    // Flight recorder footer (phase 212, plan 212-01, TLOG-02, D-15).
+    // `success` is final by this point -- the finally_t block that can
+    // clear it closes above -- and solver_control::finish() (just above,
+    // unconditional) is deliberately NOT moved: a driver blocked on a
+    // reply-stream read must still get its EOF on a failed iteration.
+    // No-op when rl_translog= is unset.
+    rl_translog::write_footer( this );
+  }
 
   elapsed_cpu  = chrono::elapsed( start_cpu_time );
   elapsed_time = chrono::elapsed( start_wall_time );
@@ -3946,6 +3965,9 @@ void sim_t::create_options()
   // In-process RL transport (phase 210, plan 210-04, XPORT-01). Validated
   // below, in its own fail-closed block beside solver_control_str's.
   add_option( opt_string( "solver_policy", solver_policy_str ) );
+  // Flight recorder (phase 212, plan 212-01, TLOG-01/02/03). Mirrors
+  // decision_dump=: empty = disabled (default), zero overhead.
+  add_option( opt_string( "rl_translog", rl_translog_file_str ) );
   add_option( opt_bool( "sequence_soft_fail", sequence_soft_fail ) );
   add_option( opt_bool( "sequence_queue_delay", sequence_queue_delay ) );
   // Deterministic proc-roll option (simc-offline-evaluation-pipeline phase
@@ -4648,6 +4670,41 @@ void sim_t::setup( sim_control_t* c )
                        "profile with a distinct solver_policy= weights path instead.",
                        profileset_map.size() ) );
     }
+  }
+
+  // Flight recorder clamp (phase 212, plan 212-01, TLOG-01/02/03). Same
+  // shape as solver_control='s and solver_policy='s clamps just above --
+  // the stream, its mutex and its row buffer are root-owned only (see
+  // sim.hpp), so worker sim_ts sharing the same rl_translog_file_str would
+  // each open (out|trunc) against it and truncate one another.
+  if ( !rl_translog_file_str.empty() )
+  {
+    if ( threads > 1 )
+    {
+      fmt::print( stderr,
+                  "Notice: rl_translog= requires a single writer; forcing threads=1 "
+                  "(was {}). Run multiple simc processes with distinct paths to parallelize.\n",
+                  threads );
+      std::fflush( stderr );
+    }
+    threads = 1;
+
+    // Profileset refusal, re-worded from solver_control='s/solver_policy='s:
+    // each profileset child sim would inherit this same rl_translog_file_str
+    // and would truncate the same file the others write -- there is no safe
+    // value to force, so refuse rather than silently drop rows.
+    if ( !profileset_map.empty() )
+    {
+      throw sc_runtime_error(
+          fmt::format( "rl_translog= cannot be combined with profilesets ({} defined): each profileset "
+                       "runs in its own sim and would share one recorder file. Run one simc process per "
+                       "profile with a distinct rl_translog= path instead.",
+                       profileset_map.size() ) );
+    }
+
+    // Root only -- see sim.hpp's rl_translog member comment.
+    if ( !parent )
+      rl_translog::open_and_write_header( this );
   }
 
   if ( iterations <= 0 )
