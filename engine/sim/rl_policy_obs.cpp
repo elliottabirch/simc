@@ -26,6 +26,8 @@
 #include "sim/event.hpp"
 #include "sim/sim.hpp"
 
+#include "fmt/format.h"
+
 #include <algorithm>
 #include <cstring>
 
@@ -189,10 +191,128 @@ double encode_bucket_ordinal( double raw, const double* buckets, std::size_t n )
   const double denom = static_cast<double>( n > 1 ? n - 1 : 1 );
   return static_cast<double>( idx ) / denom;
 }
+
+// ---------------------------------------------------------------------------
+// lookup_status -- the tri-state leaf lookup (210-05R Task 2), mirroring
+// obs.py::_lookup (obs.py:98-145) EXACTLY, but over the descriptor's
+// PRE-SPLIT (container, key, leaf) rather than splitting a dotted string
+// (ruling 210-G14/Pattern 2 -- the generator pre-splits the source so this
+// C++ never parses a string at runtime). Three outcomes:
+//   absent    -- the named buff/cooldown row (or scalar leaf) does not
+//                exist, or exists but the requested leaf has no value and
+//                is not permanent (WR-04's conflation -- deliberate, no
+//                fourth status).
+//   present   -- the leaf has a real value, written to `out_val`.
+//   permanent -- (buff only) the leaf is null but its containing buff
+//                object carries `permanent == true` (PROTOCOL.md's
+//                no-scheduled-expiration representation). `out_val` is
+//                left unwritten -- callers branch on the returned status,
+//                never on `out_val`, for this case (mirrors _lookup's own
+//                `value` being `None` here).
+// ---------------------------------------------------------------------------
+
+enum class lookup_status { absent, present, permanent };
+
+lookup_status lookup_leaf( const rl_state_t& s, const rl_obs_field& f, double& out_val )
+{
+  switch ( f.container )
+  {
+    case rl_container::scalar:
+    {
+      // `key` is unused for scalar fields (there is no container object to
+      // key into); `leaf` names a top-level scalar of rl_state_t directly.
+      // `fight_remains` is `derived` and never reaches this function (see
+      // build_obs' own dispatch below). An unrecognised scalar leaf is
+      // `absent` -- matching _lookup's "any missing segment => absent" --
+      // not an error; this schema has exactly one registered scalar leaf
+      // today (`active_enemies`), so this is reachable only if a future
+      // registry adds a scalar slot this loader has not been taught yet,
+      // and silently reading it as absent (rather than crashing the sim)
+      // is the correct fail-open default for an as-yet-unknown field.
+      if ( std::strcmp( f.leaf, "active_enemies" ) == 0 )
+      {
+        if ( s.has_active_enemies )
+        {
+          out_val = s.active_enemies;
+          return lookup_status::present;
+        }
+        return lookup_status::absent;
+      }
+      return lookup_status::absent;
+    }
+
+    case rl_container::buff:
+    {
+      const buff_reading* b = s.find_buff( f.key );
+      if ( !b )
+        return lookup_status::absent;
+      if ( b->permanent )
+        return lookup_status::permanent;
+      // This schema's only buff leaf is "stacks" today; matched by name
+      // (registry data, not a literal spell/leaf hardcode) so a future
+      // registry adding a second buff leaf fails open to `absent` here
+      // rather than silently reusing the wrong value.
+      if ( std::strcmp( f.leaf, "stacks" ) == 0 && b->has_stacks )
+      {
+        out_val = b->stacks;
+        return lookup_status::present;
+      }
+      // Found, but the requested leaf has no value and the buff is not
+      // permanent -- WR-04's conflation, deliberate, no fourth status.
+      return lookup_status::absent;
+    }
+
+    case rl_container::cooldown:
+    {
+      const cooldown_reading* c = s.find_cooldown( f.key );
+      if ( !c )
+        return lookup_status::absent;
+      // `permanent` is not a cooldown concept -- obs.py checks
+      // `node.get("permanent")` on the CONTAINING object, and only buff
+      // objects carry it (rl_policy.hpp's cooldown_reading has no such
+      // field at all).
+      if ( std::strcmp( f.leaf, "charges_fractional" ) == 0 && c->has_charges_fractional )
+      {
+        out_val = c->charges_fractional;
+        return lookup_status::present;
+      }
+      if ( std::strcmp( f.leaf, "remains" ) == 0 && c->has_remains )
+      {
+        out_val = c->remains;
+        return lookup_status::present;
+      }
+      if ( std::strcmp( f.leaf, "recharge_time" ) == 0 && c->has_recharge_time )
+      {
+        out_val = c->recharge_time;
+        return lookup_status::present;
+      }
+      if ( std::strcmp( f.leaf, "charges" ) == 0 && c->has_charges )
+      {
+        out_val = c->charges;
+        return lookup_status::present;
+      }
+      if ( std::strcmp( f.leaf, "max_charges" ) == 0 )
+      {
+        // max_charges carries no has_* flag in rl_policy.hpp -- it is
+        // always populated (defaults to 1) once the cooldown row itself
+        // is present, so a matching row always answers `present` for it.
+        out_val = static_cast<double>( c->max_charges );
+        return lookup_status::present;
+      }
+      return lookup_status::absent;
+    }
+  }
+  return lookup_status::absent;
+}
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
-// build_obs -- THE TRACER-THIN BODY (objective, deliberate gap #1).
+// build_obs -- REAL, all three leaf statuses (210-05R Task 2). Dispatch
+// order mirrors obs.py:232-287 exactly: derived fields force `present`;
+// otherwise `lookup_leaf` decides; `kind == bucket` is tested BEFORE the
+// `permanent` branch (a permanent bucket is a registry misconfiguration,
+// not a value to saturate); non-bucket `permanent` saturates to
+// RL_PERMANENT_SATURATION; everything else goes through apply_scale.
 // ---------------------------------------------------------------------------
 
 void build_obs( const rl_state_t& s, float out_obs[ RL_OBS_DIM ] )
@@ -201,24 +321,25 @@ void build_obs( const rl_state_t& s, float out_obs[ RL_OBS_DIM ] )
   {
     const rl_obs_field& f = RL_OBS_FIELDS[ slot ];
 
-    double raw;
-    bool is_absent;
+    double raw = 0.0;
+    lookup_status status;
 
     if ( f.derived )
     {
       // Only fight_remains is derived in this schema: episode.maxTime - t,
       // floored at 0 (obs.py:236-243).
       raw = std::max( RL_EPISODE_MAX_TIME - s.t, 0.0 );
-      is_absent = false;
+      status = lookup_status::present;
     }
     else
     {
-      // [210-05] tri-state lookup lands here -- this slice takes the
-      // "absent" branch for every non-derived field unconditionally.
-      // Plan 210-05 adds the present/permanent branches into this same
-      // loop; no signature, no caller, no table changes.
-      raw = f.missing;
-      is_absent = true;
+      status = lookup_leaf( s, f, raw );
+      if ( status == lookup_status::absent )
+        raw = f.missing;
+      // status == present: `raw` was already written by lookup_leaf.
+      // status == permanent: `raw` is left unused below, matching
+      // obs.py's `raw = None` for this branch -- neither the bucket-absent
+      // path nor apply_scale() is ever reached with a permanent status.
     }
 
     double encoded;
@@ -227,11 +348,31 @@ void build_obs( const rl_state_t& s, float out_obs[ RL_OBS_DIM ] )
       // obs.py:253-278: an "absent" bucket leaf encodes its `missing`
       // value DIRECTLY, bypassing the ordinal floor-match entirely
       // (WR-03 -- -1.0 must stay distinct from every legitimate ordinal
-      // 0.0/0.5/1.0).
-      if ( is_absent )
+      // 0.0/0.5/1.0). A "permanent" bucket leaf is an ERROR in Python
+      // (obs.py:281, raises naming the slot) -- no bucket field in this
+      // schema describes a buff, so this is a loud registry-misconfiguration
+      // refusal on both sides, never a silent saturation.
+      if ( status == lookup_status::absent )
+      {
         encoded = f.missing;
+      }
+      else if ( status == lookup_status::permanent )
+      {
+        throw sc_runtime_error( fmt::format(
+            "rl_policy::build_obs: observation field slot={} container='{}' key='{}' is "
+            "kind=bucket but its leaf resolved to status=permanent -- no bucket field can "
+            "legitimately be permanent (permanence is a buff-expiry concept); this is a "
+            "registry/request misconfiguration, not a valid build_obs() input",
+            f.slot, f.container == rl_container::buff ? "buff" : "cooldown", f.key ) );
+      }
       else
+      {
         encoded = encode_bucket_ordinal( raw, f.buckets, f.n_buckets );
+      }
+    }
+    else if ( status == lookup_status::permanent )
+    {
+      encoded = RL_PERMANENT_SATURATION;
     }
     else
     {
@@ -243,6 +384,15 @@ void build_obs( const rl_state_t& s, float out_obs[ RL_OBS_DIM ] )
     out_obs[ slot ] = static_cast<float>( encoded );
   }
 }
+
+// Sanity check (comment only, not executable): with the L0 enhancement
+// registry's cooldown/buff sets both empty at boundary_is_foreground's
+// default, an entirely-empty `cooldowns` set makes slot 1 (strike's
+// charges_fractional, missing=2.0, div=2) encode via the absent branch to
+// `2.0/2 = 1.0`, never `0.0` -- and an always-up buff (`permanent == true`)
+// encodes to `RL_PERMANENT_SATURATION == 1.0`, never to its `missing`
+// value. Both traps (P-1/P-2) are closed by the dispatch above, not by a
+// special case.
 
 // ---------------------------------------------------------------------------
 // cd_ready_now -- ported COMPLETE, including the fourth line, from
