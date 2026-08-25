@@ -286,6 +286,13 @@ rl_weights_t load_rlw1( const std::string& path )
   // in one clean edit (ruling 213-G17).
   if ( w.exploration != 0.0f ) { throw sc_runtime_error( fmt::format( "rl_policy::load_rlw1: file '{}' declares exploration={} -- in-process exploration is not implemented in this phase (arrives with Phase 213's generation trainer); the weights blob must carry exploration=0.0", path, w.exploration ) ); }
 
+  // WR-02 fix, cheap half (210-CR-FIX): size forward()'s hidden-layer
+  // scratch buffers ONCE, here at load time -- w.layers.size() == 3 is
+  // already confirmed above, so layers[0]/[1] are the two hidden layers
+  // forward() writes h0/h1 for.
+  w.h0_scratch.resize( w.layers[ 0 ].out_features );
+  w.h1_scratch.resize( w.layers[ 1 ].out_features );
+
   return w;
 }
 
@@ -300,7 +307,13 @@ void forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ], float out_q[
   const rl_layer& l1 = w.layers[ 1 ];
   const rl_layer& l2 = w.layers[ 2 ];
 
-  std::vector<float> h0( l0.out_features );
+  // WR-02 fix, cheap half (210-CR-FIX): h0/h1 are load-time-sized scratch
+  // buffers on `w` (rl_policy.hpp's `mutable std::vector<float>
+  // h0_scratch/h1_scratch`, sized by load_rlw1) instead of two fresh
+  // std::vector<float> allocations per decision boundary -- this is the
+  // hottest path the fork has. Sizes were fixed at load time, so the loop
+  // bodies below are unchanged; only the storage moved.
+  std::vector<float>& h0 = w.h0_scratch;
   for ( std::uint32_t o = 0; o < l0.out_features; ++o )
   {
     float acc = l0.bias[ o ];
@@ -309,7 +322,7 @@ void forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ], float out_q[
     h0[ o ] = std::max( acc, 0.0f );
   }
 
-  std::vector<float> h1( l1.out_features );
+  std::vector<float>& h1 = w.h1_scratch;
   for ( std::uint32_t o = 0; o < l1.out_features; ++o )
   {
     float acc = l1.bias[ o ];

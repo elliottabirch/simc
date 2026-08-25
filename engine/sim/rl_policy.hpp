@@ -104,6 +104,19 @@ struct rl_weights_t
   std::string   mask_rules_sha;          // bare 64 hex
   std::string   action_space_sha;        // bare 64 hex
   std::vector<rl_layer> layers;          // 3 for this net
+
+  // WR-02 fix, cheap half (210-CR-FIX): forward()'s two hidden-layer
+  // activation buffers, hoisted here and load-time-sized by load_rlw1
+  // (once layers.size() == 3 is refused/confirmed) instead of being
+  // allocated fresh -- two std::vector<float>s -- on every decision
+  // boundary's forward() call. `mutable` because forward() takes a `const
+  // rl_weights_t&` (the weights themselves are read-only per call) but
+  // still needs to write into this per-net scratch storage; safe to reuse
+  // across calls because solver_policy= is hard-clamped to threads=1
+  // (XPORT-01/AP-3), the same reasoning the wait arm's now-removed
+  // thread_local buffer (WR-05) relied on.
+  mutable std::vector<float> h0_scratch;
+  mutable std::vector<float> h1_scratch;
 };
 
 rl_weights_t load_rlw1( const std::string& path );   // throws sc_runtime_error, named per refusal
