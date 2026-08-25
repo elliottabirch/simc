@@ -54,6 +54,15 @@ namespace profileset{
   class profilesets_t;
 }
 
+// In-process RL transport (phase 210, plan 210-04, XPORT-01/03). Forward
+// declaration only -- sim.hpp must NOT include rl_policy.hpp, which is why
+// solver_policy_weights below is a std::shared_ptr (its destructor does not
+// need a complete type at instantiation the way std::unique_ptr's does).
+namespace rl_policy
+{
+struct rl_weights_t;
+}
+
 struct sim_progress_t
 {
   int current_iterations;
@@ -570,6 +579,19 @@ struct sim_t : private sc_thread_t
   // same execute_action() decision boundary as decision_dump=. Empty string
   // = disabled (default), zero overhead. See sim/solver_control.hpp.
   std::string solver_control_str;
+  // In-process RL transport (phase 210, XPORT-01). solver_policy=<path>
+  // selects the SAME decision boundary as solver_control=, but answers it
+  // by running a loaded weights blob's forward pass in this process instead
+  // of round-tripping a FIFO request/reply -- no subprocess, no wire. Empty
+  // string = disabled (default), zero overhead. Mutually exclusive with
+  // solver_control_str (refused in sim.cpp); the weights are loaded and
+  // validated at parse time via rl_policy::load_rlw1, not lazily at the
+  // first decision boundary. See sim/rl_policy.hpp.
+  std::string solver_policy_str;
+  // Owns the parsed+validated RLW1 blob once solver_policy_str is set;
+  // null when disabled. std::shared_ptr, not std::unique_ptr -- see the
+  // rl_policy forward declaration above for why.
+  std::shared_ptr<rl_policy::rl_weights_t> solver_policy_weights;
   // Verify-vs-training mode (phase 200-04, FORK-01/R-8, D-06/D-07). Empty
   // string and "verify" are equivalent (the default) -- abstain falls
   // through to the APL's own choice. "training" makes an abstain reply a

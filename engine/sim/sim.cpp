@@ -28,6 +28,7 @@
 #include "sim/expressions.hpp"
 #include "sim/option.hpp"
 #include "sim/profileset.hpp"
+#include "sim/rl_policy.hpp"
 #include "sim/scale_factor_control.hpp"
 #include "sim/sim_control.hpp"
 #include "sim/solver_control.hpp"
@@ -3942,6 +3943,9 @@ void sim_t::create_options()
   // mode. Validated below, inside the existing solver_control_str
   // fail-closed block.
   add_option( opt_string( "solver_control_mode", solver_control_mode_str ) );
+  // In-process RL transport (phase 210, plan 210-04, XPORT-01). Validated
+  // below, in its own fail-closed block beside solver_control_str's.
+  add_option( opt_string( "solver_policy", solver_policy_str ) );
   add_option( opt_bool( "sequence_soft_fail", sequence_soft_fail ) );
   add_option( opt_bool( "sequence_queue_delay", sequence_queue_delay ) );
   // Deterministic proc-roll option (simc-offline-evaluation-pipeline phase
@@ -4526,6 +4530,53 @@ void sim_t::setup( sim_control_t* c )
         fmt::format( "solver_control_mode= must be 'verify' or 'training' (got '{}').",
                      solver_control_mode_str ) );
   }
+
+  // In-process RL transport (phase 210, plan 210-04, XPORT-01). Own
+  // fail-closed block for solver_policy_str, deliberately ordered HERE --
+  // ahead of the "has no effect without solver_control=" notice just below
+  // (PC-1's fourth solver_control_str.empty() read site) -- so that
+  // `solver_policy=` combined with ANY `solver_control_mode=` value refuses
+  // via this block's own named error instead of that notice printing its
+  // now-irrelevant text first (210-04-PLAN.md's ordering option (b):
+  // validate, then advise -- cheaper than widening the notice's guard, at
+  // the cost that this block does not sit beside the clamp at solver_control_str's
+  // clamp site below).
+  if ( !solver_policy_str.empty() )
+  {
+    // Refusal 1: mutual exclusion. Never a precedence rule.
+    if ( !solver_control_str.empty() )
+    {
+      throw sc_runtime_error(
+          fmt::format( "solver_control= and solver_policy= are mutually exclusive transports (got "
+                       "solver_control='{}', solver_policy='{}'). Choose exactly one.",
+                       solver_control_str, solver_policy_str ) );
+    }
+
+    // Refusal 3 (D-13): ANY non-empty solver_control_mode, not just
+    // "verify". solver_control_mode describes how the engine treats a
+    // reply from the OTHER PROCESS on the FIFO wire; in-process there is
+    // no reply, so every value is meaningless -- and the RL rig's actual
+    // value is "training" (scripts/rl/episode.py:1081), so a
+    // "verify"-only refusal would miss the case that actually occurs.
+    if ( !solver_control_mode_str.empty() )
+    {
+      throw sc_runtime_error(
+          fmt::format( "solver_control_mode={} has no meaning for solver_policy= (there is no reply "
+                       "to gate -- the in-process transport resolves its own decision with no wire). "
+                       "Omit solver_control_mode= entirely.",
+                       solver_control_mode_str ) );
+    }
+
+    // Refusal 2: weights file readable + valid, checked NOW at parse time,
+    // never lazily at the first decision boundary. solver_control='s lazy
+    // FIFO open is deliberate for a blocking handshake; a plain file read
+    // has no such excuse, and a first-boundary failure would strand a
+    // partially-run sim. load_rlw1 throws sc_runtime_error, named per
+    // refusal, on a missing/unreadable/short/bad-magic/unknown-version file.
+    solver_policy_weights =
+        std::make_shared<rl_policy::rl_weights_t>( rl_policy::load_rlw1( solver_policy_str ) );
+  }
+
   if ( !solver_control_mode_str.empty() && solver_control_str.empty() )
   {
     fmt::print( stderr,
@@ -4560,6 +4611,41 @@ void sim_t::setup( sim_control_t* c )
           fmt::format( "solver_control= cannot be combined with profilesets ({} defined): each profileset "
                        "runs in its own sim and they would share one FIFO pair. Run one simc process per "
                        "profile with a distinct solver_control= prefix instead.",
+                       profileset_map.size() ) );
+    }
+  }
+
+  // In-process RL transport clamp (phase 210, XPORT-01/AP-3). Copies
+  // solver_control='s clamp shape verbatim -- adjust_threads() above
+  // already defaulted `threads` to the host CPU count, and this clamp
+  // does NOT extend for free from solver_control_str's: without an
+  // explicit predicate on solver_policy_str, solver_policy= would run
+  // silently multi-threaded from the very first run. One decision stream,
+  // one weights load (and, from Phase 212, one shared log path) -- the
+  // same root-owned-stream rationale as solver_control='s clamp, re-worded
+  // because the shared resource here is a weights load, not a FIFO pair.
+  if ( !solver_policy_str.empty() )
+  {
+    if ( threads > 1 )
+    {
+      fmt::print( stderr,
+                  "Notice: solver_policy= requires a single decision stream; forcing threads=1 "
+                  "(was {}). Run multiple simc processes with distinct prefixes to parallelize.\n",
+                  threads );
+      std::fflush( stderr );
+    }
+    threads = 1;
+
+    // Profileset refusal, re-worded from solver_control='s: each profileset
+    // child sim would inherit this same solver_policy_str and re-load (or
+    // share) one weights blob -- there is no safe value to force, so refuse
+    // rather than silently drop the user's profileset definitions.
+    if ( !profileset_map.empty() )
+    {
+      throw sc_runtime_error(
+          fmt::format( "solver_policy= cannot be combined with profilesets ({} defined): each profileset "
+                       "runs in its own sim and would share one weights load. Run one simc process per "
+                       "profile with a distinct solver_policy= weights path instead.",
                        profileset_map.size() ) );
     }
   }
