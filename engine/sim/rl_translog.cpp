@@ -39,7 +39,8 @@ sim_t* root_of( sim_t* sim )
   return root;
 }
 
-// Appends one 48-byte row onto the root's in-memory buffer. Does not
+// Appends one RECORD_SIZE-byte row (64 bytes as of version 2) onto the
+// root's in-memory buffer. Does not
 // flush -- callers decide the flush cadence (D-13: once per fight end, not
 // once per row).
 void append_row( sim_t* root, const void* row )
@@ -253,8 +254,8 @@ void record_close( sim_t* sim )
   std::memset( r.zero12, 0, sizeof( r.zero12 ) );
   r.decision_count = root->rl_translog_pending_decisions;
   r.iteration = static_cast<std::uint16_t>( sim->current_iteration );
-  r.zero42 = 0;
-  r.zero43 = 0;
+  r.zero58 = 0;
+  r.zero59 = 0;
 
   // The warm-up-discard verdict, decided HERE and written into the row
   // (D-09) -- the predicate lifted verbatim from sim.cpp's own
@@ -355,9 +356,10 @@ void write_footer( sim_t* sim )
   r.summed_close_damage = root->rl_translog_summed_close_damage;
   r.collected_fight_count = root->rl_translog_collected_fight_count;
   r.zero36 = 0;
+  std::memset( r.zero40, 0, sizeof( r.zero40 ) );
   r.iteration = 0xFFFF;
-  r.zero42 = 0;
-  r.zero43 = 0;
+  r.zero58 = 0;
+  r.zero59 = 0;
   r.flags = 0;
   r.thread = static_cast<std::uint8_t>( sim->thread_index );
   r.kind = KIND_FOOTER;
