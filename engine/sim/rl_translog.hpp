@@ -49,6 +49,25 @@ inline constexpr std::uint32_t FORMAT_VERSION = 1u;
 inline constexpr std::uint32_t RECORD_SIZE = 48u;
 inline constexpr std::uint32_t HEADER_SIZE = 256u;
 
+// Quick task 260826-38t (D-2R): the version-1 `decision_record` row is a
+// FROZEN, hand-authored 48-byte layout (this file's own header comment --
+// no generator, any field addition/reordering is a version bump nobody is
+// doing today) that reserves exactly five float32 obs slots at a fixed
+// byte offset. `RL_OBS_DIM` widened 5 -> 9 in this same quick task
+// (scripts/rl/specs/enhancement.json's observation schema), but that is a
+// LIVE, registry-driven dimension -- growing this frozen row to match it
+// is the version-2 redesign this file's own comment reserves for later,
+// not a value this quick task's scope extends to. `RL_TRANSLOG_OBS_DIM`
+// decouples the row's own frozen capacity from the live `RL_OBS_DIM`:
+// `record_decision()` below copies only the first `RL_TRANSLOG_OBS_DIM`
+// floats of whatever `RL_OBS_DIM`-sized array the caller passes, so the
+// translog keeps recording its original five obs slots (0-4, including
+// the RESCALED slot 4) and simply does not carry the four NEW slots (5-8)
+// -- a documented, narrower cross-path receipt for this quick task's
+// Tier 1 evidence, not a silent truncation (`build_obs`'s own JSON/
+// in-process comparison is unaffected and remains the full-vector check).
+inline constexpr std::size_t RL_TRANSLOG_OBS_DIM = 5;
+
 // Row kind discriminator (offset 46 in every row struct below, D-02). Zero
 // is deliberately not a valid kind -- a zero-filled region left by a short
 // write (a crashed/truncated file, D-14) must never classify as a valid
@@ -94,7 +113,10 @@ struct decision_record
 {
   double damage;                    // @0  -- p->solver_damage_so_far at this boundary
   float t;                          // @8  -- sim->current_time().total_seconds()
-  float obs[ RL_OBS_DIM ];          // @12 -- already float32, copied straight across
+  float obs[ RL_TRANSLOG_OBS_DIM ]; // @12 -- already float32, copied straight across (first
+                                     //         RL_TRANSLOG_OBS_DIM of the live RL_OBS_DIM-sized
+                                     //         vector -- see that constant's own comment, quick
+                                     //         task 260826-38t)
   float q_margin;                   // @32 -- best minus second-best legal Q, or quiet NaN
   std::uint32_t seq;                // @36 -- sim->solver_control_seq at this boundary
   std::uint16_t iteration;          // @40 -- sim->current_iteration
@@ -291,7 +313,14 @@ static_assert( offsetof( decision_record, reserved ) == 47 );
 
 // Dimension guards.
 static_assert( RL_ACTION_DIM <= 8, "the legality bitfield is one byte; a wider action set must fail the build" );
-static_assert( RL_OBS_DIM == 5, "the row reserves exactly five float32 obs slots at offset 12" );
+static_assert( RL_TRANSLOG_OBS_DIM == 5, "the row reserves exactly five float32 obs slots at offset 12" );
+// Quick task 260826-38t: the row's frozen capacity must never exceed the
+// LIVE obs dimension, or record_decision()'s memcpy would read past the
+// end of a caller-supplied RL_OBS_DIM-sized array. RL_OBS_DIM only ever
+// grows across this codebase's history (a widening never removes a slot),
+// so this is a one-directional guard, not a claim the two stay equal.
+static_assert( RL_OBS_DIM >= RL_TRANSLOG_OBS_DIM,
+               "the translog's frozen row capacity must not exceed the live obs dimension" );
 
 // 212-CR-FIX WR-07: the three fingerprint strings are generated
 // (rl_policy_constants.h) and NOT under this file's control -- nothing
@@ -321,6 +350,13 @@ void open_and_write_header( sim_t* sim );
 // `exploratory` (Phase 213, D-08): true whenever the random-action branch
 // fired, even when the drawn index happened to equal the greedy one -- the
 // bit means "a random action fired", not "the action differed".
+//
+// `obs` is caller-owned and RL_OBS_DIM-sized (the LIVE obs vector) --
+// this function's own implementation copies only the row's frozen
+// RL_TRANSLOG_OBS_DIM-element prefix into the record (quick task
+// 260826-38t; see RL_TRANSLOG_OBS_DIM's own comment). The parameter type
+// stays `RL_OBS_DIM`-sized so a caller with a narrower array cannot pass
+// it here by accident.
 void record_decision( sim_t* sim, const player_t* p, std::uint64_t seq,
                        const float obs[ RL_OBS_DIM ], const std::uint8_t mask[ RL_ACTION_DIM ],
                        int action_index, float q_margin, bool wait_floored, bool exploratory );
