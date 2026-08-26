@@ -364,11 +364,23 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   // actor, unlike the resource-scoped fields below.
   out << ",\"solver_damage_so_far\":" << p->solver_damage_so_far;
 
-  // Swing timer (main-hand only - ret paladin has no meaningful OH state).
+  // Swing timer, main-hand.
   if ( p->main_hand_attack && p->main_hand_attack->execute_event )
     out << ",\"swing_mh_remains\":" << p->main_hand_attack->execute_event->remains().total_seconds();
   else
     out << ",\"swing_mh_remains\":null";
+
+  // Swing timer, off-hand (quick task 260826-38t, D-2R slot 8). Previously
+  // omitted with the comment "ret paladin has no meaningful OH state" --
+  // the enhancement shaman genuinely dual-wields and this fork HEAD started
+  // the off-hand swinging (commit "fix(solver_control): start the OFF-HAND
+  // swinging too, not just the main hand"), so the omission no longer
+  // holds. Mirrors the main-hand emitter's two-branch shape exactly:
+  // obs.py distinguishes absent (null) from zero.
+  if ( p->off_hand_attack && p->off_hand_attack->execute_event )
+    out << ",\"swing_oh_remains\":" << p->off_hand_attack->execute_event->remains().total_seconds();
+  else
+    out << ",\"swing_oh_remains\":null";
 
   // Resources - holy_power is the only resource the ret solver models;
   // dumped by enum value directly rather than iterating RESOURCE_MAX to

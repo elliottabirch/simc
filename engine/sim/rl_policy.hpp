@@ -48,6 +48,7 @@ struct buff_reading
   bool   present   = false;
   double stacks    = 0.0;
   bool   has_stacks = false;
+  double remains    = 0.0;  bool has_remains = false;   // quick task 260826-38t, D-2R slot 6
   bool   permanent = false;          // leaf null + sibling "permanent": true (obs.py:132-145)
 };
 
@@ -67,6 +68,7 @@ struct rl_state_t
   double t                   = 0.0;   // sim->current_time().total_seconds(); slot 4 derives from it
   double gcd_remains         = 0.0;   bool has_gcd_remains        = false;
   double swing_mh_remains    = 0.0;   bool has_swing_mh_remains   = false;
+  double swing_oh_remains    = 0.0;   bool has_swing_oh_remains   = false;   // quick task 260826-38t, D-2R slot 8
   double active_enemies      = 0.0;   bool has_active_enemies     = false;
   bool   boundary_is_foreground = true;   // converted ONCE from execute_type by the caller
 

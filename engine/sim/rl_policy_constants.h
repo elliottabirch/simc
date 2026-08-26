@@ -61,14 +61,14 @@ struct rl_buff_gate
 inline constexpr const char* RL_REGISTRY_ID = "enhancement";
 inline constexpr const char* RL_ACTOR_NAME = "MID2_Shaman_Enhancement_Stormbringer";
 inline constexpr int RL_ENCODER_VERSION = 1;
-inline constexpr std::size_t RL_OBS_DIM = 5;
-inline constexpr std::size_t RL_ACTION_DIM = 4;
+inline constexpr std::size_t RL_OBS_DIM = 9;
+inline constexpr std::size_t RL_ACTION_DIM = 5;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
-inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v1:56938797a4c8a79612fb42627ceb10ddfb167cc92cce958f09e35cd13d721441";
-inline constexpr const char* RL_MASK_RULES_SHA = "ec0f9ede8b81a48bae0c3075afa5429480c422294f14787506d54a50df6231fd";
-inline constexpr const char* RL_ACTION_SPACE_SHA = "a78fcb368fa28939342de0d3fbdefc8a9b9f9d78892c1315578a3df9f86169d3";
+inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v1:c5e5fa655a8e1a588aa1acd3eea948b4db19e66a8f1a6c59a5fb1447d0ea8e9d";
+inline constexpr const char* RL_MASK_RULES_SHA = "59400ba29a6bd6102bbbb0daefae1379b58f730f76c3dde2d70d233e1e478c42";
+inline constexpr const char* RL_ACTION_SPACE_SHA = "4c06590d941d87cb5894ba430991ffa98a57332e1e5687df20b161bb08fddcf9";
 
 // ---- Observation field descriptors ----
 
@@ -79,7 +79,11 @@ inline constexpr rl_obs_field RL_OBS_FIELDS[RL_OBS_DIM] = {
   { 1, rl_container::cooldown, "strike", "charges_fractional", rl_kind::k_float, 2.0, true, 2.0, false, 1.0, nullptr, 0, false },
   { 2, rl_container::buff, "stormsurge", "stacks", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
   { 3, rl_container::scalar, "", "active_enemies", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT3, 3, false },
-  { 4, rl_container::scalar, "", "fight_remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 300.0, nullptr, 0, true },
+  { 4, rl_container::scalar, "", "fight_remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, true },
+  { 5, rl_container::buff, "tempest", "stacks", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
+  { 6, rl_container::buff, "tempest", "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
+  { 7, rl_container::scalar, "", "swing_mh_remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 2.1, nullptr, 0, false },
+  { 8, rl_container::scalar, "", "swing_oh_remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 2.1, nullptr, 0, false },
 };
 
 // ---- Action descriptors ----
@@ -89,12 +93,14 @@ inline constexpr rl_action_desc RL_ACTIONS[RL_ACTION_DIM] = {
   { 1, "lightning_bolt", rl_action_kind::cast, nullptr },
   { 2, "chain_lightning", rl_action_kind::cast, nullptr },
   { 3, nullptr, rl_action_kind::wait, nullptr },
+  { 4, "tempest", rl_action_kind::cast, nullptr },
 };
 
 // ---- Buff-gate table ----
 
 inline constexpr rl_buff_gate RL_BUFF_GATES[] = {
   { "lightning_bolt", "tempest", true },
+  { "tempest", "tempest", false },
 };
-inline constexpr std::size_t RL_BUFF_GATE_COUNT = 1;
+inline constexpr std::size_t RL_BUFF_GATE_COUNT = 2;
 

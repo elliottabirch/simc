@@ -83,6 +83,18 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground )
     s.has_swing_mh_remains = true;
   }
 
+  // Off-hand swing timer (quick task 260826-38t, D-2R slot 8). Mirrors the
+  // main-hand read above exactly; guarded the same way decision_dump.cpp's
+  // (new) off-hand emitter is guarded. The off-hand genuinely swings as of
+  // this fork HEAD (commit "fix(solver_control): start the OFF-HAND
+  // swinging too, not just the main hand") -- previously there was nothing
+  // here to read.
+  if ( p->off_hand_attack && p->off_hand_attack->execute_event )
+  {
+    s.swing_oh_remains = p->off_hand_attack->execute_event->remains().total_seconds();
+    s.has_swing_oh_remains = true;
+  }
+
   // Same active_enemies derivation decision_dump.cpp's emitter uses:
   // a single-target fight with no adds/pull raid events collapses to the
   // constant 1, otherwise the live sim_t::active_enemies counter.
@@ -124,7 +136,24 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground )
     b.present = true;
     b.stacks = static_cast<double>( buff->check() );
     b.has_stacks = true;
-    b.permanent = false;
+    // remains (quick task 260826-38t, D-2R slot 6) -- same source and same
+    // permanent-sentinel convention decision_dump.cpp's write_buff_remains
+    // uses: timespan_t::min() means "no scheduled expiry", encoded here as
+    // has_remains=false + permanent=true, never as a huge negative number.
+    {
+      const timespan_t remains = buff->remains();
+      if ( remains == timespan_t::min() )
+      {
+        b.has_remains = false;
+        b.permanent = true;
+      }
+      else
+      {
+        b.remains = remains.total_seconds();
+        b.has_remains = true;
+        b.permanent = false;
+      }
+    }
     s.buffs.push_back( std::move( b ) );
   }
 
@@ -281,8 +310,11 @@ lookup_status lookup_leaf( const rl_state_t& s, const rl_obs_field& f, double& o
       // `key` is unused for scalar fields (there is no container object to
       // key into); `leaf` names a top-level scalar of rl_state_t directly.
       // `fight_remains` is `derived` and never reaches this function (see
-      // build_obs' own dispatch below). This schema has exactly one
-      // registered scalar leaf today (`active_enemies`).
+      // build_obs' own dispatch below). This schema had exactly one
+      // registered scalar leaf (`active_enemies`) until quick task
+      // 260826-38t added `swing_mh_remains` and `swing_oh_remains` (D-2R
+      // slots 7/8) -- both already-populated `rl_state_t` members, simply
+      // not routed through this dispatch before now.
       if ( std::strcmp( f.leaf, "active_enemies" ) == 0 )
       {
         if ( s.has_active_enemies )
@@ -293,6 +325,24 @@ lookup_status lookup_leaf( const rl_state_t& s, const rl_obs_field& f, double& o
         // Recognised leaf, no value yet -- WR-04's conflation, not WR-03's
         // unrecognised-leaf case.
         return lookup_status::absent;
+      }
+      if ( std::strcmp( f.leaf, "swing_mh_remains" ) == 0 )
+      {
+        if ( s.has_swing_mh_remains )
+        {
+          out_val = s.swing_mh_remains;
+          return lookup_status::present;
+        }
+        return lookup_status::absent;   // WR-04's conflation
+      }
+      if ( std::strcmp( f.leaf, "swing_oh_remains" ) == 0 )
+      {
+        if ( s.has_swing_oh_remains )
+        {
+          out_val = s.swing_oh_remains;
+          return lookup_status::present;
+        }
+        return lookup_status::absent;   // WR-04's conflation
       }
       throw_unrecognised_leaf( f, "scalar" );
       return lookup_status::absent;   // unreachable -- throw_unrecognised_leaf always throws
@@ -311,13 +361,28 @@ lookup_status lookup_leaf( const rl_state_t& s, const rl_obs_field& f, double& o
       // real `stacks` value (the exact shape decision_dump.cpp:325-328
       // emits -- `"remains":null,"permanent":true` alongside a live
       // `"stacks":N`) encoded to RL_PERMANENT_SATURATION here while Python
-      // encoded the real stacks value. This schema's only buff leaf is
-      // "stacks" today.
+      // encoded the real stacks value. This schema had exactly one buff leaf
+      // ("stacks") until quick task 260826-38t added "remains" (D-2R slot
+      // 6, mirroring this branch's own leaf-first-then-permanent ordering
+      // exactly, per the same WR-01 rationale).
       if ( std::strcmp( f.leaf, "stacks" ) == 0 )
       {
         if ( b->has_stacks )
         {
           out_val = b->stacks;
+          return lookup_status::present;
+        }
+        if ( b->permanent )
+          return lookup_status::permanent;
+        // Found, but the requested leaf has no value and the buff is not
+        // permanent -- WR-04's conflation, deliberate, no fourth status.
+        return lookup_status::absent;
+      }
+      if ( std::strcmp( f.leaf, "remains" ) == 0 )
+      {
+        if ( b->has_remains )
+        {
+          out_val = b->remains;
           return lookup_status::present;
         }
         if ( b->permanent )
