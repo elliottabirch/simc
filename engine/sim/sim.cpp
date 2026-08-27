@@ -3594,6 +3594,33 @@ bool sim_t::execute()
     // reply-stream read must still get its EOF on a failed iteration.
     // No-op when rl_translog= is unset.
     rl_translog::write_footer( this );
+
+    // tstl-sylvanas phase 220, plan 220-01 (OBS-07). rl_obs_timing=1
+    // readout -- deliberately NOT written into the translog footer (that
+    // would couple a perf number into the transport in the same phase
+    // that relayouts it); this is a stderr-only diagnostic for the
+    // 220-OBS-COST-RECEIPT.md before/after measurement. No-op when the
+    // option is off or no samples were taken.
+    if ( rl_obs_timing && !rl_obs_ns.empty() )
+    {
+      std::vector<long long> sorted_ns = rl_obs_ns;
+      std::sort( sorted_ns.begin(), sorted_ns.end() );
+      const size_t n = sorted_ns.size();
+      long long total_ns = 0;
+      for ( long long v : sorted_ns )
+        total_ns += v;
+      const long long mean_ns = total_ns / static_cast<long long>( n );
+      auto pct = [ &sorted_ns, n ]( int p ) {
+        size_t idx = ( n * static_cast<size_t>( p ) ) / 100;
+        if ( idx >= n )
+          idx = n - 1;
+        return sorted_ns[ idx ];
+      };
+      fmt::print( stderr,
+                  "rl_obs_timing: decisions={} total_ns={} mean_ns={} p50_ns={} p99_ns={}\n",
+                  n, total_ns, mean_ns, pct( 50 ), pct( 99 ) );
+      std::fflush( stderr );
+    }
   }
 
   elapsed_cpu  = chrono::elapsed( start_cpu_time );
@@ -3991,6 +4018,10 @@ void sim_t::create_options()
   // pre-mix/unknown sentinel and must stay reachable by simply omitting
   // the option.
   add_option( opt_int( "rl_fight_shape_index", rl_fight_shape_index ) );
+  // tstl-sylvanas phase 220, plan 220-01 (OBS-07). rl_obs_timing=1 -- see
+  // sim.hpp's rl_obs_timing/rl_obs_ns doc comment. Default false, zero
+  // overhead when omitted.
+  add_option( opt_bool( "rl_obs_timing", rl_obs_timing ) );
   add_option( opt_bool( "sequence_soft_fail", sequence_soft_fail ) );
   add_option( opt_bool( "sequence_queue_delay", sequence_queue_delay ) );
   // Deterministic proc-roll option (simc-offline-evaluation-pipeline phase

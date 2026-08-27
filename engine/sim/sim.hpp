@@ -625,6 +625,19 @@ struct sim_t : private sc_thread_t
   // used to be a hardcoded-zero reserved field (rl_translog.hpp's
   // file_header::fight_shape_index) by open_and_write_header().
   int rl_fight_shape_index = 0;
+  // tstl-sylvanas phase 220, plan 220-01 (OBS-07). rl_obs_timing=1 wraps the
+  // in-process transport's read_state+build_obs pair (solver_control.cpp)
+  // in a steady_clock stopwatch and accumulates one nanosecond sample per
+  // decision into rl_obs_ns, printed as one summary line to stderr at sim
+  // end (sim_t::execute()). Default off (false / empty vector) takes ZERO
+  // clock samples -- the guard is on the clock calls themselves, not just
+  // the push. No mutex: rl_obs_ns is pushed only from the in-process
+  // transport's synchronous decision path, and solver_policy=/rl_translog=
+  // both force threads=1 above (see sim.cpp's clamp block near
+  // "solver_policy= requires a single decision stream"), so there is
+  // exactly one writer for the lifetime of the vector.
+  bool rl_obs_timing = false;
+  std::vector<long long> rl_obs_ns;
   // P3b fork hook (simc-offline-evaluation-pipeline phase 116, 116-01) -
   // solver_control=<prefix> opens an additive request/reply FIFO pair at the
   // same execute_action() decision boundary as decision_dump=. Empty string

@@ -510,10 +510,28 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
   // --------------------------------------------------------------------
   {
     const bool foreground = ( et == execute_type::FOREGROUND );
+
+    // tstl-sylvanas phase 220, plan 220-01 (OBS-07). rl_obs_timing=1 wraps
+    // read_state+build_obs -- and ONLY that pair, not build_mask/forward --
+    // in a steady_clock stopwatch. The clock calls themselves are guarded
+    // on the flag: when the option is off this takes ZERO samples, not two
+    // samples it throws away. See sim.hpp's rl_obs_timing/rl_obs_ns doc
+    // comment for why no mutex is needed on the push below.
+    const bool obs_timing = sim->rl_obs_timing;
+    const chrono::wall_clock::time_point obs_t0 =
+        obs_timing ? chrono::wall_clock::now() : chrono::wall_clock::time_point{};
+
     const rl_policy::rl_state_t state = rl_policy::read_state( p, foreground );
 
     float obs[ RL_OBS_DIM ];
     rl_policy::build_obs( state, obs );
+
+    if ( obs_timing )
+    {
+      const chrono::wall_clock::time_point obs_t1 = chrono::wall_clock::now();
+      sim->rl_obs_ns.push_back(
+          std::chrono::duration_cast<std::chrono::nanoseconds>( obs_t1 - obs_t0 ).count() );
+    }
 
     std::uint8_t mask[ RL_ACTION_DIM ];
     rl_policy::build_mask( state, mask );
