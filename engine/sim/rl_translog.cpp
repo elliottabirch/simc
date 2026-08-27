@@ -210,11 +210,13 @@ void record_decision( sim_t* sim, const player_t* p, std::uint64_t seq, const fl
   r.iteration = static_cast<std::uint16_t>( sim->current_iteration );
 
   // Pack the legality mask one bit per action, in declaration order.
-  std::uint8_t packed_mask = 0;
+  // Version 4: widened uint8 -> uint32 (up to 32 actions instead of 8) to
+  // pre-pay Phase 221's 24-slot action set (tstl-sylvanas plan 220-03).
+  std::uint32_t packed_mask = 0;
   for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
   {
     if ( mask[ i ] )
-      packed_mask |= static_cast<std::uint8_t>( 1u << i );
+      packed_mask |= ( 1u << i );
   }
   r.mask = packed_mask;
   r.action = static_cast<std::uint8_t>( action_index );
@@ -259,9 +261,9 @@ void record_close( sim_t* sim )
   r.fight_length = static_cast<float>( p->iteration_fight_length.total_seconds() );
   std::memset( r.zero12, 0, sizeof( r.zero12 ) );
   r.decision_count = root->rl_translog_pending_decisions;
+  r.zero_mask = 0;   // version 4: widened to uint32 to sit at decision_record's own mask offset
   r.iteration = static_cast<std::uint16_t>( sim->current_iteration );
-  r.zero62 = 0;
-  r.zero63 = 0;
+  r.zero_action = 0; // version 4: collapses the old zero62/zero63 uint8 PAIR
 
   // The warm-up-discard verdict, decided HERE and written into the row
   // (D-09) -- the predicate lifted verbatim from sim.cpp's own
@@ -364,8 +366,7 @@ void write_footer( sim_t* sim )
   r.zero36 = 0;
   std::memset( r.zero40, 0, sizeof( r.zero40 ) );
   r.iteration = 0xFFFF;
-  r.zero62 = 0;
-  r.zero63 = 0;
+  r.zero_action = 0; // version 4: collapses the old zero62/zero63 uint8 PAIR
   r.flags = 0;
   r.thread = static_cast<std::uint8_t>( sim->thread_index );
   r.kind = KIND_FOOTER;
