@@ -39,7 +39,7 @@ sim_t* root_of( sim_t* sim )
   return root;
 }
 
-// Appends one RECORD_SIZE-byte row (64 bytes as of version 2) onto the
+// Appends one RECORD_SIZE-byte row (72 bytes as of version 3) onto the
 // root's in-memory buffer. Does not
 // flush -- callers decide the flush cadence (D-13: once per fight end, not
 // once per row).
@@ -181,7 +181,7 @@ void open_and_write_header( sim_t* sim )
 
 void record_decision( sim_t* sim, const player_t* p, std::uint64_t seq, const float obs[ RL_OBS_DIM ],
                        const std::uint8_t mask[ RL_ACTION_DIM ], int action_index, float q_margin,
-                       bool wait_floored, bool exploratory )
+                       float top_q, bool wait_floored, bool exploratory )
 {
   sim_t* root = root_of( sim );
   if ( root->rl_translog_file_str.empty() )
@@ -194,6 +194,7 @@ void record_decision( sim_t* sim, const player_t* p, std::uint64_t seq, const fl
   r.t = static_cast<float>( sim->current_time().total_seconds() );
   std::memcpy( r.obs, obs, sizeof( r.obs ) );
   r.q_margin = q_margin;
+  r.top_q = top_q;   // version 3: best legal Q, or NaN -- see rl_translog.hpp's own field comment
   // 212-CR-FIX NT-02: narrowed 64->32 bits silently, unlike iteration/thread
   // above and below, which assert_write_site_ranges() refuses loudly rather
   // than truncate. Deliberate asymmetry, not an oversight: 2^32 decisions is
@@ -254,8 +255,8 @@ void record_close( sim_t* sim )
   std::memset( r.zero12, 0, sizeof( r.zero12 ) );
   r.decision_count = root->rl_translog_pending_decisions;
   r.iteration = static_cast<std::uint16_t>( sim->current_iteration );
-  r.zero58 = 0;
-  r.zero59 = 0;
+  r.zero62 = 0;
+  r.zero63 = 0;
 
   // The warm-up-discard verdict, decided HERE and written into the row
   // (D-09) -- the predicate lifted verbatim from sim.cpp's own
@@ -358,8 +359,8 @@ void write_footer( sim_t* sim )
   r.zero36 = 0;
   std::memset( r.zero40, 0, sizeof( r.zero40 ) );
   r.iteration = 0xFFFF;
-  r.zero58 = 0;
-  r.zero59 = 0;
+  r.zero62 = 0;
+  r.zero63 = 0;
   r.flags = 0;
   r.thread = static_cast<std::uint8_t>( sim->thread_index );
   r.kind = KIND_FOOTER;

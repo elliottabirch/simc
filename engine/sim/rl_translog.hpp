@@ -38,8 +38,24 @@
 // because every prior checkpoint is already invalidated by the action/obs
 // widening this same quick task's earlier commit made.
 //
-// ONE 64-byte row shape carries all three kinds (decision, fight-close,
-// footer) and the `kind` byte sits at the same offset (62) in every one of
+// Version 3 (tstl-sylvanas trainer-upgrades session, Task 2): adds
+// `top_q` -- the best LEGAL Q value at this decision (the net's own
+// estimate of how much more discounted damage is still coming from here,
+// before the engine picks an action), or a quiet NaN when no action was
+// legal. `q_margin` (best minus second-best legal Q) already lived in
+// this row and answers "how sure was the net between its top two
+// choices"; `top_q` answers a different question entirely -- "what does
+// the net think this fight is still worth from here" -- which is what a
+// trainer needs to compare the net's own prediction against what actually
+// happened afterwards (predicted-vs-realized remaining reward, computed
+// Python-side in `scripts/rl/pred_vs_realized.py`, never in this file).
+// Adding it grows every row from 64 to 72 bytes; version-2 files are
+// orphaned by design (the reader refuses on an exact version mismatch,
+// same rule as every prior bump) since there is no `top_q` to backfill
+// into an old row.
+//
+// ONE 72-byte row shape carries all three kinds (decision, fight-close,
+// footer) and the `kind` byte sits at the same offset (66) in every one of
 // them (D-02), so a reader can classify a row before it interprets it.
 
 #pragma once
@@ -63,8 +79,8 @@ namespace rl_translog
 // trailing NUL is part of the magic itself.
 inline constexpr char MAGIC[ 4 ] = { 'R', 'L', 'T', 'L' };
 inline constexpr std::uint32_t ENDIAN_CANARY = 0x01020304u;
-inline constexpr std::uint32_t FORMAT_VERSION = 2u;
-inline constexpr std::uint32_t RECORD_SIZE = 64u;
+inline constexpr std::uint32_t FORMAT_VERSION = 3u;
+inline constexpr std::uint32_t RECORD_SIZE = 72u;
 inline constexpr std::uint32_t HEADER_SIZE = 256u;
 
 // Row kind discriminator (offset 62 in every row struct below, D-02). Zero
@@ -99,27 +115,31 @@ inline constexpr std::uint8_t FLAG_EXPLORATORY = 1u << 3;
 inline constexpr std::uint8_t FLAG_COLLECTED = 1u << 4;
 
 // ---- Row layouts (212-RESEARCH M-1, ruling 212-G1, AS RELAID for version 2
-// by quick task 260826-38t -- see this file's top-of-file comment for why)
-// ----
+// by quick task 260826-38t, AS RELAID AGAIN for version 3 by this session's
+// Task 2 -- see this file's top-of-file comment for why) ----
 //
 // The layout closes under NATURAL alignment -- measured by the researcher
-// for version 1 (record sizeof=48/alignof=8) and re-measured for version 2
-// (record sizeof=64/alignof=8; header is unchanged, sizeof=256/alignof=8).
-// No struct-packing pragma is used anywhere in this file: under byte
-// packing the assertions below stop being a test of anything (a
-// misaligned float64 load becomes legal and the compiler is no longer
-// proving the offsets the assertions claim), and packing would hide
+// for version 1 (record sizeof=48/alignof=8), re-measured for version 2
+// (record sizeof=64/alignof=8), and re-measured again for version 3
+// (record sizeof=72/alignof=8; header is unchanged throughout,
+// sizeof=256/alignof=8). No struct-packing pragma is used anywhere in this
+// file: under byte packing the assertions below stop being a test of
+// anything (a misaligned float64 load becomes legal and the compiler is no
+// longer proving the offsets the assertions claim), and packing would hide
 // exactly the field-ordering mistake those assertions exist to catch.
 //
-// Version 2 grows the row from 48 to 64 bytes solely to carry the full,
-// live `RL_OBS_DIM` (9) obs floats instead of version 1's frozen five --
-// every other field keeps its ROLE, and the trailing common tail
+// Version 2 grew the row from 48 to 64 bytes solely to carry the full,
+// live `RL_OBS_DIM` (9) obs floats instead of version 1's frozen five.
+// Version 3 grows it again, 64 to 72 bytes, solely to add `top_q` right
+// after `q_margin` in decision_record (see top-of-file comment for what it
+// means) -- every OTHER field keeps its ROLE, and the trailing common tail
 // (iteration/mask-or-zero/action-or-zero/flags/thread/kind/reserved) keeps
 // the same RELATIVE order and the same cross-kind offset agreement (D-02),
-// just shifted later by the 16 extra obs bytes (decision_record) or an
-// equivalent widened zero-fill region (close_record/footer_record, so the
-// three kinds stay the same fixed 64-byte size the version-1 comment
-// above already required).
+// just shifted later by the 4 extra bytes: decision_record shifts because
+// `top_q` itself sits inline; close_record and footer_record shift by an
+// equivalent widened zero-fill region, so all three kinds stay the same
+// fixed 72-byte size version 2's comment already required of version 2's
+// own 64-byte size.
 
 struct decision_record
 {
@@ -129,29 +149,34 @@ struct decision_record
                               //         straight across (version 2: no separate frozen-width
                               //         literal, see top-of-file comment)
   float q_margin;            // @48 -- best minus second-best legal Q, or quiet NaN
-  std::uint32_t seq;         // @52 -- sim->solver_control_seq at this boundary
-  std::uint16_t iteration;   // @56 -- sim->current_iteration
-  std::uint8_t mask;         // @58 -- one bit per legal action, declaration order
-  std::uint8_t action;       // @59 -- chosen action index
-  std::uint8_t flags;        // @60
-  std::uint8_t thread;       // @61 -- sim->thread_index
-  std::uint8_t kind;         // @62 -- KIND_DECISION
-  std::uint8_t reserved;     // @63 -- written zero
+  float top_q;                // @52 -- version 3: best LEGAL Q (the net's own remaining-value
+                              //         estimate at this boundary), or quiet NaN if no action was
+                              //         legal -- see top-of-file comment
+  std::uint32_t seq;         // @56 -- sim->solver_control_seq at this boundary
+  std::uint16_t iteration;   // @60 -- sim->current_iteration
+  std::uint8_t mask;         // @62 -- one bit per legal action, declaration order
+  std::uint8_t action;       // @63 -- chosen action index
+  std::uint8_t flags;        // @64
+  std::uint8_t thread;       // @65 -- sim->thread_index
+  std::uint8_t kind;         // @66 -- KIND_DECISION
+  std::uint8_t reserved;     // @67 -- written zero
 };
 
 struct close_record
 {
   double final_damage_total;     // @0  -- p->solver_damage_so_far, complete by combat_end
   float fight_length;             // @8  -- p->iteration_fight_length.total_seconds()
-  std::uint32_t zero12[ 10 ];    // @12..51 (40 bytes) -- written zero
-  std::uint32_t decision_count;  // @52 -- decision rows appended for this fight
-  std::uint16_t iteration;       // @56
-  std::uint8_t zero58;            // @58
-  std::uint8_t zero59;            // @59
-  std::uint8_t flags;             // @60 -- FLAG_COLLECTED set per D-09; others zero this phase
-  std::uint8_t thread;             // @61
-  std::uint8_t kind;               // @62 -- KIND_CLOSE
-  std::uint8_t reserved;           // @63 -- written zero
+  std::uint32_t zero12[ 11 ];    // @12..55 (44 bytes) -- written zero (version 3: widened by one
+                                  //         uint32 to keep decision_count aligned with decision_record's
+                                  //         own shifted seq offset, see top-of-file comment)
+  std::uint32_t decision_count;  // @56 -- decision rows appended for this fight
+  std::uint16_t iteration;       // @60
+  std::uint8_t zero62;            // @62
+  std::uint8_t zero63;            // @63
+  std::uint8_t flags;             // @64 -- FLAG_COLLECTED set per D-09; others zero this phase
+  std::uint8_t thread;             // @65
+  std::uint8_t kind;               // @66 -- KIND_CLOSE
+  std::uint8_t reserved;           // @67 -- written zero
 };
 
 // 212-CR-FIX BL-01: this footer carries two DIFFERENT populations of fight,
@@ -182,15 +207,16 @@ struct footer_record
   double summed_close_damage;          // @24 -- writer's own running sum of close-row damage; ALL fights, warm-up included
   std::uint32_t collected_fight_count; // @32 -- count of close rows with FLAG_COLLECTED set (excludes warm-up); was the unused `zero32` slot
   std::uint32_t zero36;                 // @36
-  std::uint32_t zero40[ 4 ];            // @40..55 (16 bytes) -- version 2's widened zero-fill, keeping the
-                                          //         footer at the same fixed 64-byte size as the other two kinds
-  std::uint16_t iteration;              // @56 -- written 0xFFFF, a sentinel: no fight owns the footer
-  std::uint8_t zero58;                   // @58
-  std::uint8_t zero59;                   // @59
-  std::uint8_t flags;                    // @60 -- written zero
-  std::uint8_t thread;                   // @61
-  std::uint8_t kind;                     // @62 -- KIND_FOOTER
-  std::uint8_t reserved;                 // @63 -- written zero
+  std::uint32_t zero40[ 5 ];            // @40..59 (20 bytes) -- version 3's widened zero-fill (was 4 elements
+                                          //         @40..55 through version 2), keeping the footer at the same
+                                          //         fixed 72-byte size as the other two kinds
+  std::uint16_t iteration;              // @60 -- written 0xFFFF, a sentinel: no fight owns the footer
+  std::uint8_t zero62;                   // @62
+  std::uint8_t zero63;                   // @63
+  std::uint8_t flags;                    // @64 -- written zero
+  std::uint8_t thread;                   // @65
+  std::uint8_t kind;                     // @66 -- KIND_FOOTER
+  std::uint8_t reserved;                 // @67 -- written zero
 };
 
 // The header. The two fields at @20/@24 used to be pure alignment padding
@@ -262,27 +288,28 @@ static_assert( offsetof( decision_record, damage ) == 0 );
 static_assert( offsetof( decision_record, t ) == 8 );
 static_assert( offsetof( decision_record, obs ) == 12 );
 static_assert( offsetof( decision_record, q_margin ) == 48 );
-static_assert( offsetof( decision_record, seq ) == 52 );
-static_assert( offsetof( decision_record, iteration ) == 56 );
-static_assert( offsetof( decision_record, mask ) == 58 );
-static_assert( offsetof( decision_record, action ) == 59 );
-static_assert( offsetof( decision_record, flags ) == 60 );
-static_assert( offsetof( decision_record, thread ) == 61 );
-static_assert( offsetof( decision_record, kind ) == 62 );
-static_assert( offsetof( decision_record, reserved ) == 63 );
+static_assert( offsetof( decision_record, top_q ) == 52 );
+static_assert( offsetof( decision_record, seq ) == 56 );
+static_assert( offsetof( decision_record, iteration ) == 60 );
+static_assert( offsetof( decision_record, mask ) == 62 );
+static_assert( offsetof( decision_record, action ) == 63 );
+static_assert( offsetof( decision_record, flags ) == 64 );
+static_assert( offsetof( decision_record, thread ) == 65 );
+static_assert( offsetof( decision_record, kind ) == 66 );
+static_assert( offsetof( decision_record, reserved ) == 67 );
 
 // close_record field offsets
 static_assert( offsetof( close_record, final_damage_total ) == 0 );
 static_assert( offsetof( close_record, fight_length ) == 8 );
 static_assert( offsetof( close_record, zero12 ) == 12 );
-static_assert( offsetof( close_record, decision_count ) == 52 );
-static_assert( offsetof( close_record, iteration ) == 56 );
-static_assert( offsetof( close_record, zero58 ) == 58 );
-static_assert( offsetof( close_record, zero59 ) == 59 );
-static_assert( offsetof( close_record, flags ) == 60 );
-static_assert( offsetof( close_record, thread ) == 61 );
-static_assert( offsetof( close_record, kind ) == 62 );
-static_assert( offsetof( close_record, reserved ) == 63 );
+static_assert( offsetof( close_record, decision_count ) == 56 );
+static_assert( offsetof( close_record, iteration ) == 60 );
+static_assert( offsetof( close_record, zero62 ) == 62 );
+static_assert( offsetof( close_record, zero63 ) == 63 );
+static_assert( offsetof( close_record, flags ) == 64 );
+static_assert( offsetof( close_record, thread ) == 65 );
+static_assert( offsetof( close_record, kind ) == 66 );
+static_assert( offsetof( close_record, reserved ) == 67 );
 
 // footer_record field offsets
 static_assert( offsetof( footer_record, engine_run_aggregate ) == 0 );
@@ -294,13 +321,13 @@ static_assert( offsetof( footer_record, summed_close_damage ) == 24 );
 static_assert( offsetof( footer_record, collected_fight_count ) == 32 );
 static_assert( offsetof( footer_record, zero36 ) == 36 );
 static_assert( offsetof( footer_record, zero40 ) == 40 );
-static_assert( offsetof( footer_record, iteration ) == 56 );
-static_assert( offsetof( footer_record, zero58 ) == 58 );
-static_assert( offsetof( footer_record, zero59 ) == 59 );
-static_assert( offsetof( footer_record, flags ) == 60 );
-static_assert( offsetof( footer_record, thread ) == 61 );
-static_assert( offsetof( footer_record, kind ) == 62 );
-static_assert( offsetof( footer_record, reserved ) == 63 );
+static_assert( offsetof( footer_record, iteration ) == 60 );
+static_assert( offsetof( footer_record, zero62 ) == 62 );
+static_assert( offsetof( footer_record, zero63 ) == 63 );
+static_assert( offsetof( footer_record, flags ) == 64 );
+static_assert( offsetof( footer_record, thread ) == 65 );
+static_assert( offsetof( footer_record, kind ) == 66 );
+static_assert( offsetof( footer_record, reserved ) == 67 );
 
 // file_header field offsets
 static_assert( offsetof( file_header, magic ) == 0 );
@@ -320,10 +347,10 @@ static_assert( offsetof( file_header, action_space_sha ) == 184 );
 // same offset in every row shape).
 static_assert( offsetof( decision_record, kind ) == offsetof( close_record, kind ) );
 static_assert( offsetof( close_record, kind ) == offsetof( footer_record, kind ) );
-static_assert( offsetof( decision_record, kind ) == 62 );
+static_assert( offsetof( decision_record, kind ) == 66 );
 static_assert( offsetof( decision_record, reserved ) == offsetof( close_record, reserved ) );
 static_assert( offsetof( close_record, reserved ) == offsetof( footer_record, reserved ) );
-static_assert( offsetof( decision_record, reserved ) == 63 );
+static_assert( offsetof( decision_record, reserved ) == 67 );
 
 // Dimension guards.
 static_assert( RL_ACTION_DIM <= 8, "the legality bitfield is one byte; a wider action set must fail the build" );
@@ -368,9 +395,17 @@ void open_and_write_header( sim_t* sim );
 // row (version 2, quick task 260826-38t: the row's obs field is itself
 // declared `RL_OBS_DIM`-sized now, so there is no narrower prefix to copy
 // only part of).
+//
+// `top_q` (version 3, this session's Task 2): the best LEGAL Q value the
+// caller's own masked_argmax pass already computed alongside `q_margin` --
+// pass the SAME `best` the margin was derived from, never a re-derived
+// value, so the two fields can never silently disagree about what "best"
+// meant at this boundary. NaN when no action was legal (mirrors q_margin's
+// own NaN-on-insufficient-legal-actions convention).
 void record_decision( sim_t* sim, const player_t* p, std::uint64_t seq,
                        const float obs[ RL_OBS_DIM ], const std::uint8_t mask[ RL_ACTION_DIM ],
-                       int action_index, float q_margin, bool wait_floored, bool exploratory );
+                       int action_index, float q_margin, float top_q, bool wait_floored,
+                       bool exploratory );
 
 // Called from sim_t::combat_end(), after datacollection_end(). Builds and
 // appends the close row, then flushes the buffered rows for this fight to

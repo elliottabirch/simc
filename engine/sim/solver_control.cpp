@@ -593,6 +593,14 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     }
     const float q_margin =
         legal_count >= 2 ? ( best - second_best ) : std::numeric_limits<float>::quiet_NaN();
+    // top_q (translog version 3, this session's Task 2): the best LEGAL Q
+    // value -- the net's own estimate of how much more discounted damage is
+    // still coming from this decision onward, before the engine picks an
+    // action. Reuses the SAME `best` the margin above was derived from
+    // (never a re-derived value), so the two logged fields can never
+    // silently disagree about what "best" meant at this boundary. NaN when
+    // no action was legal, matching q_margin's own convention.
+    const float top_q = legal_count >= 1 ? best : std::numeric_limits<float>::quiet_NaN();
 
     if ( action.kind == rl_action_kind::cast )
     {
@@ -621,7 +629,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       // channel is being built (rulings 210-G21/212-G5); this comment
       // exists so the next reader does not go looking for a field that
       // was never there.
-      rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, false, exploratory );
+      rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, top_q, false, exploratory );
       // 212-CR-FIX WR-06: accept_cast() can refuse a not-ready action via
       // protocol_abort() (a throw), which unwinds past combat_end()'s
       // record_close() hook entirely for this fight -- without this catch,
@@ -648,7 +656,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // flag bit's only source -- it says the wait length came from the
     // floor rather than from a real timer. No-op when rl_translog= is
     // unset.
-    rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, wr.floored, exploratory );
+    rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, top_q, wr.floored, exploratory );
     // 212-CR-FIX WR-06: same reasoning as the cast branch above -- flush on
     // an abort out of accept_wait() so the decision row already appended
     // survives it.
