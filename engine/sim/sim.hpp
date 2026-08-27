@@ -616,6 +616,15 @@ struct sim_t : private sc_thread_t
   std::uint32_t rl_translog_collected_fight_count = 0;
   std::uint32_t rl_translog_pending_decisions = 0;    // decision rows since the last close, reset there
   double rl_translog_summed_close_damage = 0.0;
+  // tstl-sylvanas phase 218, plan 218-02 (RIG-01). rl_fight_shape_index=<n>
+  // names which declared fight shape (scripts/rl/specs/enhancement.json's
+  // episode.fightMix, 1-based) this run was launched under. 0 is the
+  // reserved pre-mix/unknown sentinel and is the default -- a caller that
+  // omits the option gets the same value an old (pre-218) run implicitly
+  // had. Written into the transition-log header at the byte-28 word that
+  // used to be a hardcoded-zero reserved field (rl_translog.hpp's
+  // file_header::fight_shape_index) by open_and_write_header().
+  int rl_fight_shape_index = 0;
   // P3b fork hook (simc-offline-evaluation-pipeline phase 116, 116-01) -
   // solver_control=<prefix> opens an additive request/reply FIFO pair at the
   // same execute_action() decision boundary as decision_dump=. Empty string

@@ -3986,6 +3986,11 @@ void sim_t::create_options()
   // Flight recorder (phase 212, plan 212-01, TLOG-01/02/03). Mirrors
   // decision_dump=: empty = disabled (default), zero overhead.
   add_option( opt_string( "rl_translog", rl_translog_file_str ) );
+  // tstl-sylvanas phase 218, plan 218-02 (RIG-01). No validation, no
+  // clamping, no default other than 0 -- 0 is the declared
+  // pre-mix/unknown sentinel and must stay reachable by simply omitting
+  // the option.
+  add_option( opt_int( "rl_fight_shape_index", rl_fight_shape_index ) );
   add_option( opt_bool( "sequence_soft_fail", sequence_soft_fail ) );
   add_option( opt_bool( "sequence_queue_delay", sequence_queue_delay ) );
   // Deterministic proc-roll option (simc-offline-evaluation-pipeline phase

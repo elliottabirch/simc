@@ -169,7 +169,12 @@ void open_and_write_header( sim_t* sim )
     h.exploration = 0.0f;
     h.round_index = 0;
   }
-  h.reserved1 = 0;
+  // tstl-sylvanas phase 218, plan 218-02 (RIG-01): source the header's
+  // fight-shape word from the sim option instead of hardcoding zero. 0
+  // stays reachable -- it is sim_t::rl_fight_shape_index's own default,
+  // so a run that never sets rl_fight_shape_index= writes the same zero
+  // an old (pre-218) run implicitly wrote.
+  h.fight_shape_index = static_cast<std::uint32_t>( root->rl_fight_shape_index );
   std::strncpy( h.obs_schema_sha, RL_OBS_SCHEMA_SHA, sizeof( h.obs_schema_sha ) - 1 );
   std::strncpy( h.mask_rules_sha, RL_MASK_RULES_SHA, sizeof( h.mask_rules_sha ) - 1 );
   std::strncpy( h.action_space_sha, RL_ACTION_SPACE_SHA, sizeof( h.action_space_sha ) - 1 );

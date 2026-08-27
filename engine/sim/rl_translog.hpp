@@ -256,7 +256,11 @@ struct alignas( 8 ) file_header
                                         //         since the loader refuses anything else at dial 0.0
   std::uint32_t round_index;          // @24  -- Phase 213: the round (generation) index the loaded
                                         //         weights blob declared; 0 when no policy was loaded
-  std::uint32_t reserved1;            // @28  -- still reserved, written zero
+  std::uint32_t fight_shape_index;    // @28  -- tstl-sylvanas phase 218, plan 218-02 (RIG-01): the
+                                        //         drawn fight shape's 1-based index into the declared
+                                        //         fightMix (0 = reserved pre-mix/unknown sentinel,
+                                        //         same as every pre-218 log, which wrote this word
+                                        //         zero under its old name reserved1)
   char obs_schema_sha[ 80 ];          // @32  -- RL_OBS_SCHEMA_SHA, "rl-obs-v1:<64 hex>"
   char mask_rules_sha[ 72 ];          // @112 -- RL_MASK_RULES_SHA, bare 64 hex
   char action_space_sha[ 72 ];        // @184 -- RL_ACTION_SPACE_SHA, bare 64 hex
@@ -337,7 +341,7 @@ static_assert( offsetof( file_header, record_size ) == 12 );
 static_assert( offsetof( file_header, header_size ) == 16 );
 static_assert( offsetof( file_header, exploration ) == 20 );
 static_assert( offsetof( file_header, round_index ) == 24 );
-static_assert( offsetof( file_header, reserved1 ) == 28 );
+static_assert( offsetof( file_header, fight_shape_index ) == 28 );
 static_assert( offsetof( file_header, obs_schema_sha ) == 32 );
 static_assert( offsetof( file_header, mask_rules_sha ) == 112 );
 static_assert( offsetof( file_header, action_space_sha ) == 184 );
