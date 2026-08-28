@@ -2566,6 +2566,29 @@ anchored_wait_reading read_anchored_wait( const rl_state_t& s, const rl_wait_anc
   }
   return out;
 }
+
+// WR-01 (221-08 code review): the fight-remaining AND raid-event-next-in
+// clamp, factored into ONE function so build_mask()'s legality check and
+// build_wait()'s duration computation can never diverge on which clamps
+// apply -- mirrors mask.py's anchored_wait_seconds() clamp exactly (both
+// bounds applied, in the same order, before any floor). Returns the
+// PRE-FLOOR clamped value; each caller applies its own floor comparison
+// on top (build_mask denies at <= RL_WAIT_FLOOR_SECONDS; build_wait floors
+// up to it). The ORIGINAL build_mask wait-legality rule compared the RAW
+// value directly to RL_WAIT_FLOOR_SECONDS and to fight_remains alone,
+// never consulting raid_event_next_in -- an anchored wait could be
+// offered as legal while the SAME wire state's build_wait() would clamp
+// its duration down to the bare floor, decoupling the mask's "legal" bit
+// from what the wait would actually realise.
+double clamp_anchored_wait_pre_floor( const rl_state_t& s, double raw )
+{
+  double seconds_pre_floor = raw;
+  if ( s.has_fight_remains && s.fight_remains < seconds_pre_floor )
+    seconds_pre_floor = s.fight_remains;
+  if ( s.has_raid_event_next_in && s.raid_event_next_in < seconds_pre_floor )
+    seconds_pre_floor = s.raid_event_next_in;
+  return seconds_pre_floor;
+}
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -2584,12 +2607,16 @@ void build_mask( const rl_state_t& s, std::uint8_t out_mask[ RL_ACTION_DIM ] )
     // and that FATAL. Wait actions have no action_t* to resolve and skip
     // R0's engine-truth AND below entirely. 221-03 (ACT-05/ACT-06): an
     // ANCHORED wait (a.wait_anchor.kind != none) ADDITIONALLY requires the
-    // anchor's RAW seconds (read_anchored_wait, never the floored value --
-    // comparing the floored value to the floor would make every sub-floor
-    // anchor look legal) to be present, strictly above RL_WAIT_FLOOR_SECONDS,
-    // and before fight end (absent fight_remains is a documented fail-open:
-    // waiting past the end of a fight is harmless). The null-anchor (fixed)
-    // wait keeps the bare foreground rule below, unchanged.
+    // anchor's raw seconds (read_anchored_wait) to be present AND, once
+    // CLAMPED by clamp_anchored_wait_pre_floor() (fight_remains AND
+    // raid_event_next_in, WR-01 fix, 221-08 code review), strictly above
+    // RL_WAIT_FLOOR_SECONDS. Comparing the RAW value alone (the pre-221-08
+    // behaviour) let an anchored wait whose raid-event-clamped duration
+    // would collapse to the bare floor still read legal. Absent
+    // fight_remains/raid_event_next_in is a documented fail-open (waiting
+    // past the end of a fight or a raid event is harmless). The
+    // null-anchor (fixed) wait keeps the bare foreground rule below,
+    // unchanged.
     if ( a.kind == rl_action_kind::wait )
     {
       if ( !s.boundary_is_foreground )
@@ -2603,9 +2630,8 @@ void build_mask( const rl_state_t& s, std::uint8_t out_mask[ RL_ACTION_DIM ] )
         continue;
       }
       const anchored_wait_reading reading = read_anchored_wait( s, a.wait_anchor );
-      bool legal_wait = reading.has_raw && reading.raw > RL_WAIT_FLOOR_SECONDS;
-      if ( legal_wait && s.has_fight_remains && !( reading.raw < s.fight_remains ) )
-        legal_wait = false;
+      const bool legal_wait =
+          reading.has_raw && clamp_anchored_wait_pre_floor( s, reading.raw ) > RL_WAIT_FLOOR_SECONDS;
       out_mask[ i ] = legal_wait ? 1 : 0;
       continue;
     }
@@ -2746,11 +2772,10 @@ wait_result build_wait( const rl_state_t& s, const rl_wait_anchor& anchor )
     if ( !reading.has_raw )
       return wait_result{ RL_WAIT_FLOOR_SECONDS, reading.source, true };
 
-    double seconds_pre_floor = reading.raw;
-    if ( s.has_fight_remains && s.fight_remains < seconds_pre_floor )
-      seconds_pre_floor = s.fight_remains;
-    if ( s.has_raid_event_next_in && s.raid_event_next_in < seconds_pre_floor )
-      seconds_pre_floor = s.raid_event_next_in;
+    // WR-01 (221-08 code review): shares clamp_anchored_wait_pre_floor()
+    // with build_mask()'s wait-legality rule above -- ONE clamp
+    // computation, never two independently-maintained copies.
+    const double seconds_pre_floor = clamp_anchored_wait_pre_floor( s, reading.raw );
 
     const bool floored = seconds_pre_floor < RL_WAIT_FLOOR_SECONDS;
     const double seconds = std::max( seconds_pre_floor, RL_WAIT_FLOOR_SECONDS );
