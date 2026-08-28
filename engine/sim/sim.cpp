@@ -4727,6 +4727,23 @@ void sim_t::setup( sim_control_t* c )
                        "profile with a distinct solver_policy= weights path instead.",
                        profileset_map.size() ) );
     }
+
+    // 220-08 WR-10: the RL observation's per-action hit_damage leaves call
+    // action_t::calculate_direct_amount(), which ends with
+    // `if ( !sim->average_range ) amount = floor( amount + rng().real() );`
+    // -- an RNG draw. average_range defaults true, but it is a plain sim
+    // option a profile or episode emitter can flip for variance modelling;
+    // if it does, every decision silently consumes extra RNG draws the
+    // APL-driven baseline arm never does, and reruns at the same seed stop
+    // matching pre-220 results for a reason that has nothing to do with the
+    // policy. Refuse loudly rather than depend on the default.
+    if ( !average_range )
+    {
+      throw sc_runtime_error(
+          "solver_policy= requires average_range=1: the RL observation's hit_damage leaves call "
+          "calculate_direct_amount(), which draws from the sim RNG when average_range=0, making the "
+          "observation path no longer read-only." );
+    }
   }
 
   // Flight recorder clamp (phase 212, plan 212-01, TLOG-01/02/03). Same

@@ -1310,6 +1310,19 @@ void write_names_out_if_requested( const player_t* p, const slot_table& table )
 
 const slot_table& bind_slots( player_t* p )
 {
+  // 220-08 WR-12: g_slot_table_cache is keyed on a bare player_t* with no
+  // sim identity and no clear -- correctness rests entirely on the
+  // solver_policy= single-sim/single-thread clamp in sim.cpp (threads=1,
+  // profileset refusal), which is asserted THERE but never checked at this
+  // entry point. get_enemy_handle_cache validates t->actor_index (rl_policy_
+  // obs.cpp:1108); this bare pointer lookup validated nothing. A future
+  // in-process multi-sim caller (profileset support, a batch driver, a unit
+  // test harness) would silently read a cached slot_table full of dangling
+  // buff_t*/expr_t* for a recycled player_t* address -- assert the
+  // precondition here rather than depending on it staying true forever.
+  assert( p->sim->threads == 1 && p->sim->profileset_map.empty() &&
+          "rl_policy slot cache is single-sim/single-thread by construction (220-08 WR-12)" );
+
   auto cached = g_slot_table_cache.find( p );
   if ( cached != g_slot_table_cache.end() )
     return cached->second;

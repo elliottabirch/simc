@@ -700,6 +700,20 @@ class deck_rng_wrapper_t
       return m_rng->trigger();
   }
 
+  // 220-08 CR-03: passthrough so a caller can detect a reshuffle EDGE around
+  // its own trigger() call (compare entry_remains() before vs after) without
+  // reaching into the private m_rng pointer -- mirrors trigger()'s own
+  // null-guard discipline (an untalented deck reads 0, never crashes).
+  unsigned entry_remains() const
+  {
+      if ( m_rng == nullptr )
+      {
+          return 0U;
+      }
+
+      return as<unsigned>( m_rng->entry_remains() );
+  }
+
   void create_options()
   {
     std::string success_str = fmt::format( "shaman.{}_deck_success", m_name );
@@ -12211,6 +12225,18 @@ void shaman_t::trigger_tempest( T resource_count )
     // when this very draw succeeds.
     tempest_spends_since_proc += as<unsigned>( resource_count );
 
+    // 220-08 CR-03: 220-CONTEXT.md's locked ruling for tempest_procs_this_deck
+    // is "incremented where the tempest_enh deck is drawn, RESET ON RESHUFFLE"
+    // -- the counter was previously reset only in shaman_t::reset() (once per
+    // FIGHT), making it a per-fight cast count wearing a per-deck name (it
+    // could exceed the deck's own n_success, which an addon tracking "procs
+    // since the last reshuffle" never could). Detect the reshuffle EDGE by
+    // comparing entry_remains() around the draw loop: shuffled_rng_t::trigger()
+    // reshuffles transparently and only ever INSIDE a trigger() call, so an
+    // exact draw-count decrease means no reshuffle occurred; anything else
+    // means the deck topped itself back up at least once during this loop.
+    const unsigned draws_remaining_before = rng_obj.tempest_enh.entry_remains();
+
     for ( auto draw = 0U; draw < as<unsigned>( resource_count ); ++draw )
     {
       if ( rng_obj.tempest_enh.trigger() )
@@ -12218,6 +12244,13 @@ void shaman_t::trigger_tempest( T resource_count )
         assert( !success );
         success = true;
       }
+    }
+
+    const unsigned draws_remaining_after = rng_obj.tempest_enh.entry_remains();
+    const auto expected_after = as<int64_t>( draws_remaining_before ) - as<int64_t>( resource_count );
+    if ( as<int64_t>( draws_remaining_after ) != expected_after )
+    {
+      tempest_procs_this_deck = 0U;
     }
 
     if ( success )
