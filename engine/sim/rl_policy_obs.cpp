@@ -539,7 +539,7 @@ enum class enemy_buff_kind
 enum class action_leaf_kind
 {
   plain_expression,
-  shared_hit_damage, shared_crit_pct_current, shared_persistent_multiplier,
+  shared_hit_damage, shared_crit_pct_current, shared_persistent_multiplier, shared_da_multiplier,
   dot_molten_weapon_ticking, dot_molten_weapon_remains
 };
 
@@ -1383,18 +1383,67 @@ slot_binding resolve_action_leaf( player_t* p, const std::string& engine_token, 
 
   const std::string leaf_name = leaf.leaf;
 
-  // The three shared-snapshot leaves (OBS-07, Task 3 step 2) -- see
-  // build_obs' own dispatch for the derivation arithmetic.
-  if ( leaf_name == "hit_damage" || leaf_name == "crit_pct_current" || leaf_name == "persistent_multiplier" )
+  // The four shared-snapshot leaves (OBS-07, Task 3 step 2; `multiplier`
+  // added 221-07) -- see build_obs' own dispatch for the derivation
+  // arithmetic.
+  if ( leaf_name == "hit_damage" || leaf_name == "crit_pct_current" ||
+       leaf_name == "persistent_multiplier" || leaf_name == "multiplier" )
   {
+    // 221-07 WR-01: `a->create_expression("multiplier")` is NOT usable for
+    // this leaf -- action_t::create_expression (action.cpp) unconditionally
+    // tries `dot_t::create_expression(nullptr, this, this, name, true)`
+    // BEFORE its own name-match chain reaches "multiplier"
+    // (action.cpp:~3368), and dot_t's own "multiplier" handler
+    // (dot.cpp:561) is a DIFFERENT, unrelated alias -- the DOT tick
+    // multiplier (`dot->state ? dot->state->ta_multiplier : 0`), which is
+    // permanently 0 for every non-DOT action in this registry (proven via
+    // live instrumentation: the real action_t::create_expression body for
+    // "multiplier" never once executed for crash_lightning/lava_lash/
+    // voltaic_blaze/sundering/windstrike across a live episode). The
+    // MEANINGFUL "how hard is this ability hitting right now" signal is
+    // `composite_da_multiplier()` -- the same per-action virtual this
+    // schema's own persistent_multiplier leaf already calls the sibling
+    // `composite_persistent_multiplier()` for -- so `multiplier` is folded
+    // into the SAME shared-snapshot cache (no new `snapshot_state()` call,
+    // OBS-07's cost discipline unchanged) rather than routed through
+    // `create_expression` at all.
+    //
+    // 221-07 WR-02: `windstrike`/`voltaic_blaze` are DISPATCHER/CARRIER
+    // actions with zero direct-damage component of their own (windstrike_t's
+    // own comment: "Actual damaging attacks are done by stormstrike_attack_t";
+    // voltaic_blaze_t's damage is entirely its `impact_action`,
+    // voltaic_blaze_damage_t) -- `a->calculate_direct_amount()` on the
+    // dispatcher itself is structurally always 0 (confirmed live:
+    // base_dd_min/max=0, spell_power_mod.direct=0 on the resolved
+    // `windstrike`/`voltaic_blaze` action objects). The REAL damage-dealing
+    // child action is separately named and separately `find_action()`-able,
+    // so the shared cache is snapshotted against THAT action instead --
+    // mirrors this same file's own `full_recharge_time`/"strike" ->
+    // "stormstrike" hardcoded remap precedent (resolve_cooldown_leaf, just
+    // above). `ready`/every OTHER leaf of this member is UNCHANGED -- the
+    // RL agent still needs the DISPATCHER's own ready() bit for legality,
+    // only the four shared-cache damage leaves redirect.
+    action_t* damage_action = a;
+    if ( engine_token == "windstrike" )
+    {
+      if ( action_t* mh = p->find_action( "windstrike_mh" ) )
+        damage_action = mh;
+    }
+    else if ( engine_token == "voltaic_blaze" )
+    {
+      if ( action_t* dmg = p->find_action( "voltaic_blaze_damage" ) )
+        damage_action = dmg;
+    }
+
     slot_binding b;
     b.leaf = &leaf;
     b.kind = slot_binding_kind::action_expression;
-    b.bound_action = a;
-    b.shared_action_state = get_or_create_shared_action_state( a, table );
+    b.bound_action = damage_action;
+    b.shared_action_state = get_or_create_shared_action_state( damage_action, table );
     b.action_leaf = ( leaf_name == "hit_damage" ) ? action_leaf_kind::shared_hit_damage
                    : ( leaf_name == "crit_pct_current" ) ? action_leaf_kind::shared_crit_pct_current
-                   : action_leaf_kind::shared_persistent_multiplier;
+                   : ( leaf_name == "persistent_multiplier" ) ? action_leaf_kind::shared_persistent_multiplier
+                   : action_leaf_kind::shared_da_multiplier;
     return b;
   }
 
@@ -1444,12 +1493,15 @@ slot_binding resolve_action_leaf( player_t* p, const std::string& engine_token, 
   if ( leaf_name == "pet_surging_totem_remains" )
     return resolve_expression_leaf( p, "pet.surging_totem.remains", leaf, table );
 
-  // Everything else this census declares (ready, multiplier, travel_time,
-  // spell_targets, and any of cast_time/execute_time/cost/usable_in/
-  // available_targets/the charge leaves this census happens to use) is a
-  // plain action-scoped expression -- a->create_expression(leaf_name). Never
-  // resolved through a "cooldown.<spell>.*" name (the dead-alias-row trap,
-  // 220-RESEARCH.md Pitfall 6) -- this path always goes through the ACTION.
+  // Everything else this census declares (ready, travel_time, spell_targets,
+  // and any of cast_time/execute_time/cost/usable_in/available_targets/the
+  // charge leaves this census happens to use) is a plain action-scoped
+  // expression -- a->create_expression(leaf_name). Never resolved through a
+  // "cooldown.<spell>.*" name (the dead-alias-row trap, 220-RESEARCH.md
+  // Pitfall 6) -- this path always goes through the ACTION. `multiplier`
+  // moved OUT of this fallback (221-07 WR-01) -- see the shared-snapshot
+  // branch above for why the bare create_expression("multiplier") name is
+  // unusable for this leaf.
   return resolve_action_expression_leaf( a, leaf_name, leaf, table );
 }
 
@@ -1606,8 +1658,57 @@ const slot_table& bind_slots( player_t* p )
               // under a single-shape fight (sim.cpp:3824-3840) -- correct,
               // per this task's own action text; the census must see these
               // move under HecticAddCleave/LightMovement instead.
-              binding = resolve_expression_leaf(
-                p, "raid_event." + std::string( mem.engine_token ) + "." + leaf.leaf, leaf, table );
+              //
+              // 221-07 WR-03: the "movement" member's remains/distance/up
+              // leaves are NOT readable off the base raid_event_t's own
+              // remains()/distance_max/up() -- movement_event_t
+              // (raid_event.cpp:1136) tracks its own timing/distance in
+              // SUBCLASS-LOCAL fields (move_distance/move_distance_max) that
+              // the base class's generic filter expressions
+              // (raid_event.cpp:2627-2691, what "raid_event.movement.*"
+              // resolves through) never read, and movement_event_t never
+              // sets the base class's `duration`, so the active-window
+              // remains()/up() machinery never sees a nonzero window either
+              // -- proven live: raid_move.in ticked 15->13.8->5.5->4.36->
+              // 4.27s across a LightMovement corpus while raid_event.
+              // movement.remains/distance/up read constant 0.0 the ENTIRE
+              // fight, including while the player was actively mid-move
+              // (confirmed against `movement.remains`/`movement.distance`,
+              // player.cpp:12285-12306, which DID vary in the same window:
+              // remains 1.40->1.30->1.20->1.10->1.00s, distance 10.44->
+              // 9.70->8.95->8.21->7.47y). Redirected to that per-player
+              // source instead, ONLY for these three leaves of the
+              // "movement" member -- `in`/`cooldown`/etc are UNCHANGED
+              // (those DO read correctly-populated base-class scheduling
+              // fields; raid_adds.remains/up under HecticAddCleave prove the
+              // generic path is fine for event types that DO set `duration`
+              // -- this is a movement-specific gap, not a family-wide one).
+              const bool is_movement_member = std::strcmp( mem.engine_token, "movement" ) == 0;
+              if ( is_movement_member && std::strcmp( leaf.leaf, "remains" ) == 0 )
+              {
+                binding = resolve_expression_leaf( p, "movement.remains", leaf, table );
+              }
+              else if ( is_movement_member && std::strcmp( leaf.leaf, "distance" ) == 0 )
+              {
+                binding = resolve_expression_leaf( p, "movement.distance", leaf, table );
+              }
+              else if ( is_movement_member && std::strcmp( leaf.leaf, "up" ) == 0 )
+              {
+                // No player-scoped "movement.up" expression exists -- derive
+                // it from the SAME `current.distance_to_move` field
+                // "movement.remains"/"movement.distance" themselves read
+                // (player.cpp:12285-12299): a player is "moving" exactly
+                // when there is nonzero distance left to cover.
+                auto up_expr = make_fn_expr( "movement_up", [ p ] {
+                  return p->current.distance_to_move > 0.0 ? 1.0 : 0.0;
+                } );
+                binding = bind_expression_result( std::move( up_expr ), leaf, table );
+              }
+              else
+              {
+                binding = resolve_expression_leaf(
+                  p, "raid_event." + std::string( mem.engine_token ) + "." + leaf.leaf, leaf, table );
+              }
             }
             else
             {
@@ -1714,13 +1815,16 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t, flo
   compute_enemy_slot_candidates( p, enemy_candidates );
 
   // 220-06 Task 3 (OBS-07): the shared-snapshot cache for
-  // hit_damage/crit_pct_current/persistent_multiplier, keyed by the SAME
-  // `action_state_t*` slot_table already owns per action -- computed at most
-  // ONCE per action per decision, local to this call (a plain local
-  // unordered_map, never persisted across decisions: the state pointer
-  // itself is stable across decisions, but the VALUES it derives are not).
-  std::unordered_map<action_state_t*, std::array<double, 3>> shared_action_leaf_cache;
-  auto get_shared_action_leaves = [ & ]( action_t* a, action_state_t* state ) -> const std::array<double, 3>&
+  // hit_damage/crit_pct_current/persistent_multiplier/da_multiplier (4th
+  // slot added 221-07 WR-01 -- see resolve_action_leaf's own comment for why
+  // `multiplier` could not stay on the generic create_expression path),
+  // keyed by the SAME `action_state_t*` slot_table already owns per action
+  // -- computed at most ONCE per action per decision, local to this call (a
+  // plain local unordered_map, never persisted across decisions: the state
+  // pointer itself is stable across decisions, but the VALUES it derives
+  // are not).
+  std::unordered_map<action_state_t*, std::array<double, 4>> shared_action_leaf_cache;
+  auto get_shared_action_leaves = [ & ]( action_t* a, action_state_t* state ) -> const std::array<double, 4>&
   {
     auto found = shared_action_leaf_cache.find( state );
     if ( found != shared_action_leaf_cache.end() )
@@ -1729,14 +1833,17 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t, flo
     // Mirrors persistent_multiplier_expr_t's own n_targets logic
     // (action.cpp:3466-3481) so composite_persistent_multiplier is correct
     // for cleave-shaped actions, THEN calls snapshot_state ONCE -- never
-    // three times -- and derives all three leaves from that ONE state,
+    // four times -- and derives all four leaves from that ONE state,
     // replicating each retired expression's own arithmetic exactly:
     // action.cpp:3226-3251 (hit_damage), :3514-3533 (crit_pct_current),
-    // :3460-3484 (persistent_multiplier). `state->result` is fixed to
-    // RESULT_HIT once here (never averaged with crit) -- the same contract
-    // amount_expr_t's own hit_damage construction uses
-    // (action.cpp:3212-3224, constructed with an explicit RESULT_HIT, not
-    // RESULT_NONE, so average_crit stays false).
+    // :3460-3484 (persistent_multiplier). `da_multiplier` calls the same
+    // `composite_da_multiplier( state )` virtual `action_multiplier`-style
+    // code elsewhere in this engine already relies on for "how hard is this
+    // hitting right now" (e.g. crash_lightning_t's own TWW2 4pc override).
+    // `state->result` is fixed to RESULT_HIT once here (never averaged with
+    // crit) -- the same contract amount_expr_t's own hit_damage
+    // construction uses (action.cpp:3212-3224, constructed with an explicit
+    // RESULT_HIT, not RESULT_NONE, so average_crit stays false).
     state->target = a->target;
     int num_targets = a->n_targets();
     if ( num_targets == -1 || num_targets > 1 )
@@ -1759,9 +1866,10 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t, flo
 
     const double crit_pct_current = std::min( 100.0, state->composite_crit_chance() * 100.0 );
     const double persistent_multiplier = a->composite_persistent_multiplier( state );
+    const double da_multiplier = a->composite_da_multiplier( state );
 
     auto& entry = shared_action_leaf_cache[ state ];
-    entry = { hit_damage, crit_pct_current, persistent_multiplier };
+    entry = { hit_damage, crit_pct_current, persistent_multiplier, da_multiplier };
     return entry;
   };
 
@@ -2221,17 +2329,19 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t, flo
             case action_leaf_kind::shared_hit_damage:
             case action_leaf_kind::shared_crit_pct_current:
             case action_leaf_kind::shared_persistent_multiplier:
+            case action_leaf_kind::shared_da_multiplier:
             {
               if ( b.bound_action == nullptr || b.shared_action_state == nullptr )
               {
                 status = lookup_status::absent;
                 break;
               }
-              const std::array<double, 3>& vals =
+              const std::array<double, 4>& vals =
                   get_shared_action_leaves( b.bound_action, b.shared_action_state );
               raw = ( b.action_leaf == action_leaf_kind::shared_hit_damage ) ? vals[ 0 ]
                   : ( b.action_leaf == action_leaf_kind::shared_crit_pct_current ) ? vals[ 1 ]
-                  : vals[ 2 ];
+                  : ( b.action_leaf == action_leaf_kind::shared_persistent_multiplier ) ? vals[ 2 ]
+                  : vals[ 3 ];
               status = lookup_status::present;
               break;
             }
