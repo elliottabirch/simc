@@ -10487,6 +10487,39 @@ std::unique_ptr<expr_t> shaman_t::create_expression( util::string_view name )
     } );
   }
 
+  // 220-05 OBS-04 Task 2 (Rule 2 -- missing critical functionality): the
+  // observation census names pets.<searing_totem|surging_totem>.pulse_event_remains,
+  // and no existing APL expression exposes a totem's own periodic pulse timer
+  // (pulse_event is a raw event_t owned by shaman_totem_pet_t, not a
+  // dot/cooldown any generic player_t::create_expression path reaches) --
+  // verified empirically: "pet.surging_totem.pulse_event_remains" throws "No
+  // expression found" without this. Routed through shaman_t (not the totem
+  // pet's own create_expression) because "pet.<name>.<tail>" resolves via
+  // player_t::find_pet -> find_spawner -> pet_spawner_t::create_expression
+  // when no live pet instance exists at parse/bind time (the totem
+  // pet_spawner_t path, not the single-pet_t path shaman_totem_pet_t
+  // overrides) -- the spawner's own generic leaves (active/remains/
+  // min_remains/max_remains) never reach an individual pet. A null
+  // pulse_event (totem not currently summoned) reads 0.0, matching this
+  // family's `expression`-kind absent convention.
+  if ( util::str_compare_ci( name, "surging_totem_pulse_remains" ) )
+  {
+    return make_fn_expr( name, [ this ]() {
+      auto active = pet.surging_totem.active_pets();
+      return ( !active.empty() && active[ 0 ]->pulse_event )
+        ? active[ 0 ]->pulse_event->remains().total_seconds() : 0.0;
+    } );
+  }
+
+  if ( util::str_compare_ci( name, "searing_totem_pulse_remains" ) )
+  {
+    return make_fn_expr( name, [ this ]() {
+      auto active = pet.searing_totem.active_pets();
+      return ( !active.empty() && active[ 0 ]->pulse_event )
+        ? active[ 0 ]->pulse_event->remains().total_seconds() : 0.0;
+    } );
+  }
+
   if ( util::str_compare_ci( name, "tww3_procs_to_asc" ) )
     return make_fn_expr( name, [ this ]() {
       if ( !spell.tww3_stormbringer_2pc->ok() )

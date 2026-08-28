@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <set>
 #include <unordered_map>
 
 namespace rl_policy
@@ -306,12 +307,41 @@ enum class slot_binding_kind
 
 enum class buff_leaf_kind { stacks, remains };
 
-// The `scalars` pseudo-family's `direct`-kind leaves this task resolves.
+// The `scalars` pseudo-family's `direct`-kind leaves this task resolves,
+// PLUS (220-05 Task 2) the `stats`/`swing_cast`/`position` families' own
+// `direct`-kind leaves and the `sim_auras` family's single `skyfury` member
+// (declared `rl_family_kind::expression` in the generated table alongside
+// deck/pets/items/raid_events, but bound `direct` here -- `sim->auras.*` is
+// a raid-wide buff_t* with no `sim.auras.<name>` APL expression form at all,
+// verified empirically; a direct engine read is both correct and cheaper
+// than round-tripping through a nonexistent expression string).
 // `fight_remains` needs no entry here -- it is `derived` (rl_leaf_desc::
 // derived), and build_obs' derived-first dispatch short-circuits before
 // ever consulting a binding's `direct` id, exactly as the retired
 // per-field walk did for the same field.
-enum class direct_id { active_enemies, t, maelstrom };
+enum class direct_id
+{
+  active_enemies, t, maelstrom,
+  // stats
+  stats_attack_haste, stats_attack_crit_chance, stats_mastery_value,
+  stats_damage_versatility, stats_attack_power,
+  // swing_cast
+  swing_cast_auto_attack_interval, swing_cast_casting_remains, swing_cast_gcd_length,
+  swing_cast_gcd_remains, swing_cast_swing_mh_remains, swing_cast_swing_oh_remains,
+  // position
+  position_current_distance, position_distance_to_move, position_movement_speed,
+  position_x, position_y,
+  // sim_auras
+  sim_aura_skyfury
+};
+
+// rl_family_kind::cooldown's own `direct`-style dispatch (220-05 Task 2):
+// which cooldown_t accessor a leaf means, decided once at bind time -- never
+// a strcmp inside build_obs. `full_recharge_time` is NOT here: it is the
+// only leaf in this schema resolved through the ACTION rather than the raw
+// cooldown_t* (see resolve_cooldown_member's own comment), so it binds
+// `slot_binding_kind::expression` instead.
+enum class cooldown_leaf_kind { remains, charges, charges_fractional, recharge_time, max_charges };
 
 struct slot_binding
 {
@@ -321,9 +351,11 @@ struct slot_binding
   buff_leaf_kind buff_leaf = buff_leaf_kind::stacks;   // kind == buff
   direct_id direct = direct_id::t;      // kind == direct
   expr_t* expr = nullptr;               // kind == expression -- non-owning; owned by slot_table::owned_expressions
-  // cooldown_t*/enemy-slot descriptor handles are added by plan 220-06
-  // alongside the `cooldown`/`action_expression`/`enemy_slot` resolution
-  // cases below -- no structural change needed here.
+  cooldown_t* cooldown = nullptr;                        // kind == cooldown
+  cooldown_leaf_kind cooldown_leaf = cooldown_leaf_kind::remains;  // kind == cooldown
+  // enemy-slot descriptor handles are added by plan 220-06 alongside the
+  // `enemy_slot`/`action_expression` resolution cases below -- no
+  // structural change needed here.
 };
 
 struct slot_table
@@ -476,6 +508,29 @@ slot_binding resolve_scalar_leaf( const rl_leaf_desc& leaf )
   return b;
 }
 
+// Shared plumbing for every `expression`-kind binding (220-05 OBS-04/Task 2):
+// a resolved (possibly null) expr_t is moved into `table.owned_expressions`
+// (kept alive for the actor's whole run -- eval() is called once PER
+// DECISION from build_obs, never re-created there) and the binding holds
+// only a non-owning raw pointer into that vector. A null `expr` (whether
+// because create_expression legitimately returned nullptr, or because the
+// caller already caught a throw) binds `unresolved`.
+slot_binding bind_expression_result( std::unique_ptr<expr_t> expr, const rl_leaf_desc& leaf,
+                                      slot_table& table )
+{
+  slot_binding b;
+  b.leaf = &leaf;
+  if ( !expr )
+  {
+    b.kind = slot_binding_kind::unresolved;
+    return b;
+  }
+  table.owned_expressions.push_back( std::move( expr ) );
+  b.kind = slot_binding_kind::expression;
+  b.expr = table.owned_expressions.back().get();
+  return b;
+}
+
 // rl_family_kind::expression resolution (220-05 OBS-04, Pitfall 5): the
 // class-agnostic seam -- every deck/pet/item/raid-event member is an
 // expression NAME that arrives from the census artifact's `engine_token`,
@@ -484,28 +539,290 @@ slot_binding resolve_scalar_leaf( const rl_leaf_desc& leaf )
 // unrecognised name (player.cpp:12263/12281/12596) -- wrapped in try/catch
 // HERE, at bind time, so a failure becomes an `unresolved` binding (named in
 // the names file) rather than aborting the run mid-fight with a confusing
-// APL-argument message. A resolved `expr_t` is moved into
-// `table.owned_expressions` (kept alive for the actor's whole run) and the
-// binding holds only a non-owning raw pointer into that vector -- eval() is
-// called once PER DECISION from build_obs, never re-created there.
+// APL-argument message.
 slot_binding resolve_expression_leaf( player_t* p, const std::string& engine_token,
                                        const rl_leaf_desc& leaf, slot_table& table )
 {
-  slot_binding b;
-  b.leaf = &leaf;
+  std::unique_ptr<expr_t> expr;
   try
   {
-    std::unique_ptr<expr_t> expr = p->create_expression( engine_token );
-    if ( !expr )
-    {
-      b.kind = slot_binding_kind::unresolved;
-      return b;
-    }
-    table.owned_expressions.push_back( std::move( expr ) );
-    b.kind = slot_binding_kind::expression;
-    b.expr = table.owned_expressions.back().get();
+    expr = p->create_expression( engine_token );
   }
   catch ( const std::exception& )
+  {
+    expr = nullptr;
+  }
+  return bind_expression_result( std::move( expr ), leaf, table );
+}
+
+// Same as resolve_expression_leaf, but resolved through an ACTION's own
+// create_expression rather than the player's -- 220-05 Task 2's
+// `full_recharge_time` leaf (the cooldown family's `strike` member) needs
+// this: `cooldown.<name>.full_recharge_time` is not a recognised generic
+// cooldown expression (only `cooldown.<name>.remains` and friends are), but
+// `action.<name>.full_recharge_time` reaches the action's own real cooldown
+// object directly. A null `action` (find_action failed to resolve the
+// engine_token->action-name mapping) binds `unresolved` without ever
+// calling create_expression on a null pointer.
+slot_binding resolve_action_expression_leaf( action_t* action, const std::string& expr_name,
+                                              const rl_leaf_desc& leaf, slot_table& table )
+{
+  std::unique_ptr<expr_t> expr;
+  if ( action != nullptr )
+  {
+    try
+    {
+      expr = action->create_expression( expr_name );
+    }
+    catch ( const std::exception& )
+    {
+      expr = nullptr;
+    }
+  }
+  return bind_expression_result( std::move( expr ), leaf, table );
+}
+
+// rl_family_kind::cooldown resolution (220-05 Task 2): the named cooldown_t*
+// is resolved ONCE per member (bind_slots' own member-level cache, mirroring
+// the buff family's member_buff cache) and every leaf but one dispatches to
+// a `cooldown`-kind binding read directly off that handle in build_obs --
+// never through create_expression, since a raw pointer read is both cheaper
+// (OBS-07's hot-path concern) and simpler than round-tripping an expression
+// string for the SAME accessor read_state already used pre-220-04
+// (rl_policy_obs.cpp:189-200's retired walk).
+//
+// `full_recharge_time` is the ONE exception, per this task's own action
+// text: it is resolved through the ACTION, not the cooldown_t*, because
+// `cooldown.<name>.full_recharge_time` is not a real generic-cooldown
+// expression (verified empirically) and a cooldown NAME does not always
+// equal its action's name -- in this schema `full_recharge_time` appears
+// ONLY on the `strike` member (the shared Stormstrike/Windstrike cooldown
+// row), whose real action is named "stormstrike", not "strike"; that one
+// mapping is hardcoded here rather than assumed identical to every other
+// cooldown member (which never need it -- no OTHER member in this census
+// declares a `full_recharge_time` leaf).
+//
+// Deliberately does NOT gate `charges_fractional` on
+// `p->resources.is_active(RESOURCE_MAELSTROM)` (the SC-5 byte-neutrality
+// contract 220-04 preserved for the `maelstrom` scalar) -- that gate exists
+// for the retired FIFO transport's wire-omission concern, not for whether
+// the engine can answer the read, and CR-01's actor filter means only the
+// shaman ever reaches this path (resolve_scalar_leaf's own 220-04 comment
+// makes the identical argument for `maelstrom`).
+slot_binding resolve_cooldown_leaf( player_t* p, cooldown_t* cd, const std::string& cooldown_token,
+                                     const rl_leaf_desc& leaf, slot_table& table )
+{
+  if ( std::strcmp( leaf.leaf, "full_recharge_time" ) == 0 )
+  {
+    const std::string action_token = ( cooldown_token == "strike" ) ? "stormstrike" : cooldown_token;
+    return resolve_action_expression_leaf( p->find_action( action_token ), "full_recharge_time", leaf, table );
+  }
+
+  slot_binding b;
+  b.leaf = &leaf;
+  if ( cd == nullptr )
+  {
+    b.kind = slot_binding_kind::unresolved;
+    return b;
+  }
+  b.cooldown = cd;
+  b.kind = slot_binding_kind::cooldown;
+  if ( std::strcmp( leaf.leaf, "remains" ) == 0 )
+    b.cooldown_leaf = cooldown_leaf_kind::remains;
+  else if ( std::strcmp( leaf.leaf, "charges" ) == 0 )
+    b.cooldown_leaf = cooldown_leaf_kind::charges;
+  else if ( std::strcmp( leaf.leaf, "charges_fractional" ) == 0 )
+    b.cooldown_leaf = cooldown_leaf_kind::charges_fractional;
+  else if ( std::strcmp( leaf.leaf, "recharge_time" ) == 0 )
+    b.cooldown_leaf = cooldown_leaf_kind::recharge_time;
+  else if ( std::strcmp( leaf.leaf, "max_charges" ) == 0 )
+    b.cooldown_leaf = cooldown_leaf_kind::max_charges;
+  else
+    b.kind = slot_binding_kind::unresolved;   // artifact/generator mismatch, not a runtime fact
+  return b;
+}
+
+// rl_family_kind::direct resolution for `stats`/`swing_cast`/`position`
+// (220-05 Task 2) -- a small closed mapping from (family id, member name) to
+// a `direct_id`, decided once at bind time. Each member in these three
+// families carries exactly one leaf (always named "value" in this schema),
+// so no per-leaf dispatch is needed beyond the member-name match itself.
+slot_binding resolve_stats_swing_cast_position_leaf( rl_family fam_id, const std::string& member,
+                                                      const rl_leaf_desc& leaf )
+{
+  slot_binding b;
+  b.leaf = &leaf;
+  b.kind = slot_binding_kind::direct;
+
+  if ( fam_id == rl_family::stats )
+  {
+    if ( member == "attack_power" )      b.direct = direct_id::stats_attack_power;
+    else if ( member == "crit" )         b.direct = direct_id::stats_attack_crit_chance;
+    else if ( member == "damage_versatility" ) b.direct = direct_id::stats_damage_versatility;
+    else if ( member == "haste" )        b.direct = direct_id::stats_attack_haste;
+    else if ( member == "mastery_value" ) b.direct = direct_id::stats_mastery_value;
+    else b.kind = slot_binding_kind::unresolved;
+  }
+  else if ( fam_id == rl_family::swing_cast )
+  {
+    if ( member == "auto_attack_interval" ) b.direct = direct_id::swing_cast_auto_attack_interval;
+    else if ( member == "casting_remains" ) b.direct = direct_id::swing_cast_casting_remains;
+    else if ( member == "gcd_length" )      b.direct = direct_id::swing_cast_gcd_length;
+    else if ( member == "gcd_remains" )     b.direct = direct_id::swing_cast_gcd_remains;
+    else if ( member == "swing_mh_remains" ) b.direct = direct_id::swing_cast_swing_mh_remains;
+    else if ( member == "swing_oh_remains" ) b.direct = direct_id::swing_cast_swing_oh_remains;
+    else b.kind = slot_binding_kind::unresolved;
+  }
+  else if ( fam_id == rl_family::position )
+  {
+    if ( member == "current_distance" )    b.direct = direct_id::position_current_distance;
+    else if ( member == "distance_to_move" ) b.direct = direct_id::position_distance_to_move;
+    else if ( member == "movement_speed" ) b.direct = direct_id::position_movement_speed;
+    else if ( member == "x" )              b.direct = direct_id::position_x;
+    else if ( member == "y" )              b.direct = direct_id::position_y;
+    else b.kind = slot_binding_kind::unresolved;
+  }
+  else
+  {
+    b.kind = slot_binding_kind::unresolved;
+  }
+  return b;
+}
+
+// rl_family_kind::expression resolution for the `pets` family (220-05 Task
+// 2). Two sub-strategies, both class-agnostic in NAME (the wiring lives
+// here, in a shared file, never in sc_shaman.cpp -- ruling R-4 is about core
+// RL code naming no spell/pet token; this switch is the census's own
+// resolution logic, exactly like raid_events' "adds"/"movement" -> "raid_event.*"
+// composition below):
+//   - "n_active_pets"/"active" leaves compose "pet.<token>.active", which
+//     resolves through player_t::create_expression's pet_spawner_t branch to
+//     a live COUNT (pet_spawner_t::create_expression, "active" ->
+//     n_active_pets()) for a multi-pet spawner, or a 0/1 liveness bit for a
+//     single find_pet() match -- either way a correct numeric encoding.
+//   - "remains" composes "pet.<token>.remains" (spawner: soonest-to-expire
+//     active pet; single pet: its own expiration).
+//   - "pulse_event_remains" (searing_totem/surging_totem only) uses the two
+//     new shaman_t-level expressions this task's fork edit added, NOT
+//     "pet.<token>.pulse_event_remains" -- that string throws (verified
+//     empirically: no existing APL expression reaches a totem's raw
+//     pulse_event timer through the spawner path).
+// "the wolves" (all_wolves/fire_wolves/lightning_wolves) route through the
+// shaman's own soft-failing `feral_spirit.active`/`feral_spirit.remains`
+// forms instead of `pet.<token>.*` -- there is no per-color wolf split in
+// this fork (one Feral Spirit cast spawns an undifferentiated wolf pack), so
+// all three members read the SAME feral_spirit.* value; 220-07's liveness
+// census prunes the resulting cross-slot duplication by its own
+// "redundant-with:<slot>" rule (CONTEXT.md ruling), not by special-casing it
+// away here.
+slot_binding resolve_pets_leaf( player_t* p, const std::string& member, const std::string& engine_token,
+                                 const rl_leaf_desc& leaf, slot_table& table )
+{
+  static const std::set<std::string> wolves{ "all_wolves", "fire_wolves", "lightning_wolves" };
+
+  if ( wolves.count( member ) )
+  {
+    if ( std::strcmp( leaf.leaf, "n_active_pets" ) == 0 )
+      return resolve_expression_leaf( p, "feral_spirit.active", leaf, table );
+    if ( std::strcmp( leaf.leaf, "remains" ) == 0 )
+      return resolve_expression_leaf( p, "feral_spirit.remains", leaf, table );
+    return bind_expression_result( nullptr, leaf, table );   // artifact mismatch -> unresolved
+  }
+
+  if ( std::strcmp( leaf.leaf, "pulse_event_remains" ) == 0 )
+  {
+    if ( member == "surging_totem" )
+      return resolve_expression_leaf( p, "surging_totem_pulse_remains", leaf, table );
+    if ( member == "searing_totem" )
+      return resolve_expression_leaf( p, "searing_totem_pulse_remains", leaf, table );
+    return bind_expression_result( nullptr, leaf, table );
+  }
+
+  std::string suffix;
+  if ( std::strcmp( leaf.leaf, "n_active_pets" ) == 0 || std::strcmp( leaf.leaf, "active" ) == 0 )
+    suffix = "active";
+  else if ( std::strcmp( leaf.leaf, "remains" ) == 0 )
+    suffix = "remains";
+  else
+    return bind_expression_result( nullptr, leaf, table );   // artifact mismatch -> unresolved
+
+  return resolve_expression_leaf( p, "pet." + engine_token + "." + suffix, leaf, table );
+}
+
+// rl_family_kind::expression resolution for `items` (220-05 Task 2). Two
+// members, two different real expression forms -- neither is the bare
+// census token, exactly like raid_events/pets above.
+//   - "midnight_season_2_4pc" -> "set_bonus.midnight_season_2_4pc" (a
+//     player-scoped set-bonus check, real regardless of talent state).
+//   - "trinket_has_use_buff" -> the OR of BOTH trinket slots'
+//     `trinket.<N>.has_use_buff` (the census declares ONE aggregate member
+//     for what the game exposes as two independently-equipped slots; a
+//     composite `make_fn_expr` over up to two resolved sub-expressions is
+//     the simplest correct aggregation -- max() over {0,1} boolean-ish
+//     reads is OR). A slot with no trinket present is expected to throw
+//     nothing here (verified empirically both trinket slots resolve
+//     cleanly for this profile); either sub-expression failing to resolve
+//     still lets the composite bind through the other.
+slot_binding resolve_items_leaf( player_t* p, const std::string& member, const rl_leaf_desc& leaf,
+                                  slot_table& table )
+{
+  if ( member == "midnight_season_2_4pc" )
+    return resolve_expression_leaf( p, "set_bonus.midnight_season_2_4pc", leaf, table );
+
+  if ( member == "trinket_has_use_buff" )
+  {
+    expr_t* e1 = nullptr;
+    expr_t* e2 = nullptr;
+    try
+    {
+      if ( auto e = p->create_expression( "trinket.1.has_use_buff" ) )
+      {
+        table.owned_expressions.push_back( std::move( e ) );
+        e1 = table.owned_expressions.back().get();
+      }
+    }
+    catch ( const std::exception& ) { }
+    try
+    {
+      if ( auto e = p->create_expression( "trinket.2.has_use_buff" ) )
+      {
+        table.owned_expressions.push_back( std::move( e ) );
+        e2 = table.owned_expressions.back().get();
+      }
+    }
+    catch ( const std::exception& ) { }
+
+    if ( e1 == nullptr && e2 == nullptr )
+      return bind_expression_result( nullptr, leaf, table );
+
+    auto composite = make_fn_expr( "trinket_has_use_buff", [ e1, e2 ]() {
+      double v = 0.0;
+      if ( e1 != nullptr ) v = std::max( v, e1->eval() );
+      if ( e2 != nullptr ) v = std::max( v, e2->eval() );
+      return v;
+    } );
+    return bind_expression_result( std::move( composite ), leaf, table );
+  }
+
+  return bind_expression_result( nullptr, leaf, table );   // artifact mismatch -> unresolved
+}
+
+// rl_family_kind::expression resolution for `sim_auras` (220-05 Task 2),
+// bound `direct` (not `expression`) -- see direct_id's own comment above for
+// why: `sim->auras.skyfury` is a raid-wide buff_t* with no matching APL
+// expression string at all (verified empirically), so the correct and
+// cheapest read is direct engine access, exactly like the `maelstrom`
+// scalar.
+slot_binding resolve_sim_auras_leaf( const std::string& member, const rl_leaf_desc& leaf )
+{
+  slot_binding b;
+  b.leaf = &leaf;
+  if ( member == "skyfury" )
+  {
+    b.kind = slot_binding_kind::direct;
+    b.direct = direct_id::sim_aura_skyfury;
+  }
+  else
   {
     b.kind = slot_binding_kind::unresolved;
   }
@@ -583,6 +900,12 @@ const slot_table& bind_slots( player_t* p )
       buff_t* member_buff = nullptr;
       bool member_buff_scanned = false;
 
+      // Cooldown family (220-05 Task 2): same one-scan-per-member discipline
+      // as the buff family above, over p->cooldown_list instead of
+      // p->buff_list.
+      cooldown_t* member_cooldown = nullptr;
+      bool member_cooldown_scanned = false;
+
       for ( std::size_t li = 0; li < mem.n_leaves; ++li )
       {
         const rl_leaf_desc& leaf = mem.leaves[ li ];
@@ -616,17 +939,27 @@ const slot_table& bind_slots( player_t* p )
             binding = resolve_scalar_leaf( leaf );
             break;
           case rl_family_kind::expression:
-            // 220-05 Task 1: prove the expression seam on `deck` (the family
-            // with fork edits). `pets`/`items`/`raid_events`/`sim_auras`
-            // share this SAME rl_family_kind but are deliberately left
-            // unresolved here -- Task 2 (pets/items/sim_auras) and Task 3
-            // (raid_events) add their own engine_token->expression-name
-            // composition, which differs per family (deck's engine_token
-            // IS the expression name directly; raid_events composes
-            // "raid_event.<token>.<leaf>").
+            // 220-05 Task 1 proved the seam on `deck`; Task 2 adds
+            // `pets`/`items` and (bound `direct`, not `expression` -- see
+            // resolve_sim_auras_leaf's own comment) `sim_auras`. `raid_events`
+            // shares this SAME rl_family_kind but is deliberately left
+            // unresolved here -- Task 3 adds its own engine_token->expression
+            // composition ("raid_event.<token>.<leaf>").
             if ( fam.id == rl_family::deck )
             {
               binding = resolve_expression_leaf( p, mem.engine_token, leaf, table );
+            }
+            else if ( fam.id == rl_family::pets )
+            {
+              binding = resolve_pets_leaf( p, mem.member, mem.engine_token, leaf, table );
+            }
+            else if ( fam.id == rl_family::items )
+            {
+              binding = resolve_items_leaf( p, mem.member, leaf, table );
+            }
+            else if ( fam.id == rl_family::sim_auras )
+            {
+              binding = resolve_sim_auras_leaf( mem.member, leaf );
             }
             else
             {
@@ -635,13 +968,32 @@ const slot_table& bind_slots( player_t* p )
             }
             break;
           case rl_family_kind::cooldown:
+          {
+            if ( !member_cooldown_scanned )
+            {
+              for ( cooldown_t* cd : p->cooldown_list )
+              {
+                if ( cd->name_str == mem.member )
+                {
+                  member_cooldown = cd;
+                  break;
+                }
+              }
+              member_cooldown_scanned = true;
+            }
+            binding = resolve_cooldown_leaf( p, member_cooldown, mem.member, leaf, table );
+            break;
+          }
+          case rl_family_kind::direct:
+            // 220-05 Task 2: stats/swing_cast/position -- see
+            // resolve_stats_swing_cast_position_leaf's own comment.
+            binding = resolve_stats_swing_cast_position_leaf( fam.id, mem.member, leaf );
+            break;
           case rl_family_kind::enemy_slot:
           case rl_family_kind::action_expression:
-          case rl_family_kind::direct:
           default:
-            // Deferred to plan 220-06 (enemy_slot/action_expression) or the
-            // rest of 220-05 (cooldown/direct, Task 2) -- see this
-            // function's own header comment.
+            // Deferred to plan 220-06 -- see this function's own header
+            // comment.
             binding.kind = slot_binding_kind::unresolved;
             binding.leaf = &leaf;
             break;
@@ -779,6 +1131,131 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t, flo
               raw = p->resources.current[ RESOURCE_MAELSTROM ];
               status = lookup_status::present;
               break;
+
+            // 220-05 Task 2: stats -- always well-defined, never absent.
+            case direct_id::stats_attack_haste:
+              raw = p->cache.attack_haste();
+              status = lookup_status::present;
+              break;
+            case direct_id::stats_attack_crit_chance:
+              raw = p->cache.attack_crit_chance();
+              status = lookup_status::present;
+              break;
+            case direct_id::stats_mastery_value:
+              raw = p->cache.mastery_value();
+              status = lookup_status::present;
+              break;
+            case direct_id::stats_damage_versatility:
+              raw = p->cache.damage_versatility();
+              status = lookup_status::present;
+              break;
+            case direct_id::stats_attack_power:
+              raw = p->cache.attack_power();
+              status = lookup_status::present;
+              break;
+
+            // 220-05 Task 2: swing_cast. gcd_remains/swing_mh_remains/
+            // swing_oh_remains read the SAME rl_state_t POD read_state
+            // already populates (has_* flags -> absent, exactly like
+            // active_enemies above) -- never re-derived here. gcd_length and
+            // auto_attack_interval mirror decision_dump.cpp's own
+            // player-scoped formulas (this task's own read_first); both are
+            // unconditionally well-defined (0.0 is a real "no main-hand
+            // weapon" reading for auto_attack_interval, not an absence).
+            case direct_id::swing_cast_gcd_remains:
+              if ( s.has_gcd_remains )
+              {
+                raw = s.gcd_remains;
+                status = lookup_status::present;
+              }
+              else
+              {
+                status = lookup_status::absent;
+              }
+              break;
+            case direct_id::swing_cast_swing_mh_remains:
+              if ( s.has_swing_mh_remains )
+              {
+                raw = s.swing_mh_remains;
+                status = lookup_status::present;
+              }
+              else
+              {
+                status = lookup_status::absent;
+              }
+              break;
+            case direct_id::swing_cast_swing_oh_remains:
+              if ( s.has_swing_oh_remains )
+              {
+                raw = s.swing_oh_remains;
+                status = lookup_status::present;
+              }
+              else
+              {
+                status = lookup_status::absent;
+              }
+              break;
+            case direct_id::swing_cast_gcd_length:
+            {
+              timespan_t player_gcd = p->base_gcd * p->cache.attack_haste();
+              if ( player_gcd < p->min_gcd )
+                player_gcd = p->min_gcd;
+              raw = player_gcd.total_seconds();
+              status = lookup_status::present;
+              break;
+            }
+            case direct_id::swing_cast_auto_attack_interval:
+              raw = p->main_hand_attack
+                ? ( p->main_hand_weapon.swing_time * p->cache.auto_attack_speed() ).total_seconds()
+                : 0.0;
+              status = lookup_status::present;
+              break;
+            case direct_id::swing_cast_casting_remains:
+              if ( p->executing && p->executing->execute_event )
+              {
+                raw = p->executing->execute_event->remains().total_seconds();
+                status = lookup_status::present;
+              }
+              else if ( p->channeling && p->channeling->execute_event )
+              {
+                raw = p->channeling->execute_event->remains().total_seconds();
+                status = lookup_status::present;
+              }
+              else
+              {
+                status = lookup_status::absent;   // not currently casting
+              }
+              break;
+
+            // 220-05 Task 2: position. Always well-defined.
+            case direct_id::position_current_distance:
+              raw = p->current.distance;
+              status = lookup_status::present;
+              break;
+            case direct_id::position_distance_to_move:
+              raw = p->current.distance_to_move;
+              status = lookup_status::present;
+              break;
+            case direct_id::position_movement_speed:
+              raw = p->composite_movement_speed();
+              status = lookup_status::present;
+              break;
+            case direct_id::position_x:
+              raw = p->x_position;
+              status = lookup_status::present;
+              break;
+            case direct_id::position_y:
+              raw = p->y_position;
+              status = lookup_status::present;
+              break;
+
+            // 220-05 Task 2: sim_auras.skyfury -- constructed unconditionally
+            // (sim.cpp:2825), so ->check() is always a safe read.
+            case direct_id::sim_aura_skyfury:
+              raw = p->sim->auras.skyfury->check();
+              status = lookup_status::present;
+              break;
+
             default:
               status = lookup_status::absent;
               break;
@@ -803,13 +1280,43 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t, flo
           break;
         }
         case slot_binding_kind::cooldown:
+        {
+          // 220-05 Task 2: a direct cooldown_t* read, resolved once at bind
+          // time (resolve_cooldown_leaf); no create_expression round-trip.
+          if ( b.cooldown == nullptr )
+          {
+            status = lookup_status::absent;
+            break;
+          }
+          switch ( b.cooldown_leaf )
+          {
+            case cooldown_leaf_kind::remains:
+              raw = b.cooldown->remains().total_seconds();
+              break;
+            case cooldown_leaf_kind::charges:
+              raw = static_cast<double>( b.cooldown->current_charge );
+              break;
+            case cooldown_leaf_kind::charges_fractional:
+              raw = b.cooldown->charges_fractional();
+              break;
+            case cooldown_leaf_kind::recharge_time:
+              raw = b.cooldown->recharge_event
+                ? b.cooldown->recharge_event->remains().total_seconds() : 0.0;
+              break;
+            case cooldown_leaf_kind::max_charges:
+              raw = static_cast<double>( b.cooldown->charges );
+              break;
+          }
+          status = lookup_status::present;
+          break;
+        }
         case slot_binding_kind::action_expression:
         case slot_binding_kind::enemy_slot:
         case slot_binding_kind::unresolved:
         default:
-          // Deferred to plan 220-06 (enemy_slot/action_expression), or the
-          // rest of 220-05 (cooldown, Task 2) -- an unresolved binding
-          // yields `absent` (header_contract), never a special value.
+          // Deferred to plan 220-06 (enemy_slot/action_expression) -- an
+          // unresolved binding yields `absent` (header_contract), never a
+          // special value.
           status = lookup_status::absent;
           break;
       }
