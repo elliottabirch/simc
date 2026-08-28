@@ -2567,19 +2567,16 @@ anchored_wait_reading read_anchored_wait( const rl_state_t& s, const rl_wait_anc
   return out;
 }
 
-// WR-01 (221-08 code review): the fight-remaining AND raid-event-next-in
-// clamp, factored into ONE function so build_mask()'s legality check and
-// build_wait()'s duration computation can never diverge on which clamps
-// apply -- mirrors mask.py's anchored_wait_seconds() clamp exactly (both
-// bounds applied, in the same order, before any floor). Returns the
-// PRE-FLOOR clamped value; each caller applies its own floor comparison
-// on top (build_mask denies at <= RL_WAIT_FLOOR_SECONDS; build_wait floors
-// up to it). The ORIGINAL build_mask wait-legality rule compared the RAW
-// value directly to RL_WAIT_FLOOR_SECONDS and to fight_remains alone,
-// never consulting raid_event_next_in -- an anchored wait could be
-// offered as legal while the SAME wire state's build_wait() would clamp
-// its duration down to the bare floor, decoupling the mask's "legal" bit
-// from what the wait would actually realise.
+// The fight-remaining AND raid-event-next-in clamp, shared by
+// build_wait()'s duration computation below (mirrors mask.py's
+// anchored_wait_seconds() clamp exactly -- both bounds applied, in the
+// same order, before any floor). build_mask()'s wait-legality rule above
+// does NOT use this helper -- it compares the RAW value symmetrically
+// against both bounds (WR-01, 221-08 code review: "does the anchor's raw
+// duration fit before whichever bound comes first", NOT "is the clamped
+// value still above the floor" -- the latter silently admits a raw value
+// clamped down to a bound well above the floor, which is a real
+// divergence from build_wait()'s own duration for the SAME wire state).
 double clamp_anchored_wait_pre_floor( const rl_state_t& s, double raw )
 {
   double seconds_pre_floor = raw;
@@ -2607,12 +2604,17 @@ void build_mask( const rl_state_t& s, std::uint8_t out_mask[ RL_ACTION_DIM ] )
     // and that FATAL. Wait actions have no action_t* to resolve and skip
     // R0's engine-truth AND below entirely. 221-03 (ACT-05/ACT-06): an
     // ANCHORED wait (a.wait_anchor.kind != none) ADDITIONALLY requires the
-    // anchor's raw seconds (read_anchored_wait) to be present AND, once
-    // CLAMPED by clamp_anchored_wait_pre_floor() (fight_remains AND
-    // raid_event_next_in, WR-01 fix, 221-08 code review), strictly above
-    // RL_WAIT_FLOOR_SECONDS. Comparing the RAW value alone (the pre-221-08
-    // behaviour) let an anchored wait whose raid-event-clamped duration
-    // would collapse to the bare floor still read legal. Absent
+    // anchor's RAW seconds (read_anchored_wait, never the floored/clamped
+    // value) to be present, strictly above RL_WAIT_FLOOR_SECONDS, before
+    // fight end, AND (WR-01 fix, 221-08 code review) before the next raid
+    // event. The invariant is symmetric across both bounds: the anchor's
+    // RAW duration must fit entirely before WHICHEVER of fight-end or the
+    // next raid event comes first -- mirrors mask.py's legal() exactly,
+    // including why the CLAMPED value is never compared to the floor
+    // directly (a raw value clamped down to a fight_remains/raid_event_
+    // next_in well above the floor would then read legal, when the
+    // anchor's raw duration does not actually fit before that bound; an
+    // earlier draft of this fix made exactly that mistake). Absent
     // fight_remains/raid_event_next_in is a documented fail-open (waiting
     // past the end of a fight or a raid event is harmless). The
     // null-anchor (fixed) wait keeps the bare foreground rule below,
@@ -2630,8 +2632,11 @@ void build_mask( const rl_state_t& s, std::uint8_t out_mask[ RL_ACTION_DIM ] )
         continue;
       }
       const anchored_wait_reading reading = read_anchored_wait( s, a.wait_anchor );
-      const bool legal_wait =
-          reading.has_raw && clamp_anchored_wait_pre_floor( s, reading.raw ) > RL_WAIT_FLOOR_SECONDS;
+      bool legal_wait = reading.has_raw && reading.raw > RL_WAIT_FLOOR_SECONDS;
+      if ( legal_wait && s.has_fight_remains && !( reading.raw < s.fight_remains ) )
+        legal_wait = false;
+      if ( legal_wait && s.has_raid_event_next_in && !( reading.raw < s.raid_event_next_in ) )
+        legal_wait = false;
       out_mask[ i ] = legal_wait ? 1 : 0;
       continue;
     }
