@@ -775,6 +775,25 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   // is what lets mask.py AND the same bits on the wire that build_mask
   // ANDs in-process. Wait entries emit 0 (they have no action_t* to
   // resolve; read_action_gate_bits() already encodes that).
+  //
+  // WR-05 (221-08 code review): read_action_gate_bits()'s g_action_handle_
+  // cache is a file-static, unlocked std::unordered_map keyed on a bare
+  // const player_t* -- correct only under the single-sim/single-thread
+  // precondition its own assert states, which is COMPILED OUT under
+  // NDEBUG. Before 221 that precondition belonged only to the in-process
+  // arm (single-threaded by construction); 221 reaches this SAME function
+  // from BOTH call sites named above, including the FIFO request line and
+  // decision_dump=<file> runs with no threading requirement of their own
+  // -- a decision_dump=/threads>1 combination (previously legal; nothing
+  // in the dump path required single-threading) now races on the cache in
+  // a release build with no diagnostic. The precondition is now ENFORCED
+  // here rather than merely asserted: a multi-threaded/profileset run
+  // emits `null` for both arrays instead of touching the cache at all --
+  // mask.py's `_engine_truth_denies` already treats an absent-or-null
+  // array as "no engine truth on this wire" (a documented fail-open, not
+  // a crash), so this degrades a multi-threaded dump into that existing,
+  // named behaviour instead of undefined behaviour.
+  if ( p->sim->threads == 1 && p->sim->profileset_map.empty() )
   {
     std::uint8_t action_resolvable[ RL_ACTION_DIM ];
     std::uint8_t action_ready[ RL_ACTION_DIM ];
@@ -795,6 +814,11 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
       out << static_cast<int>( action_ready[ i ] );
     }
     out << "]";
+  }
+  else
+  {
+    out << ",\"action_resolvable\":null";
+    out << ",\"action_ready\":null";
   }
 }
 
