@@ -154,6 +154,25 @@ void accept_wait( sim_t* sim, execute_type et, double sec, const std::string& co
   if ( rl_policy::next_raid_event_in( sim, raid_event_bound ) && raid_event_bound < sec )
     sec = raid_event_bound;
 
+  // CR-04 (221-08 code review): re-apply the floor AFTER the fight-end/
+  // raid-event clamp above, not just before it. Both bounds can legally
+  // drive `sec` below RL_WAIT_FLOOR_SECONDS -- a raid event 1ms away, or
+  // `fight_remaining == 0.0` when the iteration has already ended -- and
+  // WITHOUT this re-floor, `sec` could land at exactly 0.0.
+  // `player_ready_event_t::execute()` (player.cpp) then schedules a fresh
+  // Player-Ready event at `timespan_t::from_seconds(0.0)`, at the SAME
+  // timestamp against the SAME state: a deterministic policy re-picks the
+  // (still legal, `anchor: null`) fixed wait and the loop repeats at zero
+  // elapsed time. This is exactly the spin `maskRules.waitZeroLengthForbidden`
+  // (enhancement.json) declares forbidden -- both `mask.py` and this
+  // file's own `build_wait()` already floor at RL_WAIT_FLOOR_SECONDS
+  // consistently; this was the ONE point that clamped without re-flooring.
+  // Waiting a hair past a raid event or past fight end is harmless (the
+  // engine re-decides at the next boundary either way); a zero-length wait
+  // is the one outcome the floor exists to forbid.
+  if ( sec < RL_WAIT_FLOOR_SECONDS )
+    sec = RL_WAIT_FLOOR_SECONDS;
+
   sim->solver_control_pending_wait_s = sec;
   sim->solver_control_has_pending_wait = true;
 }
