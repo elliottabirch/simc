@@ -19,7 +19,10 @@
 
 #include "sim/rl_policy.hpp"
 
+#include "action/action.hpp"
+#include "action/action_state.hpp"
 #include "action/attack.hpp"
+#include "action/dot.hpp"
 #include "buff/buff.hpp"
 #include "player/consumable.hpp"
 #include "player/player.hpp"
@@ -34,10 +37,13 @@
 #include "fmt/format.h"
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <cstring>
 #include <memory>
 #include <set>
 #include <unordered_map>
+#include <vector>
 
 namespace rl_policy
 {
@@ -346,6 +352,45 @@ enum class direct_id
 // `slot_binding_kind::expression` instead.
 enum class cooldown_leaf_kind { remains, charges, charges_fractional, recharge_time, max_charges };
 
+// 220-06 Task 1: the `enemy_slots` family's own per-slot dispatch. A slot's
+// ACTOR leaves (present/distance/time_to_die/health_pct/role) are read
+// directly off the per-decision candidate array (built once per build_obs
+// call, never per slot -- see build_obs' own header comment); a slot's
+// per-EFFECT leaves (Task 2) additionally need to know which of the 13
+// shaman-carried effects this leaf belongs to and whether that effect is a
+// dot (`t->dot_list`, `ticking`-shaped) or a debuff (`t->buff_list`,
+// `stacks`-shaped) -- decided ONCE at bind time by scanning the effect
+// member's OWN declared leaf set (present in `rl_obs_member::leaves` at bind
+// time), never re-derived per decision.
+enum class enemy_actor_leaf_kind { present, distance, time_to_die, health_pct, role };
+enum class enemy_effect_leaf_kind
+{
+  debuff_stacks, debuff_remains, debuff_tick_time,
+  dot_ticking, dot_remains, dot_tick_time, dot_tick_dmg, dot_pmultiplier
+};
+
+// 220-06 Task 3: the `action_leaves` family's own per-leaf dispatch.
+// `plain_expression` covers every leaf resolved through create_expression
+// (on the action OR the player, per resolve_action_leaf's own comment) --
+// the resolved expr_t lives in slot_table::owned_expressions exactly like
+// every other expression-kind binding in this file, no new ownership
+// mechanism needed. The three `shared_*` kinds are OBS-07's cost-split
+// mechanism: hit_damage/crit_pct_current/persistent_multiplier for the SAME
+// action share ONE `action_state_t*` (owned in
+// slot_table::owned_action_states, allocated once at bind, snapshotted once
+// per action per DECISION in build_obs -- never per leaf, never per bind).
+// The two `dot_molten_weapon_*` kinds are lava_lash's Molten Weapon residual
+// (220-RESEARCH.md's own citation: "per-enemy dot_list, same as
+// enemy_slots") -- read fresh off the CURRENT target's dot_list each
+// decision (never cached at bind time: the current target, and therefore
+// which dot_t* instance answers this leaf, can change between decisions).
+enum class action_leaf_kind
+{
+  plain_expression,
+  shared_hit_damage, shared_crit_pct_current, shared_persistent_multiplier,
+  dot_molten_weapon_ticking, dot_molten_weapon_remains
+};
+
 struct slot_binding
 {
   slot_binding_kind kind = slot_binding_kind::unresolved;
@@ -356,9 +401,20 @@ struct slot_binding
   expr_t* expr = nullptr;               // kind == expression -- non-owning; owned by slot_table::owned_expressions
   cooldown_t* cooldown = nullptr;                        // kind == cooldown
   cooldown_leaf_kind cooldown_leaf = cooldown_leaf_kind::remains;  // kind == cooldown
-  // enemy-slot descriptor handles are added by plan 220-06 alongside the
-  // `enemy_slot`/`action_expression` resolution cases below -- no
-  // structural change needed here.
+
+  // kind == enemy_slot (220-06 Task 1/2).
+  int enemy_slot_index = -1;                    // which of the 5 per-decision candidate slots (0-4)
+  bool enemy_is_effect_leaf = false;             // false == the base actor leaf (present/distance/...)
+  enemy_actor_leaf_kind enemy_actor_leaf = enemy_actor_leaf_kind::present;
+  std::string enemy_effect_name;                 // e.g. "flame_shock" -- only when enemy_is_effect_leaf
+  bool enemy_effect_is_dot = false;               // true == t->dot_list scan; false == t->buff_list scan
+  enemy_effect_leaf_kind enemy_effect_leaf = enemy_effect_leaf_kind::debuff_stacks;
+
+  // kind == action_expression (220-06 Task 3).
+  action_leaf_kind action_leaf = action_leaf_kind::plain_expression;
+  action_t* bound_action = nullptr;              // non-owning; the engine owns every action_t
+  action_state_t* shared_action_state = nullptr; // non-owning; owned by slot_table::owned_action_states,
+                                                  // shared by all three shared_* leaves of this SAME action
 };
 
 struct slot_table
@@ -371,6 +427,15 @@ struct slot_table
   // slot_table itself in g_slot_table_cache) -- slot_binding::expr is a
   // non-owning raw pointer into this vector, never re-created per decision.
   std::vector<std::unique_ptr<expr_t>> owned_expressions;
+  // 220-06 Task 3 (OBS-07): ONE action_state_t* per action that declares any
+  // of hit_damage/crit_pct_current/persistent_multiplier, allocated once at
+  // bind time via action_t::get_state() (a plain `new`, safe to `delete` --
+  // action_state_expr_t's own destructor does exactly that, see
+  // action.cpp:3199-3202) and reused every decision -- never reallocated,
+  // never released mid-run (same process-lifetime-leak convention this file
+  // already uses for owned_expressions and every raw engine handle it never
+  // frees).
+  std::vector<std::unique_ptr<action_state_t>> owned_action_states;
 };
 
 namespace
@@ -841,6 +906,360 @@ slot_binding resolve_sim_auras_leaf( const std::string& member, const rl_leaf_de
   return b;
 }
 
+// ---------------------------------------------------------------------------
+// 220-06 Task 1/2: `enemy_slots` resolution (rl_family_kind::enemy_slot).
+// ---------------------------------------------------------------------------
+
+constexpr std::size_t RL_ENEMY_SLOT_COUNT = 5;
+
+// "slotN" or "slotN.<effect>" -- N is a single digit 0-4 in this schema
+// (RL_ENEMY_SLOT_COUNT). Returns false for anything else (an
+// artifact/generator mismatch, handled by the caller as `unresolved`).
+bool parse_enemy_slot_member( const std::string& member, int& slot_index, std::string& effect_name )
+{
+  if ( member.size() < 5 || member.compare( 0, 4, "slot" ) != 0 )
+    return false;
+  const std::size_t dot = member.find( '.' );
+  const std::string slot_token = ( dot == std::string::npos ) ? member : member.substr( 0, dot );
+  if ( slot_token.size() != 5 || !std::isdigit( static_cast<unsigned char>( slot_token[ 4 ] ) ) )
+    return false;
+  slot_index = slot_token[ 4 ] - '0';
+  if ( slot_index < 0 || static_cast<std::size_t>( slot_index ) >= RL_ENEMY_SLOT_COUNT )
+    return false;
+  effect_name = ( dot == std::string::npos ) ? std::string() : member.substr( dot + 1 );
+  return true;
+}
+
+// rl_family_kind::enemy_slot resolution -- bind-time only. Which of the 5
+// per-decision candidate slots (Task 1) and, for a per-effect member (Task
+// 2), whether that effect is a dot (`t->dot_list`, "ticking"-shaped) or a
+// debuff (`t->buff_list`, "stacks"-shaped) is decided ONCE here by scanning
+// the effect's OWN declared leaf set (`mem.leaves`) -- never re-derived per
+// decision. The per-decision candidate array itself (WHICH player_t* answers
+// slot K this decision) is computed in build_obs, once per call -- see
+// compute_enemy_slot_candidates below; this function only records the slot
+// INDEX and leaf semantics, never a player_t* (enemies arise/despawn
+// mid-fight, so nothing actor-specific can be resolved at bind time).
+slot_binding resolve_enemy_slot_leaf( const rl_obs_member& mem, const rl_leaf_desc& leaf )
+{
+  slot_binding b;
+  b.leaf = &leaf;
+
+  int slot_index = -1;
+  std::string effect_name;
+  if ( !parse_enemy_slot_member( mem.member, slot_index, effect_name ) )
+  {
+    b.kind = slot_binding_kind::unresolved;
+    return b;
+  }
+  b.enemy_slot_index = slot_index;
+
+  if ( effect_name.empty() )
+  {
+    b.enemy_is_effect_leaf = false;
+    if ( std::strcmp( leaf.leaf, "present" ) == 0 )          b.enemy_actor_leaf = enemy_actor_leaf_kind::present;
+    else if ( std::strcmp( leaf.leaf, "distance" ) == 0 )    b.enemy_actor_leaf = enemy_actor_leaf_kind::distance;
+    else if ( std::strcmp( leaf.leaf, "time_to_die" ) == 0 ) b.enemy_actor_leaf = enemy_actor_leaf_kind::time_to_die;
+    else if ( std::strcmp( leaf.leaf, "health_pct" ) == 0 )  b.enemy_actor_leaf = enemy_actor_leaf_kind::health_pct;
+    else if ( std::strcmp( leaf.leaf, "role" ) == 0 )        b.enemy_actor_leaf = enemy_actor_leaf_kind::role;
+    else
+    {
+      b.kind = slot_binding_kind::unresolved;
+      return b;
+    }
+    b.kind = slot_binding_kind::enemy_slot;
+    return b;
+  }
+
+  bool is_dot = false;
+  for ( std::size_t i = 0; i < mem.n_leaves; ++i )
+  {
+    if ( std::strcmp( mem.leaves[ i ].leaf, "ticking" ) == 0 )
+    {
+      is_dot = true;
+      break;
+    }
+  }
+
+  b.enemy_is_effect_leaf = true;
+  b.enemy_effect_name = effect_name;
+  b.enemy_effect_is_dot = is_dot;
+
+  if ( is_dot )
+  {
+    if ( std::strcmp( leaf.leaf, "ticking" ) == 0 )          b.enemy_effect_leaf = enemy_effect_leaf_kind::dot_ticking;
+    else if ( std::strcmp( leaf.leaf, "remains" ) == 0 )     b.enemy_effect_leaf = enemy_effect_leaf_kind::dot_remains;
+    else if ( std::strcmp( leaf.leaf, "tick_time" ) == 0 )   b.enemy_effect_leaf = enemy_effect_leaf_kind::dot_tick_time;
+    else if ( std::strcmp( leaf.leaf, "tick_dmg" ) == 0 )    b.enemy_effect_leaf = enemy_effect_leaf_kind::dot_tick_dmg;
+    else if ( std::strcmp( leaf.leaf, "pmultiplier" ) == 0 ) b.enemy_effect_leaf = enemy_effect_leaf_kind::dot_pmultiplier;
+    else
+    {
+      b.kind = slot_binding_kind::unresolved;
+      return b;
+    }
+  }
+  else
+  {
+    if ( std::strcmp( leaf.leaf, "stacks" ) == 0 )           b.enemy_effect_leaf = enemy_effect_leaf_kind::debuff_stacks;
+    else if ( std::strcmp( leaf.leaf, "remains" ) == 0 )     b.enemy_effect_leaf = enemy_effect_leaf_kind::debuff_remains;
+    else if ( std::strcmp( leaf.leaf, "tick_time" ) == 0 )   b.enemy_effect_leaf = enemy_effect_leaf_kind::debuff_tick_time;
+    else
+    {
+      b.kind = slot_binding_kind::unresolved;
+      return b;
+    }
+  }
+
+  b.kind = slot_binding_kind::enemy_slot;
+  return b;
+}
+
+// 220-06 Task 1: the per-decision 5-element enemy-slot candidate array,
+// built ONCE per build_obs() call -- there are up to RL_ENEMY_SLOT_COUNT *
+// (1 + 9 effects * ~2-5 leaves) enemy_slots slots per decision, all sharing
+// this ONE ordering; computing it per-slot would both be wasteful and risk
+// the ordering disagreeing with itself mid-decision. Current target first
+// by pointer identity (if present in the non-sleeping list), then the
+// remainder ascending by `time_to_percent(0)`, TIE-BROKEN ON ACTOR INDEX:
+// under `fixed_time=1` every boss-type enemy's `time_to_percent(0)` is
+// byte-identical (sc_enemy.cpp:1749-1800 -- no per-actor term at all), so on
+// a single-boss-shape fight (Patchwerk-5T) the sort is a TOTAL TIE, and
+// without this tie-break slot order would depend on arise/demise insertion
+// history and change run to run -- not reproducible, in violation of this
+// plan's own SC 3 requirement. `player_t::sim`/`player_t::target` are
+// accessible through a `const player_t*` (the pointer members themselves are
+// non-const-qualified fields on player_t, so a const player_t* still yields
+// a mutable player_t* through them -- the same pattern
+// direct_id::raid_event_next_in's own build_obs arm already relies on for
+// `p->sim->raid_events`).
+void compute_enemy_slot_candidates( const player_t* p, std::array<player_t*, RL_ENEMY_SLOT_COUNT>& out )
+{
+  out.fill( nullptr );
+
+  std::vector<player_t*> rest;
+  rest.reserve( p->sim->target_non_sleeping_list.size() );
+  player_t* current_target = p->target;
+  bool have_current_target = false;
+  for ( player_t* t : p->sim->target_non_sleeping_list )
+  {
+    if ( !have_current_target && t == current_target )
+    {
+      have_current_target = true;
+      continue;
+    }
+    rest.push_back( t );
+  }
+
+  std::sort( rest.begin(), rest.end(), []( player_t* a, player_t* b ) {
+    const double ta = a->time_to_percent( 0 ).total_seconds();
+    const double tb = b->time_to_percent( 0 ).total_seconds();
+    if ( ta != tb )
+      return ta < tb;
+    return a->actor_index < b->actor_index;   // deterministic tie-break -- see this function's own comment
+  } );
+
+  std::size_t idx = 0;
+  if ( have_current_target && idx < out.size() )
+    out[ idx++ ] = current_target;
+  for ( player_t* t : rest )
+  {
+    if ( idx >= out.size() )
+      break;
+    out[ idx++ ] = t;
+  }
+}
+
+// 220-06 Task 2: a lazily-filled per-enemy handle cache, keyed on the raw
+// `player_t*`. Filled the FIRST time an enemy appears in a candidate slot --
+// not at bind time, because adds arise mid-fight under HecticAddCleave and
+// do not exist when the shaman's slot table is built (220-RESEARCH.md
+// Assumptions Log A5: add `player_t*` stability is INFERRED from
+// `adds_event_t`'s pre-created `std::vector<pet_t*> adds`, not PROVEN).
+//
+// VALIDATED on every use, never trusted from a one-time fill, via two
+// independent checks: (1) `t->actor_index` must still match what the cache
+// was filled for -- catches the corruption case where a `player_t*` value
+// gets reused for a DIFFERENT actor identity, the honest response to an
+// inferred-not-proven stability assumption; (2) a still-null handle is NOT
+// treated as a permanent "this effect doesn't exist on this enemy" answer --
+// it is RESCANNED every call while it is still null, because the engine can lazily
+// construct a target-specific debuff/dot object (`td()`) the first time this
+// actor is actually TARGETED, which can happen strictly after this function
+// first saw the actor in a slot.
+struct enemy_handle_cache
+{
+  std::size_t validated_actor_index = static_cast<std::size_t>( -1 );
+  buff_t* burning_core = nullptr;
+  buff_t* casting = nullptr;
+  buff_t* flametongue_attack = nullptr;
+  buff_t* lashing_flames = nullptr;
+  buff_t* lightning_rod = nullptr;
+  buff_t* venomfang_debuff = nullptr;
+  dot_t*  flame_shock = nullptr;
+  dot_t*  rune_of_unleashed_fire_lingering = nullptr;
+  dot_t*  venomfang = nullptr;
+};
+
+std::unordered_map<const player_t*, enemy_handle_cache> g_enemy_handle_cache;
+
+enemy_handle_cache& get_enemy_handle_cache( const player_t* p, player_t* t )
+{
+  auto& c = g_enemy_handle_cache[ t ];
+  if ( c.validated_actor_index != t->actor_index )
+  {
+    c = enemy_handle_cache{};
+    c.validated_actor_index = t->actor_index;
+  }
+
+  const bool need_buff_scan = c.burning_core == nullptr || c.casting == nullptr ||
+      c.flametongue_attack == nullptr || c.lashing_flames == nullptr ||
+      c.lightning_rod == nullptr || c.venomfang_debuff == nullptr;
+  if ( need_buff_scan )
+  {
+    for ( buff_t* b : t->buff_list )
+    {
+      if ( b->source != p )
+        continue;
+      if ( c.burning_core == nullptr && b->name_str == "burning_core" )                  c.burning_core = b;
+      else if ( c.casting == nullptr && b->name_str == "casting" )                       c.casting = b;
+      else if ( c.flametongue_attack == nullptr && b->name_str == "flametongue_attack" ) c.flametongue_attack = b;
+      else if ( c.lashing_flames == nullptr && b->name_str == "lashing_flames" )         c.lashing_flames = b;
+      else if ( c.lightning_rod == nullptr && b->name_str == "lightning_rod" )           c.lightning_rod = b;
+      else if ( c.venomfang_debuff == nullptr && b->name_str == "venomfang_debuff" )     c.venomfang_debuff = b;
+    }
+  }
+
+  const bool need_dot_scan = c.flame_shock == nullptr ||
+      c.rune_of_unleashed_fire_lingering == nullptr || c.venomfang == nullptr;
+  if ( need_dot_scan )
+  {
+    for ( dot_t* d : t->dot_list )
+    {
+      if ( d->source != p )
+        continue;
+      if ( c.flame_shock == nullptr && d->name_str == "flame_shock" )
+        c.flame_shock = d;
+      else if ( c.rune_of_unleashed_fire_lingering == nullptr && d->name_str == "rune_of_unleashed_fire_lingering" )
+        c.rune_of_unleashed_fire_lingering = d;
+      else if ( c.venomfang == nullptr && d->name_str == "venomfang" )
+        c.venomfang = d;
+    }
+  }
+
+  return c;
+}
+
+// ---------------------------------------------------------------------------
+// 220-06 Task 3: `action_leaves` resolution (rl_family_kind::action_expression).
+// ---------------------------------------------------------------------------
+
+// OBS-07's cost-split mechanism: ONE `action_state_t*` per action that
+// declares any of hit_damage/crit_pct_current/persistent_multiplier,
+// allocated once at bind time (never per decision) and shared by all three
+// leaves of that SAME action.
+action_state_t* get_or_create_shared_action_state( action_t* a, slot_table& table )
+{
+  for ( auto& s : table.owned_action_states )
+  {
+    if ( s->action == a )
+      return s.get();
+  }
+  action_state_t* fresh = a->get_state();
+  table.owned_action_states.push_back( std::unique_ptr<action_state_t>( fresh ) );
+  return fresh;
+}
+
+// rl_family_kind::action_expression resolution. `engine_token` IS the
+// action's `find_action()` token for every member in this census (verified
+// against the generated table: no `engineToken` override for `action_leaves`,
+// unlike `pets`/`items`/`raid_events`). A null `find_action()` result binds
+// EVERY leaf of this member `unresolved` and lets the census name it -- an
+// untalented action is a census input, not an error (this task's own action
+// text, step 1).
+slot_binding resolve_action_leaf( player_t* p, const std::string& engine_token, const rl_leaf_desc& leaf,
+                                   slot_table& table )
+{
+  action_t* a = p->find_action( engine_token );
+  if ( a == nullptr )
+  {
+    slot_binding b;
+    b.leaf = &leaf;
+    b.kind = slot_binding_kind::unresolved;
+    return b;
+  }
+
+  const std::string leaf_name = leaf.leaf;
+
+  // The three shared-snapshot leaves (OBS-07, Task 3 step 2) -- see
+  // build_obs' own dispatch for the derivation arithmetic.
+  if ( leaf_name == "hit_damage" || leaf_name == "crit_pct_current" || leaf_name == "persistent_multiplier" )
+  {
+    slot_binding b;
+    b.leaf = &leaf;
+    b.kind = slot_binding_kind::action_expression;
+    b.bound_action = a;
+    b.shared_action_state = get_or_create_shared_action_state( a, table );
+    b.action_leaf = ( leaf_name == "hit_damage" ) ? action_leaf_kind::shared_hit_damage
+                   : ( leaf_name == "crit_pct_current" ) ? action_leaf_kind::shared_crit_pct_current
+                   : action_leaf_kind::shared_persistent_multiplier;
+    return b;
+  }
+
+  // lava_lash's Molten Weapon residual -- read fresh off the CURRENT
+  // target's dot_list each decision (220-RESEARCH.md's own citation:
+  // "per-enemy dot_list, same as enemy_slots"), never through
+  // create_expression: this action_leaves member is not per-slot, and the
+  // action's own dot object tracks whichever target lava_lash last hit.
+  if ( leaf_name == "molten_weapon_ticking" || leaf_name == "molten_weapon_remains" )
+  {
+    slot_binding b;
+    b.leaf = &leaf;
+    b.kind = slot_binding_kind::action_expression;
+    b.bound_action = a;
+    b.action_leaf = ( leaf_name == "molten_weapon_ticking" ) ? action_leaf_kind::dot_molten_weapon_ticking
+                                                               : action_leaf_kind::dot_molten_weapon_remains;
+    return b;
+  }
+
+  // The in_flight family -- the 3-part "action.<token>.<leaf>" form is
+  // MANDATORY (action.cpp:4090-4110's `in_flight_singleton` branch): calling
+  // `a->create_expression("in_flight")` directly makes the engine search
+  // `player->action_list` for an action literally NAMED "in_flight".
+  if ( leaf_name == "in_flight" || leaf_name == "in_flight_count" ||
+       leaf_name == "in_flight_remains" || leaf_name == "in_flight_to_target" )
+  {
+    return resolve_action_expression_leaf( a, "action." + engine_token + "." + leaf_name, leaf, table );
+  }
+
+  // active_enemies_within_<yards> -- the census's member-name-safe leaf
+  // spelling (a literal "." is not a valid member/leaf-name character); the
+  // real expression is the 2-part "active_enemies_within.<yards>" form ON
+  // THE ACTION (action.cpp:3673-3702) -- the 3-part "action.X..." form fails
+  // its `splits.size() == 3` guard for this leaf (action.cpp:4096).
+  if ( leaf_name.rfind( "active_enemies_within_", 0 ) == 0 )
+  {
+    const std::string yards = leaf_name.substr( std::strlen( "active_enemies_within_" ) );
+    return resolve_action_expression_leaf( a, "active_enemies_within." + yards, leaf, table );
+  }
+
+  // pet.surging_totem.{active,remains} -- likewise the census's
+  // member-name-safe spelling; resolved through the PLAYER (not the
+  // action), wrapped -- it throws when the pet/spawner is absent
+  // (player.cpp:12570-12633).
+  if ( leaf_name == "pet_surging_totem_active" )
+    return resolve_expression_leaf( p, "pet.surging_totem.active", leaf, table );
+  if ( leaf_name == "pet_surging_totem_remains" )
+    return resolve_expression_leaf( p, "pet.surging_totem.remains", leaf, table );
+
+  // Everything else this census declares (ready, multiplier, travel_time,
+  // spell_targets, and any of cast_time/execute_time/cost/usable_in/
+  // available_targets/the charge leaves this census happens to use) is a
+  // plain action-scoped expression -- a->create_expression(leaf_name). Never
+  // resolved through a "cooldown.<spell>.*" name (the dead-alias-row trap,
+  // 220-RESEARCH.md Pitfall 6) -- this path always goes through the ACTION.
+  return resolve_action_expression_leaf( a, leaf_name, leaf, table );
+}
+
 // Writes the `rl_obs_names_out=` file ONCE per process (T-220-04-02's
 // rundir-scoped discipline, mirroring rl_translog='s open_and_write_header:
 // eager, no parent directories created, refuses loudly on a bad path
@@ -1013,10 +1432,14 @@ const slot_table& bind_slots( player_t* p )
             binding = resolve_stats_swing_cast_position_leaf( fam.id, mem.member, leaf );
             break;
           case rl_family_kind::enemy_slot:
+            // 220-06 Task 1/2 -- see resolve_enemy_slot_leaf's own comment.
+            binding = resolve_enemy_slot_leaf( mem, leaf );
+            break;
           case rl_family_kind::action_expression:
+            // 220-06 Task 3 -- see resolve_action_leaf's own comment.
+            binding = resolve_action_leaf( p, mem.engine_token, leaf, table );
+            break;
           default:
-            // Deferred to plan 220-06 -- see this function's own header
-            // comment.
             binding.kind = slot_binding_kind::unresolved;
             binding.leaf = &leaf;
             break;
@@ -1078,6 +1501,64 @@ const slot_table& bind_slots( player_t* p )
 
 void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t, float out_obs[ RL_OBS_DIM ] )
 {
+  // 220-06 Task 1: the enemy-slot candidate array is computed ONCE per
+  // decision here, never per slot -- see compute_enemy_slot_candidates' own
+  // comment.
+  std::array<player_t*, RL_ENEMY_SLOT_COUNT> enemy_candidates{};
+  compute_enemy_slot_candidates( p, enemy_candidates );
+
+  // 220-06 Task 3 (OBS-07): the shared-snapshot cache for
+  // hit_damage/crit_pct_current/persistent_multiplier, keyed by the SAME
+  // `action_state_t*` slot_table already owns per action -- computed at most
+  // ONCE per action per decision, local to this call (a plain local
+  // unordered_map, never persisted across decisions: the state pointer
+  // itself is stable across decisions, but the VALUES it derives are not).
+  std::unordered_map<action_state_t*, std::array<double, 3>> shared_action_leaf_cache;
+  auto get_shared_action_leaves = [ & ]( action_t* a, action_state_t* state ) -> const std::array<double, 3>&
+  {
+    auto found = shared_action_leaf_cache.find( state );
+    if ( found != shared_action_leaf_cache.end() )
+      return found->second;
+
+    // Mirrors persistent_multiplier_expr_t's own n_targets logic
+    // (action.cpp:3466-3481) so composite_persistent_multiplier is correct
+    // for cleave-shaped actions, THEN calls snapshot_state ONCE -- never
+    // three times -- and derives all three leaves from that ONE state,
+    // replicating each retired expression's own arithmetic exactly:
+    // action.cpp:3226-3251 (hit_damage), :3514-3533 (crit_pct_current),
+    // :3460-3484 (persistent_multiplier). `state->result` is fixed to
+    // RESULT_HIT once here (never averaged with crit) -- the same contract
+    // amount_expr_t's own hit_damage construction uses
+    // (action.cpp:3212-3224, constructed with an explicit RESULT_HIT, not
+    // RESULT_NONE, so average_crit stays false).
+    state->target = a->target;
+    int num_targets = a->n_targets();
+    if ( num_targets == -1 || num_targets > 1 )
+    {
+      a->target_cache.is_valid = false;
+      const int max_targets = static_cast<int>( a->target_list().size() );
+      num_targets = ( num_targets < 0 ) ? max_targets : std::min( max_targets, num_targets );
+    }
+    state->n_targets = std::max( 1, num_targets );
+    state->chain_target = 0;
+    state->result = RESULT_HIT;
+
+    a->snapshot_state( state, result_amount_type::NONE );
+
+    double hit_damage = a->calculate_direct_amount( state );
+    state->result_amount = hit_damage;
+    if ( state->target != nullptr )
+      state->target->target_mitigation( a->get_school(), result_amount_type::DMG_DIRECT, state );
+    hit_damage = state->result_amount;
+
+    const double crit_pct_current = std::min( 100.0, state->composite_crit_chance() * 100.0 );
+    const double persistent_multiplier = a->composite_persistent_multiplier( state );
+
+    auto& entry = shared_action_leaf_cache[ state ];
+    entry = { hit_damage, crit_pct_current, persistent_multiplier };
+    return entry;
+  };
+
   for ( std::size_t slot = 0; slot < RL_OBS_DIM; ++slot )
   {
     const slot_binding& b = t.bindings[ slot ];
@@ -1362,12 +1843,227 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t, flo
           status = lookup_status::present;
           break;
         }
-        case slot_binding_kind::action_expression:
         case slot_binding_kind::enemy_slot:
+        {
+          // 220-06 Task 1/2: the candidate array is computed once above
+          // (enemy_candidates), never per slot.
+          player_t* et = ( b.enemy_slot_index >= 0 &&
+                           static_cast<std::size_t>( b.enemy_slot_index ) < enemy_candidates.size() )
+              ? enemy_candidates[ static_cast<std::size_t>( b.enemy_slot_index ) ] : nullptr;
+          if ( et == nullptr )
+          {
+            // Absent slot -- every leaf, INCLUDING `present`, flows through
+            // this SAME absent->missing path; `present`'s own declared
+            // missing is 0 (header_contract) -- never hand-special-cased.
+            status = lookup_status::absent;
+            break;
+          }
+
+          if ( !b.enemy_is_effect_leaf )
+          {
+            switch ( b.enemy_actor_leaf )
+            {
+              case enemy_actor_leaf_kind::present:
+                raw = 1.0;
+                status = lookup_status::present;
+                break;
+              case enemy_actor_leaf_kind::distance:
+                raw = p->get_player_distance( *et );
+                status = lookup_status::present;
+                break;
+              case enemy_actor_leaf_kind::time_to_die:
+                raw = et->time_to_percent( 0 ).total_seconds();
+                status = lookup_status::present;
+                break;
+              case enemy_actor_leaf_kind::health_pct:
+                raw = et->health_percentage() / 100.0;
+                status = lookup_status::present;
+                break;
+              case enemy_actor_leaf_kind::role:
+                raw = et->is_add() ? 1.0 : 0.0;
+                status = lookup_status::present;
+                break;
+            }
+            break;
+          }
+
+          // Per-effect leaf (Task 2) -- the lazily-filled, validated-on-use
+          // handle cache (get_enemy_handle_cache's own comment explains the
+          // validation).
+          enemy_handle_cache& hc = get_enemy_handle_cache( p, et );
+          if ( b.enemy_effect_is_dot )
+          {
+            dot_t* d = ( b.enemy_effect_name == "flame_shock" ) ? hc.flame_shock
+                     : ( b.enemy_effect_name == "rune_of_unleashed_fire_lingering" ) ? hc.rune_of_unleashed_fire_lingering
+                     : ( b.enemy_effect_name == "venomfang" ) ? hc.venomfang
+                     : nullptr;
+            if ( d == nullptr || !d->is_ticking() )
+            {
+              status = lookup_status::absent;
+              break;
+            }
+            switch ( b.enemy_effect_leaf )
+            {
+              case enemy_effect_leaf_kind::dot_ticking:
+                raw = 1.0;
+                status = lookup_status::present;
+                break;
+              case enemy_effect_leaf_kind::dot_remains:
+                raw = d->remains().total_seconds();
+                status = lookup_status::present;
+                break;
+              case enemy_effect_leaf_kind::dot_tick_time:
+                // dot_t::tick_time is PRIVATE (dot.hpp) -- the public,
+                // equivalent read is the action's own tick_time() re-run
+                // against the dot's snapshotted state, the exact formula
+                // dot.cpp:350 uses internally.
+                raw = ( d->current_action != nullptr && d->state != nullptr )
+                    ? d->current_action->tick_time( d->state ).total_seconds() : 0.0;
+                status = lookup_status::present;
+                break;
+              case enemy_effect_leaf_kind::dot_tick_dmg:
+              {
+                // dot.cpp:487-501's own formula, replicated: this leaf is
+                // per-SLOT (any of the 5 enemies), but
+                // create_expression("dot.<name>.tick_dmg") is scoped only to
+                // the CURRENT target -- so this cannot round-trip through an
+                // expression the way the player-scoped families do. A fresh
+                // temp state is copied from the dot's own snapshotted state,
+                // RESULT forced to HIT, evaluated, and freed directly --
+                // action_t::release_state is PRIVATE (only action_t's own
+                // pooling code may call it), so this mirrors
+                // action_state_expr_t's own destructor instead
+                // (action.cpp:3199-3202's plain `delete state;`).
+                if ( d->current_action == nullptr || d->state == nullptr )
+                {
+                  raw = 0.0;
+                }
+                else
+                {
+                  action_state_t* tmp = d->current_action->get_state();
+                  tmp->copy_state( d->state );
+                  tmp->result = RESULT_HIT;
+                  raw = d->current_action->calculate_tick_amount( tmp, d->current_stack() );
+                  delete tmp;
+                }
+                status = lookup_status::present;
+                break;
+              }
+              case enemy_effect_leaf_kind::dot_pmultiplier:
+                raw = ( d->state != nullptr ) ? d->state->persistent_multiplier : 0.0;
+                status = lookup_status::present;
+                break;
+              default:
+                status = lookup_status::absent;
+                break;
+            }
+          }
+          else
+          {
+            buff_t* eb = ( b.enemy_effect_name == "burning_core" ) ? hc.burning_core
+                       : ( b.enemy_effect_name == "casting" ) ? hc.casting
+                       : ( b.enemy_effect_name == "flametongue_attack" ) ? hc.flametongue_attack
+                       : ( b.enemy_effect_name == "lashing_flames" ) ? hc.lashing_flames
+                       : ( b.enemy_effect_name == "lightning_rod" ) ? hc.lightning_rod
+                       : ( b.enemy_effect_name == "venomfang_debuff" ) ? hc.venomfang_debuff
+                       : nullptr;
+            if ( eb == nullptr || eb->check() <= 0 )
+            {
+              status = lookup_status::absent;
+              break;
+            }
+            switch ( b.enemy_effect_leaf )
+            {
+              case enemy_effect_leaf_kind::debuff_stacks:
+                raw = static_cast<double>( eb->check() );
+                status = lookup_status::present;
+                break;
+              case enemy_effect_leaf_kind::debuff_remains:
+              {
+                const timespan_t remains = eb->remains();
+                if ( remains == timespan_t::min() )
+                {
+                  status = lookup_status::permanent;
+                }
+                else
+                {
+                  raw = remains.total_seconds();
+                  status = lookup_status::present;
+                }
+                break;
+              }
+              case enemy_effect_leaf_kind::debuff_tick_time:
+                raw = eb->tick_time().total_seconds();
+                status = lookup_status::present;
+                break;
+              default:
+                status = lookup_status::absent;
+                break;
+            }
+          }
+          break;
+        }
+        case slot_binding_kind::action_expression:
+        {
+          switch ( b.action_leaf )
+          {
+            case action_leaf_kind::shared_hit_damage:
+            case action_leaf_kind::shared_crit_pct_current:
+            case action_leaf_kind::shared_persistent_multiplier:
+            {
+              if ( b.bound_action == nullptr || b.shared_action_state == nullptr )
+              {
+                status = lookup_status::absent;
+                break;
+              }
+              const std::array<double, 3>& vals =
+                  get_shared_action_leaves( b.bound_action, b.shared_action_state );
+              raw = ( b.action_leaf == action_leaf_kind::shared_hit_damage ) ? vals[ 0 ]
+                  : ( b.action_leaf == action_leaf_kind::shared_crit_pct_current ) ? vals[ 1 ]
+                  : vals[ 2 ];
+              status = lookup_status::present;
+              break;
+            }
+            case action_leaf_kind::dot_molten_weapon_ticking:
+            case action_leaf_kind::dot_molten_weapon_remains:
+            {
+              dot_t* mw = nullptr;
+              if ( p->target != nullptr )
+              {
+                for ( dot_t* d : p->target->dot_list )
+                {
+                  if ( d->source == p && d->name_str == "molten_weapon" )
+                  {
+                    mw = d;
+                    break;
+                  }
+                }
+              }
+              if ( mw == nullptr || !mw->is_ticking() )
+              {
+                status = lookup_status::absent;
+              }
+              else if ( b.action_leaf == action_leaf_kind::dot_molten_weapon_ticking )
+              {
+                raw = 1.0;
+                status = lookup_status::present;
+              }
+              else
+              {
+                raw = mw->remains().total_seconds();
+                status = lookup_status::present;
+              }
+              break;
+            }
+            default:
+              status = lookup_status::absent;
+              break;
+          }
+          break;
+        }
         case slot_binding_kind::unresolved:
         default:
-          // Deferred to plan 220-06 (enemy_slot/action_expression) -- an
-          // unresolved binding yields `absent` (header_contract), never a
+          // An unresolved binding yields `absent` (header_contract), never a
           // special value.
           status = lookup_status::absent;
           break;
