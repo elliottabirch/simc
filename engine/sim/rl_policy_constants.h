@@ -89,13 +89,13 @@ inline constexpr const char* RL_REGISTRY_ID = "enhancement";
 inline constexpr const char* RL_ACTOR_NAME = "MID2_Shaman_Enhancement_Stormbringer";
 inline constexpr int RL_ENCODER_VERSION = 2;
 inline constexpr std::size_t RL_OBS_DIM = 208;
-inline constexpr std::size_t RL_ACTION_DIM = 6;
+inline constexpr std::size_t RL_ACTION_DIM = 16;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
 inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v2:90206fa823fca5720e8ce8f4fc5e0fd3d9912f70992844a194e0a7c4d0cf545d";
-inline constexpr const char* RL_MASK_RULES_SHA = "0774a23687815c8b37b1f64b797302df9fc6bcfb501e362cbe4f8e351815c7b0";
-inline constexpr const char* RL_ACTION_SPACE_SHA = "fcef3be80d8c654cfe5e16707c5fe7d40b6e0a1ebdd9021a2139f0aed2870774";
+inline constexpr const char* RL_MASK_RULES_SHA = "25c87a07570a5855cf5558302d90ba73557c0476ad57d62c117ccaa186f02243";
+inline constexpr const char* RL_ACTION_SPACE_SHA = "1e06245ba23b3c59c05f137097ea94d492da5e7631c11b2afe553a85b226995b";
 
 // ---- Observation name list (the materialised ordering) ----
 
@@ -873,7 +873,17 @@ inline constexpr rl_action_desc RL_ACTIONS[RL_ACTION_DIM] = {
   { 2, "chain_lightning", rl_action_kind::cast, nullptr, nullptr, "chain_lightning" },
   { 3, nullptr, rl_action_kind::wait, nullptr, nullptr, nullptr },
   { 4, "tempest", rl_action_kind::cast, nullptr, nullptr, "tempest" },
-  { 5, "lava_lash", rl_action_kind::cast, "lava_lash", nullptr, "lava_lash" },
+  { 5, "windstrike", rl_action_kind::cast, "strike", nullptr, "windstrike" },
+  { 6, "crash_lightning", rl_action_kind::cast, "crash_lightning", nullptr, "crash_lightning" },
+  { 7, "lava_lash", rl_action_kind::cast, "lava_lash", nullptr, "lava_lash" },
+  { 8, "voltaic_blaze", rl_action_kind::cast, "voltaic_blaze", nullptr, "voltaic_blaze" },
+  { 9, "sundering", rl_action_kind::cast, "sundering", nullptr, "sundering" },
+  { 10, "ascendance", rl_action_kind::cast, "ascendance", nullptr, "ascendance" },
+  { 11, "doom_winds", rl_action_kind::cast, "doom_winds", nullptr, "doom_winds" },
+  { 12, "primordial_storm", rl_action_kind::cast, nullptr, nullptr, "primordial_storm" },
+  { 13, "surging_totem", rl_action_kind::cast, "surging_totem", nullptr, "surging_totem" },
+  { 14, "use_item_voracious_heart_of_ulatek", rl_action_kind::cast, "voracious_heart_of_ulatek_1297761", "item_cd_1141", "use_item_voracious_heart_of_ulatek" },
+  { 15, "berserking", rl_action_kind::cast, "berserking", nullptr, "berserking" },
 };
 
 // ---- Buff-gate table ----
@@ -881,13 +891,26 @@ inline constexpr rl_action_desc RL_ACTIONS[RL_ACTION_DIM] = {
 inline constexpr rl_buff_gate RL_BUFF_GATES[] = {
   { "lightning_bolt", "tempest", true },
   { "tempest", "tempest", false },
+  { "stormstrike", "ascendance", true },
+  { "windstrike", "ascendance", false },
+  { "sundering", "primordial_storm", true },
+  { "primordial_storm", "primordial_storm", false },
 };
-inline constexpr std::size_t RL_BUFF_GATE_COUNT = 2;
+inline constexpr std::size_t RL_BUFF_GATE_COUNT = 6;
 
 // ---- Talent-gate table ----
 
 inline constexpr rl_talent_gate RL_TALENT_GATES[] = {
+  { "windstrike", "ascendance", false },
+  { "crash_lightning", "crash_lightning", false },
   { "lava_lash", "lava_lash", false },
+  { "sundering", "sundering", false },
+  { "ascendance", "ascendance", false },
+  { "doom_winds", "doom_winds", false },
+  { "doom_winds", "ascendance", true },
+  { "doom_winds", "deeply_rooted_elements", true },
+  { "primordial_storm", "primordial_storm", false },
+  { "surging_totem", "surging_totem", false },
 };
-inline constexpr std::size_t RL_TALENT_GATE_COUNT = 1;
+inline constexpr std::size_t RL_TALENT_GATE_COUNT = 10;
 
