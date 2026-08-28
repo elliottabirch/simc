@@ -4018,6 +4018,9 @@ void sim_t::create_options()
   // pre-mix/unknown sentinel and must stay reachable by simply omitting
   // the option.
   add_option( opt_int( "rl_fight_shape_index", rl_fight_shape_index ) );
+  // tstl-sylvanas phase 220, plan 220-04 (OBS-02). See sim.hpp's
+  // rl_obs_names_out_str doc comment. Default empty, disabled.
+  add_option( opt_string( "rl_obs_names_out", rl_obs_names_out_str ) );
   // tstl-sylvanas phase 220, plan 220-01 (OBS-07). rl_obs_timing=1 -- see
   // sim.hpp's rl_obs_timing/rl_obs_ns doc comment. Default false, zero
   // overhead when omitted.

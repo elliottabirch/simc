@@ -21,16 +21,19 @@
 
 #include "action/attack.hpp"
 #include "buff/buff.hpp"
+#include "player/consumable.hpp"
 #include "player/player.hpp"
 #include "sim/cooldown.hpp"
 #include "sim/decision_dump.hpp"
 #include "sim/event.hpp"
 #include "sim/sim.hpp"
+#include "util/io.hpp"
 
 #include "fmt/format.h"
 
 #include <algorithm>
 #include <cstring>
+#include <unordered_map>
 
 namespace rl_policy
 {
@@ -207,13 +210,16 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground )
 }
 
 // ---------------------------------------------------------------------------
-// Stage 2 helpers -- PURE over the POD, mirroring obs.py's
-// _apply_scale / _encode_bucket_ordinal exactly.
+// Stage 2 helpers -- PURE arithmetic, mirroring obs.py's
+// _apply_scale / _encode_bucket_ordinal exactly. Retargeted (phase 220,
+// plan 220-04) from the retired per-field `rl_obs_field` to the per-leaf
+// `rl_leaf_desc` -- the scale/bucket fields these two functions read are
+// identical between the two structs, so this is a type swap only.
 // ---------------------------------------------------------------------------
 
 namespace
 {
-double apply_scale( double raw, rl_kind kind, const rl_obs_field& f )
+double apply_scale( double raw, rl_kind kind, const rl_leaf_desc& f )
 {
   switch ( kind )
   {
@@ -257,224 +263,387 @@ double encode_bucket_ordinal( double raw, const double* buckets, std::size_t n )
   return static_cast<double>( idx ) / denom;
 }
 
-// ---------------------------------------------------------------------------
-// lookup_status -- the tri-state leaf lookup (210-05R Task 2), mirroring
-// obs.py::_lookup (obs.py:98-145) EXACTLY, but over the descriptor's
-// PRE-SPLIT (container, key, leaf) rather than splitting a dotted string
-// (ruling 210-G14/Pattern 2 -- the generator pre-splits the source so this
-// C++ never parses a string at runtime). Three outcomes:
-//   absent    -- the named buff/cooldown row (or scalar leaf) does not
-//                exist, or exists but the requested (RECOGNISED) leaf has
-//                no value and is not permanent (WR-04's conflation --
-//                deliberate, no fourth status).
-//   present   -- the leaf has a real value, written to `out_val`.
-//   permanent -- (buff only) the leaf is null but its containing buff
-//                object carries `permanent == true` (PROTOCOL.md's
-//                no-scheduled-expiration representation). `out_val` is
-//                left unwritten -- callers branch on the returned status,
-//                never on `out_val`, for this case (mirrors _lookup's own
-//                `value` being `None` here).
-//
-// WR-03(b) fix (210-CR-FIX): an UNRECOGNISED leaf name -- a string this
-// switch has not been taught, as opposed to a recognised leaf that simply
-// has no value right now -- used to fail open to `absent` in every branch
-// below. That is the wrong default for a value the net consumes: a future
-// registry field this loader has not been taught yet would regenerate the
-// header (fingerprints all stay green, since none of the three hashes this
-// loader's own C-string literals) and then silently encode as the field's
-// `missing` sentinel forever, with both transports reporting success while
-// disagreeing on the observation vector. Every genuinely-unrecognised-leaf
-// fallthrough below now throws, naming the slot/container/key/leaf, instead
-// of returning `absent` -- WR-04's conflation (a RECOGNISED leaf whose
-// value is not currently populated) is untouched, since that is a real,
-// intentional encoding, not a registry/loader mismatch.
-// ---------------------------------------------------------------------------
-
 enum class lookup_status { absent, present, permanent };
-
-[[noreturn]] void throw_unrecognised_leaf( const rl_obs_field& f, const char* container_name )
-{
-  throw sc_runtime_error( fmt::format(
-      "rl_policy::lookup_leaf: observation field slot={} container='{}' key='{}' names "
-      "unrecognised leaf '{}' -- this loader has not been taught this leaf name; a silent "
-      "'absent' here would let the net see a wrong number instead of a loud stop (WR-03)",
-      f.slot, container_name, f.key, f.leaf ) );
-}
-
-lookup_status lookup_leaf( const rl_state_t& s, const rl_obs_field& f, double& out_val )
-{
-  switch ( f.container )
-  {
-    case rl_container::scalar:
-    {
-      // `key` is unused for scalar fields (there is no container object to
-      // key into); `leaf` names a top-level scalar of rl_state_t directly.
-      // `fight_remains` is `derived` and never reaches this function (see
-      // build_obs' own dispatch below). This schema had exactly one
-      // registered scalar leaf (`active_enemies`) until quick task
-      // 260826-38t added `swing_mh_remains` and `swing_oh_remains` (D-2R
-      // slots 7/8) -- both already-populated `rl_state_t` members, simply
-      // not routed through this dispatch before now.
-      if ( std::strcmp( f.leaf, "active_enemies" ) == 0 )
-      {
-        if ( s.has_active_enemies )
-        {
-          out_val = s.active_enemies;
-          return lookup_status::present;
-        }
-        // Recognised leaf, no value yet -- WR-04's conflation, not WR-03's
-        // unrecognised-leaf case.
-        return lookup_status::absent;
-      }
-      if ( std::strcmp( f.leaf, "swing_mh_remains" ) == 0 )
-      {
-        if ( s.has_swing_mh_remains )
-        {
-          out_val = s.swing_mh_remains;
-          return lookup_status::present;
-        }
-        return lookup_status::absent;   // WR-04's conflation
-      }
-      if ( std::strcmp( f.leaf, "swing_oh_remains" ) == 0 )
-      {
-        if ( s.has_swing_oh_remains )
-        {
-          out_val = s.swing_oh_remains;
-          return lookup_status::present;
-        }
-        return lookup_status::absent;   // WR-04's conflation
-      }
-      throw_unrecognised_leaf( f, "scalar" );
-      return lookup_status::absent;   // unreachable -- throw_unrecognised_leaf always throws
-    }
-
-    case rl_container::buff:
-    {
-      const buff_reading* b = s.find_buff( f.key );
-      if ( !b )
-        return lookup_status::absent;
-      // WR-01 fix (210-CR-FIX): the leaf is read FIRST, `permanent` tested
-      // only once the leaf itself has no value -- matching obs.py::_lookup
-      // (obs.py:146-165), which reaches `node.get("permanent")` only after
-      // `leaf is None`. The prior C++ order tested `permanent` before ever
-      // looking at the leaf, so a buff row with `permanent == true` AND a
-      // real `stacks` value (the exact shape decision_dump.cpp:325-328
-      // emits -- `"remains":null,"permanent":true` alongside a live
-      // `"stacks":N`) encoded to RL_PERMANENT_SATURATION here while Python
-      // encoded the real stacks value. This schema had exactly one buff leaf
-      // ("stacks") until quick task 260826-38t added "remains" (D-2R slot
-      // 6, mirroring this branch's own leaf-first-then-permanent ordering
-      // exactly, per the same WR-01 rationale).
-      if ( std::strcmp( f.leaf, "stacks" ) == 0 )
-      {
-        if ( b->has_stacks )
-        {
-          out_val = b->stacks;
-          return lookup_status::present;
-        }
-        if ( b->permanent )
-          return lookup_status::permanent;
-        // Found, but the requested leaf has no value and the buff is not
-        // permanent -- WR-04's conflation, deliberate, no fourth status.
-        return lookup_status::absent;
-      }
-      if ( std::strcmp( f.leaf, "remains" ) == 0 )
-      {
-        if ( b->has_remains )
-        {
-          out_val = b->remains;
-          return lookup_status::present;
-        }
-        if ( b->permanent )
-          return lookup_status::permanent;
-        // Found, but the requested leaf has no value and the buff is not
-        // permanent -- WR-04's conflation, deliberate, no fourth status.
-        return lookup_status::absent;
-      }
-      throw_unrecognised_leaf( f, "buff" );
-      return lookup_status::absent;   // unreachable -- throw_unrecognised_leaf always throws
-    }
-
-    case rl_container::cooldown:
-    {
-      const cooldown_reading* c = s.find_cooldown( f.key );
-      if ( !c )
-        return lookup_status::absent;
-      // `permanent` is not a cooldown concept -- obs.py checks
-      // `node.get("permanent")` on the CONTAINING object, and only buff
-      // objects carry it (rl_policy.hpp's cooldown_reading has no such
-      // field at all).
-      if ( std::strcmp( f.leaf, "charges_fractional" ) == 0 )
-      {
-        if ( c->has_charges_fractional )
-        {
-          out_val = c->charges_fractional;
-          return lookup_status::present;
-        }
-        return lookup_status::absent;   // WR-04's conflation
-      }
-      if ( std::strcmp( f.leaf, "remains" ) == 0 )
-      {
-        if ( c->has_remains )
-        {
-          out_val = c->remains;
-          return lookup_status::present;
-        }
-        return lookup_status::absent;   // WR-04's conflation
-      }
-      if ( std::strcmp( f.leaf, "recharge_time" ) == 0 )
-      {
-        if ( c->has_recharge_time )
-        {
-          out_val = c->recharge_time;
-          return lookup_status::present;
-        }
-        return lookup_status::absent;   // WR-04's conflation
-      }
-      if ( std::strcmp( f.leaf, "charges" ) == 0 )
-      {
-        if ( c->has_charges )
-        {
-          out_val = c->charges;
-          return lookup_status::present;
-        }
-        return lookup_status::absent;   // WR-04's conflation
-      }
-      if ( std::strcmp( f.leaf, "max_charges" ) == 0 )
-      {
-        // max_charges carries no has_* flag in rl_policy.hpp -- it is
-        // always populated (defaults to 1) once the cooldown row itself
-        // is present, so a matching row always answers `present` for it.
-        out_val = static_cast<double>( c->max_charges );
-        return lookup_status::present;
-      }
-      throw_unrecognised_leaf( f, "cooldown" );
-      return lookup_status::absent;   // unreachable -- throw_unrecognised_leaf always throws
-    }
-  }
-  // Unreachable: rl_container is a 3-value enum class and every case above
-  // either returns or throws. No trailing `return absent` -- an unhandled
-  // enumerator is a compiler warning (-Wswitch), not a silent absent.
-  throw sc_runtime_error( fmt::format(
-      "rl_policy::lookup_leaf: observation field slot={} has an unhandled container enumerator",
-      f.slot ) );
-}
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
-// build_obs -- REAL, all three leaf statuses (210-05R Task 2). Dispatch
-// order mirrors obs.py:232-287 exactly: derived fields force `present`;
-// otherwise `lookup_leaf` decides; `kind == bucket` is tested BEFORE the
-// `permanent` branch (a permanent bucket is a registry misconfiguration,
-// not a value to saturate); non-bucket `permanent` saturates to
-// RL_PERMANENT_SATURATION; everything else goes through apply_scale.
+// Slot binding (phase 220, plan 220-04, OBS-02/OBS-07): ONE census walk
+// resolves every family member to an engine handle ONCE per actor AND
+// composes that slot's name from the SAME family/member/leaf tables --
+// so the vector build_obs fills and the name list a caller can request via
+// `rl_obs_names_out=` share one source of truth by construction (this is
+// what makes T-220-04-01's fingerprint check non-vacuous: a names file
+// that only echoed RL_OBS_NAMES back would compare the generator to
+// itself; this walk composes its own names independently and reports a
+// divergence if it ever disagrees with the baked table).
+//
+// Resolved for real in this task: `player_buffs` (buff) and the `scalars`
+// pseudo-family's `fight_remains`/`active_enemies`/`t`/`maelstrom` leaves
+// (`raid_event_next_in` stays unresolved -- plan 220-05 binds it). Every
+// other family resolves `unresolved` here; plans 220-05/220-06 turn those
+// into real bindings by adding cases below, with NO change to this
+// structure (the slot_binding/slot_table shape, the bind-once contract,
+// the name-composition walk).
 // ---------------------------------------------------------------------------
 
-void build_obs( const rl_state_t& s, float out_obs[ RL_OBS_DIM ] )
+// These three enums (and slot_binding/slot_table below) are deliberately
+// AT NAMESPACE SCOPE, not inside an anonymous namespace -- slot_table is
+// forward-declared in rl_policy.hpp with external linkage (rl_policy::
+// slot_table), so its member type slot_binding, and slot_binding's own
+// member types, must not carry internal linkage themselves.
+enum class slot_binding_kind
+{
+  buff,
+  cooldown,
+  expression,
+  action_expression,
+  enemy_slot,
+  direct,
+  unresolved
+};
+
+enum class buff_leaf_kind { stacks, remains };
+
+// The `scalars` pseudo-family's `direct`-kind leaves this task resolves.
+// `fight_remains` needs no entry here -- it is `derived` (rl_leaf_desc::
+// derived), and build_obs' derived-first dispatch short-circuits before
+// ever consulting a binding's `direct` id, exactly as the retired
+// per-field walk did for the same field.
+enum class direct_id { active_enemies, t, maelstrom };
+
+struct slot_binding
+{
+  slot_binding_kind kind = slot_binding_kind::unresolved;
+  const rl_leaf_desc* leaf = nullptr;   // this slot's own descriptor -- resolved once, indexed per decision
+  buff_t* buff = nullptr;               // kind == buff
+  buff_leaf_kind buff_leaf = buff_leaf_kind::stacks;   // kind == buff
+  direct_id direct = direct_id::t;      // kind == direct
+  // cooldown_t*/expr_t*/enemy-slot descriptor handles are added by plans
+  // 220-05/220-06 alongside the `cooldown`/`expression`/`action_expression`/
+  // `enemy_slot` resolution cases below -- no structural change needed here.
+};
+
+struct slot_table
+{
+  std::vector<slot_binding> bindings;        // size RL_OBS_DIM, slot order
+  std::vector<std::string>  composed_names;  // size RL_OBS_DIM -- the WALK's own names
+  int first_name_divergence = -1;            // -1 == the walk agreed with RL_OBS_NAMES at every slot
+};
+
+namespace
+{
+std::unordered_map<const player_t*, slot_table> g_slot_table_cache;
+bool g_names_out_written = false;   // guards the ONE names-file write per process
+
+std::string compose_slot_name( const rl_obs_family& fam, const rl_obs_member& mem, const rl_leaf_desc& leaf )
+{
+  // header_contract (220-04-PLAN.md): `bare_name` families (only `scalars`)
+  // compose the bare leaf name; every other family composes
+  // "<family.name>.<member>.<leaf>".
+  if ( fam.bare_name )
+    return leaf.leaf;
+  return fmt::format( "{}.{}.{}", fam.name, mem.member, leaf.leaf );
+}
+
+// The census artifact merges several consumable buffs into ONE generic
+// member name per role (`flask`, `food`, `voidtouched` == augmentation,
+// `potion`) -- INCLUDED.tsv's own "merged, one row" convention (220-02's
+// importer, `_MULTI_INSTANCE_ROWS`/`_RENAME_ROWS`). The underlying buff
+// object's REAL name is the specific item (e.g. a flask token, not the
+// literal string "flask"), so a plain `p->buff_list` name-string scan can
+// never match these four -- `player_t::consumables` exists for exactly
+// this reason (flask/food/augmentation are direct `buff_t*` pointers,
+// populated at init regardless of which concrete item the profile chose).
+// `potion` has no equivalent direct pointer; its action ("potion",
+// `dbc_consumable_base_t`) exposes the SAME generic seam through its own
+// public `consumable_buff` member.
+buff_t* resolve_generic_consumable_buff( player_t* p, const std::string& member )
+{
+  if ( member == "flask" )
+    return p->consumables.flask;
+  if ( member == "food" )
+    return p->consumables.food;
+  if ( member == "voidtouched" )
+    return p->consumables.augmentation;
+  if ( member == "potion" )
+  {
+    if ( action_t* a = p->find_action( "potion" ) )
+    {
+      if ( auto* consumable = dynamic_cast<dbc_consumable_base_t*>( a ) )
+        return consumable->consumable_buff;
+    }
+    return nullptr;
+  }
+  return nullptr;   // not a generic-consumable member -- caller falls through to a name scan
+}
+
+// rl_family_kind::buff resolution: `stacks`/`remains` are the only two
+// leaves this schema's census artifact declares for this family -- an
+// UNRECOGNISED leaf name binds `unresolved` (a generator/artifact
+// mismatch, not a per-fight data fact). A recognised leaf ALWAYS binds
+// `kind::buff`, even when `member_buff` is null -- a member whose handle
+// this run simply never created (an untalented proc buff, a raid-event-
+// gated buff under a fight style that never injects that event) is a
+// RUNTIME absence build_obs already encodes correctly (buff==nullptr ->
+// absent -> `missing`), not an unimplemented resolution strategy. Binding
+// it `unresolved` instead would conflate "this fight has no such buff"
+// with "plans 220-05/220-06 still owe this family a binding" -- exactly
+// the distinction the acceptance criteria (player_buffs fully resolved,
+// `unresolved[]` names only families this task defers) requires.
+slot_binding resolve_buff_leaf( buff_t* member_buff, const rl_leaf_desc& leaf )
+{
+  slot_binding b;
+  b.leaf = &leaf;
+  b.buff = member_buff;
+  if ( std::strcmp( leaf.leaf, "stacks" ) == 0 )
+  {
+    b.kind = slot_binding_kind::buff;
+    b.buff_leaf = buff_leaf_kind::stacks;
+  }
+  else if ( std::strcmp( leaf.leaf, "remains" ) == 0 )
+  {
+    b.kind = slot_binding_kind::buff;
+    b.buff_leaf = buff_leaf_kind::remains;
+  }
+  else
+  {
+    b.kind = slot_binding_kind::unresolved;
+  }
+  return b;
+}
+
+// rl_family_kind::scalar resolution (the `scalars` pseudo-family). Every
+// leaf this task resolves reads a value `build_obs` already has to hand
+// with NO per-decision engine lookup of its own: `active_enemies`/`t` come
+// straight from `rl_state_t` (already populated by `read_state`, untouched
+// by this plan); `maelstrom` is read directly off `p->resources` at build
+// time -- there is no POD field for it (deliberately: "do NOT touch
+// read_state's POD population"), which is exactly what the new
+// `build_obs(player_t*, ...)` signature exists to allow. Where the RETIRED
+// per-field walk gated an engine-direct read like this on
+// `p->resources.is_active(RESOURCE_MAELSTROM)` (the SC-5 cross-transport
+// byte-neutrality contract, `cooldowns.strike.charges_fractional`'s old
+// gate), that gate is unnecessary for any read this new walk performs: the
+// FIFO transport's own byte-neutrality concern was about the WIRE PROTOCOL
+// omitting a key the request never asked for, not about whether the engine
+// itself can answer the read -- and CR-01's actor filter means only the
+// shaman ever reaches this path, so there is no other actor's absent
+// resource to accidentally read as zero. Applies identically to the
+// cooldowns family's own `charges_fractional` when plan 220-05 binds it.
+slot_binding resolve_scalar_leaf( const rl_leaf_desc& leaf )
+{
+  slot_binding b;
+  b.leaf = &leaf;
+  if ( leaf.derived )
+  {
+    // Never actually read -- build_obs' derived-first dispatch short-
+    // circuits before consulting `direct` for a derived leaf. Kept a
+    // defined value rather than left default-constructed so a future
+    // reader never has to wonder whether "direct_id::t" here means
+    // anything.
+    b.kind = slot_binding_kind::direct;
+    b.direct = direct_id::t;
+    return b;
+  }
+  if ( std::strcmp( leaf.leaf, "active_enemies" ) == 0 )
+  {
+    b.kind = slot_binding_kind::direct;
+    b.direct = direct_id::active_enemies;
+    return b;
+  }
+  if ( std::strcmp( leaf.leaf, "t" ) == 0 )
+  {
+    b.kind = slot_binding_kind::direct;
+    b.direct = direct_id::t;
+    return b;
+  }
+  if ( std::strcmp( leaf.leaf, "maelstrom" ) == 0 )
+  {
+    b.kind = slot_binding_kind::direct;
+    b.direct = direct_id::maelstrom;
+    return b;
+  }
+  // raid_event_next_in and anything else this task does not bind.
+  b.kind = slot_binding_kind::unresolved;
+  return b;
+}
+
+// Writes the `rl_obs_names_out=` file ONCE per process (T-220-04-02's
+// rundir-scoped discipline, mirroring rl_translog='s open_and_write_header:
+// eager, no parent directories created, refuses loudly on a bad path
+// rather than silently skipping). Called from bind_slots() -- the ONLY
+// place a fresh slot_table (and therefore a fresh set of walk-composed
+// names) is ever produced.
+void write_names_out_if_requested( const player_t* p, const slot_table& table )
+{
+  if ( g_names_out_written )
+    return;
+  const std::string& path = p->sim->rl_obs_names_out_str;
+  if ( path.empty() )
+    return;
+  g_names_out_written = true;
+
+  io::ofstream stream;
+  stream.open( path, std::ios::out | std::ios::trunc );
+  if ( !stream.is_open() )
+  {
+    throw sc_runtime_error(
+        fmt::format( "rl_obs_names_out=: unable to open '{}' for writing.", path ) );
+  }
+
+  stream << "{\"schemaSha\":\"" << decision_dump::json_escape( RL_OBS_SCHEMA_SHA ) << "\",";
+  stream << "\"width\":" << RL_OBS_DIM << ",";
+  stream << "\"names\":[";
+  for ( std::size_t i = 0; i < RL_OBS_DIM; ++i )
+  {
+    if ( i > 0 )
+      stream << ",";
+    stream << "\"" << decision_dump::json_escape( table.composed_names[ i ] ) << "\"";
+  }
+  stream << "],\"unresolved\":[";
+  bool first = true;
+  for ( std::size_t i = 0; i < RL_OBS_DIM; ++i )
+  {
+    if ( table.bindings[ i ].kind != slot_binding_kind::unresolved )
+      continue;
+    if ( !first )
+      stream << ",";
+    first = false;
+    stream << "\"" << decision_dump::json_escape( table.composed_names[ i ] ) << "\"";
+  }
+  stream << "],\"firstNameDivergence\":" << table.first_name_divergence << "}";
+  stream.flush();
+}
+} // anonymous namespace
+
+const slot_table& bind_slots( player_t* p )
+{
+  auto cached = g_slot_table_cache.find( p );
+  if ( cached != g_slot_table_cache.end() )
+    return cached->second;
+
+  slot_table table;
+  table.bindings.reserve( RL_OBS_DIM );
+  table.composed_names.reserve( RL_OBS_DIM );
+
+  std::size_t counter = 0;
+  for ( std::size_t fi = 0; fi < RL_OBS_FAMILY_COUNT; ++fi )
+  {
+    const rl_obs_family& fam = RL_OBS_FAMILIES[ fi ];
+    for ( std::size_t mi = 0; mi < fam.n_members; ++mi )
+    {
+      const rl_obs_member& mem = fam.members[ mi ];
+
+      // Buff family: resolve the handle ONCE per member (shared across
+      // that member's leaves) -- never re-scan p->buff_list per leaf.
+      buff_t* member_buff = nullptr;
+      bool member_buff_scanned = false;
+
+      for ( std::size_t li = 0; li < mem.n_leaves; ++li )
+      {
+        const rl_leaf_desc& leaf = mem.leaves[ li ];
+        std::string composed = compose_slot_name( fam, mem, leaf );
+
+        slot_binding binding;
+        switch ( fam.kind )
+        {
+          case rl_family_kind::buff:
+          {
+            if ( !member_buff_scanned )
+            {
+              member_buff = resolve_generic_consumable_buff( p, mem.member );
+              if ( member_buff == nullptr )
+              {
+                for ( buff_t* buff : p->buff_list )
+                {
+                  if ( buff->name_str == mem.member )
+                  {
+                    member_buff = buff;
+                    break;
+                  }
+                }
+              }
+              member_buff_scanned = true;
+            }
+            binding = resolve_buff_leaf( member_buff, leaf );
+            break;
+          }
+          case rl_family_kind::scalar:
+            binding = resolve_scalar_leaf( leaf );
+            break;
+          case rl_family_kind::cooldown:
+          case rl_family_kind::enemy_slot:
+          case rl_family_kind::action_expression:
+          case rl_family_kind::expression:
+          case rl_family_kind::direct:
+          default:
+            // Deferred to plans 220-05/220-06 -- see this function's own
+            // header comment.
+            binding.kind = slot_binding_kind::unresolved;
+            binding.leaf = &leaf;
+            break;
+        }
+
+        if ( counter >= RL_OBS_DIM )
+        {
+          throw sc_runtime_error( fmt::format(
+              "rl_policy::bind_slots: the family table walk produced more than RL_OBS_DIM ({}) "
+              "slots at family='{}' member='{}' leaf='{}' -- this is a generator/engine table "
+              "mismatch (a long table), not a runtime data problem",
+              RL_OBS_DIM, fam.name, mem.member, leaf.leaf ) );
+        }
+
+        // Assert the composed name equals RL_OBS_NAMES[i]. On a mismatch,
+        // do NOT abort -- record the FIRST divergent slot and still emit
+        // the WALK's own composed name (never a copy of RL_OBS_NAMES) so
+        // obs_fingerprint.py can see the divergence instead of the engine
+        // hiding it (T-220-04-01).
+        if ( table.first_name_divergence < 0 && composed != RL_OBS_NAMES[ counter ] )
+          table.first_name_divergence = static_cast<int>( counter );
+
+        table.bindings.push_back( binding );
+        table.composed_names.push_back( std::move( composed ) );
+        ++counter;
+      }
+    }
+  }
+
+  if ( counter != RL_OBS_DIM )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::bind_slots: the family table walk produced {} slots, expected RL_OBS_DIM={} "
+        "-- this is a generator bug (a short table), not a runtime data problem",
+        counter, RL_OBS_DIM ) );
+  }
+
+  write_names_out_if_requested( p, table );
+
+  auto [ inserted, ok ] = g_slot_table_cache.emplace( p, std::move( table ) );
+  ( void )ok;   // emplace on a key just proven absent by the find() above always succeeds
+  return inserted->second;
+}
+
+// ---------------------------------------------------------------------------
+// build_obs -- REAL for the families this task resolves (player_buffs,
+// scalars); every other family's slots read their bound `unresolved`
+// status (-> `missing`) until plans 220-05/220-06 add real bindings, with
+// NO change to this dispatch. Order mirrors obs.py:232-287 and the retired
+// per-field walk exactly: derived fields force `present`; otherwise the
+// binding decides a tri-state status (absent/present/permanent); `kind ==
+// bucket` is tested BEFORE the `permanent` branch (a permanent bucket is a
+// registry misconfiguration, not a value to saturate); non-bucket
+// `permanent` saturates to RL_PERMANENT_SATURATION; everything else goes
+// through apply_scale. NO string comparison anywhere in this function's
+// body -- every slot's resolution (which accessor to call, which leaf a
+// buff binding means) was already decided once, at bind time, above.
+// ---------------------------------------------------------------------------
+
+void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t, float out_obs[ RL_OBS_DIM ] )
 {
   for ( std::size_t slot = 0; slot < RL_OBS_DIM; ++slot )
   {
-    const rl_obs_field& f = RL_OBS_FIELDS[ slot ];
+    const slot_binding& b = t.bindings[ slot ];
+    const rl_leaf_desc& f = *b.leaf;
 
     double raw = 0.0;
     lookup_status status;
@@ -488,14 +657,90 @@ void build_obs( const rl_state_t& s, float out_obs[ RL_OBS_DIM ] )
     }
     else
     {
-      status = lookup_leaf( s, f, raw );
-      if ( status == lookup_status::absent )
-        raw = f.missing;
-      // status == present: `raw` was already written by lookup_leaf.
-      // status == permanent: `raw` is left unused below, matching
-      // obs.py's `raw = None` for this branch -- neither the bucket-absent
-      // path nor apply_scale() is ever reached with a permanent status.
+      switch ( b.kind )
+      {
+        case slot_binding_kind::buff:
+        {
+          buff_t* buff = b.buff;
+          if ( buff == nullptr || buff->check() <= 0 )
+          {
+            // Not up (or unresolved) -- absent for BOTH leaves of this
+            // member, matching the retired walk's own `s.buffs` filter
+            // (a not-up buff was skipped entirely, so find_buff() would
+            // return nullptr for it there too).
+            status = lookup_status::absent;
+          }
+          else if ( b.buff_leaf == buff_leaf_kind::stacks )
+          {
+            raw = static_cast<double>( buff->check() );
+            status = lookup_status::present;
+          }
+          else   // remains
+          {
+            const timespan_t remains = buff->remains();
+            if ( remains == timespan_t::min() )
+            {
+              status = lookup_status::permanent;
+            }
+            else
+            {
+              raw = remains.total_seconds();
+              status = lookup_status::present;
+            }
+          }
+          break;
+        }
+        case slot_binding_kind::direct:
+        {
+          switch ( b.direct )
+          {
+            case direct_id::active_enemies:
+              if ( s.has_active_enemies )
+              {
+                raw = s.active_enemies;
+                status = lookup_status::present;
+              }
+              else
+              {
+                status = lookup_status::absent;
+              }
+              break;
+            case direct_id::t:
+              raw = s.t;
+              status = lookup_status::present;
+              break;
+            case direct_id::maelstrom:
+              // Read directly off the engine, not off rl_state_t -- there
+              // is no POD field for it (see resolve_scalar_leaf's own
+              // comment on why that gate is unnecessary here).
+              raw = p->resources.current[ RESOURCE_MAELSTROM ];
+              status = lookup_status::present;
+              break;
+            default:
+              status = lookup_status::absent;
+              break;
+          }
+          break;
+        }
+        case slot_binding_kind::cooldown:
+        case slot_binding_kind::expression:
+        case slot_binding_kind::action_expression:
+        case slot_binding_kind::enemy_slot:
+        case slot_binding_kind::unresolved:
+        default:
+          // Deferred to plans 220-05/220-06 -- an unresolved binding
+          // yields `absent` (header_contract), never a special value.
+          status = lookup_status::absent;
+          break;
+      }
     }
+
+    if ( status == lookup_status::absent )
+      raw = f.missing;
+    // status == present: `raw` was already written above.
+    // status == permanent: `raw` is left unused below, matching obs.py's
+    // `raw = None` for this branch -- neither the bucket-absent path nor
+    // apply_scale() is ever reached with a permanent status.
 
     double encoded;
     if ( f.kind == rl_kind::k_bucket )
@@ -514,11 +759,11 @@ void build_obs( const rl_state_t& s, float out_obs[ RL_OBS_DIM ] )
       else if ( status == lookup_status::permanent )
       {
         throw sc_runtime_error( fmt::format(
-            "rl_policy::build_obs: observation field slot={} container='{}' key='{}' is "
-            "kind=bucket but its leaf resolved to status=permanent -- no bucket field can "
-            "legitimately be permanent (permanence is a buff-expiry concept); this is a "
-            "registry/request misconfiguration, not a valid build_obs() input",
-            f.slot, f.container == rl_container::buff ? "buff" : "cooldown", f.key ) );
+            "rl_policy::build_obs: observation slot={} leaf='{}' is kind=bucket but its binding "
+            "resolved to status=permanent -- no bucket field can legitimately be permanent "
+            "(permanence is a buff-expiry concept); this is a registry/binding misconfiguration, "
+            "not a valid build_obs() input",
+            slot, f.leaf ) );
       }
       else
       {
@@ -540,11 +785,11 @@ void build_obs( const rl_state_t& s, float out_obs[ RL_OBS_DIM ] )
   }
 }
 
-// Sanity check (comment only, not executable): with the L0 enhancement
-// registry's cooldown/buff sets both empty at boundary_is_foreground's
-// default, an entirely-empty `cooldowns` set makes slot 1 (strike's
-// charges_fractional, missing=2.0, div=2) encode via the absent branch to
-// `2.0/2 = 1.0`, never `0.0` -- and an always-up buff (`permanent == true`)
+// Sanity check (comment only, not executable): with `player_buffs` fully
+// bound and every OTHER family still `unresolved` (this task's own scope),
+// an unresolved-cooldown slot (e.g. `cooldowns.strike.charges_fractional`,
+// missing=2.0, div=2) encodes via the absent branch to `2.0/2 = 1.0`, never
+// `0.0` -- and an always-up buff (`permanent == true`, its `remains` leaf)
 // encodes to `RL_PERMANENT_SATURATION == 1.0`, never to its `missing`
 // value. Both traps (P-1/P-2) are closed by the dispatch above, not by a
 // special case.

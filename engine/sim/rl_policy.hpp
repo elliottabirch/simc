@@ -22,9 +22,21 @@
 // standalone test executable (plan 210-07, D-05) that runs with no sim and
 // no fight cannot call builders taking `player_t*` (a `player_t` requires a
 // `sim_t` and full actor init), so `read_state(player_t*)` fills this POD
-// and everything downstream of it (`build_obs`/`build_mask`/`build_wait`)
-// is PURE over the POD -- that purity is what the standalone executable and
-// Phase 211's differ exercise.
+// and `build_mask`/`build_wait` remain PURE over it -- that purity is what
+// Phase 211's differ exercises for those two.
+//
+// UPDATED (tstl-sylvanas phase 220, plan 220-04, OBS-01/OBS-02/OBS-07): the
+// "Stage 2 is PURE over the POD" contract above was written for plan
+// 210-07's standalone test executable, which was SUPERSEDED OUTRIGHT under
+// ruling N-8 (rl_policy_obs.cpp's own read_first note says so) and will
+// never be built. `build_obs` now ALSO reads the engine directly (a
+// `player_t*` parameter, a `slot_table` of handles resolved once per actor
+// at bind time) -- one census walk composes the observation vector AND its
+// own name list by construction, rather than mirroring a Python-authored
+// per-field table. `read_state`'s POD vectors (`s.buffs`, `s.cooldowns`,
+// `s.swing_mh_remains`, `s.swing_oh_remains`, `s.gcd_remains`,
+// `s.boundary_is_foreground`) are STILL REQUIRED -- `build_mask` and
+// `build_wait` read every one of them and are untouched by this change.
 
 #pragma once
 #include "sim/rl_policy_constants.h"
@@ -37,6 +49,15 @@ struct player_t;
 
 namespace rl_policy
 {
+// Opaque to callers (tstl-sylvanas phase 220, plan 220-04, OBS-02/OBS-07):
+// solver_control.cpp holds a `const slot_table&` and passes it straight
+// through to build_obs -- it never inspects a slot_table's members, only
+// bind_slots() and build_obs() (both declared below, both defined in
+// rl_policy_obs.cpp) ever look inside one. Forward-declared here so the
+// pinned interface stays a reference-only seam; the full definition
+// (slot_binding's per-kind resolved handle, the per-slot composed name,
+// the first-name-divergence slot) lives in the .cpp.
+struct slot_table;
 // ---- Stage 1 output / Stage 2 input: plain old data, NO engine types ----
 // Absent and zero are DIFFERENT everywhere in this schema (obs slot 1's
 // missing value is 2.0, not 0.0) -- hence a has_* flag beside every
@@ -97,8 +118,24 @@ struct wait_result { double seconds = 0.0; std::string source = "floor"; bool fl
 // ---- Stage 1: needs the engine. NOT exercised by the standalone test executable. ----
 rl_state_t read_state( const player_t* p, bool boundary_is_foreground );
 
-// ---- Stage 2: PURE over the POD. This is what the test executable and the differ exercise. ----
-void        build_obs ( const rl_state_t& s, float out_obs[ RL_OBS_DIM ] );
+// ---- Slot binding (phase 220, plan 220-04, OBS-02/OBS-07) ----
+// bind_slots resolves every RL_OBS_FAMILIES member to an engine handle
+// ONCE per actor (buff_t*/cooldown_t*/expr_t*/... -- see rl_policy_obs.cpp
+// for the per-kind resolution and the file-static cache keyed on
+// `const player_t*`) and returns a reference to the cached slot_table for
+// `p`; a second call for the same `p` is O(1). The SAME walk that resolves
+// each slot also composes that slot's name from the same family/member/leaf
+// tables -- so the vector build_obs fills and the name list a caller can
+// request via `rl_obs_names_out=` share one source of truth by
+// construction, never a second hand-copied name list (OBS-02).
+const slot_table& bind_slots( player_t* p );
+
+// ---- Stage 2 ----
+// build_mask/build_wait remain PURE over the rl_state_t POD (unchanged).
+// build_obs now ALSO reads the engine directly through `t`'s resolved
+// handles and, for a `direct` binding, through `p` itself -- see this
+// header's own updated "Stage 2" comment above.
+void        build_obs ( const player_t* p, const rl_state_t& s, const slot_table& t, float out_obs[ RL_OBS_DIM ] );
 void        build_mask( const rl_state_t& s, std::uint8_t out_mask[ RL_ACTION_DIM ] );
 wait_result build_wait( const rl_state_t& s );
 

@@ -521,10 +521,18 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     const chrono::wall_clock::time_point obs_t0 =
         obs_timing ? chrono::wall_clock::now() : chrono::wall_clock::time_point{};
 
+    // tstl-sylvanas phase 220, plan 220-04 (OBS-02/OBS-07). bind_slots() is
+    // resolved ONCE per actor (a file-static cache keyed on `const
+    // player_t*` inside rl_policy_obs.cpp) and is amortised across the
+    // whole run -- called here, BEFORE read_state, and deliberately OUTSIDE
+    // the rl_obs_timing stopwatch below, which still spans exactly
+    // read_state+build_obs as plan 220-01 pinned it.
+    const rl_policy::slot_table& table = rl_policy::bind_slots( p );
+
     const rl_policy::rl_state_t state = rl_policy::read_state( p, foreground );
 
     float obs[ RL_OBS_DIM ];
-    rl_policy::build_obs( state, obs );
+    rl_policy::build_obs( p, state, table, obs );
 
     if ( obs_timing )
     {

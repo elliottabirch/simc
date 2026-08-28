@@ -625,6 +625,15 @@ struct sim_t : private sc_thread_t
   // used to be a hardcoded-zero reserved field (rl_translog.hpp's
   // file_header::fight_shape_index) by open_and_write_header().
   int rl_fight_shape_index = 0;
+  // tstl-sylvanas phase 220, plan 220-04 (OBS-02). rl_obs_names_out=<path>
+  // writes a JSON names file ONCE per process (see rl_policy_obs.cpp's
+  // bind_slots()/write_names_out_if_requested): the SAME family/member/leaf
+  // walk that resolves the observation vector's slot handles also composes
+  // this file's `names[]`, so it is a check tool against
+  // scripts/rl/obs_fingerprint.py's own comparison to the registry, never a
+  // copy of RL_OBS_NAMES echoed back. Empty string (default) = disabled,
+  // mirroring rl_translog_file_str's own convention.
+  std::string rl_obs_names_out_str;
   // tstl-sylvanas phase 220, plan 220-01 (OBS-07). rl_obs_timing=1 wraps the
   // in-process transport's read_state+build_obs pair (solver_control.cpp)
   // in a steady_clock stopwatch and accumulates one nanosecond sample per
