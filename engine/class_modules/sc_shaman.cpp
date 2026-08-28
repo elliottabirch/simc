@@ -711,26 +711,51 @@ class deck_rng_wrapper_t
 
   std::unique_ptr<expr_t> create_expression( util::string_view name ) const
   {
-    if ( util::str_compare_ci( name, fmt::format( "{}_proc_left", m_name ) ) )
+    // 220-05 OBS-04, deviation Rule 1 fix: the name must be matched to THIS
+    // wrapper's own three forms FIRST -- shaman_t::create_expression forwards
+    // through every deck_rng_wrapper_t in sequence (deeply_rooted_elements is
+    // checked FIRST), so an m_rng==nullptr guard evaluated before the name
+    // match would fire for ANY expression name whenever the untalented DRE
+    // deck happens to be first in that chain, masking every OTHER deck's real
+    // expressions behind a constant 0 rather than merely DRE's own three.
+    const bool is_proc_left  = util::str_compare_ci( name, fmt::format( "{}_proc_left", m_name ) );
+    const bool is_fail_left  = util::str_compare_ci( name, fmt::format( "{}_fail_left", m_name ) );
+    const bool is_draws_left = util::str_compare_ci( name, fmt::format( "{}_draws_left", m_name ) );
+
+    if ( !is_proc_left && !is_fail_left && !is_draws_left )
+    {
+      return nullptr;   // not one of this wrapper's own names -- let the caller try the next deck
+    }
+
+    // Mirror trigger()'s own null-rng guard above -- an untaken deck talent
+    // (e.g. DRE in the reference Stormbringer build) leaves build() returning
+    // early with the pointer still unset. Guarded HERE, after confirming the
+    // name belongs to THIS wrapper, so only this deck's own three names read
+    // a constant 0 -- one guard site still covers all five decks (each
+    // instantiation of this template method), never replicated at call sites.
+    if ( m_rng == nullptr )
+    {
+      return expr_t::create_constant( name, 0 );
+    }
+
+    if ( is_proc_left )
     {
       return make_fn_expr( name, [ rng = this->m_rng ]() {
         return rng->count_remains( shuffled_rng_e::SUCCESS );
       } );
     }
-    else if ( util::str_compare_ci( name, fmt::format( "{}_fail_left", m_name ) ) )
+    else if ( is_fail_left )
     {
       return make_fn_expr( name, [ rng = this->m_rng ]() {
         return rng->count_remains( shuffled_rng_e::FAIL );
       } );
     }
-    else if ( util::str_compare_ci( name, fmt::format( "{}_draws_left", m_name ) ) )
+    else // is_draws_left
     {
       return make_fn_expr( name, [ rng = this->m_rng ]() {
         return rng->entry_remains();
       } );
     }
-
-    return nullptr;
   }
 
   deck_rng_wrapper_t& set_param_fn( const param_fn_t& fn_ )
@@ -1236,6 +1261,13 @@ public:
   unsigned dre_attempts;
   unsigned aws_counter;
   double lava_surge_attempts_normalized;
+
+  /// Tempest addon-trackable belief pair (220-05 OBS-04): tempest_procs_this_deck is an
+  /// exact algebraic rewrite of (deck_successes - tempest_proc_left) and therefore adds
+  /// no information over the raw deck counters -- kept because an in-game addon cannot
+  /// see proc_left and must count procs itself, which is the addon-trackable justification.
+  unsigned tempest_spends_since_proc;
+  unsigned tempest_procs_this_deck;
 
   /// Rolling Thunder last trigger
   timespan_t rt_last_trigger;
@@ -1955,6 +1987,8 @@ public:
       dre_attempts( 0U ),
       aws_counter(0U),
       lava_surge_attempts_normalized( 0.0 ),
+      tempest_spends_since_proc( 0U ),
+      tempest_procs_this_deck( 0U ),
       tracker( this ),
       action(),
       pet( this ),
@@ -10411,6 +10445,48 @@ std::unique_ptr<expr_t> shaman_t::create_expression( util::string_view name )
     return expr;
   }
 
+  if ( auto expr = rng_obj.storm_unleashed.create_expression( name ) )
+  {
+    return expr;
+  }
+
+  if ( auto expr = rng_obj.asc_dw.create_expression( name ) )
+  {
+    return expr;
+  }
+
+  // 220-05 OBS-04: rng_obj.imbuement_mastery / rng_obj.lively_totems_ptr are assigned
+  // UNCONDITIONALLY at rng_obj construction time (get_accumulated_rng(...), no talent
+  // gate), unlike the five deck_rng_wrapper_t members above -- no null guard is required
+  // here; do not add one by analogy with the deck expressions.
+  if ( util::str_compare_ci( name, "imbuement_mastery_accumulated" ) )
+  {
+    return make_fn_expr( name, [ this ]() {
+      return as<double>( rng_obj.imbuement_mastery->get_trigger_count() );
+    } );
+  }
+
+  if ( util::str_compare_ci( name, "lively_totems_accumulated" ) )
+  {
+    return make_fn_expr( name, [ this ]() {
+      return as<double>( rng_obj.lively_totems_ptr->get_trigger_count() );
+    } );
+  }
+
+  if ( util::str_compare_ci( name, "tempest_spends_since_proc" ) )
+  {
+    return make_fn_expr( name, [ this ]() {
+      return as<double>( tempest_spends_since_proc );
+    } );
+  }
+
+  if ( util::str_compare_ci( name, "tempest_procs_this_deck" ) )
+  {
+    return make_fn_expr( name, [ this ]() {
+      return as<double>( tempest_procs_this_deck );
+    } );
+  }
+
   if ( util::str_compare_ci( name, "tww3_procs_to_asc" ) )
     return make_fn_expr( name, [ this ]() {
       if ( !spell.tww3_stormbringer_2pc->ok() )
@@ -12097,6 +12173,11 @@ void shaman_t::trigger_tempest( T resource_count )
   {
     bool success = false;
 
+    // 220-05 OBS-04: Tempest addon-trackable belief pair -- accumulate spends
+    // BEFORE the draw loop so the counter reflects "since the last proc" even
+    // when this very draw succeeds.
+    tempest_spends_since_proc += as<unsigned>( resource_count );
+
     for ( auto draw = 0U; draw < as<unsigned>( resource_count ); ++draw )
     {
       if ( rng_obj.tempest_enh.trigger() )
@@ -12109,6 +12190,8 @@ void shaman_t::trigger_tempest( T resource_count )
     if ( success )
     {
       buff.tempest->trigger();
+      tempest_spends_since_proc = 0U;
+      tempest_procs_this_deck++;
     }
   }
   else if ( specialization() == SHAMAN_ELEMENTAL )
@@ -13787,6 +13870,8 @@ void shaman_t::reset()
   dre_attempts = 0U;
   aws_counter                    = 0U;
   lava_surge_attempts_normalized = 0.0;
+  tempest_spends_since_proc      = 0U;
+  tempest_procs_this_deck        = 0U;
   action.ti_trigger = nullptr;
 
   pet.all_wolves.clear();

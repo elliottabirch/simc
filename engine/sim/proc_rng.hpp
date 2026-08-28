@@ -281,6 +281,12 @@ public:
 
   void reset( reset_type_e reset_type ) override;
   int trigger( action_state_t* = nullptr ) override;
+
+  // 220-05 OBS-04: read-only accessors so RL observation binding can expose the
+  // accumulated-chance state (unconditionally-assigned rng_obj members such as
+  // imbuement_mastery/lively_totems_ptr) without touching the private accumulator.
+  unsigned get_trigger_count() const { return trigger_count; }
+  double get_proc_chance() const { return proc_chance; }
 };
 
 // Threshold RNG rng helper class ==========================

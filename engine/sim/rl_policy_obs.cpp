@@ -26,6 +26,7 @@
 #include "sim/cooldown.hpp"
 #include "sim/decision_dump.hpp"
 #include "sim/event.hpp"
+#include "sim/expressions.hpp"
 #include "sim/sim.hpp"
 #include "util/io.hpp"
 
@@ -33,6 +34,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
 #include <unordered_map>
 
 namespace rl_policy
@@ -318,9 +320,10 @@ struct slot_binding
   buff_t* buff = nullptr;               // kind == buff
   buff_leaf_kind buff_leaf = buff_leaf_kind::stacks;   // kind == buff
   direct_id direct = direct_id::t;      // kind == direct
-  // cooldown_t*/expr_t*/enemy-slot descriptor handles are added by plans
-  // 220-05/220-06 alongside the `cooldown`/`expression`/`action_expression`/
-  // `enemy_slot` resolution cases below -- no structural change needed here.
+  expr_t* expr = nullptr;               // kind == expression -- non-owning; owned by slot_table::owned_expressions
+  // cooldown_t*/enemy-slot descriptor handles are added by plan 220-06
+  // alongside the `cooldown`/`action_expression`/`enemy_slot` resolution
+  // cases below -- no structural change needed here.
 };
 
 struct slot_table
@@ -328,6 +331,11 @@ struct slot_table
   std::vector<slot_binding> bindings;        // size RL_OBS_DIM, slot order
   std::vector<std::string>  composed_names;  // size RL_OBS_DIM -- the WALK's own names
   int first_name_divergence = -1;            // -1 == the walk agreed with RL_OBS_NAMES at every slot
+  // 220-05 OBS-04: expr_t objects returned by player_t::create_expression are
+  // owned here (kept alive for the actor's whole run, same lifetime as the
+  // slot_table itself in g_slot_table_cache) -- slot_binding::expr is a
+  // non-owning raw pointer into this vector, never re-created per decision.
+  std::vector<std::unique_ptr<expr_t>> owned_expressions;
 };
 
 namespace
@@ -468,6 +476,42 @@ slot_binding resolve_scalar_leaf( const rl_leaf_desc& leaf )
   return b;
 }
 
+// rl_family_kind::expression resolution (220-05 OBS-04, Pitfall 5): the
+// class-agnostic seam -- every deck/pet/item/raid-event member is an
+// expression NAME that arrives from the census artifact's `engine_token`,
+// never a spell token core RL code names itself (ruling R-4).
+// `player_t::create_expression` throws `sc_invalid_apl_argument` for an
+// unrecognised name (player.cpp:12263/12281/12596) -- wrapped in try/catch
+// HERE, at bind time, so a failure becomes an `unresolved` binding (named in
+// the names file) rather than aborting the run mid-fight with a confusing
+// APL-argument message. A resolved `expr_t` is moved into
+// `table.owned_expressions` (kept alive for the actor's whole run) and the
+// binding holds only a non-owning raw pointer into that vector -- eval() is
+// called once PER DECISION from build_obs, never re-created there.
+slot_binding resolve_expression_leaf( player_t* p, const std::string& engine_token,
+                                       const rl_leaf_desc& leaf, slot_table& table )
+{
+  slot_binding b;
+  b.leaf = &leaf;
+  try
+  {
+    std::unique_ptr<expr_t> expr = p->create_expression( engine_token );
+    if ( !expr )
+    {
+      b.kind = slot_binding_kind::unresolved;
+      return b;
+    }
+    table.owned_expressions.push_back( std::move( expr ) );
+    b.kind = slot_binding_kind::expression;
+    b.expr = table.owned_expressions.back().get();
+  }
+  catch ( const std::exception& )
+  {
+    b.kind = slot_binding_kind::unresolved;
+  }
+  return b;
+}
+
 // Writes the `rl_obs_names_out=` file ONCE per process (T-220-04-02's
 // rundir-scoped discipline, mirroring rl_translog='s open_and_write_header:
 // eager, no parent directories created, refuses loudly on a bad path
@@ -571,14 +615,33 @@ const slot_table& bind_slots( player_t* p )
           case rl_family_kind::scalar:
             binding = resolve_scalar_leaf( leaf );
             break;
+          case rl_family_kind::expression:
+            // 220-05 Task 1: prove the expression seam on `deck` (the family
+            // with fork edits). `pets`/`items`/`raid_events`/`sim_auras`
+            // share this SAME rl_family_kind but are deliberately left
+            // unresolved here -- Task 2 (pets/items/sim_auras) and Task 3
+            // (raid_events) add their own engine_token->expression-name
+            // composition, which differs per family (deck's engine_token
+            // IS the expression name directly; raid_events composes
+            // "raid_event.<token>.<leaf>").
+            if ( fam.id == rl_family::deck )
+            {
+              binding = resolve_expression_leaf( p, mem.engine_token, leaf, table );
+            }
+            else
+            {
+              binding.kind = slot_binding_kind::unresolved;
+              binding.leaf = &leaf;
+            }
+            break;
           case rl_family_kind::cooldown:
           case rl_family_kind::enemy_slot:
           case rl_family_kind::action_expression:
-          case rl_family_kind::expression:
           case rl_family_kind::direct:
           default:
-            // Deferred to plans 220-05/220-06 -- see this function's own
-            // header comment.
+            // Deferred to plan 220-06 (enemy_slot/action_expression) or the
+            // rest of 220-05 (cooldown/direct, Task 2) -- see this
+            // function's own header comment.
             binding.kind = slot_binding_kind::unresolved;
             binding.leaf = &leaf;
             break;
@@ -722,13 +785,30 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t, flo
           }
           break;
         }
-        case slot_binding_kind::cooldown:
         case slot_binding_kind::expression:
+        {
+          // 220-05 OBS-04: eval() is called ONCE per decision here -- the
+          // expr_t itself was resolved once at bind time (resolve_expression_leaf).
+          // A null b.expr (should not happen for a binding of this kind, but
+          // guarded defensively) reads absent rather than dereferencing null.
+          if ( b.expr == nullptr )
+          {
+            status = lookup_status::absent;
+          }
+          else
+          {
+            raw = b.expr->eval();
+            status = lookup_status::present;
+          }
+          break;
+        }
+        case slot_binding_kind::cooldown:
         case slot_binding_kind::action_expression:
         case slot_binding_kind::enemy_slot:
         case slot_binding_kind::unresolved:
         default:
-          // Deferred to plans 220-05/220-06 -- an unresolved binding
+          // Deferred to plan 220-06 (enemy_slot/action_expression), or the
+          // rest of 220-05 (cooldown, Task 2) -- an unresolved binding
           // yields `absent` (header_contract), never a special value.
           status = lookup_status::absent;
           break;
