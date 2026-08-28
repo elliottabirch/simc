@@ -91,36 +91,16 @@ action_t* resolve_action_prefer_castable( player_t* p, const std::string& name )
   return background_match;
 }
 
-action_t* resolve_action( player_t* p, const std::string& name )
-{
-  if ( action_t* resolved = resolve_action_prefer_castable( p, name ) )
-    return resolved;
-
-  // Fallback for spells whose *constructed* action_t renames its own
-  // name_str based on live talent state, even though the APL/sequence
-  // CONSTRUCTOR token stays fixed (found live during 116-01 smoke testing:
-  // sc_paladin_retribution.cpp's templars_verdict_t sets name_str to
-  // "final_verdict" once the Final Verdict talent is active, even though
-  // "templars_verdict" remains the only registered create_action() factory
-  // token -- there is no "final_verdict" branch in create_action at all).
-  // scripts/simc-eval/name-map.json intentionally emits ONLY the canonical
-  // constructor-token name ("templars_verdict", never "final_verdict" --
-  // writing the display name as a sequence entry fails SILENTLY, per that
-  // file's own landmine note), so this alias is tried only when the exact
-  // match above fails, keeping the driver/worker/name-map unaware of the
-  // live rename.
-  static const std::unordered_map<std::string, std::string> NAME_STR_RENAME_ALIASES = {
-    { "templars_verdict", "final_verdict" },
-  };
-  auto alias_it = NAME_STR_RENAME_ALIASES.find( name );
-  if ( alias_it != NAME_STR_RENAME_ALIASES.end() )
-  {
-    if ( action_t* resolved = resolve_action_prefer_castable( p, alias_it->second ) )
-      return resolved;
-  }
-
-  return nullptr;
-}
+// resolve_action() itself is DECLARED in solver_control.hpp and DEFINED
+// below, inside `namespace solver_control` (221-01, Pattern 2) -- moved out
+// of this anonymous namespace so `rl_policy_obs.cpp`'s engine-truth handle
+// table (read_action_gate_bits) and this file's own accept_cast() below
+// resolve a name to the SAME action_t*, by construction, never by two
+// independently-maintained loops that could drift. It still calls
+// resolve_action_prefer_castable() above unqualified -- an anonymous
+// namespace's members are visible, unqualified, throughout this whole
+// translation unit regardless of which named namespace surrounds the call
+// site, so no qualification is needed for that call.
 
 // Shared 'cast' epilogue (210-05R Task 1) -- both transports resolve their
 // chosen action-name token through the same resolve_action()/ready() gate,
@@ -129,7 +109,7 @@ action_t* resolve_action( player_t* p, const std::string& name )
 // transport answered the boundary).
 action_t* accept_cast( player_t* p, const std::string& action_name, std::uint64_t seq )
 {
-  action_t* resolved = resolve_action( p, action_name );
+  action_t* resolved = solver_control::resolve_action( p, action_name );
   if ( !resolved )
     protocol_abort( "'cast' reply named an unresolvable action '" + action_name + "' (seq=" +
                      std::to_string( seq ) + ")" );
@@ -162,6 +142,43 @@ void accept_wait( sim_t* sim, execute_type et, double sec, const std::string& co
 
 namespace solver_control
 {
+// 221-01 (ACT-02, Pattern 2). Exposed so `rl_policy_obs.cpp`'s engine-truth
+// handle table (read_action_gate_bits) and accept_cast() above resolve a
+// token to the SAME action_t* -- this is the single seam that makes
+// "mask/engine agreement" true by construction rather than by census.
+// resolve_action_prefer_castable() stays file-local (anonymous namespace,
+// unchanged) and is called here unqualified.
+action_t* resolve_action( player_t* p, const std::string& name )
+{
+  if ( action_t* resolved = resolve_action_prefer_castable( p, name ) )
+    return resolved;
+
+  // Fallback for spells whose *constructed* action_t renames its own
+  // name_str based on live talent state, even though the APL/sequence
+  // CONSTRUCTOR token stays fixed (found live during 116-01 smoke testing:
+  // sc_paladin_retribution.cpp's templars_verdict_t sets name_str to
+  // "final_verdict" once the Final Verdict talent is active, even though
+  // "templars_verdict" remains the only registered create_action() factory
+  // token -- there is no "final_verdict" branch in create_action at all).
+  // scripts/simc-eval/name-map.json intentionally emits ONLY the canonical
+  // constructor-token name ("templars_verdict", never "final_verdict" --
+  // writing the display name as a sequence entry fails SILENTLY, per that
+  // file's own landmine note), so this alias is tried only when the exact
+  // match above fails, keeping the driver/worker/name-map unaware of the
+  // live rename.
+  static const std::unordered_map<std::string, std::string> NAME_STR_RENAME_ALIASES = {
+    { "templars_verdict", "final_verdict" },
+  };
+  auto alias_it = NAME_STR_RENAME_ALIASES.find( name );
+  if ( alias_it != NAME_STR_RENAME_ALIASES.end() )
+  {
+    if ( action_t* resolved = resolve_action_prefer_castable( p, alias_it->second ) )
+      return resolved;
+  }
+
+  return nullptr;
+}
+
 action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
 {
   sim_t* sim = p->sim;

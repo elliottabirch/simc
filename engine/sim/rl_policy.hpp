@@ -93,12 +93,35 @@ struct rl_state_t
   double active_enemies      = 0.0;   bool has_active_enemies     = false;
   bool   boundary_is_foreground = true;   // converted ONCE from execute_type by the caller
 
+  // 221-01 (ACT-02, Pattern 1) -- the engine-truth legality layer, action-id
+  // order, exactly RL_ACTION_DIM wide. Filled by read_state() calling
+  // read_action_gate_bits() below (the ONE computation both this POD and
+  // decision_dump::write_state_fields() share). `build_mask` (still PURE
+  // over this POD, no player_t*) ANDs these into Layer 1's declarative
+  // rules for every `kind == cast` candidate. A `wait` action's slot is
+  // left at its default 0 -- `build_mask` never reads it (wait actions
+  // resolve to no `action_t*` and skip the engine-truth AND entirely).
+  std::uint8_t action_resolvable[ RL_ACTION_DIM ] = {};
+  std::uint8_t action_ready     [ RL_ACTION_DIM ] = {};
+
   std::vector<buff_reading>     buffs;
   std::vector<cooldown_reading> cooldowns;
 
   const buff_reading*     find_buff( const char* name ) const;
   const cooldown_reading* find_cooldown( const char* name ) const;
 };
+
+// 221-01 (ACT-02, Pattern 1) -- Stage 1, needs the engine (same tier as
+// read_state, which calls this to fill its two POD arrays above). Exists so
+// this ONE computation is shared by read_state (fills rl_state_t) AND
+// decision_dump::write_state_fields (emits the same two arrays onto both
+// the JSONL dump and the FIFO wire) -- never two independent walks that
+// could drift (Pattern 3). Resolves each cast action's token through
+// solver_control::resolve_action -- the SAME resolver accept_cast uses --
+// so the bits this function computes and the FATAL gate `accept_cast`
+// enforces can never disagree about which action_t* they mean.
+void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_ACTION_DIM ],
+                             std::uint8_t out_ready[ RL_ACTION_DIM ] );
 
 // WR-05 fix (210-CR-FIX): `source` is a `std::string`, not a `const char*`
 // into shared storage. `wait_result` is part of the pinned POD interface --

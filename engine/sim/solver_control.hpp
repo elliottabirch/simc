@@ -21,12 +21,27 @@
 #include "config.hpp"
 #include "sc_enums.hpp"
 
+#include <string>
+
 struct player_t;
 struct action_t;
 struct sim_t;
 
 namespace solver_control
 {
+// 221-01 (ACT-02, Pattern 2). Resolves a SimC internal action name
+// (`name_str`) to one of the actor's already-constructed action_t objects,
+// preferring a player-CASTABLE (non-background) match -- see the
+// definition's own comment in solver_control.cpp for the full resolution
+// order and the background-collision rationale. Exposed here (moved out of
+// an anonymous namespace) so `rl_policy_obs.cpp`'s engine-truth handle
+// table and this file's own `accept_cast()` epilogue resolve a token to the
+// SAME action_t*, by construction -- the mask bit and the not-ready FATAL
+// gate can never disagree about which object they mean. Never constructs a
+// new action; returns nullptr when no match exists under `name` (or its one
+// known rename alias).
+action_t* resolve_action( player_t* p, const std::string& name );
+
 // Called at a decision boundary, from one of TWO call sites (phase 200-04,
 // FORK-01/R-8 -- widened from the original single foreground-only call;
 // corrected 2026-08-21, WR-05: the precombat leg documented here as a third

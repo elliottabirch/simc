@@ -32,6 +32,7 @@
 #include "sim/expressions.hpp"
 #include "sim/raid_event.hpp"
 #include "sim/sim.hpp"
+#include "sim/solver_control.hpp"
 #include "util/io.hpp"
 
 #include "fmt/format.h"
@@ -47,6 +48,21 @@
 
 namespace rl_policy
 {
+namespace
+{
+// 221-01 (ACT-02, Pattern 1) -- resolved ONCE per actor, same lazy-fill-on-
+// first-use discipline as bind_slots()'s g_slot_table_cache further down
+// this file (keyed on a bare const player_t*, same WR-12 single-sim/
+// single-thread precondition asserted at the fill site below).
+// `background`/`action_list` are stable after player_t::init_actions(), so
+// one resolution per actor is honest for the whole fight (Assumptions Log
+// A1) -- filled lazily on first read_action_gate_bits() call, never during
+// actor init. Declared here (ahead of read_state/read_action_gate_bits,
+// rather than beside g_slot_table_cache) purely because C++ requires the
+// declaration precede first use in the same translation unit.
+std::unordered_map<const player_t*, std::vector<action_t*>> g_action_handle_cache;
+} // anonymous namespace
+
 // ---------------------------------------------------------------------------
 // rl_state_t lookups -- absent is a distinct state, never a zero default.
 // ---------------------------------------------------------------------------
@@ -216,7 +232,81 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground )
   // Phase 212's log), holy_power, target_debuffs, target_time_to_die, dots,
   // gcd_length, auto_attack_interval, resolved_action.
 
+  // 221-01 (ACT-02, Pattern 1) -- the engine-truth legality layer. Filled
+  // via the SAME function decision_dump::write_state_fields calls, so this
+  // POD and the wire/dump arrays can never drift apart (Pattern 3).
+  read_action_gate_bits( p, s.action_resolvable, s.action_ready );
+
   return s;
+}
+
+// ---------------------------------------------------------------------------
+// read_action_gate_bits -- 221-01 (ACT-02, Pattern 1/2). Resolves each
+// `kind == cast` action's token to an action_t* through
+// solver_control::resolve_action (the SAME resolver accept_cast uses, via a
+// handle table cached ONCE per actor -- g_action_handle_cache above, filled
+// lazily on first use, never during actor init) and computes two bits per
+// action: `resolvable` (`!background` ALONE -- see the comment on that line
+// below for why `data().ok()` is deliberately NOT part of this predicate)
+// and `ready` (`resolvable && a->ready()` -- plain `ready()`, NOT the
+// `_ready`-suffixed `action_ready()`, which is the APL's own selection
+// predicate and evaluates `if_expr`/target-selection/line-cooldown/RNG
+// skill rolls that `accept_cast` never consults). A `kind == wait` action
+// has no `action_t*` to resolve; both of its output bits stay at their
+// default 0 and `build_mask` never reads them for a wait candidate.
+// ---------------------------------------------------------------------------
+
+void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_ACTION_DIM ],
+                             std::uint8_t out_ready[ RL_ACTION_DIM ] )
+{
+  // Same WR-12 single-sim/single-thread precondition bind_slots() asserts
+  // above -- this cache is keyed on a bare const player_t* with no sim
+  // identity and no clear.
+  assert( p->sim->threads == 1 && p->sim->profileset_map.empty() &&
+          "rl_policy action-handle cache is single-sim/single-thread by construction (221-01)" );
+
+  auto cached = g_action_handle_cache.find( p );
+  if ( cached == g_action_handle_cache.end() )
+  {
+    // `resolve_action` takes a non-const `player_t*` (it does not mutate
+    // the actor, but SimC's own action-list scan API is non-const
+    // throughout) -- read_state's own `const player_t*` parameter is the
+    // Open Question 5 const-handling choice this plan resolves via
+    // const_cast at this ONE call site, rather than threading a non-const
+    // overload of read_state/read_action_gate_bits through every caller.
+    player_t* mutable_p = const_cast<player_t*>( p );
+    std::vector<action_t*> handles;
+    handles.reserve( RL_ACTION_DIM );
+    for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+    {
+      const rl_action_desc& a = RL_ACTIONS[ i ];
+      handles.push_back( a.kind == rl_action_kind::cast
+                              ? solver_control::resolve_action( mutable_p, a.token )
+                              : nullptr );
+    }
+    cached = g_action_handle_cache.emplace( p, std::move( handles ) ).first;
+  }
+
+  const std::vector<action_t*>& handles = cached->second;
+  for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+  {
+    action_t* a = handles[ i ];
+    // `!background` ALONE -- NOT `data().ok()`. `use_item_t` is constructed
+    // with nil spell data (`_id == 0`), so `data().ok()` is FALSE for the
+    // trinket and would mark it permanently unresolvable; `!background`
+    // already subsumes every silent-no-op branch (untalented spell, item
+    // name/slot miss, verify_actor_* failure -- each sets `background`
+    // itself). See rl_policy_constants.h's own generated comment site and
+    // 221-RESEARCH.md Pitfall 2 for the full citation trail.
+    out_resolvable[ i ] = ( a != nullptr && !a->background ) ? 1 : 0;
+    // Plain `ready()` -- the SAME call accept_cast makes before FATAL-ing
+    // (solver_control.cpp). NOT `action_ready()` (the `_ready`-suffixed
+    // APL-selection predicate, which additionally evaluates `if_expr`,
+    // `select_target()`, `line_cooldown` and an RNG skill roll) -- using
+    // that one here would make the mask disagree with the engine's own
+    // FATAL gate about what "ready" means.
+    out_ready[ i ] = ( out_resolvable[ i ] && a->ready() ) ? 1 : 0;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2238,15 +2328,32 @@ void build_mask( const rl_state_t& s, std::uint8_t out_mask[ RL_ACTION_DIM ] )
     // R1: a wait action is legal ONLY at a foreground boundary. A `wait`
     // reply at any other boundary hard-aborts the engine
     // (protocol_abort) -- the mask is the only thing between the agent
-    // and that FATAL.
+    // and that FATAL. Wait actions have no action_t* to resolve and skip
+    // R0's engine-truth AND below entirely.
     if ( a.kind == rl_action_kind::wait )
     {
       out_mask[ i ] = s.boundary_is_foreground ? 1 : 0;
       continue;
     }
 
+    // R0: engine-truth AND (221-01, Pattern 1) -- evaluated FIRST, before
+    // even R2's buff gate below. `s.action_resolvable`/`s.action_ready`
+    // were computed ONCE in read_state() via read_action_gate_bits(),
+    // through the SAME resolver (solver_control::resolve_action) that
+    // accept_cast() uses before its own not-ready FATAL -- a not-
+    // resolvable or not-ready action per the engine's own truth is denied
+    // here regardless of what the declarative rules below would otherwise
+    // say. `build_mask` stays PURE over the rl_state_t POD (no player_t*
+    // parameter, unchanged) -- these bits are READ from the POD, never
+    // computed here.
+    if ( !s.action_resolvable[ i ] || !s.action_ready[ i ] )
+    {
+      out_mask[ i ] = 0;
+      continue;
+    }
+
     // R2: buff gate (mask.py's maskRules.buffGates). FAIL-CLOSED,
-    // evaluated FIRST -- and deliberately the OPPOSITE polarity to R3's
+    // evaluated next -- and deliberately the OPPOSITE polarity to R3's
     // absent-cooldown-row rule below. mask.py's own capitalized warning,
     // reproduced verbatim in substance: an unsatisfied buff gate means
     // "the engine will refuse this cast" (restrictive is correct), while
@@ -2283,18 +2390,46 @@ void build_mask( const rl_state_t& s, std::uint8_t out_mask[ RL_ACTION_DIM ] )
     // OR whose named row is ABSENT from request['cooldowns']: legal."
     // Deliberate FAIL-OPEN exception to this repo's usual fail-closed
     // mask convention (mask.py:22-32) -- do not harmonise with R2 above.
-    if ( a.cooldown_row == nullptr )
+    // Captured into a bool (rather than an early `continue`, as before
+    // 221-01) so R5 below can AND the shared cooldown row on top of it.
+    bool own_row_ready = true;
+    if ( a.cooldown_row != nullptr )
     {
-      out_mask[ i ] = 1;
+      const cooldown_reading* row = s.find_cooldown( a.cooldown_row );
+      own_row_ready = ( row == nullptr ) ? true : cd_ready_now( *row );
+    }
+    if ( !own_row_ready )
+    {
+      out_mask[ i ] = 0;
       continue;
     }
-    const cooldown_reading* row = s.find_cooldown( a.cooldown_row );
-    if ( row == nullptr )
+
+    // R5: shared cooldown row AND (221-01, Pattern 1) -- when this action
+    // declares `cooldown_row_shared` (e.g. a trinket sharing an item-
+    // cooldown-category row with a sibling trinket), that row must ALSO
+    // read ready. Keeps the SAME fail-open reading R3/R4 use for the own
+    // row: a shared row ABSENT from `s.cooldowns` means "this shared-
+    // cooldown group has never started" and does not deny -- this only
+    // ANDs in a PRESENT-but-not-ready shared row.
+    if ( a.cooldown_row_shared != nullptr )
     {
-      out_mask[ i ] = 1;
-      continue;
+      const cooldown_reading* shared_row = s.find_cooldown( a.cooldown_row_shared );
+      if ( shared_row != nullptr && !cd_ready_now( *shared_row ) )
+      {
+        out_mask[ i ] = 0;
+        continue;
+      }
     }
-    out_mask[ i ] = cd_ready_now( *row ) ? 1 : 0;
+
+    // Deliberately NOT evaluated here: RL_TALENT_GATES[] (221-01,
+    // ACT-01/ACT-02). Talent legality is DECLARATIVE data for the
+    // fingerprint and for humans -- it is EXECUTED by R0's
+    // `action_resolvable` bit above (an untalented action's action_t is
+    // `background`, so `action_resolvable` is already 0 for it, R-4: the
+    // engine already resolved the talent tree, Python/C++ never
+    // re-implement it). Do not "fix" this apparent omission by adding a
+    // second talent check here.
+    out_mask[ i ] = 1;
   }
 }
 

@@ -15,6 +15,7 @@
 #include "sim/cooldown.hpp"
 #include "sim/event.hpp"
 #include "sim/gain.hpp"
+#include "sim/rl_policy.hpp"
 #include "sim/sim.hpp"
 #include "util/concurrency.hpp"
 #include "util/io.hpp"
@@ -713,6 +714,40 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
     if ( solver_reply_gated )
       out << ",\"solver_reply_type\":\"" << json_escape( sim->solver_control_last_reply_type ) << "\"";
   }
+
+  // 221-01 (ACT-02, Pattern 3) -- the engine-truth legality layer, emitted
+  // as RL_ACTION_DIM-long integer arrays in action-id order, filled by
+  // calling rl_policy::read_action_gate_bits() -- the SAME computation
+  // read_state() calls to fill its rl_state_t POD for the in-process arm
+  // (never a second, independent walk here; see that function's own doc
+  // comment for why two computations would be the exact drift class this
+  // design closes). This function has exactly two call sites --
+  // decision_dump::record()'s JSONL append below and solver_control.cpp's
+  // FIFO request line -- so this ONE edit reaches both transports, which
+  // is what lets mask.py AND the same bits on the wire that build_mask
+  // ANDs in-process. Wait entries emit 0 (they have no action_t* to
+  // resolve; read_action_gate_bits() already encodes that).
+  {
+    std::uint8_t action_resolvable[ RL_ACTION_DIM ];
+    std::uint8_t action_ready[ RL_ACTION_DIM ];
+    rl_policy::read_action_gate_bits( p, action_resolvable, action_ready );
+    out << ",\"action_resolvable\":[";
+    for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+    {
+      if ( i > 0 )
+        out << ",";
+      out << static_cast<int>( action_resolvable[ i ] );
+    }
+    out << "]";
+    out << ",\"action_ready\":[";
+    for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+    {
+      if ( i > 0 )
+        out << ",";
+      out << static_cast<int>( action_ready[ i ] );
+    }
+    out << "]";
+  }
 }
 
 void record( player_t* p, action_t* chosen, execute_type et )
@@ -762,8 +797,16 @@ void record( player_t* p, action_t* chosen, execute_type et )
   // just the FIFO one -- left unwidened, an in-process dump emits a
   // PRE-reply `resolved_action` with no `solver_reply_type`, and every
   // downstream reader (including this phase's own smoke receipt) breaks
-  // silently. Nothing else in this function changes; `write_state_fields`
-  // itself stays byte-frozen.
+  // silently. Nothing else in THIS function (record()) changes.
+  //
+  // UPDATED 221-01: the claim that `write_state_fields` itself "stays
+  // byte-frozen" was a Phase 210 scoping statement about that specific
+  // patch, never an invariant of the function -- 221-01 extends it with
+  // the `action_resolvable`/`action_ready` arrays (see that function's own
+  // doc comment). The extension is additive and every reader (this file's
+  // own JSONL consumers, `mask.py`'s `request.get(key)`) tolerates an
+  // unknown/absent key, so record()'s own byte-shape claim above is
+  // unaffected -- only write_state_fields' output grows.
   write_state_fields( line, p, chosen, !sim->solver_control_str.empty() || !sim->solver_policy_str.empty() );
 
   line << "}\n";
