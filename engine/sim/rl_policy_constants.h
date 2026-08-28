@@ -65,6 +65,8 @@ struct rl_action_desc
   const char*    token;
   rl_action_kind kind;
   const char*    cooldown_row;
+  const char*    cooldown_row_shared;
+  const char*    label;
 };
 
 struct rl_buff_gate
@@ -74,19 +76,26 @@ struct rl_buff_gate
   bool        forbidden;
 };
 
+struct rl_talent_gate
+{
+  const char* action_token;
+  const char* talent_name;
+  bool        forbidden;
+};
+
 // ---- Scalar constants ----
 
 inline constexpr const char* RL_REGISTRY_ID = "enhancement";
 inline constexpr const char* RL_ACTOR_NAME = "MID2_Shaman_Enhancement_Stormbringer";
 inline constexpr int RL_ENCODER_VERSION = 2;
 inline constexpr std::size_t RL_OBS_DIM = 208;
-inline constexpr std::size_t RL_ACTION_DIM = 5;
+inline constexpr std::size_t RL_ACTION_DIM = 6;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
 inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v2:90206fa823fca5720e8ce8f4fc5e0fd3d9912f70992844a194e0a7c4d0cf545d";
-inline constexpr const char* RL_MASK_RULES_SHA = "59400ba29a6bd6102bbbb0daefae1379b58f730f76c3dde2d70d233e1e478c42";
-inline constexpr const char* RL_ACTION_SPACE_SHA = "4c06590d941d87cb5894ba430991ffa98a57332e1e5687df20b161bb08fddcf9";
+inline constexpr const char* RL_MASK_RULES_SHA = "0774a23687815c8b37b1f64b797302df9fc6bcfb501e362cbe4f8e351815c7b0";
+inline constexpr const char* RL_ACTION_SPACE_SHA = "fcef3be80d8c654cfe5e16707c5fe7d40b6e0a1ebdd9021a2139f0aed2870774";
 
 // ---- Observation name list (the materialised ordering) ----
 
@@ -859,11 +868,12 @@ inline constexpr rl_obs_family RL_OBS_FAMILIES[RL_OBS_FAMILY_COUNT] = {
 // ---- Action descriptors ----
 
 inline constexpr rl_action_desc RL_ACTIONS[RL_ACTION_DIM] = {
-  { 0, "stormstrike", rl_action_kind::cast, "strike" },
-  { 1, "lightning_bolt", rl_action_kind::cast, nullptr },
-  { 2, "chain_lightning", rl_action_kind::cast, nullptr },
-  { 3, nullptr, rl_action_kind::wait, nullptr },
-  { 4, "tempest", rl_action_kind::cast, nullptr },
+  { 0, "stormstrike", rl_action_kind::cast, "strike", nullptr, "stormstrike" },
+  { 1, "lightning_bolt", rl_action_kind::cast, nullptr, nullptr, "lightning_bolt" },
+  { 2, "chain_lightning", rl_action_kind::cast, nullptr, nullptr, "chain_lightning" },
+  { 3, nullptr, rl_action_kind::wait, nullptr, nullptr, nullptr },
+  { 4, "tempest", rl_action_kind::cast, nullptr, nullptr, "tempest" },
+  { 5, "lava_lash", rl_action_kind::cast, "lava_lash", nullptr, "lava_lash" },
 };
 
 // ---- Buff-gate table ----
@@ -873,4 +883,11 @@ inline constexpr rl_buff_gate RL_BUFF_GATES[] = {
   { "tempest", "tempest", false },
 };
 inline constexpr std::size_t RL_BUFF_GATE_COUNT = 2;
+
+// ---- Talent-gate table ----
+
+inline constexpr rl_talent_gate RL_TALENT_GATES[] = {
+  { "lava_lash", "lava_lash", false },
+};
+inline constexpr std::size_t RL_TALENT_GATE_COUNT = 1;
 
