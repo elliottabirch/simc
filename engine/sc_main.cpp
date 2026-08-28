@@ -16,12 +16,26 @@
 #include "sim/reforge_plot.hpp"
 #include "sim/profileset.hpp"
 #include "sim/apl_json.hpp"
+// Phase 222, plan 222-04 (NET-02's cross-path receipt, rl_forward_probe).
+// sim.hpp deliberately does NOT include rl_policy.hpp (only forward-declares
+// the namespace) -- see sim.hpp's own comment beside that forward
+// declaration -- so this TU includes it directly, the same way
+// solver_control.cpp does.
+#include "sim/rl_policy.hpp"
 #include "sim/sim.hpp"
 #include "sim/scale_factor_control.hpp"
 #include "sim/sim_control.hpp"
 #include "util/git_info.hpp"
 #include "util/io.hpp"
 
+// Phase 222, plan 222-04 (rl_forward_probe): <cmath> for std::isfinite,
+// <cstdlib> for std::strtof (istream's own float extraction fails on
+// "nan"/"inf" and clamps overflow to a finite value on this libstdc++ --
+// verified this session -- so strtof is what makes the non-finite refusal
+// reachable), <fstream> for the probe's plain-text input file.
+#include <cmath>
+#include <cstdlib>
+#include <fstream>
 #include <locale>
 
 #ifdef SC_SIGACTION
@@ -345,6 +359,158 @@ int sim_t::main( const std::vector<std::string>& args )
       catch ( const std::exception& )
       {
         std::throw_with_nested( std::runtime_error( "APL JSON generation" ) );
+      }
+    }
+    // Phase 222, plan 222-04 (NET-02's cross-path receipt). Modelled on the
+    // apl_json branch immediately above but WITHOUT init(): the weights are
+    // already loaded+validated in setup()'s solver_policy= fail-closed
+    // block, and the probe needs only RL_OBS_DIM/RL_ACTION_DIM from the
+    // generated header -- no player init, no fight. Tested BEFORE
+    // need_to_save_profiles so it is reachable; sim.cpp's amended "Nothing
+    // to sim!" predicate lets this branch run with ZERO players configured.
+    else if ( !rl_forward_probe_str.empty() )
+    {
+      try
+      {
+        if ( !solver_policy_weights )
+        {
+          throw sc_runtime_error(
+              "rl_forward_probe: no solver_policy= given -- there are no weights to run" );
+        }
+        if ( rl_forward_probe_out_str.empty() )
+        {
+          throw sc_runtime_error( "rl_forward_probe: rl_forward_probe_out= must also be given" );
+        }
+
+        std::ifstream probe_in( rl_forward_probe_str );
+        if ( !probe_in.is_open() )
+        {
+          throw sc_runtime_error( fmt::format(
+              "rl_forward_probe: could not open input file '{}'", rl_forward_probe_str ) );
+        }
+
+        // P-13: the IN file is plain whitespace-separated TEXT tokens --
+        // line 1 is RL_OBS_DIM floats, line 2 is RL_ACTION_DIM values in
+        // {0, 1} -- read with ONE std::ifstream loop (obs first, then
+        // mask), so the probe adds no JSON parser to the fork. Tokens are
+        // read as strings and parsed with std::strtof rather than
+        // istream's own float extraction: libstdc++'s operator>>(float&)
+        // FAILS extraction outright on "nan"/"inf" and CLAMPS an
+        // overflowing literal to a finite FLT_MAX rather than producing an
+        // actual non-finite value (verified this session with a standalone
+        // probe) -- so a raw `>>` into a float can never reach the
+        // isfinite() refusal below at all. strtof DOES parse "nan"/"inf"
+        // per the C standard, which is what makes that refusal reachable
+        // and testable. A shortfall during the first RL_OBS_DIM
+        // extractions is attributable to line 1; a shortfall during the
+        // next RL_ACTION_DIM is attributable to line 2.
+        float probe_obs[ RL_OBS_DIM ];
+        for ( std::size_t i = 0; i < RL_OBS_DIM; ++i )
+        {
+          std::string tok;
+          if ( !( probe_in >> tok ) )
+          {
+            throw sc_runtime_error( fmt::format(
+                "rl_forward_probe: input file '{}' line 1 has fewer than RL_OBS_DIM={} values "
+                "(failed at value {})",
+                rl_forward_probe_str, RL_OBS_DIM, i ) );
+          }
+          char* endptr = nullptr;
+          const float v = std::strtof( tok.c_str(), &endptr );
+          if ( endptr == tok.c_str() || *endptr != '\0' )
+          {
+            throw sc_runtime_error( fmt::format(
+                "rl_forward_probe: input file '{}' line 1 value '{}' at index {} is not a valid "
+                "number",
+                rl_forward_probe_str, tok, i ) );
+          }
+          if ( !std::isfinite( v ) )
+          {
+            throw sc_runtime_error( fmt::format(
+                "rl_forward_probe: input file '{}' observation value '{}' at index {} is not "
+                "finite",
+                rl_forward_probe_str, tok, i ) );
+          }
+          probe_obs[ i ] = v;
+        }
+
+        std::uint8_t probe_mask[ RL_ACTION_DIM ];
+        for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+        {
+          std::string tok;
+          if ( !( probe_in >> tok ) )
+          {
+            throw sc_runtime_error( fmt::format(
+                "rl_forward_probe: input file '{}' line 2 has fewer than RL_ACTION_DIM={} values "
+                "(failed at value {})",
+                rl_forward_probe_str, RL_ACTION_DIM, i ) );
+          }
+          if ( tok != "0" && tok != "1" )
+          {
+            throw sc_runtime_error( fmt::format(
+                "rl_forward_probe: input file '{}' mask value '{}' at index {} must be 0 or 1",
+                rl_forward_probe_str, tok, i ) );
+          }
+          probe_mask[ i ] = static_cast<std::uint8_t>( tok == "1" ? 1 : 0 );
+        }
+
+        std::string probe_trailing;
+        if ( probe_in >> probe_trailing )
+        {
+          throw sc_runtime_error( fmt::format(
+              "rl_forward_probe: input file '{}' has more than RL_OBS_DIM={} + RL_ACTION_DIM={} "
+              "values",
+              rl_forward_probe_str, RL_OBS_DIM, RL_ACTION_DIM ) );
+        }
+
+        float probe_q[ RL_ACTION_DIM ];
+        rl_policy::forward( *solver_policy_weights, probe_obs, probe_mask, probe_q );
+        const int probe_argmax = rl_policy::masked_argmax( probe_q, probe_mask );
+
+        // NET-01: hidden_sizes is read through the SAME derived
+        // hidden_layer_count() helper load_rlw1/forward already validated
+        // the blob against -- never re-derived a third time here.
+        const std::size_t n_hidden = rl_policy::hidden_layer_count(
+            solver_policy_weights->body, solver_policy_weights->layers.size() );
+        std::string hidden_sizes_json = "[";
+        for ( std::size_t i = 0; i < n_hidden; ++i )
+        {
+          if ( i > 0 )
+            hidden_sizes_json += ",";
+          hidden_sizes_json += fmt::format( "{}", solver_policy_weights->layers[ i ].out_features );
+        }
+        hidden_sizes_json += "]";
+
+        std::string q_json = "[";
+        for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+        {
+          if ( i > 0 )
+            q_json += ",";
+          q_json += fmt::format( "{:.9g}", probe_q[ i ] );
+        }
+        q_json += "]";
+
+        const std::string out_json = fmt::format(
+            "{{\"obs_dim\":{},\"action_dim\":{},\"body\":\"{}\",\"n_layers\":{},"
+            "\"hidden_sizes\":{},\"n_input_slots\":{},\"allowed_actions\":{},\"q\":{},"
+            "\"argmax\":{}}}\n",
+            RL_OBS_DIM, RL_ACTION_DIM, rl_policy::body_name( solver_policy_weights->body ),
+            solver_policy_weights->layers.size(), hidden_sizes_json,
+            solver_policy_weights->input_slots.size(), solver_policy_weights->allowed_actions,
+            q_json, probe_argmax );
+
+        io::ofstream probe_out;
+        probe_out.open( rl_forward_probe_out_str );
+        if ( !probe_out.is_open() )
+        {
+          throw sc_runtime_error( fmt::format(
+              "rl_forward_probe: could not open output file '{}'", rl_forward_probe_out_str ) );
+        }
+        probe_out << out_json;
+      }
+      catch ( const std::exception& )
+      {
+        std::throw_with_nested( std::runtime_error( "rl_forward_probe" ) );
       }
     }
     else if ( need_to_save_profiles( this ) )

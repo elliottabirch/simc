@@ -5,19 +5,28 @@
 //
 // In-process RL transport, weights loader + forward (three body types) +
 // masked argmax -- tstl-sylvanas phase 210, plan 210-04; widened to RLW1 v2
-// (network.body: mlp/dueling/ln-dueling) at Phase 213-TDL Task 1. `load_rlw1`
-// parses the RLW1 v2 binary layout implemented on the Python side by
+// (network.body: mlp/dueling/ln-dueling) at Phase 213-TDL Task 1; widened
+// again at Phase 222 (NET-01/NET-02) to an ARBITRARY depth (2-4 hidden
+// layers, any width 128-512, widths >=16 tolerated) via a single derived
+// layer-split rule (hidden_layer_count(), rl_policy.hpp), a legal-only
+// dueling mean with a mirrored zero-legal fallback, and RLW1 v3's optional
+// trailing input-gather + action-allow-list section. `load_rlw1` parses the
+// RLW1 v2/v3 binary layout implemented on the Python side by
 // scripts/rl/rlw1.py -- this loader refuses on the same conditions that
 // reader refuses on (bad magic, short file, unknown version, unknown body,
-// out-of-range dims, a body/layer-shape mismatch, truncated payload), each
-// with its own named error, little-endian throughout (this format is a
-// portable on-disk layout, not an in-memory dump; declared explicitly here
-// via raw byte reads on an x86-64/ARM64 little-endian host, matching the
-// Python writer's explicit `<` struct format).
+// out-of-range dims, a body/layer-shape mismatch, truncated payload, an
+// out-of-range or non-increasing input gather, an all-disallowed action
+// set, unexpected trailing bytes), each with its own named error,
+// little-endian throughout (this format is a portable on-disk layout, not
+// an in-memory dump; declared explicitly here via raw byte reads on an
+// x86-64/ARM64 little-endian host, matching the Python writer's explicit
+// `<` struct format).
 //
-// RLW1 v1 is RETIRED -- a v1 file's format_version field (1) no longer
-// matches RLW1_SUPPORTED_FORMAT_VERSION (2), so it is refused BY NAME
-// (naming both the found and supported versions), never misread as v2.
+// RLW1 v1 is RETIRED -- a v1 file's format_version field (1) does not fall
+// in the {2, 3} accepted set, so it is refused BY NAME (naming both the
+// found version and the accepted set), never misread as v2/v3. v2 is still
+// fully supported (reads as identity gather + all-allowed); v3 is the only
+// version this reader's Python counterpart writes (scripts/rl/rlw1.py).
 //
 // masked_argmax reproduces tianshou 2.x's DQN.compute_q_value formula
 // verbatim -- RE-VERIFIED AT SOURCE this session (A6), not merely cited
@@ -35,10 +44,15 @@
 //   ...then `q.argmax(dim=1)` (dqn.py:141) -- torch.argmax returns the
 //   FIRST index on a tie.
 //
-// forward()'s dueling recombination (Q = V + A - mean(A), mean over ALL
-// actions, computed BEFORE masked_argmax's own mask+argmax step ever runs)
-// and ln-dueling's LayerNorm (eps=1e-5, torch's own default, applied after
-// each hidden linear, before ReLU, per-decision statistics only -- see
+// forward()'s dueling recombination is Phase 222 NET-02's legal-only mean:
+// Q = V + A - mean_legal(A), mean over actions whose mask[] byte is
+// non-zero, computed BEFORE masked_argmax's own mask+argmax step ever
+// runs, falling back to the mean over EVERY action when zero actions are
+// legal (mirrored exactly against scripts/rl/agent/network_bodies.py's own
+// DuelingBody.forward -- a background decision boundary can produce an
+// all-illegal mask, since `wait` is foreground-only). ln-dueling's
+// LayerNorm (eps=1e-5, torch's own default, applied after each hidden
+// linear, before ReLU, per-decision statistics only -- see
 // scripts/rl/agent/network_bodies.py's own docstring for the plain-language
 // explanation and why per-decision-not-batch statistics is what lets this
 // C++ reproduce the training-side torch computation bit-for-bit) are this
@@ -58,11 +72,39 @@
 
 namespace rl_policy
 {
+// NET-01 (Phase 222): the ONE derived layer-split rule for this language,
+// declared in rl_policy.hpp and defined here so load_rlw1, forward() (both
+// below) AND an out-of-file caller holding only a loaded rl_weights_t (the
+// rl_forward_probe sim option, sc_main.cpp) all share it -- never a third,
+// independently re-derived copy (222-RESEARCH.md "Anti-Patterns to Avoid").
+std::size_t hidden_layer_count( rl_body_type body, std::size_t n_layers )
+{
+  return body == rl_body_type::mlp ? n_layers - 1 : n_layers - 2;
+}
+
+const char* body_name( rl_body_type body )
+{
+  switch ( body )
+  {
+    case rl_body_type::mlp: return "mlp";
+    case rl_body_type::dueling: return "dueling";
+    case rl_body_type::ln_dueling: return "ln-dueling";
+  }
+  return "unknown";
+}
+
 namespace
 {
 constexpr std::size_t RLW1_HEADER_BYTES = 264;
 constexpr std::size_t RLW1_SHA_FIELD_BYTES = 80;
-constexpr std::uint32_t RLW1_SUPPORTED_FORMAT_VERSION = 2;
+// NET-01 (Phase 222, arm subsets): {2, 3} accepted -- widening the OLD
+// equality check (format_version != 2) to a SET is what lets every
+// existing v2 blob keep loading (as identity gather + all-allowed) while
+// the Python writer moves to v3 (scripts/rl/rlw1.py). Bumping this to an
+// equality on 3 instead would refuse every committed v2 fixture by name
+// (222-RESEARCH.md Pitfall 15).
+constexpr std::uint32_t RLW1_MIN_SUPPORTED_FORMAT_VERSION = 2;
+constexpr std::uint32_t RLW1_MAX_SUPPORTED_FORMAT_VERSION = 3;
 constexpr std::uint32_t RLW1_MAX_LAYERS = 16;
 constexpr std::uint32_t RLW1_MIN_FEATURES = 1;
 constexpr std::uint32_t RLW1_MAX_FEATURES = 4096;
@@ -93,20 +135,15 @@ rl_body_type decode_body_type( std::uint32_t raw, const std::string& path )
   }
 }
 
+// NET-01 (Phase 222): a MINIMUM layer count per body (mlp >= 2, dueling and
+// ln-dueling >= 3), plus the existing hard upper bound RLW1_MAX_LAYERS
+// (enforced separately, at n_layers parse time, below) -- replaces the OLD
+// exact-count rule (mlp==3, dueling/ln-dueling==4), which was depth-2's own
+// special case. A 3-layer mlp or a 4-layer dueling/ln-dueling blob is that
+// depth-2 special case, so every pre-222 blob stays readable.
 std::size_t expected_layer_count( rl_body_type body )
 {
-  return body == rl_body_type::mlp ? 3 : 4;
-}
-
-const char* body_name( rl_body_type body )
-{
-  switch ( body )
-  {
-    case rl_body_type::mlp: return "mlp";
-    case rl_body_type::dueling: return "dueling";
-    case rl_body_type::ln_dueling: return "ln-dueling";
-  }
-  return "unknown";
+  return body == rl_body_type::mlp ? 2 : 3;
 }
 } // anonymous namespace
 
@@ -142,12 +179,12 @@ rl_weights_t load_rlw1( const std::string& path )
 
   std::uint32_t format_version = 0;
   std::memcpy( &format_version, data.data() + 4, 4 );
-  if ( format_version != RLW1_SUPPORTED_FORMAT_VERSION )
+  if ( format_version < RLW1_MIN_SUPPORTED_FORMAT_VERSION || format_version > RLW1_MAX_SUPPORTED_FORMAT_VERSION )
   {
     throw sc_runtime_error( fmt::format(
-        "rl_policy::load_rlw1: file '{}' has format_version={}, but this loader supports only "
-        "format_version={}",
-        path, format_version, RLW1_SUPPORTED_FORMAT_VERSION ) );
+        "rl_policy::load_rlw1: file '{}' has format_version={}, but this loader supports "
+        "format_version {{{}..{}}}",
+        path, format_version, RLW1_MIN_SUPPORTED_FORMAT_VERSION, RLW1_MAX_SUPPORTED_FORMAT_VERSION ) );
   }
 
   rl_weights_t w;
@@ -254,13 +291,112 @@ rl_weights_t load_rlw1( const std::string& path )
     w.layers.push_back( std::move( layer ) );
   }
 
-  // Shape sanity against the GENERATED constants -- otherwise a shape
-  // mismatch is a buffer overrun in forward() instead of an error message.
-  if ( w.layers.front().in_features != RL_OBS_DIM )
+  // NET-01 (Phase 222, arm subsets): the optional trailing input-gather +
+  // action-allow-list section, RLW1 v3. MANDATORY at v3, FORBIDDEN at v2 --
+  // a v2 blob's `offset` must already equal `data.size()` at this point
+  // (checked below); a v3 blob's section is parsed with the SAME
+  // positive-length-check discipline (T-210-04) the layer loop above uses:
+  // a 4-byte header check, then ONE combined check for the index array plus
+  // the trailing allowed_actions word, and finally a strictly-increasing
+  // walk (done just below, beside the other gather refusals). Default (v2,
+  // or a v3 blob declaring n_input_slots==0): identity gather (input_slots
+  // stays empty) + every action allowed.
+  w.allowed_actions = ( RL_ACTION_DIM >= 32 )
+                           ? 0xFFFFFFFFu
+                           : ( ( 1u << static_cast<std::uint32_t>( RL_ACTION_DIM ) ) - 1u );
+  if ( format_version >= 3 )
+  {
+    if ( offset + 4 > data.size() )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' truncated -- the v3 subset section header needs 4 "
+          "bytes at offset {}, only {} remain",
+          path, offset, data.size() - offset ) );
+    }
+    std::uint32_t n_slots_raw = 0;
+    std::memcpy( &n_slots_raw, data.data() + offset, 4 );
+    offset += 4;
+    if ( n_slots_raw > RLW1_MAX_FEATURES )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' declares n_input_slots={}, must be 0..{}",
+          path, n_slots_raw, RLW1_MAX_FEATURES ) );
+    }
+    const std::uint64_t needed = static_cast<std::uint64_t>( n_slots_raw ) * 4 + 4;
+    if ( offset + needed > data.size() )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' truncated mid-subset-section -- {} slot index(es) plus "
+          "allowed_actions need {} bytes at offset {}, file is short by {} bytes",
+          path, n_slots_raw, needed, offset, ( offset + needed ) - data.size() ) );
+    }
+    w.input_slots.resize( n_slots_raw );
+    for ( std::uint32_t i = 0; i < n_slots_raw; ++i )
+      std::memcpy( &w.input_slots[ i ], data.data() + offset + static_cast<std::size_t>( i ) * 4, 4 );
+    offset += static_cast<std::size_t>( n_slots_raw ) * 4;
+    std::memcpy( &w.allowed_actions, data.data() + offset, 4 );
+    offset += 4;
+  }
+  // Pitfall 14: read_rlw1 (and this loader, pre-222) never compared `offset`
+  // to `data.size()` after the layer/section walk -- trailing bytes were
+  // silently ignored. Strengthens v2 parsing too: closes it for every
+  // format_version, not only v3.
+  if ( offset != data.size() )
   {
     throw sc_runtime_error( fmt::format(
-        "rl_policy::load_rlw1: file '{}' first layer in_features={} does not match RL_OBS_DIM={}",
-        path, w.layers.front().in_features, RL_OBS_DIM ) );
+        "rl_policy::load_rlw1: file '{}' has {} unexpected trailing byte(s)",
+        path, data.size() - offset ) );
+  }
+
+  // NET-01 (Phase 222, arm subsets): three gather refusals, AT LOAD, never
+  // per decision -- these are what make `obs[ w.input_slots[i] ]` safe to
+  // read in forward() with no per-decision bounds check (same reasoning the
+  // file's own CR-02 comment gives for the layer-count refusal below).
+  const std::size_t n_slots = w.input_slots.size();
+  if ( n_slots > RL_OBS_DIM )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' declares n_input_slots={} which exceeds RL_OBS_DIM={}",
+        path, n_slots, RL_OBS_DIM ) );
+  }
+  for ( std::size_t i = 0; i < n_slots; ++i )
+  {
+    if ( w.input_slots[ i ] >= RL_OBS_DIM )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' input_slots[{}]={} is out of range for RL_OBS_DIM={}",
+          path, i, w.input_slots[ i ], RL_OBS_DIM ) );
+    }
+    if ( i > 0 && w.input_slots[ i ] <= w.input_slots[ i - 1 ] )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' input_slots are not strictly increasing at index {} "
+          "({} then {}) -- the gather order is part of the identity",
+          path, i, w.input_slots[ i - 1 ], w.input_slots[ i ] ) );
+    }
+  }
+  if ( w.allowed_actions == 0 )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' declares allowed_actions=0 -- no action would ever be "
+        "legal",
+        path ) );
+  }
+
+  // Shape sanity against the GENERATED constants -- otherwise a shape
+  // mismatch is a buffer overrun in forward() instead of an error message.
+  // The first-layer check is against the RESOLVED expected width -- n_slots
+  // when a gather is declared, RL_OBS_DIM otherwise -- REPLACING the old
+  // bare `== RL_OBS_DIM` check, which cannot be right once a subset can
+  // narrow layer 0's input.
+  const std::uint32_t expected_in = n_slots ? static_cast<std::uint32_t>( n_slots ) : RL_OBS_DIM;
+  if ( w.layers.front().in_features != expected_in )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' first layer in_features={} does not match the resolved "
+        "input width={} ({})",
+        path, w.layers.front().in_features, expected_in,
+        n_slots ? "n_input_slots" : "RL_OBS_DIM" ) );
   }
   if ( w.layers.back().out_features != RL_ACTION_DIM )
   {
@@ -269,28 +405,33 @@ rl_weights_t load_rlw1( const std::string& path )
         path, w.layers.back().out_features, RL_ACTION_DIM ) );
   }
 
-  // CR-02 fix (210-CR-FIX), widened Phase 213-TDL Task 1: forward() indexes
-  // w.layers[0..N-1] via operator[] for a FIXED N per body type (3 for mlp,
-  // 4 for dueling/ln-dueling) -- so any other layer count is unchecked UB
-  // there. Refuse here, at load time, where an out-of-range value is a
-  // named error instead of a heap read past the vector.
-  if ( w.layers.size() != expected_layer_count( w.body ) )
+  // CR-02 fix (210-CR-FIX), widened Phase 213-TDL Task 1, generalised Phase
+  // 222 NET-01: forward() indexes w.layers[0..N-1] via operator[] for a
+  // layer count derived from n_layers and body -- so a count below the
+  // body's own minimum is unchecked UB there. Refuse here, at load time,
+  // where an out-of-range value is a named error instead of a heap read
+  // past the vector. (The hard upper bound RLW1_MAX_LAYERS was already
+  // enforced above, at n_layers parse time.)
+  if ( w.layers.size() < expected_layer_count( w.body ) )
   {
     throw sc_runtime_error( fmt::format(
-        "rl_policy::load_rlw1: file '{}' body={} requires exactly {} layers, but declares {}",
+        "rl_policy::load_rlw1: file '{}' body={} requires at least {} layers, but declares only {}",
         path, body_name( w.body ), expected_layer_count( w.body ), w.layers.size() ) );
   }
 
   // has_ln pattern must match body's own convention (rlw1.py's
-  // _BODY_HAS_LN_PATTERN, mirrored here): mlp/dueling carry has_ln=false on
-  // every layer; ln-dueling carries has_ln=true on hidden0/hidden1 (indices
-  // 0/1) ONLY -- v_head/a_head (indices 2/3) are output heads, no norm
-  // follows them.
+  // _layer_split, mirrored here, Phase 222 NET-01): mlp/dueling carry
+  // has_ln=false on EVERY layer; ln-dueling carries has_ln=true on every
+  // HIDDEN layer ONLY (indices [0, hidden_layer_count) -- v_head/a_head are
+  // output heads, no norm follows them. Depth-agnostic: derived from
+  // hidden_layer_count(), never a fixed pair of indices.
   {
     const bool expect_ln_hidden = w.body == rl_body_type::ln_dueling;
+    const std::size_t n_hidden_for_ln =
+        expect_ln_hidden ? hidden_layer_count( w.body, w.layers.size() ) : 0;
     for ( std::size_t i = 0; i < w.layers.size(); ++i )
     {
-      const bool expected = expect_ln_hidden && ( i == 0 || i == 1 );
+      const bool expected = expect_ln_hidden && ( i < n_hidden_for_ln );
       if ( w.layers[ i ].has_ln != expected )
       {
         throw sc_runtime_error( fmt::format(
@@ -302,10 +443,11 @@ rl_weights_t load_rlw1( const std::string& path )
 
   if ( w.body == rl_body_type::mlp )
   {
-    // A straight chain: in -> hidden0 -> hidden1 -> out. Interior
-    // dimensions must chain -- forward() indexes h0/h1 by the NEXT layer's
-    // in_features, so a mismatch here is a heap over-read rather than an
-    // error.
+    // A straight chain: in -> hidden[0] -> hidden[1] -> ... -> out. Interior
+    // dimensions must chain -- forward() indexes each hidden scratch entry
+    // by the NEXT layer's in_features, so a mismatch here is a heap
+    // over-read rather than an error. Already depth-agnostic (n_layers >= 2
+    // walks every layer regardless of count) -- unchanged from pre-222.
     for ( std::size_t i = 1; i < w.layers.size(); ++i )
     {
       if ( w.layers[ i ].in_features != w.layers[ i - 1 ].out_features )
@@ -319,39 +461,46 @@ rl_weights_t load_rlw1( const std::string& path )
   }
   else
   {
-    // dueling / ln-dueling: hidden0 -> hidden1 chains normally, but v_head
-    // (index 2) and a_head (index 3) both BRANCH off hidden1's OUTPUT --
-    // never a further chain onto each other. Checked explicitly here
-    // because the straight-chain loop above would be WRONG for this
-    // branching shape (it would require a_head.in_features ==
-    // v_head.out_features, which is nonsense for two sibling branches).
-    if ( w.layers[ 1 ].in_features != w.layers[ 0 ].out_features )
+    // dueling / ln-dueling: hidden[0] -> hidden[1] -> ... -> hidden[n-1]
+    // chains normally, but v_head and a_head (the last TWO layers) both
+    // BRANCH off the LAST hidden layer's OUTPUT -- never a further chain
+    // onto each other. Checked explicitly here (Pitfall 2 -- the second
+    // depth pin) because the straight-chain loop above would be WRONG for
+    // this branching shape. Re-indexed to hidden_layer_count() so the check
+    // is correct at any depth, not just the old fixed 4-layer shape.
+    const std::size_t n_hidden = hidden_layer_count( w.body, w.layers.size() );
+    for ( std::size_t i = 1; i < n_hidden; ++i )
+    {
+      if ( w.layers[ i ].in_features != w.layers[ i - 1 ].out_features )
+      {
+        throw sc_runtime_error( fmt::format(
+            "rl_policy::load_rlw1: file '{}' hidden layer {} in_features={} does not match hidden "
+            "layer {} out_features={}",
+            path, i, w.layers[ i ].in_features, i - 1, w.layers[ i - 1 ].out_features ) );
+      }
+    }
+    const std::size_t v_idx = n_hidden;
+    const std::size_t a_idx = n_hidden + 1;
+    const std::uint32_t last_hidden_out = w.layers[ n_hidden - 1 ].out_features;
+    if ( w.layers[ v_idx ].in_features != last_hidden_out )
     {
       throw sc_runtime_error( fmt::format(
-          "rl_policy::load_rlw1: file '{}' hidden1 in_features={} does not match hidden0 "
-          "out_features={}",
-          path, w.layers[ 1 ].in_features, w.layers[ 0 ].out_features ) );
+          "rl_policy::load_rlw1: file '{}' v_head in_features={} does not match the last hidden "
+          "layer's out_features={}",
+          path, w.layers[ v_idx ].in_features, last_hidden_out ) );
     }
-    const std::uint32_t hidden1_out = w.layers[ 1 ].out_features;
-    if ( w.layers[ 2 ].in_features != hidden1_out )
-    {
-      throw sc_runtime_error( fmt::format(
-          "rl_policy::load_rlw1: file '{}' v_head in_features={} does not match hidden1 "
-          "out_features={}",
-          path, w.layers[ 2 ].in_features, hidden1_out ) );
-    }
-    if ( w.layers[ 2 ].out_features != 1 )
+    if ( w.layers[ v_idx ].out_features != 1 )
     {
       throw sc_runtime_error( fmt::format(
           "rl_policy::load_rlw1: file '{}' v_head out_features={}, must be 1",
-          path, w.layers[ 2 ].out_features ) );
+          path, w.layers[ v_idx ].out_features ) );
     }
-    if ( w.layers[ 3 ].in_features != hidden1_out )
+    if ( w.layers[ a_idx ].in_features != last_hidden_out )
     {
       throw sc_runtime_error( fmt::format(
-          "rl_policy::load_rlw1: file '{}' a_head in_features={} does not match hidden1 "
-          "out_features={}",
-          path, w.layers[ 3 ].in_features, hidden1_out ) );
+          "rl_policy::load_rlw1: file '{}' a_head in_features={} does not match the last hidden "
+          "layer's out_features={}",
+          path, w.layers[ a_idx ].in_features, last_hidden_out ) );
     }
   }
 
@@ -418,39 +567,57 @@ rl_weights_t load_rlw1( const std::string& path )
         path, w.exploration ) );
   }
 
-  // WR-02 fix, cheap half (210-CR-FIX): size forward()'s hidden-layer
-  // scratch buffers ONCE, here at load time -- w.layers.size() == 3 is
-  // already confirmed above, so layers[0]/[1] are the two hidden layers
-  // forward() writes h0/h1 for.
-  w.h0_scratch.resize( w.layers[ 0 ].out_features );
-  w.h1_scratch.resize( w.layers[ 1 ].out_features );
+  // WR-02 fix, cheap half (210-CR-FIX), generalised Phase 222 NET-01: size
+  // forward()'s hidden-layer scratch buffers ONCE, here at load time, one
+  // entry per hidden layer (hidden_layer_count() of them, already validated
+  // above), plus the gather scratch when a subset is declared.
+  {
+    const std::size_t n_hidden = hidden_layer_count( w.body, w.layers.size() );
+    w.hidden_scratch.resize( n_hidden );
+    for ( std::size_t i = 0; i < n_hidden; ++i )
+      w.hidden_scratch[ i ].resize( w.layers[ i ].out_features );
+    w.obs_gather_scratch.resize( n_slots );
+  }
 
   return w;
 }
 
 // ---------------------------------------------------------------------------
-// forward -- three body types (rl_body_type), dispatched at the top:
+// forward -- three body types (rl_body_type), dispatched at the top, ANY
+// depth (Phase 222 NET-01, derived via hidden_layer_count()):
 //
-//   mlp:        h0 = relu(W0*obs + b0), h1 = relu(W1*h0 + b1), q = W2*h1 + b2.
-//               ReLU between hidden layers only, no output activation.
-//               Byte-identical to the pre-v2 forward().
-//   dueling:    h0 = relu(W0*obs + b0), h1 = relu(W1*h0 + b1),
-//               v = Wv*h1 + bv (scalar), a = Wa*h1 + ba (RL_ACTION_DIM),
-//               q[i] = v + a[i] - mean(a). Mean is taken over ALL actions,
-//               computed HERE, before masked_argmax's own mask+argmax step
-//               ever runs -- so a masked-out action's advantage still
-//               participates in the mean, matching agent/network_bodies.py's
-//               DuelingBody.forward() exactly.
-//   ln-dueling: same as dueling, but each hidden linear's raw output is
+//   mlp:        x0 = obs (or the gathered subset -- see below), then for
+//               each hidden layer i: hi = relu(Wi*x(i-1) + bi); finally
+//               q = W_out*h(last) + b_out. ReLU between hidden layers only,
+//               no output activation. Byte-identical to the pre-v2
+//               forward() at depth 2.
+//   dueling:    same hidden-layer loop, then v = Wv*h(last) + bv (scalar),
+//               a = Wa*h(last) + ba (RL_ACTION_DIM), and Phase 222 NET-02's
+//               LEGAL-ONLY recombination: q[i] = v + a[i] - mean_legal(a),
+//               mean over actions whose mask[] byte is non-zero, computed
+//               HERE, before masked_argmax's own mask+argmax step ever
+//               runs -- falling back to the mean over EVERY action when
+//               zero actions are legal (mirrored exactly against
+//               agent/network_bodies.py's own DuelingBody.forward(); never
+//               NaN -- a NaN Q vector would make every masked_argmax
+//               comparison false and silently return index 0).
+//   ln-dueling: same as dueling, but each HIDDEN layer's raw output is
 //               LayerNorm'd (eps=RL_LAYER_NORM_EPS, per-decision statistics
 //               over that layer's own out_features values -- never batch
 //               statistics, since this forward() only ever sees ONE
-//               decision at a time) BEFORE its ReLU.
+//               decision at a time) BEFORE its ReLU -- read from that
+//               layer's own has_ln flag, never from `body == ln_dueling`
+//               re-checked per layer.
 //
-// Fixed-size scratch throughout (h0_scratch/h1_scratch load-time-sized by
-// load_rlw1; the V head is a single local float; the A head is written
-// DIRECTLY into out_q[] and recombined in place) -- no allocation on this,
-// the hottest path the fork has.
+// Gather: when w.input_slots is non-empty, the full-width `obs` is
+// projected into obs_gather_scratch ONCE, before layer 0 -- n_slots float
+// copies, zero allocation (the scratch is load-time-sized). Every layer
+// after that reads exactly as it always did.
+//
+// Fixed-size scratch throughout (hidden_scratch/obs_gather_scratch
+// load-time-sized by load_rlw1; the V head is a single local float; the A
+// head is written DIRECTLY into out_q[] and recombined in place) -- no
+// allocation on this, the hottest path the fork has.
 // ---------------------------------------------------------------------------
 
 namespace
@@ -485,76 +652,105 @@ void apply_layer_norm( std::vector<float>& x, const std::vector<float>& gamma, c
 }
 } // anonymous namespace
 
-void forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ], float out_q[ RL_ACTION_DIM ] )
+void forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ], const std::uint8_t mask[ RL_ACTION_DIM ],
+              float out_q[ RL_ACTION_DIM ] )
 {
-  const rl_layer& l0 = w.layers[ 0 ];
-  const rl_layer& l1 = w.layers[ 1 ];
-
-  // WR-02 fix, cheap half (210-CR-FIX): h0/h1 are load-time-sized scratch
-  // buffers on `w` (rl_policy.hpp's `mutable std::vector<float>
-  // h0_scratch/h1_scratch`, sized by load_rlw1) instead of two fresh
-  // std::vector<float> allocations per decision boundary -- this is the
-  // hottest path the fork has. Shared by all three body types (the two
-  // hidden layers are identically shaped/positioned regardless of body).
-  std::vector<float>& h0 = w.h0_scratch;
-  for ( std::uint32_t o = 0; o < l0.out_features; ++o )
+  // NET-01 (Phase 222, arm subsets): gather the full-width obs into the
+  // load-time-sized obs_gather_scratch ONCE, before layer 0, when a subset
+  // is declared -- otherwise layer 0 reads obs directly. w.layers.front()'s
+  // in_features was validated at load time against exactly this resolved
+  // width (n_slots when a gather is declared, RL_OBS_DIM otherwise), so no
+  // per-decision bounds check is needed here.
+  const float* x = obs;
+  if ( !w.input_slots.empty() )
   {
-    float acc = l0.bias[ o ];
-    for ( std::uint32_t i = 0; i < l0.in_features; ++i )
-      acc += l0.weight[ o * l0.in_features + i ] * obs[ i ];
-    h0[ o ] = acc;
+    for ( std::size_t i = 0; i < w.input_slots.size(); ++i )
+      w.obs_gather_scratch[ i ] = obs[ w.input_slots[ i ] ];
+    x = w.obs_gather_scratch.data();
   }
-  if ( w.body == rl_body_type::ln_dueling )
-    apply_layer_norm( h0, l0.gamma, l0.beta );
-  for ( std::uint32_t o = 0; o < l0.out_features; ++o )
-    h0[ o ] = std::max( h0[ o ], 0.0f );
 
-  std::vector<float>& h1 = w.h1_scratch;
-  for ( std::uint32_t o = 0; o < l1.out_features; ++o )
+  // WR-02 fix, cheap half (210-CR-FIX), generalised Phase 222 NET-01:
+  // hidden_scratch[i] is a load-time-sized scratch buffer on `w`
+  // (rl_policy.hpp's `mutable std::vector<std::vector<float>>
+  // hidden_scratch`, sized by load_rlw1) instead of a fresh
+  // std::vector<float> allocation per decision boundary -- this is the
+  // hottest path the fork has. Shared by all three body types (the hidden
+  // layers are identically shaped/positioned regardless of body). The loop
+  // bound is hidden_layer_count(), the SAME derived rule load_rlw1 already
+  // validated the blob against.
+  const std::size_t n_hidden = hidden_layer_count( w.body, w.layers.size() );
+  const float* layer_in = x;
+  for ( std::size_t li = 0; li < n_hidden; ++li )
   {
-    float acc = l1.bias[ o ];
-    for ( std::uint32_t i = 0; i < l1.in_features; ++i )
-      acc += l1.weight[ o * l1.in_features + i ] * h0[ i ];
-    h1[ o ] = acc;
+    const rl_layer& l = w.layers[ li ];
+    std::vector<float>& h = w.hidden_scratch[ li ];
+    for ( std::uint32_t o = 0; o < l.out_features; ++o )
+    {
+      float acc = l.bias[ o ];
+      for ( std::uint32_t i = 0; i < l.in_features; ++i )
+        acc += l.weight[ o * l.in_features + i ] * layer_in[ i ];
+      h[ o ] = acc;
+    }
+    if ( l.has_ln )  // P-14: read the PER-LAYER flag, not `body == ln_dueling`
+      apply_layer_norm( h, l.gamma, l.beta );
+    for ( std::uint32_t o = 0; o < l.out_features; ++o )
+      h[ o ] = std::max( h[ o ], 0.0f );
+    layer_in = h.data();
   }
-  if ( w.body == rl_body_type::ln_dueling )
-    apply_layer_norm( h1, l1.gamma, l1.beta );
-  for ( std::uint32_t o = 0; o < l1.out_features; ++o )
-    h1[ o ] = std::max( h1[ o ], 0.0f );
 
   if ( w.body == rl_body_type::mlp )
   {
-    const rl_layer& l2 = w.layers[ 2 ];
-    for ( std::uint32_t o = 0; o < l2.out_features; ++o )
+    const rl_layer& out_layer = w.layers[ n_hidden ];  // the single output layer
+    for ( std::uint32_t o = 0; o < out_layer.out_features; ++o )
     {
-      float acc = l2.bias[ o ];
-      for ( std::uint32_t i = 0; i < l2.in_features; ++i )
-        acc += l2.weight[ o * l2.in_features + i ] * h1[ i ];
+      float acc = out_layer.bias[ o ];
+      for ( std::uint32_t i = 0; i < out_layer.in_features; ++i )
+        acc += out_layer.weight[ o * out_layer.in_features + i ] * layer_in[ i ];
       out_q[ o ] = acc;
     }
     return;
   }
 
   // dueling / ln-dueling: V head (scalar) + A head (RL_ACTION_DIM), both
-  // branching off h1 -- recombined as Q = V + A - mean(A).
-  const rl_layer& v_head = w.layers[ 2 ];
-  const rl_layer& a_head = w.layers[ 3 ];
+  // branching off the LAST hidden layer's output -- recombined as Phase 222
+  // NET-02's legal-only mean: Q = V + A - mean_legal(A).
+  const rl_layer& v_head = w.layers[ n_hidden ];
+  const rl_layer& a_head = w.layers[ n_hidden + 1 ];
 
   float v = v_head.bias[ 0 ];
   for ( std::uint32_t i = 0; i < v_head.in_features; ++i )
-    v += v_head.weight[ i ] * h1[ i ];  // v_head.out_features == 1, row 0 only
+    v += v_head.weight[ i ] * layer_in[ i ];  // v_head.out_features == 1, row 0 only
 
   // A head written DIRECTLY into out_q[] -- no separate scratch allocation.
+  // a_sum/a_count accumulate inside this SAME loop, guarded by mask[o] --
+  // NET-02: legal actions only.
   float a_sum = 0.0f;
+  std::uint32_t a_count = 0;
   for ( std::uint32_t o = 0; o < a_head.out_features; ++o )
   {
     float acc = a_head.bias[ o ];
     for ( std::uint32_t i = 0; i < a_head.in_features; ++i )
-      acc += a_head.weight[ o * a_head.in_features + i ] * h1[ i ];
+      acc += a_head.weight[ o * a_head.in_features + i ] * layer_in[ i ];
     out_q[ o ] = acc;
-    a_sum += acc;
+    if ( mask[ o ] )
+    {
+      a_sum += acc;
+      ++a_count;
+    }
   }
-  const float a_mean = a_sum / static_cast<float>( a_head.out_features );
+  if ( a_count == 0 )
+  {
+    // P-16 / Pitfall 4: mirror scripts/rl/agent/network_bodies.py's
+    // DuelingBody.forward EXACTLY -- a background decision boundary can
+    // produce an all-illegal mask (wait is foreground-only), so this branch
+    // is reachable, not merely defensive. Fall back to the mean over EVERY
+    // action rather than dividing by zero: a NaN Q vector would make every
+    // masked_argmax comparison false and silently return index 0.
+    for ( std::uint32_t o = 0; o < a_head.out_features; ++o )
+      a_sum += out_q[ o ];
+    a_count = a_head.out_features;
+  }
+  const float a_mean = a_sum / static_cast<float>( a_count );
   for ( std::uint32_t o = 0; o < a_head.out_features; ++o )
     out_q[ o ] = v + out_q[ o ] - a_mean;
 }

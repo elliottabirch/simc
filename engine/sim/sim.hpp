@@ -665,6 +665,20 @@ struct sim_t : private sc_thread_t
   // null when disabled. std::shared_ptr, not std::unique_ptr -- see the
   // rl_policy forward declaration above for why.
   std::shared_ptr<rl_policy::rl_weights_t> solver_policy_weights;
+  // rl_forward_probe sim option (tstl-sylvanas Phase 222, plan 222-04,
+  // NET-02's cross-path receipt). Loads a solver_policy= blob (weights are
+  // already loaded+validated in setup() above, same as solver_policy=
+  // itself) and, instead of running combat, reads ONE observation+mask pair
+  // from a plain whitespace-separated text file (line 1: RL_OBS_DIM floats;
+  // line 2: RL_ACTION_DIM values in {0,1}), runs rl_policy::forward +
+  // rl_policy::masked_argmax, and writes the resulting Q vector + argmax as
+  // one JSON object to rl_forward_probe_out=. No player init, no fight --
+  // see sc_main.cpp's sim_t::main() if/else chain and sim.cpp's amended
+  // "Nothing to sim!" predicate for how this branch is reached with zero
+  // players configured. Empty string (default) = disabled, zero overhead,
+  // mirroring every other probe-style option in this file.
+  std::string rl_forward_probe_str;
+  std::string rl_forward_probe_out_str;
   // Verify-vs-training mode (phase 200-04, FORK-01/R-8, D-06/D-07). Empty
   // string and "verify" are equivalent (the default) -- abstain falls
   // through to the APL's own choice. "training" makes an abstain reply a

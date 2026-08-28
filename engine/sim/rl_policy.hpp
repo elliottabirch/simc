@@ -195,27 +195,55 @@ void        build_obs ( const player_t* p, const rl_state_t& s, const slot_table
 void        build_mask( const rl_state_t& s, std::uint8_t out_mask[ RL_ACTION_DIM ] );
 wait_result build_wait( const rl_state_t& s, const rl_wait_anchor& anchor );
 
-// ---- Weights (RLW1 v2, tstl-sylvanas Phase 213-TDL Task 1) ----
+// ---- Weights (RLW1 v2/v3, tstl-sylvanas Phase 210-04 -> Phase 213-TDL
+// Task 1 -> Phase 222 NET-01/NET-02) ----
 //
 // Three body types share this same rl_layer/rl_weights_t plumbing -- see
 // scripts/rl/agent/network_bodies.py (this repo's own Python counterpart)
-// for the plain-language explanation of what each one computes:
+// for the plain-language explanation of what each one computes. The layer
+// split below is a DERIVED rule over n_layers (Phase 222 NET-01), not a
+// fixed-depth lookup -- see hidden_layer_count() below, the ONE place this
+// rule is written in this language:
 //
-//   - mlp:        3 layers [hidden0, hidden1, out]. No gamma/beta anywhere.
-//                 Byte-identical computation to the pre-v2 format.
-//   - dueling:    4 layers [hidden0, hidden1, v_head, a_head]. v_head and
-//                 a_head both BRANCH off hidden1's output (not a further
-//                 chain). Q = V + A - mean(A), mean over ALL actions, taken
-//                 BEFORE the engine's own mask+argmax step.
-//   - ln-dueling: same 4-layer sequence as dueling, but hidden0/hidden1
-//                 each carry a LayerNorm gamma/beta pair (applied after the
-//                 linear layer, before ReLU); v_head/a_head never do.
+//   - mlp:        n_layers >= 2. hidden = layers[0 .. n-2], out = layers[n-1].
+//                 No gamma/beta anywhere. Byte-identical computation to the
+//                 pre-v2 format at depth 2.
+//   - dueling:    n_layers >= 3. hidden = layers[0 .. n-3]; v_head and
+//                 a_head are layers[n-2]/layers[n-1], BOTH branching off the
+//                 LAST hidden layer's output (never a further chain onto
+//                 each other). Q = V + A - mean_legal(A) -- Phase 222
+//                 NET-02: the mean is taken over LEGAL actions only
+//                 (mask[o] != 0), falling back to the mean over every
+//                 action when zero actions are legal (a background decision
+//                 boundary can produce an all-illegal mask; see forward()'s
+//                 own comment in rl_policy_net.cpp). The retired pre-NET-02
+//                 all-actions mean formula does not appear in this file.
+//   - ln-dueling: same layer split as dueling, but every HIDDEN layer
+//                 (never v_head/a_head) carries a LayerNorm gamma/beta pair
+//                 (applied after the linear layer, before ReLU) -- read
+//                 from that layer's OWN has_ln flag (validated against the
+//                 body's convention at load time), never from
+//                 `body == ln_dueling` re-checked per layer; that is what
+//                 makes forward() depth-agnostic instead of re-encoding the
+//                 convention a third time.
 enum class rl_body_type
 {
   mlp,
   dueling,
   ln_dueling
 };
+
+// NET-01 (Phase 222): the ONE derived layer-split rule this language uses --
+// called by both load_rlw1 (validation + scratch sizing) and forward() (the
+// loop bound) in rl_policy_net.cpp, and exported here so a caller holding
+// only a loaded rl_weights_t (the rl_forward_probe sim option, sc_main.cpp)
+// can report a body's hidden layer sizes without re-deriving the rule a
+// third time (222-RESEARCH.md "Anti-Patterns to Avoid": never re-derive the
+// layer split in three places). n_layers must already satisfy the body's
+// own minimum (load_rlw1 refuses otherwise); this function does not itself
+// re-validate that.
+std::size_t hidden_layer_count( rl_body_type body, std::size_t n_layers );
+const char* body_name( rl_body_type body );
 
 struct rl_layer
 {
@@ -236,28 +264,46 @@ struct rl_weights_t
   std::string   obs_schema_sha;          // "rl-obs-v1:<64hex>" -- NOT a bare 64-hex
   std::string   mask_rules_sha;          // bare 64 hex
   std::string   action_space_sha;        // bare 64 hex
-  std::vector<rl_layer> layers;          // 3 (mlp) or 4 (dueling/ln-dueling)
+  std::vector<rl_layer> layers;          // n_layers >= the body's own minimum (2 mlp / 3 dueling+)
+
+  // Phase 222 (NET-01, arm subsets): an optional input GATHER and a static
+  // action ALLOW-LIST, both carried on the blob (RLW1 v3's trailing
+  // section; a v2 blob reads as identity gather + all-allowed). Resolved
+  // ONCE at load time -- see rl_policy_net.cpp's load_rlw1 for the three
+  // bounds refusals that make obs[ input_slots[i] ] safe to read in
+  // forward() with no per-decision check.
+  std::vector<std::uint32_t> input_slots;         // empty == identity gather (network takes the full obs)
+  std::uint32_t              allowed_actions = 0; // bit i set == action i statically allowed
 
   // WR-02 fix, cheap half (210-CR-FIX; widened Phase 213-TDL Task 1 for the
-  // dueling bodies' branch heads): forward()'s hidden-layer activation
-  // buffers, hoisted here and load-time-sized by load_rlw1 instead of being
-  // allocated fresh on every decision boundary's forward() call. `mutable`
-  // because forward() takes a `const rl_weights_t&` (the weights themselves
-  // are read-only per call) but still needs to write into this per-net
-  // scratch storage; safe to reuse across calls because solver_policy= is
+  // dueling bodies' branch heads; generalised Phase 222 NET-01 to an
+  // arbitrary depth): forward()'s hidden-layer activation buffers, hoisted
+  // here and load-time-sized by load_rlw1 instead of being allocated fresh
+  // on every decision boundary's forward() call. `mutable` because
+  // forward() takes a `const rl_weights_t&` (the weights themselves are
+  // read-only per call) but still needs to write into this per-net scratch
+  // storage; safe to reuse across calls because solver_policy= is
   // hard-clamped to threads=1 (XPORT-01/AP-3), the same reasoning the wait
   // arm's now-removed thread_local buffer (WR-05) relied on.
   //
-  // h0_scratch/h1_scratch hold the two hidden layers' post-ReLU activations
-  // (all three body types). The dueling bodies' V head (a single scalar)
-  // and A head (RL_ACTION_DIM-wide, written directly into forward()'s own
-  // out_q[] output buffer before being recombined in place) need no
-  // persistent scratch of their own -- see rl_policy_net.cpp's forward().
-  mutable std::vector<float> h0_scratch;
-  mutable std::vector<float> h1_scratch;
+  // hidden_scratch[i] holds hidden layer i's post-ReLU activations, one
+  // entry per hidden layer (hidden_layer_count(body, layers.size()) of
+  // them, sized at LOAD -- never per decision, same threads=1 reasoning as
+  // above), replacing the old fixed two-buffer scratch pair this struct used pre-222.
+  // The dueling bodies' V head (a single scalar) and A head
+  // (RL_ACTION_DIM-wide, written directly into forward()'s own out_q[]
+  // output buffer before being recombined in place) need no persistent
+  // scratch of their own -- see rl_policy_net.cpp's forward().
+  //
+  // obs_gather_scratch holds the projected (gathered) observation when
+  // input_slots is non-empty, sized at LOAD to input_slots.size() -- also
+  // never allocated per decision.
+  mutable std::vector<std::vector<float>> hidden_scratch;
+  mutable std::vector<float>              obs_gather_scratch;
 };
 
 rl_weights_t load_rlw1( const std::string& path );   // throws sc_runtime_error, named per refusal
-void         forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ], float out_q[ RL_ACTION_DIM ] );
+void         forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ],
+                       const std::uint8_t mask[ RL_ACTION_DIM ], float out_q[ RL_ACTION_DIM ] );
 int          masked_argmax( const float q[ RL_ACTION_DIM ], const std::uint8_t mask[ RL_ACTION_DIM ] );
 }

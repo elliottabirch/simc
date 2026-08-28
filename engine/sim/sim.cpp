@@ -4010,6 +4010,11 @@ void sim_t::create_options()
   // In-process RL transport (phase 210, plan 210-04, XPORT-01). Validated
   // below, in its own fail-closed block beside solver_control_str's.
   add_option( opt_string( "solver_policy", solver_policy_str ) );
+  // rl_forward_probe sim option (Phase 222, plan 222-04, NET-02's
+  // cross-path receipt). See sim.hpp's rl_forward_probe_str doc comment.
+  // Default empty, disabled.
+  add_option( opt_string( "rl_forward_probe", rl_forward_probe_str ) );
+  add_option( opt_string( "rl_forward_probe_out", rl_forward_probe_out_str ) );
   // Flight recorder (phase 212, plan 212-01, TLOG-01/02/03). Mirrors
   // decision_dump=: empty = disabled (default), zero overhead.
   add_option( opt_string( "rl_translog", rl_translog_file_str ) );
@@ -4531,7 +4536,15 @@ void sim_t::setup( sim_control_t* c )
     }
   }
 
-  if ( player_list.empty() && spell_query == nullptr && !display_bonus_ids && display_build <= 1 )
+  // Phase 222, plan 222-04 (NET-02's cross-path receipt): rl_forward_probe=
+  // needs no profile and no player initialisation at all -- it reads a
+  // weights blob (already loaded above via the solver_policy= block) plus
+  // one observation+mask pair from a file, and exits before combat. Without
+  // this exception a probe-only invocation (deliberately zero players)
+  // would hit this early return and never reach sim_t::main()'s
+  // rl_forward_probe branch.
+  if ( player_list.empty() && spell_query == nullptr && !display_bonus_ids && display_build <= 1 &&
+       rl_forward_probe_str.empty() )
   {
     fmt::print( "Nothing to sim! " );
     canceled = true;

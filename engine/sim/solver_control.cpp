@@ -614,9 +614,23 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
 
     std::uint8_t mask[ RL_ACTION_DIM ];
     rl_policy::build_mask( state, mask );
+    // NET-01 (arm subsets, Phase 222): a config-declared action allow-list,
+    // carried on the loaded blob, ANDed ONCE here so every downstream
+    // consumer -- masked_argmax below, the epsilon draw's legal_indices,
+    // the Q-margin/top_q diagnostics, and record_decision's translog row --
+    // sees the SAME restricted mask. build_mask stays PURE over the POD
+    // (unchanged, Phase 221's own ruling); the translog therefore records
+    // the RESTRICTED mask alongside the FULL-width obs, which is exactly
+    // right: the log stays arm-independent and the Python side does its own
+    // gather.
+    {
+      const std::uint32_t allowed = sim->solver_policy_weights->allowed_actions;
+      for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+        mask[ i ] = static_cast<std::uint8_t>( mask[ i ] & ( ( allowed >> static_cast<std::uint32_t>( i ) ) & 1u ) );
+    }
 
     float q[ RL_ACTION_DIM ];
-    rl_policy::forward( *sim->solver_policy_weights, obs, q );
+    rl_policy::forward( *sim->solver_policy_weights, obs, mask, q );
 
     const int greedy_idx = rl_policy::masked_argmax( q, mask );
     int idx = greedy_idx;
