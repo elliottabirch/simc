@@ -24,6 +24,9 @@ enum class rl_family { player_buffs, cooldowns, enemy_slots, action_leaves, deck
 enum class rl_family_kind { buff, cooldown, enemy_slot, action_expression, expression, direct, scalar };
 enum class rl_kind { k_int, k_float, k_seconds, k_bucket };
 enum class rl_action_kind { cast, wait };
+// 221-03 (ACT-05/ACT-06): the four declared anchor kinds a kind==wait action may carry; `none` reproduces today's next-event-minimum build_wait() behaviour byte-for-byte.
+enum class rl_wait_anchor_kind { none, cooldown, swing, maelstrom, gcd };
+enum class rl_swing_hand { none, mh, oh };
 
 struct rl_leaf_desc
 {
@@ -59,6 +62,13 @@ struct rl_obs_family
   std::size_t          n_slots;
 };
 
+struct rl_wait_anchor
+{
+  rl_wait_anchor_kind kind;
+  const char*         cooldown_row;   // non-null only when kind == cooldown
+  rl_swing_hand       hand;           // rl_swing_hand::none unless kind == swing
+};
+
 struct rl_action_desc
 {
   int            id;
@@ -67,6 +77,7 @@ struct rl_action_desc
   const char*    cooldown_row;
   const char*    cooldown_row_shared;
   const char*    label;
+  rl_wait_anchor wait_anchor;
 };
 
 struct rl_buff_gate
@@ -89,13 +100,13 @@ inline constexpr const char* RL_REGISTRY_ID = "enhancement";
 inline constexpr const char* RL_ACTOR_NAME = "MID2_Shaman_Enhancement_Stormbringer";
 inline constexpr int RL_ENCODER_VERSION = 2;
 inline constexpr std::size_t RL_OBS_DIM = 208;
-inline constexpr std::size_t RL_ACTION_DIM = 16;
+inline constexpr std::size_t RL_ACTION_DIM = 24;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
 inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v2:90206fa823fca5720e8ce8f4fc5e0fd3d9912f70992844a194e0a7c4d0cf545d";
 inline constexpr const char* RL_MASK_RULES_SHA = "25c87a07570a5855cf5558302d90ba73557c0476ad57d62c117ccaa186f02243";
-inline constexpr const char* RL_ACTION_SPACE_SHA = "1e06245ba23b3c59c05f137097ea94d492da5e7631c11b2afe553a85b226995b";
+inline constexpr const char* RL_ACTION_SPACE_SHA = "54fb0e9886e0c73b6980dc9e48b8de9d2c8430f194fee43d9316ac8c1e6ccf10";
 
 // ---- Observation name list (the materialised ordering) ----
 
@@ -868,22 +879,30 @@ inline constexpr rl_obs_family RL_OBS_FAMILIES[RL_OBS_FAMILY_COUNT] = {
 // ---- Action descriptors ----
 
 inline constexpr rl_action_desc RL_ACTIONS[RL_ACTION_DIM] = {
-  { 0, "stormstrike", rl_action_kind::cast, "strike", nullptr, "stormstrike" },
-  { 1, "lightning_bolt", rl_action_kind::cast, nullptr, nullptr, "lightning_bolt" },
-  { 2, "chain_lightning", rl_action_kind::cast, nullptr, nullptr, "chain_lightning" },
-  { 3, nullptr, rl_action_kind::wait, nullptr, nullptr, nullptr },
-  { 4, "tempest", rl_action_kind::cast, nullptr, nullptr, "tempest" },
-  { 5, "windstrike", rl_action_kind::cast, "strike", nullptr, "windstrike" },
-  { 6, "crash_lightning", rl_action_kind::cast, "crash_lightning", nullptr, "crash_lightning" },
-  { 7, "lava_lash", rl_action_kind::cast, "lava_lash", nullptr, "lava_lash" },
-  { 8, "voltaic_blaze", rl_action_kind::cast, "voltaic_blaze", nullptr, "voltaic_blaze" },
-  { 9, "sundering", rl_action_kind::cast, "sundering", nullptr, "sundering" },
-  { 10, "ascendance", rl_action_kind::cast, "ascendance", nullptr, "ascendance" },
-  { 11, "doom_winds", rl_action_kind::cast, "doom_winds", nullptr, "doom_winds" },
-  { 12, "primordial_storm", rl_action_kind::cast, nullptr, nullptr, "primordial_storm" },
-  { 13, "surging_totem", rl_action_kind::cast, "surging_totem", nullptr, "surging_totem" },
-  { 14, "use_item_voracious_heart_of_ulatek", rl_action_kind::cast, "voracious_heart_of_ulatek_1297761", "item_cd_1141", "use_item_voracious_heart_of_ulatek" },
-  { 15, "berserking", rl_action_kind::cast, "berserking", nullptr, "berserking" },
+  { 0, "stormstrike", rl_action_kind::cast, "strike", nullptr, "stormstrike", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
+  { 1, "lightning_bolt", rl_action_kind::cast, nullptr, nullptr, "lightning_bolt", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
+  { 2, "chain_lightning", rl_action_kind::cast, nullptr, nullptr, "chain_lightning", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
+  { 3, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_next_event", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
+  { 4, "tempest", rl_action_kind::cast, nullptr, nullptr, "tempest", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
+  { 5, "windstrike", rl_action_kind::cast, "strike", nullptr, "windstrike", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
+  { 6, "crash_lightning", rl_action_kind::cast, "crash_lightning", nullptr, "crash_lightning", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
+  { 7, "lava_lash", rl_action_kind::cast, "lava_lash", nullptr, "lava_lash", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
+  { 8, "voltaic_blaze", rl_action_kind::cast, "voltaic_blaze", nullptr, "voltaic_blaze", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
+  { 9, "sundering", rl_action_kind::cast, "sundering", nullptr, "sundering", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
+  { 10, "ascendance", rl_action_kind::cast, "ascendance", nullptr, "ascendance", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
+  { 11, "doom_winds", rl_action_kind::cast, "doom_winds", nullptr, "doom_winds", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
+  { 12, "primordial_storm", rl_action_kind::cast, nullptr, nullptr, "primordial_storm", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
+  { 13, "surging_totem", rl_action_kind::cast, "surging_totem", nullptr, "surging_totem", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
+  { 14, "use_item_voracious_heart_of_ulatek", rl_action_kind::cast, "voracious_heart_of_ulatek_1297761", "item_cd_1141", "use_item_voracious_heart_of_ulatek", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
+  { 15, "berserking", rl_action_kind::cast, "berserking", nullptr, "berserking", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
+  { 16, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_cd_strike", { rl_wait_anchor_kind::cooldown, "strike", rl_swing_hand::none } },
+  { 17, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_cd_lava_lash", { rl_wait_anchor_kind::cooldown, "lava_lash", rl_swing_hand::none } },
+  { 18, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_cd_crash_lightning", { rl_wait_anchor_kind::cooldown, "crash_lightning", rl_swing_hand::none } },
+  { 19, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_cd_voltaic_blaze", { rl_wait_anchor_kind::cooldown, "voltaic_blaze", rl_swing_hand::none } },
+  { 20, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_swing_mh", { rl_wait_anchor_kind::swing, nullptr, rl_swing_hand::mh } },
+  { 21, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_swing_oh", { rl_wait_anchor_kind::swing, nullptr, rl_swing_hand::oh } },
+  { 22, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_maelstrom", { rl_wait_anchor_kind::maelstrom, nullptr, rl_swing_hand::none } },
+  { 23, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_gcd", { rl_wait_anchor_kind::gcd, nullptr, rl_swing_hand::none } },
 };
 
 // ---- Buff-gate table ----
