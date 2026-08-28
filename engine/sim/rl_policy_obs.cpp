@@ -27,6 +27,7 @@
 #include "sim/decision_dump.hpp"
 #include "sim/event.hpp"
 #include "sim/expressions.hpp"
+#include "sim/raid_event.hpp"
 #include "sim/sim.hpp"
 #include "util/io.hpp"
 
@@ -332,7 +333,9 @@ enum class direct_id
   position_current_distance, position_distance_to_move, position_movement_speed,
   position_x, position_y,
   // sim_auras
-  sim_aura_skyfury
+  sim_aura_skyfury,
+  // scalars (Task 3)
+  raid_event_next_in
 };
 
 // rl_family_kind::cooldown's own `direct`-style dispatch (220-05 Task 2):
@@ -503,7 +506,16 @@ slot_binding resolve_scalar_leaf( const rl_leaf_desc& leaf )
     b.direct = direct_id::maelstrom;
     return b;
   }
-  // raid_event_next_in and anything else this task does not bind.
+  if ( std::strcmp( leaf.leaf, "raid_event_next_in" ) == 0 )
+  {
+    // 220-05 Task 3 (RIG-05): computed from the public sim->raid_events +
+    // until_next() in build_obs, never through create_expression -- see
+    // that switch arm's own comment for the missing-substitution rule.
+    b.kind = slot_binding_kind::direct;
+    b.direct = direct_id::raid_event_next_in;
+    return b;
+  }
+  // anything else this task does not bind.
   b.kind = slot_binding_kind::unresolved;
   return b;
 }
@@ -940,11 +952,9 @@ const slot_table& bind_slots( player_t* p )
             break;
           case rl_family_kind::expression:
             // 220-05 Task 1 proved the seam on `deck`; Task 2 adds
-            // `pets`/`items` and (bound `direct`, not `expression` -- see
-            // resolve_sim_auras_leaf's own comment) `sim_auras`. `raid_events`
-            // shares this SAME rl_family_kind but is deliberately left
-            // unresolved here -- Task 3 adds its own engine_token->expression
-            // composition ("raid_event.<token>.<leaf>").
+            // `pets`/`items`/`raid_events` (Task 3) and (bound `direct`,
+            // not `expression` -- see resolve_sim_auras_leaf's own comment)
+            // `sim_auras`.
             if ( fam.id == rl_family::deck )
             {
               binding = resolve_expression_leaf( p, mem.engine_token, leaf, table );
@@ -960,6 +970,19 @@ const slot_table& bind_slots( player_t* p )
             else if ( fam.id == rl_family::sim_auras )
             {
               binding = resolve_sim_auras_leaf( mem.member, leaf );
+            }
+            else if ( fam.id == rl_family::raid_events )
+            {
+              // 220-05 Task 3 (RIG-05): "raid_event.<token>.<leaf>" --
+              // member.engine_token is "adds"/"movement" (the census's own
+              // engineToken override, chosen to avoid the genericity-token
+              // collision "adds" has against source.split('.')[1] elsewhere
+              // -- CONTEXT.md's own ruling). Constant-folded at creation time
+              // under a single-shape fight (sim.cpp:3824-3840) -- correct,
+              // per this task's own action text; the census must see these
+              // move under HecticAddCleave/LightMovement instead.
+              binding = resolve_expression_leaf(
+                p, "raid_event." + std::string( mem.engine_token ) + "." + leaf.leaf, leaf, table );
             }
             else
             {
@@ -1255,6 +1278,35 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t, flo
               raw = p->sim->auras.skyfury->check();
               status = lookup_status::present;
               break;
+
+            // 220-05 Task 3 (RIG-05): the soonest-to-fire raid event across
+            // the whole sim, computed from the PUBLIC sim->raid_events
+            // (sim.hpp:218) + raid_event_t::until_next() (raid_event.hpp:78)
+            // -- never through raid_event_t::get_next_raid_event, which is
+            // file-local to raid_event.cpp's unnamed namespace and therefore
+            // NOT LINKABLE from here; a later reader must not "simplify"
+            // this loop into a call to that function. timespan_t::max()
+            // (nothing pending, or an empty raid_events vector) substitutes
+            // the SAME value the fight_remains scalar computes above
+            // (max(RL_EPISODE_MAX_TIME - s.t, 0)), never the raw ~1e12
+            // saturation sentinel (Pitfall 7).
+            case direct_id::raid_event_next_in:
+            {
+              timespan_t min_until = timespan_t::max();
+              for ( const auto& re : p->sim->raid_events )
+              {
+                if ( !re )
+                  continue;
+                const timespan_t u = re->until_next();
+                if ( u < min_until )
+                  min_until = u;
+              }
+              raw = ( min_until == timespan_t::max() )
+                ? std::max( RL_EPISODE_MAX_TIME - s.t, 0.0 )
+                : min_until.total_seconds();
+              status = lookup_status::present;
+              break;
+            }
 
             default:
               status = lookup_status::absent;
