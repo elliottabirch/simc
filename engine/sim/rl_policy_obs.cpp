@@ -88,6 +88,43 @@ const cooldown_reading* rl_state_t::find_cooldown( const char* name ) const
 }
 
 // ---------------------------------------------------------------------------
+// next_raid_event_in -- 221-03 (ACT-05/ACT-06). See this function's own
+// declaration in rl_policy.hpp for the full three-consumer contract. A
+// candidate survives the filter only when its own until_next() is
+// strictly positive AND no greater than the remaining fight -- this is
+// what discards raid_event_t::until_next()'s ~9.2e12 "nothing pending"
+// saturation value (RESEARCH Pitfall 6) WITHOUT ever comparing against
+// that sentinel by name: any candidate that large is, by construction,
+// far larger than any real fight length, so the fight-remaining bound
+// alone excludes it.
+// ---------------------------------------------------------------------------
+
+bool next_raid_event_in( const sim_t* sim, double& out_seconds )
+{
+  const double fight_remaining =
+      std::max( ( sim->expected_iteration_time - sim->current_time() ).total_seconds(), 0.0 );
+
+  bool found = false;
+  double best = 0.0;
+  for ( const auto& re : sim->raid_events )
+  {
+    if ( !re )
+      continue;
+    const double candidate = re->until_next().total_seconds();
+    if ( candidate <= 0.0 || candidate > fight_remaining )
+      continue;
+    if ( !found || candidate < best )
+    {
+      best = candidate;
+      found = true;
+    }
+  }
+  if ( found )
+    out_seconds = best;
+  return found;
+}
+
+// ---------------------------------------------------------------------------
 // Stage 1: read_state -- needs the engine, not exercised by the standalone
 // test executable (plan 210-07).
 // ---------------------------------------------------------------------------
@@ -99,6 +136,16 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground )
 
   s.t = sim->current_time().total_seconds();
   s.boundary_is_foreground = boundary_is_foreground;
+
+  // 221-03 (ACT-05/ACT-06) -- the two anchored-wait clamp inputs. Engine's
+  // own fight_remains definition (sim.cpp's expected_combat_length/
+  // fight_remains expression); the SHARED next_raid_event_in() helper for
+  // the raid-event bound, RAW -- no substitution when nothing is pending
+  // (has_raid_event_next_in stays false, meaning "no clamp from this
+  // source" downstream in accept_wait()).
+  s.fight_remains = std::max( ( sim->expected_iteration_time - sim->current_time() ).total_seconds(), 0.0 );
+  s.has_fight_remains = true;
+  s.has_raid_event_next_in = next_raid_event_in( sim, s.raid_event_next_in );
 
   // Same formula as decision_dump.cpp:355's gcd_remains -- shared helper,
   // not a re-derived expression, so the two can never drift.
@@ -1919,31 +1966,28 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t, flo
               status = lookup_status::present;
               break;
 
-            // 220-05 Task 3 (RIG-05): the soonest-to-fire raid event across
-            // the whole sim, computed from the PUBLIC sim->raid_events
-            // (sim.hpp:218) + raid_event_t::until_next() (raid_event.hpp:78)
-            // -- never through raid_event_t::get_next_raid_event, which is
-            // file-local to raid_event.cpp's unnamed namespace and therefore
-            // NOT LINKABLE from here; a later reader must not "simplify"
-            // this loop into a call to that function. timespan_t::max()
-            // (nothing pending, or an empty raid_events vector) substitutes
-            // the SAME value the fight_remains scalar computes above
-            // (max(RL_EPISODE_MAX_TIME - s.t, 0)), never the raw ~1e12
-            // saturation sentinel (Pitfall 7).
+            // 220-05 Task 3 (RIG-05), REFACTORED 221-03 (ACT-05/ACT-06):
+            // the soonest-to-fire raid event across the whole sim -- was an
+            // inline walk of sim->raid_events + until_next() here; NOW
+            // factored into the shared next_raid_event_in() helper
+            // (rl_policy.hpp/this file, above) so this leaf, read_state()'s
+            // own raid_event_next_in POD field, and accept_wait()'s clamp
+            // (solver_control.cpp) share ONE walk, never three independently
+            // -maintained ones that could drift (221-03 Task 2 point 1/3).
+            // "Nothing pending" (the helper returns false) substitutes the
+            // SAME value the fight_remains scalar computes above
+            // (max(RL_EPISODE_MAX_TIME - s.t, 0)) -- THIS consumer's own
+            // policy, deliberately different from read_state()'s POD field
+            // (which leaves has_raid_event_next_in false / "no clamp" in
+            // that case) -- see the helper's own doc comment for why the
+            // two policies differ. Never the raw ~1e12 saturation sentinel
+            // (Pitfall 7); never a second walk of sim->raid_events.
             case direct_id::raid_event_next_in:
             {
-              timespan_t min_until = timespan_t::max();
-              for ( const auto& re : p->sim->raid_events )
-              {
-                if ( !re )
-                  continue;
-                const timespan_t u = re->until_next();
-                if ( u < min_until )
-                  min_until = u;
-              }
-              raw = ( min_until == timespan_t::max() )
-                ? std::max( RL_EPISODE_MAX_TIME - s.t, 0.0 )
-                : min_until.total_seconds();
+              double v = 0.0;
+              if ( !next_raid_event_in( p->sim, v ) )
+                v = std::max( RL_EPISODE_MAX_TIME - s.t, 0.0 );
+              raw = v;
               status = lookup_status::present;
               break;
             }
@@ -2316,6 +2360,105 @@ bool cd_ready_now( const cooldown_reading& row )
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
+// read_anchored_wait -- 221-03 (ACT-05/ACT-06). ONE pure anchor reader,
+// called from BOTH build_mask()'s wait-legality rule below AND
+// build_wait()'s per-anchor duration below -- mirrors mask.py's own
+// anchored_wait_seconds() reading rules exactly, including the
+// charge-based recharge-clock preference. Two computations of the same
+// quantity is the drift class this helper exists to prevent -- do not
+// inline the reading logic in either caller. Returns the RAW value only
+// (unclamped, unfloored); each caller applies its OWN clamp/floor policy
+// on top (build_mask compares raw directly to the floor and to
+// fight_remains for legality; build_wait clamps+floors it into a
+// wait_result).
+// ---------------------------------------------------------------------------
+
+namespace
+{
+struct anchored_wait_reading
+{
+  double      raw     = 0.0;
+  bool        has_raw = false;
+  std::string source;
+};
+
+anchored_wait_reading read_anchored_wait( const rl_state_t& s, const rl_wait_anchor& anchor )
+{
+  anchored_wait_reading out;
+  switch ( anchor.kind )
+  {
+    case rl_wait_anchor_kind::cooldown:
+    {
+      out.source = std::string( "cooldown:" ) + ( anchor.cooldown_row ? anchor.cooldown_row : "" );
+      const cooldown_reading* row = s.find_cooldown( anchor.cooldown_row );
+      if ( row != nullptr )
+      {
+        // Charge-based (max_charges > 1): prefer the RECHARGE clock.
+        // Single-charge: the REMAINING clock. Same two clocks cd_ready_now
+        // above already reads.
+        const bool charge_based = row->max_charges > 1;
+        const bool has_val = charge_based ? row->has_recharge_time : row->has_remains;
+        const double val = charge_based ? row->recharge_time : row->remains;
+        if ( has_val && val > 0.0 )
+        {
+          out.raw = val;
+          out.has_raw = true;
+        }
+      }
+      break;
+    }
+    case rl_wait_anchor_kind::swing:
+    {
+      const bool mh = ( anchor.hand == rl_swing_hand::mh );
+      out.source = mh ? "swing_mh" : "swing_oh";
+      const bool has_val = mh ? s.has_swing_mh_remains : s.has_swing_oh_remains;
+      const double val = mh ? s.swing_mh_remains : s.swing_oh_remains;
+      if ( has_val && val > 0.0 )
+      {
+        out.raw = val;
+        out.has_raw = true;
+      }
+      break;
+    }
+    case rl_wait_anchor_kind::maelstrom:
+    {
+      // No engine "next Maelstrom stack" event -- DEFINED as the earlier
+      // of the next main-hand/off-hand swing (221-RESEARCH.md Assumptions
+      // Log A7; the registered spec's own $anchorComment on this anchor
+      // carries the full citation).
+      out.source = "maelstrom";
+      if ( s.has_swing_mh_remains && s.swing_mh_remains > 0.0 )
+      {
+        out.raw = s.swing_mh_remains;
+        out.has_raw = true;
+      }
+      if ( s.has_swing_oh_remains && s.swing_oh_remains > 0.0 &&
+           ( !out.has_raw || s.swing_oh_remains < out.raw ) )
+      {
+        out.raw = s.swing_oh_remains;
+        out.has_raw = true;
+      }
+      break;
+    }
+    case rl_wait_anchor_kind::gcd:
+    {
+      out.source = "gcd";
+      if ( s.has_gcd_remains && s.gcd_remains > 0.0 )
+      {
+        out.raw = s.gcd_remains;
+        out.has_raw = true;
+      }
+      break;
+    }
+    case rl_wait_anchor_kind::none:
+    default:
+      break;
+  }
+  return out;
+}
+} // anonymous namespace
+
+// ---------------------------------------------------------------------------
 // build_mask -- REAL, all four rules, mirroring mask.py:133-172 exactly.
 // ---------------------------------------------------------------------------
 
@@ -2329,10 +2472,31 @@ void build_mask( const rl_state_t& s, std::uint8_t out_mask[ RL_ACTION_DIM ] )
     // reply at any other boundary hard-aborts the engine
     // (protocol_abort) -- the mask is the only thing between the agent
     // and that FATAL. Wait actions have no action_t* to resolve and skip
-    // R0's engine-truth AND below entirely.
+    // R0's engine-truth AND below entirely. 221-03 (ACT-05/ACT-06): an
+    // ANCHORED wait (a.wait_anchor.kind != none) ADDITIONALLY requires the
+    // anchor's RAW seconds (read_anchored_wait, never the floored value --
+    // comparing the floored value to the floor would make every sub-floor
+    // anchor look legal) to be present, strictly above RL_WAIT_FLOOR_SECONDS,
+    // and before fight end (absent fight_remains is a documented fail-open:
+    // waiting past the end of a fight is harmless). The null-anchor (fixed)
+    // wait keeps the bare foreground rule below, unchanged.
     if ( a.kind == rl_action_kind::wait )
     {
-      out_mask[ i ] = s.boundary_is_foreground ? 1 : 0;
+      if ( !s.boundary_is_foreground )
+      {
+        out_mask[ i ] = 0;
+        continue;
+      }
+      if ( a.wait_anchor.kind == rl_wait_anchor_kind::none )
+      {
+        out_mask[ i ] = 1;
+        continue;
+      }
+      const anchored_wait_reading reading = read_anchored_wait( s, a.wait_anchor );
+      bool legal_wait = reading.has_raw && reading.raw > RL_WAIT_FLOOR_SECONDS;
+      if ( legal_wait && s.has_fight_remains && !( reading.raw < s.fight_remains ) )
+        legal_wait = false;
+      out_mask[ i ] = legal_wait ? 1 : 0;
       continue;
     }
 
@@ -2434,7 +2598,14 @@ void build_mask( const rl_state_t& s, std::uint8_t out_mask[ RL_ACTION_DIM ] )
 }
 
 // ---------------------------------------------------------------------------
-// build_wait -- REAL, mirroring mask.py:175-243 exactly (next_event_wait_detail).
+// build_wait -- REAL. anchor.kind == none mirrors mask.py:175-243 exactly
+// (next_event_wait_detail), BYTE FOR BYTE -- same candidate set, same
+// tie-break, same floor (RESEARCH Pitfall 7). An anchored kind (221-03,
+// ACT-05/ACT-06) instead calls the SAME read_anchored_wait() pure reader
+// build_mask()'s wait-legality rule calls above, then clamps to the two
+// known bounds and floors -- never a second, independently-maintained
+// reading of the anchor's own value (the drift class this helper exists to
+// prevent).
 // ---------------------------------------------------------------------------
 
 namespace
@@ -2448,8 +2619,34 @@ struct wait_candidate
 };
 } // anonymous namespace
 
-wait_result build_wait( const rl_state_t& s )
+wait_result build_wait( const rl_state_t& s, const rl_wait_anchor& anchor )
 {
+  if ( anchor.kind != rl_wait_anchor_kind::none )
+  {
+    // 221-03 (ACT-05/ACT-06): clamp to fight-remaining and the shared
+    // next-raid-event bound WHEN THOSE ARE KNOWN on this rl_state_t
+    // (s.has_fight_remains / s.has_raid_event_next_in), then floor. The
+    // AUTHORITATIVE clamp is accept_wait() (solver_control.cpp, the ONE
+    // point both transports converge) -- this clamp exists only so the
+    // in-process arm's own computed seconds already matches what
+    // accept_wait would apply anyway for a value computed from this SAME
+    // rl_state_t, never as a substitute for accept_wait's own live-state
+    // clamp.
+    const anchored_wait_reading reading = read_anchored_wait( s, anchor );
+    if ( !reading.has_raw )
+      return wait_result{ RL_WAIT_FLOOR_SECONDS, reading.source, true };
+
+    double seconds_pre_floor = reading.raw;
+    if ( s.has_fight_remains && s.fight_remains < seconds_pre_floor )
+      seconds_pre_floor = s.fight_remains;
+    if ( s.has_raid_event_next_in && s.raid_event_next_in < seconds_pre_floor )
+      seconds_pre_floor = s.raid_event_next_in;
+
+    const bool floored = seconds_pre_floor < RL_WAIT_FLOOR_SECONDS;
+    const double seconds = std::max( seconds_pre_floor, RL_WAIT_FLOOR_SECONDS );
+    return wait_result{ seconds, reading.source, floored };
+  }
+
   std::vector<wait_candidate> candidates;
 
   // Append order IS the tie-break rule (P-3): every cooldown row's

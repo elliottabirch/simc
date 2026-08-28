@@ -694,6 +694,21 @@ struct sim_t : private sc_thread_t
   // disabled (never touched).
   bool solver_control_auto_attack_started = false;
   std::string solver_control_last_reply_type;
+  // 221-03 (ACT-05/ACT-06, Task 2 point 4). Set by BOTH transports right
+  // before calling accept_wait() on a "wait" reply -- the value HANDED TO
+  // accept_wait() before its own fight-end/raid-event clamp, and the
+  // chosen wait's registry label (empty on the FIFO arm: the wire "wait"
+  // reply carries no anchor identity, only "sec" -- see PROTOCOL.md; the
+  // in-process arm always sets it from RL_ACTIONS[idx].label). Cleared
+  // (has_...=false / label cleared) at the top of every reply's handling
+  // on both transports, regardless of reply type, so a "cast"/"default"/
+  // "abstain"/"noop" boundary's dump never carries a stale prior wait's
+  // value. Read by decision_dump::write_state_fields() to emit
+  // "requested_wait_sec"/"wait_anchor", gated the same way
+  // solver_control_last_reply_type is.
+  bool solver_control_has_requested_wait_sec = false;
+  double solver_control_last_requested_wait_sec = 0.0;
+  std::string solver_control_last_wait_anchor_label;
   // In-process exploration draw (Phase 213, D-08, ruling 213-G17). A
   // DEDICATED stream, re-seeded once per fight from that fight's own seed
   // (solver_control::reset_iteration()) -- it must NEVER be the engine's

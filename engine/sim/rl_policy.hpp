@@ -46,6 +46,7 @@
 #include <vector>
 
 struct player_t;
+struct sim_t;
 
 namespace rl_policy
 {
@@ -93,6 +94,19 @@ struct rl_state_t
   double active_enemies      = 0.0;   bool has_active_enemies     = false;
   bool   boundary_is_foreground = true;   // converted ONCE from execute_type by the caller
 
+  // 221-03 (ACT-05/ACT-06) -- the two anchored-wait clamp inputs. Filled
+  // in read_state() from the engine's own definitions (fight_remains =
+  // expected_iteration_time - current_time(); raid_event_next_in = the
+  // SHARED next_raid_event_in() helper declared below, RAW, no
+  // substitution). `has_raid_event_next_in == false` means "no raid event
+  // pending" -- downstream this means NO CLAMP (waiting is unbounded by
+  // raid events when none are pending), the opposite substitution Phase
+  // 220 plan 05's OBSERVATION scalar applies on top of the SAME helper --
+  // see that helper's own doc comment in rl_policy_obs.cpp for why the two
+  // consumers deliberately differ.
+  double fight_remains        = 0.0;   bool has_fight_remains        = false;
+  double raid_event_next_in   = 0.0;   bool has_raid_event_next_in   = false;
+
   // 221-01 (ACT-02, Pattern 1) -- the engine-truth legality layer, action-id
   // order, exactly RL_ACTION_DIM wide. Filled by read_state() calling
   // read_action_gate_bits() below (the ONE computation both this POD and
@@ -122,6 +136,25 @@ struct rl_state_t
 // enforces can never disagree about which action_t* they mean.
 void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_ACTION_DIM ],
                              std::uint8_t out_ready[ RL_ACTION_DIM ] );
+
+// 221-03 (ACT-05/ACT-06) -- the ONE shared raid-event walk, called from
+// read_state() (this file), build_obs()'s raid_event_next_in leaf
+// (rl_policy_obs.cpp, Phase 220 plan 05), and accept_wait()'s clamp
+// (solver_control.cpp) -- three consumers, ONE walk, never a second/third
+// independently-maintained loop over sim->raid_events (RESEARCH Pitfall 6:
+// a naive expression-system read returns a ~9.2e12 saturation value rather
+// than "no event"; this walks the sim's own raid_events list directly).
+// Returns the RAW minimum candidate's seconds through out_seconds (a
+// candidate survives the filter only when its own until_next() is
+// strictly positive AND no greater than the remaining fight -- exactly
+// the right filter for a CLAMP, and it discards the not-pending
+// saturation value without ever naming it) plus a has-value flag; applies
+// NO substitution and NO further clamp of its own -- "nothing pending"
+// means out_seconds is left untouched and the function returns false.
+// Each of the three callers applies its OWN policy on top of that boolean
+// (see rl_state_t::has_raid_event_next_in's own doc comment above for the
+// two deliberately-different policies).
+bool next_raid_event_in( const sim_t* sim, double& out_seconds );
 
 // WR-05 fix (210-CR-FIX): `source` is a `std::string`, not a `const char*`
 // into shared storage. `wait_result` is part of the pinned POD interface --
@@ -160,7 +193,7 @@ const slot_table& bind_slots( player_t* p );
 // header's own updated "Stage 2" comment above.
 void        build_obs ( const player_t* p, const rl_state_t& s, const slot_table& t, float out_obs[ RL_OBS_DIM ] );
 void        build_mask( const rl_state_t& s, std::uint8_t out_mask[ RL_ACTION_DIM ] );
-wait_result build_wait( const rl_state_t& s );
+wait_result build_wait( const rl_state_t& s, const rl_wait_anchor& anchor );
 
 // ---- Weights (RLW1 v2, tstl-sylvanas Phase 213-TDL Task 1) ----
 //

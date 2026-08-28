@@ -354,6 +354,29 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   // decision).
   out << ",\"gcd_remains\":" << clamp_nonneg( ( p->gcd_ready - sim->current_time() ).total_seconds() );
 
+  // 221-03 (ACT-05/ACT-06, Task 2 point 4) -- fight_remains/raid_event_next_in
+  // as TOP-LEVEL scalars, DISTINCT from the observation vector's own
+  // fight_remains/raid_event_next_in leaves (which reach the FIFO client
+  // only after the whole observation encoding round-trip). The FIFO arm's
+  // mask.py mirror (anchored_wait_seconds) needs both directly on this
+  // wire request to apply the SAME clamp accept_wait() applies engine-side
+  // -- Phase 220 deliberately did not widen this wire for that purpose
+  // (see its own plan-07 follow-up todo). Computed through the SAME
+  // rl_policy::next_raid_event_in()/fight_remains definitions read_state()
+  // and accept_wait() use -- never a third independent walk of
+  // sim->raid_events. raid_event_next_in is emitted as null (never a
+  // saturation number) when nothing is pending.
+  {
+    const double fight_remaining =
+        clamp_nonneg( ( sim->expected_iteration_time - sim->current_time() ).total_seconds() );
+    out << ",\"fight_remains\":" << fight_remaining;
+    double raid_event_bound = 0.0;
+    if ( rl_policy::next_raid_event_in( sim, raid_event_bound ) )
+      out << ",\"raid_event_next_in\":" << raid_event_bound;
+    else
+      out << ",\"raid_event_next_in\":null";
+  }
+
   // solver_damage_so_far (FORK-03, tstl-sylvanas phase 205, owner ruling
   // OQ-1 2026-08-22) -- cumulative kit damage (pets included, D-05) since
   // the start of the current iteration, read exactly (no fractional bucket
@@ -713,6 +736,31 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
     }
     if ( solver_reply_gated )
       out << ",\"solver_reply_type\":\"" << json_escape( sim->solver_control_last_reply_type ) << "\"";
+  }
+
+  // 221-03 (ACT-05/ACT-06, Task 2 point 4) -- requested_wait_sec/wait_anchor:
+  // the value HANDED TO accept_wait() before its own fight-end/raid-event
+  // clamp, and the chosen wait's registry label. Gated the SAME way
+  // solver_reply_type immediately above is (solver_reply_gated) -- these
+  // fields describe what THIS boundary's solver reply chose, so they
+  // belong only on decision_dump::record()'s post-reply call, never on the
+  // wire-request-building call (which describes the UPCOMING boundary,
+  // before any reply exists for it -- emitting a stale prior-boundary
+  // value there would be exactly the pre-resolution-placeholder class of
+  // bug resolved_action's own gating fixed, above). null on every
+  // non-"wait" reply and whenever the FIFO arm's own reply carried no
+  // anchor identity (wait_anchor only, PROTOCOL.md's "wait" shape has no
+  // anchor field).
+  if ( solver_reply_gated )
+  {
+    if ( sim->solver_control_last_reply_type == "wait" && sim->solver_control_has_requested_wait_sec )
+      out << ",\"requested_wait_sec\":" << sim->solver_control_last_requested_wait_sec;
+    else
+      out << ",\"requested_wait_sec\":null";
+    if ( sim->solver_control_last_reply_type == "wait" && !sim->solver_control_last_wait_anchor_label.empty() )
+      out << ",\"wait_anchor\":\"" << json_escape( sim->solver_control_last_wait_anchor_label ) << "\"";
+    else
+      out << ",\"wait_anchor\":null";
   }
 
   // 221-01 (ACT-02, Pattern 3) -- the engine-truth legality layer, emitted

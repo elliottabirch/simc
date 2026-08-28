@@ -19,6 +19,7 @@
 
 #include "fmt/format.h"
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -135,6 +136,24 @@ void accept_wait( sim_t* sim, execute_type et, double sec, const std::string& co
                      decision_dump::boundary_name( et ) + "): " + context );
   if ( sec < 0.0 )
     sec = 0.0;
+
+  // 221-03 (ACT-05/ACT-06, Task 2 point 3): clamp to the lesser of the
+  // requested seconds, the remaining fight, and the next raid-event time --
+  // the ONE point both transports pass through, which is why the clamp
+  // cannot live only in build_wait() (the FIFO arm's seconds are computed
+  // in Python and would arrive here unclamped). Both bounds computed
+  // through the SAME rl_policy::next_raid_event_in()/fight_remains
+  // definitions read_state() uses -- never a third independent walk of
+  // sim->raid_events. No raid event pending (next_raid_event_in() returns
+  // false) means no clamp from that source, per read_state()'s own policy.
+  const double fight_remaining =
+      std::max( ( sim->expected_iteration_time - sim->current_time() ).total_seconds(), 0.0 );
+  if ( fight_remaining < sec )
+    sec = fight_remaining;
+  double raid_event_bound = 0.0;
+  if ( rl_policy::next_raid_event_in( sim, raid_event_bound ) && raid_event_bound < sec )
+    sec = raid_event_bound;
+
   sim->solver_control_pending_wait_s = sec;
   sim->solver_control_has_pending_wait = true;
 }
@@ -434,6 +453,14 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // exactly this) can report the SOLVER's actual per-boundary resolution
     // instead of the pre-reply APL/sequence placeholder pick.
     sim->solver_control_last_reply_type = type;
+    // 221-03 (ACT-05/ACT-06, Task 2 point 4): cleared for EVERY reply type
+    // (not just non-wait ones) so a "cast"/"default"/"abstain"/"noop"
+    // boundary's dump never carries a stale prior wait's requested_wait_sec/
+    // wait_anchor -- the "wait" branch below overwrites these right before
+    // calling accept_wait().
+    sim->solver_control_has_requested_wait_sec = false;
+    sim->solver_control_last_requested_wait_sec = 0.0;
+    sim->solver_control_last_wait_anchor_label.clear();
 
     if ( type == "cast" )
     {
@@ -458,6 +485,14 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       // (player.cpp), which checks the pending-wait pair accept_wait() sets
       // before falling back to the default poll/threshold-based idle
       // scheduling.
+      // 221-03 (ACT-05/ACT-06, Task 2 point 4): the value HANDED TO
+      // accept_wait() below, before its own fight-end/raid-event clamp.
+      // wait_anchor stays empty/null on this arm -- the wire "wait" reply
+      // carries no anchor identity (PROTOCOL.md's "wait" shape is
+      // `{"sec": float}` only), unlike the in-process arm below which
+      // always knows RL_ACTIONS[idx].label.
+      sim->solver_control_has_requested_wait_sec = true;
+      sim->solver_control_last_requested_wait_sec = doc["sec"].GetDouble();
       accept_wait( sim, et, doc["sec"].GetDouble(), "seq=" + std::to_string( seq ) + ": " + line );
       return nullptr;
     }
@@ -609,6 +644,16 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
 
     const rl_action_desc& action = RL_ACTIONS[ idx ];
 
+    // 221-03 (ACT-05/ACT-06, Task 2 point 4): cleared for EVERY decision
+    // (not just non-wait ones) -- same discipline as the FIFO arm's own
+    // reset immediately after parsing `type` above -- so a "cast"
+    // boundary's dump never carries a stale prior wait's requested_wait_sec/
+    // wait_anchor. The wait branch below (rl_action_kind::wait) overwrites
+    // these right before calling accept_wait().
+    sim->solver_control_has_requested_wait_sec = false;
+    sim->solver_control_last_requested_wait_sec = 0.0;
+    sim->solver_control_last_wait_anchor_label.clear();
+
     // Confidence gap (Phase 212, plan 212-01, TLOG-02): the largest legal Q
     // minus the second largest, considering only entries whose mask byte is
     // non-zero. If fewer than two actions were legal there is no second
@@ -692,9 +737,19 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     }
 
     // rl_action_kind::wait -- action.token is null for this entry (see
-    // RL_ACTIONS' own comment in rl_policy_constants.h).
+    // RL_ACTIONS' own comment in rl_policy_constants.h). 221-03 (ACT-05/
+    // ACT-06): passes action.wait_anchor -- an anchor of kind "none"
+    // reproduces today's next-event-minimum build_wait() behaviour byte
+    // for byte; an anchored kind computes the per-anchor duration.
     sim->solver_control_last_reply_type = "wait";
-    const rl_policy::wait_result wr = rl_policy::build_wait( state );
+    const rl_policy::wait_result wr = rl_policy::build_wait( state, action.wait_anchor );
+    // 221-03 (ACT-05/ACT-06, Task 2 point 4): the value HANDED TO
+    // accept_wait() below, before its own fight-end/raid-event clamp, and
+    // the chosen wait's registry label (RL_ACTIONS[idx].label -- always
+    // known on this arm, unlike the FIFO arm above).
+    sim->solver_control_has_requested_wait_sec = true;
+    sim->solver_control_last_requested_wait_sec = wr.seconds;
+    sim->solver_control_last_wait_anchor_label = action.label ? action.label : "";
     // Flight recorder decision row, wait branch. wr.floored is the fifth
     // flag bit's only source -- it says the wait length came from the
     // floor rather than from a real timer. No-op when rl_translog= is
