@@ -13960,7 +13960,28 @@ void shaman_t::reset()
     std::get<1>( it.second ) = 0.0;
   }
 
-  assert( mid2_enh_4pc_mul.empty() );
+  // mid2_enh_4pc_mul (MID2 Enhancement 4-piece "Short Circuit" snapshot queue) is pushed
+  // synchronously and unconditionally in crash_lightning_t::execute() (on every crash_lightning
+  // cast that hits, when the set bonus is active), on the assumption that the corresponding
+  // buff.crash_lightning stack registration will follow and later drive this queue's own
+  // popping/clearing via its stack_change_callback. That correspondence is NOT guaranteed:
+  // buff_t::trigger() defers the actual stack increment through a scheduled buff_delay_t event
+  // whenever the buff is not `activated` and sim->default_aura_delay.mean > 0 (true here) -- and
+  // a delayed event scheduled near the very end of an iteration can be discarded, un-fired, when
+  // the fight/iteration terminates before it processes. When that happens the buff's own stack
+  // never actually changes (no stack_change_callback fires), so nothing pops the queue entry
+  // this cast already pushed -- it survives past this reset() with no iteration-scoped consumer
+  // left to read it (crash_lightning_attack_t::action_multiplier() is scoped to the iteration
+  // that produced the snapshot; nothing reads a stale entry from a prior iteration on purpose).
+  // Confirmed via reproduction: engine build a89b636aff8, profile mid2-stormbringer.simc,
+  // solver_policy scoring the FULL-fidelity (24-action) enhancement checkpoint (the only arm
+  // whose action space includes crash_lightning) at seed=3/iterations=200 -- traced the exact
+  // orphaned push (see .planning/todos -- 2026-08-28 fork crash finding, 223-03b). This queue's
+  // entire lifetime is scoped to a single iteration (nothing here is meant to survive a reset),
+  // so clearing it at the reset boundary is the correct fix, not a workaround: it makes this
+  // function's own invariant genuinely true rather than merely asserting it and hoping the
+  // buff's async delay always resolves before iteration end.
+  mid2_enh_4pc_mul.clear();
 }
 
 // shaman_t::merge ==========================================================
