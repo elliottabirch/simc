@@ -301,9 +301,20 @@ rl_weights_t load_rlw1( const std::string& path )
   // walk (done just below, beside the other gather refusals). Default (v2,
   // or a v3 blob declaring n_input_slots==0): identity gather (input_slots
   // stays empty) + every action allowed.
-  w.allowed_actions = ( RL_ACTION_DIM >= 32 )
-                           ? 0xFFFFFFFFu
-                           : ( ( 1u << static_cast<std::uint32_t>( RL_ACTION_DIM ) ) - 1u );
+  // 222-07 (WR-01): rl_policy.hpp's static_assert( RL_ACTION_DIM <= 32 )
+  // beside the `allowed_actions` member guarantees this shift amount never
+  // reaches or exceeds 32, so the well-defined single formula below
+  // replaces the old `RL_ACTION_DIM >= 32 ? 0xFFFFFFFFu : (1u <<
+  // RL_ACTION_DIM) - 1u` runtime special case -- that ternary "papered
+  // over" the UB boundary at runtime rather than refusing to build past it,
+  // and its own `1u << 32` branch was itself UB it never took today only
+  // because RL_ACTION_DIM (24) never reached it. `0xFFFFFFFFu >> (32 -
+  // RL_ACTION_DIM)` is well-defined for every RL_ACTION_DIM in [1, 32]
+  // (shift amount in [0, 31]) and produces the identical "every action
+  // allowed" bit pattern -- this is the documented v2 back-compat default
+  // (a v2 blob, or a v3 blob declaring no subset, means identity gather +
+  // all-allowed), unchanged in behaviour, only in how it is computed.
+  w.allowed_actions = 0xFFFFFFFFu >> ( 32u - static_cast<std::uint32_t>( RL_ACTION_DIM ) );
   if ( format_version >= 3 )
   {
     if ( offset + 4 > data.size() )

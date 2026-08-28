@@ -275,6 +275,24 @@ struct rl_weights_t
   std::vector<std::uint32_t> input_slots;         // empty == identity gather (network takes the full obs)
   std::uint32_t              allowed_actions = 0; // bit i set == action i statically allowed
 
+  // 222-07 (WR-01): `allowed_actions` is a u32 bitmask on the wire (RLW1's
+  // own encoding, mirrored by both `(allowed >> i) & 1u` call sites --
+  // solver_control.cpp's allow-list AND and load_rlw1's default-value
+  // computation) -- a shift count of i >= 32 is undefined behaviour, and on
+  // x86 silently wraps mod 32 rather than trapping. Refuse the widening at
+  // COMPILE time rather than papering over it at load time with a runtime
+  // `RL_ACTION_DIM >= 32` special case (that special case used to compute
+  // the "all actions allowed" default, which is legitimate v2/no-subset
+  // back-compat behaviour -- the bug was HOW it computed it, not that it
+  // did). Widen this field (e.g. to a byte array or a 64-bit word) before
+  // widening RL_ACTION_DIM past this ceiling; matches the Python side's own
+  // refusal (subsets.py::_MAX_ACTIONS = 32, rlw1.write_rlw1's
+  // `bit_length() > 32` check).
+  static_assert( RL_ACTION_DIM <= 32,
+                  "rl_policy: allowed_actions is a u32 bitmask -- RLW1's 32-action ceiling "
+                  "(subsets.py::_MAX_ACTIONS). Widen the wire field before widening the action "
+                  "set." );
+
   // WR-02 fix, cheap half (210-CR-FIX; widened Phase 213-TDL Task 1 for the
   // dueling bodies' branch heads; generalised Phase 222 NET-01 to an
   // arbitrary depth): forward()'s hidden-layer activation buffers, hoisted

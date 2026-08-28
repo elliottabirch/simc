@@ -629,6 +629,42 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
         mask[ i ] = static_cast<std::uint8_t>( mask[ i ] & ( ( allowed >> static_cast<std::uint32_t>( i ) ) & 1u ) );
     }
 
+    // 222-07 (CR-04): the allow-list AND above can manufacture an
+    // all-illegal mask that build_mask's own upstream refusal already
+    // passed -- 222-RESEARCH.md's Pitfall 16 names this exactly ("a
+    // background boundary has no legal wait" combined with a CONTROL arm's
+    // narrow allow-list makes the all-illegal state materially more
+    // reachable in the subset arms than in the full arm") and its
+    // recommendation is explicit: "re-assert AFTER the AND (both
+    // languages)". Python already does -- episode.py's post-AND
+    // EmptyMask raise, policy_loaders._policy's post-AND
+    // _assert_mask_not_empty. This mirrors both, on the C++ side, BEFORE
+    // forward()/masked_argmax ever see the mask.
+    //
+    // This is not defensive -- masked_argmax() does NOT fall back to
+    // index 0 on an all-illegal row (see its own definition below): every
+    // mask[i] is 0, so `1 - mask[i]` is 1 for every entry, every q[i] gets
+    // the IDENTICAL min_value penalty, ordering among entries is
+    // unchanged, and masked_argmax silently returns argmax(q) -- an
+    // ILLEGAL action, which the caller then executes via RL_ACTIONS[idx].
+    // For a wait-kind index that is an unanchored wait; for a cast-kind
+    // index it asks the engine to cast a spell build_mask just declared
+    // unusable -- the "not-ready-cast" class this project has already
+    // recorded as a ~0.9s engine FATAL. Fail closed here instead, by name.
+    {
+      bool any_legal = false;
+      for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+        any_legal = any_legal || ( mask[ i ] != 0 );
+      if ( !any_legal )
+      {
+        protocol_abort( fmt::format(
+            "solver_policy: every action is illegal after the blob's allowed_actions AND at "
+            "seq={} -- the arm's allow-list and the engine's legality gate have no action in "
+            "common here",
+            seq ) );
+      }
+    }
+
     float q[ RL_ACTION_DIM ];
     rl_policy::forward( *sim->solver_policy_weights, obs, mask, q );
 
@@ -649,10 +685,16 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       {
         // Collect the SAME legality list the greedy pick just read above --
         // never a freshly built one -- and draw uniformly among the legal
-        // indices. If none is legal, masked_argmax() already owns that
-        // degenerate case (it falls back to index 0); this block must not
-        // invent a second answer for it, so the greedy index is left alone
-        // and the flag is NOT set.
+        // indices. The all-illegal case cannot reach here (222-07/CR-04
+        // correction): the refusal added immediately after the allow-list
+        // AND, above, already protocol_abort()s before forward() or
+        // masked_argmax() ever run, so at least one mask[i] is guaranteed
+        // non-zero here and legal_indices is never empty. (masked_argmax()
+        // itself does NOT fall back to index 0 on an all-illegal row -- see
+        // its own definition below -- which is exactly why the refusal
+        // lives upstream of it rather than being left to it.) This block
+        // therefore still must not invent a second answer for the
+        // degenerate case; there is no degenerate case left to answer for.
         std::vector<int> legal_indices;
         for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
         {
