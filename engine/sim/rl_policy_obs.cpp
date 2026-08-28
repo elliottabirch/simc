@@ -1170,8 +1170,21 @@ enemy_handle_cache& get_enemy_handle_cache( const player_t* p, player_t* t )
     }
   }
 
+  // 220-08 WR-03 addendum: molten_weapon does NOT gate need_dot_scan on its
+  // own -- lava_lash is not yet in the RL action registry (action_leaves.
+  // lava_lash.* is dead-by-action-set until Phase 221), so under the
+  // in-process RL rig its dot practically never exists, and including it
+  // here would make need_dot_scan permanently true (a full dot_list scan
+  // EVERY call, for EVERY target, forever) the instant flame_shock/rune_of_
+  // unleashed_fire_lingering/venomfang all resolve -- exactly the WR-04
+  // perpetual-rescan problem, reintroduced by accident (measured: +9-10%
+  // mean_ns on the OBS-07 rig before this fix, confirmed reproducible
+  // across two runs). molten_weapon still rides the SAME scan loop below
+  // opportunistically whenever one happens for the other three reasons, so
+  // it is found for free the moment lava_lash starts being cast during a
+  // scan window -- it simply never independently triggers one.
   const bool need_dot_scan = c.flame_shock == nullptr ||
-      c.rune_of_unleashed_fire_lingering == nullptr || c.venomfang == nullptr || c.molten_weapon == nullptr;
+      c.rune_of_unleashed_fire_lingering == nullptr || c.venomfang == nullptr;
   if ( need_dot_scan )
   {
     for ( dot_t* d : t->dot_list )
