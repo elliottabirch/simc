@@ -369,6 +369,21 @@ enum class enemy_effect_leaf_kind
   dot_ticking, dot_remains, dot_tick_time, dot_tick_dmg, dot_pmultiplier
 };
 
+// 220-08 WR-03 (220-REVIEW.md): resolved ONCE per member at BIND time
+// (resolve_enemy_slot_leaf), never per decision -- build_obs indexes these
+// enums directly instead of re-comparing b.enemy_effect_name against a
+// 3-way/6-way string chain on every decision for every enemy slot. The
+// per-decision std::string comparisons this replaces were the exact class
+// of cost this file's own handle-table design otherwise avoids everywhere
+// else (220-04's acceptance criterion asserted "zero strcmp/str_compare_ci
+// in build_obs" without noticing operator== on b.enemy_effect_name is the
+// same work spelled differently -- this closes that gap).
+enum class enemy_dot_kind { unknown, flame_shock, rune_of_unleashed_fire_lingering, venomfang };
+enum class enemy_buff_kind
+{
+  unknown, burning_core, casting, flametongue_attack, lashing_flames, lightning_rod, venomfang_debuff
+};
+
 // 220-06 Task 3: the `action_leaves` family's own per-leaf dispatch.
 // `plain_expression` covers every leaf resolved through create_expression
 // (on the action OR the player, per resolve_action_leaf's own comment) --
@@ -406,7 +421,10 @@ struct slot_binding
   int enemy_slot_index = -1;                    // which of the 5 per-decision candidate slots (0-4)
   bool enemy_is_effect_leaf = false;             // false == the base actor leaf (present/distance/...)
   enemy_actor_leaf_kind enemy_actor_leaf = enemy_actor_leaf_kind::present;
-  std::string enemy_effect_name;                 // e.g. "flame_shock" -- only when enemy_is_effect_leaf
+  std::string enemy_effect_name;                 // e.g. "flame_shock" -- diagnostic only; build_obs
+                                                  // dispatches on the enums below, never this string
+  enemy_dot_kind enemy_dot = enemy_dot_kind::unknown;    // resolved once at bind (WR-03)
+  enemy_buff_kind enemy_buff = enemy_buff_kind::unknown; // resolved once at bind (WR-03)
   bool enemy_effect_is_dot = false;               // true == t->dot_list scan; false == t->buff_list scan
   enemy_effect_leaf_kind enemy_effect_leaf = enemy_effect_leaf_kind::debuff_stacks;
 
@@ -984,6 +1002,23 @@ slot_binding resolve_enemy_slot_leaf( const rl_obs_member& mem, const rl_leaf_de
   b.enemy_is_effect_leaf = true;
   b.enemy_effect_name = effect_name;
   b.enemy_effect_is_dot = is_dot;
+  if ( is_dot )
+  {
+    if ( effect_name == "flame_shock" )                              b.enemy_dot = enemy_dot_kind::flame_shock;
+    else if ( effect_name == "rune_of_unleashed_fire_lingering" )     b.enemy_dot = enemy_dot_kind::rune_of_unleashed_fire_lingering;
+    else if ( effect_name == "venomfang" )                            b.enemy_dot = enemy_dot_kind::venomfang;
+    else                                                               b.enemy_dot = enemy_dot_kind::unknown;
+  }
+  else
+  {
+    if ( effect_name == "burning_core" )                              b.enemy_buff = enemy_buff_kind::burning_core;
+    else if ( effect_name == "casting" )                              b.enemy_buff = enemy_buff_kind::casting;
+    else if ( effect_name == "flametongue_attack" )                   b.enemy_buff = enemy_buff_kind::flametongue_attack;
+    else if ( effect_name == "lashing_flames" )                       b.enemy_buff = enemy_buff_kind::lashing_flames;
+    else if ( effect_name == "lightning_rod" )                        b.enemy_buff = enemy_buff_kind::lightning_rod;
+    else if ( effect_name == "venomfang_debuff" )                     b.enemy_buff = enemy_buff_kind::venomfang_debuff;
+    else                                                               b.enemy_buff = enemy_buff_kind::unknown;
+  }
 
   if ( is_dot )
   {
@@ -1098,6 +1133,12 @@ struct enemy_handle_cache
   dot_t*  flame_shock = nullptr;
   dot_t*  rune_of_unleashed_fire_lingering = nullptr;
   dot_t*  venomfang = nullptr;
+  // 220-08 WR-03 (220-REVIEW.md): molten_weapon (lava_lash's residual,
+  // action_leaf_kind::dot_molten_weapon_*) reused this SAME per-target
+  // lazy cache instead of its own bespoke per-decision dot_list scan --
+  // same source==p predicate, same target-identity validation, no new
+  // caching mechanism.
+  dot_t*  molten_weapon = nullptr;
 };
 
 std::unordered_map<const player_t*, enemy_handle_cache> g_enemy_handle_cache;
@@ -1130,7 +1171,7 @@ enemy_handle_cache& get_enemy_handle_cache( const player_t* p, player_t* t )
   }
 
   const bool need_dot_scan = c.flame_shock == nullptr ||
-      c.rune_of_unleashed_fire_lingering == nullptr || c.venomfang == nullptr;
+      c.rune_of_unleashed_fire_lingering == nullptr || c.venomfang == nullptr || c.molten_weapon == nullptr;
   if ( need_dot_scan )
   {
     for ( dot_t* d : t->dot_list )
@@ -1143,6 +1184,8 @@ enemy_handle_cache& get_enemy_handle_cache( const player_t* p, player_t* t )
         c.rune_of_unleashed_fire_lingering = d;
       else if ( c.venomfang == nullptr && d->name_str == "venomfang" )
         c.venomfang = d;
+      else if ( c.molten_weapon == nullptr && d->name_str == "molten_weapon" )
+        c.molten_weapon = d;
     }
   }
 
@@ -1906,10 +1949,14 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t, flo
           enemy_handle_cache& hc = get_enemy_handle_cache( p, et );
           if ( b.enemy_effect_is_dot )
           {
-            dot_t* d = ( b.enemy_effect_name == "flame_shock" ) ? hc.flame_shock
-                     : ( b.enemy_effect_name == "rune_of_unleashed_fire_lingering" ) ? hc.rune_of_unleashed_fire_lingering
-                     : ( b.enemy_effect_name == "venomfang" ) ? hc.venomfang
-                     : nullptr;
+            dot_t* d = nullptr;
+            switch ( b.enemy_dot )
+            {
+              case enemy_dot_kind::flame_shock:                          d = hc.flame_shock; break;
+              case enemy_dot_kind::rune_of_unleashed_fire_lingering:     d = hc.rune_of_unleashed_fire_lingering; break;
+              case enemy_dot_kind::venomfang:                            d = hc.venomfang; break;
+              case enemy_dot_kind::unknown:                              d = nullptr; break;
+            }
             if ( d == nullptr || !d->is_ticking() )
             {
               status = lookup_status::absent;
@@ -1973,13 +2020,17 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t, flo
           }
           else
           {
-            buff_t* eb = ( b.enemy_effect_name == "burning_core" ) ? hc.burning_core
-                       : ( b.enemy_effect_name == "casting" ) ? hc.casting
-                       : ( b.enemy_effect_name == "flametongue_attack" ) ? hc.flametongue_attack
-                       : ( b.enemy_effect_name == "lashing_flames" ) ? hc.lashing_flames
-                       : ( b.enemy_effect_name == "lightning_rod" ) ? hc.lightning_rod
-                       : ( b.enemy_effect_name == "venomfang_debuff" ) ? hc.venomfang_debuff
-                       : nullptr;
+            buff_t* eb = nullptr;
+            switch ( b.enemy_buff )
+            {
+              case enemy_buff_kind::burning_core:          eb = hc.burning_core; break;
+              case enemy_buff_kind::casting:                eb = hc.casting; break;
+              case enemy_buff_kind::flametongue_attack:     eb = hc.flametongue_attack; break;
+              case enemy_buff_kind::lashing_flames:         eb = hc.lashing_flames; break;
+              case enemy_buff_kind::lightning_rod:          eb = hc.lightning_rod; break;
+              case enemy_buff_kind::venomfang_debuff:       eb = hc.venomfang_debuff; break;
+              case enemy_buff_kind::unknown:                eb = nullptr; break;
+            }
             if ( eb == nullptr || eb->check() <= 0 )
             {
               status = lookup_status::absent;
@@ -2040,18 +2091,12 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t, flo
             case action_leaf_kind::dot_molten_weapon_ticking:
             case action_leaf_kind::dot_molten_weapon_remains:
             {
-              dot_t* mw = nullptr;
-              if ( p->target != nullptr )
-              {
-                for ( dot_t* d : p->target->dot_list )
-                {
-                  if ( d->source == p && d->name_str == "molten_weapon" )
-                  {
-                    mw = d;
-                    break;
-                  }
-                }
-              }
+              // 220-08 WR-03: reuses the SAME per-target lazy handle cache
+              // enemy_slots' effect leaves already use -- no per-decision
+              // string comparison, and no new caching mechanism (get_enemy_
+              // handle_cache validates target identity on every call, same
+              // as every other consumer of this cache).
+              dot_t* mw = ( p->target != nullptr ) ? get_enemy_handle_cache( p, p->target ).molten_weapon : nullptr;
               if ( mw == nullptr || !mw->is_ticking() )
               {
                 status = lookup_status::absent;
