@@ -117,7 +117,7 @@ inline constexpr std::uint32_t FORMAT_VERSION = 4u;
 // honest: RECORD_SIZE(W) = roundup8(35 + 4*W), so a mistyped literal
 // cannot silently drift from the formula and still compile (tstl 220-03,
 // OBS-06).
-inline constexpr std::uint32_t RECORD_SIZE = 1584u;
+inline constexpr std::uint32_t RECORD_SIZE = 808u;
 static_assert( RECORD_SIZE == ( ( 35u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) + 7u ) / 8u ) * 8u,
                "RECORD_SIZE must be roundup8(35 + 4*RL_OBS_DIM)" );
 static_assert( RL_OBS_DIM >= 4, "footer_record's zero40[RL_OBS_DIM-3] needs at least one element" );
