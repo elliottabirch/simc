@@ -107,14 +107,19 @@ struct rl_state_t
   double fight_remains        = 0.0;   bool has_fight_remains        = false;
   double raid_event_next_in   = 0.0;   bool has_raid_event_next_in   = false;
 
-  // 221-01 (ACT-02, Pattern 1) -- the engine-truth legality layer, action-id
-  // order, exactly RL_ACTION_DIM wide. Filled by read_state() calling
-  // read_action_gate_bits() below (the ONE computation both this POD and
-  // decision_dump::write_state_fields() share). `build_mask` (still PURE
-  // over this POD, no player_t*) ANDs these into Layer 1's declarative
-  // rules for every `kind == cast` candidate. A `wait` action's slot is
-  // left at its default 0 -- `build_mask` never reads it (wait actions
-  // resolve to no `action_t*` and skip the engine-truth AND entirely).
+  // 221-01 (ACT-02, Pattern 1), RECOMPOSED 260831-lg6 (D-1) -- the
+  // engine-truth legality layer, action-id order, exactly RL_ACTION_DIM
+  // wide. Filled by read_state() calling read_action_gate_bits() below
+  // (the ONE computation both this POD and decision_dump::
+  // write_state_fields() share). `build_mask` (still PURE over this POD,
+  // no player_t*) treats these bits as AUTHORITATIVE for every
+  // `kind == cast` candidate -- when present (ALWAYS, for this POD; there
+  // is no absent-bits state here, unlike mask.py's Python side) they
+  // alone decide the verdict, the declarative buff-gate/cooldown-row
+  // rules are retired dead code kept as comments (see build_mask's own
+  // R0 comment in rl_policy_obs.cpp for the full rationale). A `wait`
+  // action's slot is left at its default 0 -- `build_mask` never reads it
+  // (wait actions resolve to no `action_t*` and skip R0 entirely).
   std::uint8_t action_resolvable[ RL_ACTION_DIM ] = {};
   std::uint8_t action_ready     [ RL_ACTION_DIM ] = {};
 

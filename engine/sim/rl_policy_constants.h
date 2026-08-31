@@ -105,7 +105,7 @@ inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
 inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v2:0a1f5127c18ee7d72e45f52040f56233da2c43aa38dff2541b7491990bc3fa6a";
-inline constexpr const char* RL_MASK_RULES_SHA = "25c87a07570a5855cf5558302d90ba73557c0476ad57d62c117ccaa186f02243";
+inline constexpr const char* RL_MASK_RULES_SHA = "e7b395d2886a54529bf3a86581492ebe69eec56aa1e4abfce670d68c808cb7be";
 inline constexpr const char* RL_ACTION_SPACE_SHA = "1fadf4ed553b45e704d773719ab238e618eee4e35df9cd6a9a993636ff008665";
 
 // ---- Observation name list (the materialised ordering) ----
