@@ -2670,7 +2670,11 @@ double clamp_anchored_wait_pre_floor( const rl_state_t& s, double raw )
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
-// build_mask -- REAL, all four rules, mirroring mask.py:133-172 exactly.
+// build_mask -- mirrors mask.py:legal() exactly (260831-lg6, D-1): R1's
+// wait rule, then for kind=="cast" R0's engine truth is AUTHORITATIVE
+// (the POD's arrays are always filled, so R2/R3/R4/R5's old AND
+// composition is retired dead code, kept as comments below, never a
+// live branch).
 // ---------------------------------------------------------------------------
 
 void build_mask( const rl_state_t& s, std::uint8_t out_mask[ RL_ACTION_DIM ] )
@@ -2722,90 +2726,80 @@ void build_mask( const rl_state_t& s, std::uint8_t out_mask[ RL_ACTION_DIM ] )
       continue;
     }
 
-    // R0: engine-truth AND (221-01, Pattern 1) -- evaluated FIRST, before
-    // even R2's buff gate below. `s.action_resolvable`/`s.action_ready`
-    // were computed ONCE in read_state() via read_action_gate_bits(),
-    // through the SAME resolver (solver_control::resolve_action) that
-    // accept_cast() uses before its own not-ready FATAL -- a not-
-    // resolvable or not-ready action per the engine's own truth is denied
-    // here regardless of what the declarative rules below would otherwise
-    // say. `build_mask` stays PURE over the rl_state_t POD (no player_t*
-    // parameter, unchanged) -- these bits are READ from the POD, never
-    // computed here.
+    // R0: engine truth is AUTHORITATIVE (260831-lg6, D-1 -- RECOMPOSED from
+    // the prior 221-01 AND). `s.action_resolvable`/`s.action_ready` were
+    // computed ONCE in read_state() via read_action_gate_bits(), through
+    // the SAME resolver (solver_control::resolve_action) that
+    // accept_cast() uses before its own not-ready FATAL. `build_mask`
+    // stays PURE over the rl_state_t POD (no player_t* parameter,
+    // unchanged) -- these bits are READ from the POD, never computed here.
+    //
+    // Under the OLD (221-01) composition, R2/R3/R4/R5 below were ANDed on
+    // top of this bit even when it was already true. 260831-lg6 measured
+    // (R-1..R-4 in that quick task's PLAN.md) that `action_ready[i]` IS
+    // `accept_cast`'s own predicate through the SAME resolver, so it is
+    // already necessary and sufficient for FATAL-safety; every declarative
+    // rule below is either a coarser restatement of a `ready()` override
+    // this bit already executes, or reads an object a proc-driven bypass
+    // has already moved the action away from (a cooldown-POINTER swap the
+    // declarative `cooldowns` dump never even emits). ANDing a narrower-
+    // or-wrong declarative rule on top of an already-correct engine
+    // verdict can only ever make the mask MORE illegal than the engine
+    // actually is, never less -- so when this bit is true, it is now THE
+    // WHOLE VERDICT: `out_mask[i] = 1` immediately, R2/R3/R4/R5 NOT
+    // evaluated at all for this action.
+    //
+    // Unlike mask.py's Python side, there is NO absent-bits fallback here:
+    // `s.action_resolvable`/`s.action_ready` are POD MEMBERS, always
+    // filled by read_state() before build_mask() ever runs (never null,
+    // never absent) -- so the declarative fallback Python keeps for "no
+    // engine truth on this wire" (old dumps, the golden-encode fixture,
+    // probes/blindfold.py) has NO C++ counterpart BY CONSTRUCTION. The
+    // R2/R3/R4/R5 blocks below are kept as COMMENTS, never silently
+    // deleted, each naming the engine `ready()` predicate that subsumes it
+    // -- a reader can see WHAT dead code this recomposition retired and
+    // WHY, without re-deriving it from the git history.
     if ( !s.action_resolvable[ i ] || !s.action_ready[ i ] )
     {
       out_mask[ i ] = 0;
       continue;
     }
 
-    // R2: buff gate (mask.py's maskRules.buffGates). FAIL-CLOSED,
-    // evaluated next -- and deliberately the OPPOSITE polarity to R3's
-    // absent-cooldown-row rule below. mask.py's own capitalized warning,
-    // reproduced verbatim in substance: an unsatisfied buff gate means
-    // "the engine will refuse this cast" (restrictive is correct), while
-    // an absent cooldown row means "this action has no cooldown"
-    // (permissive is correct). DO NOT HARMONISE THE TWO.
-    bool denied = false;
-    for ( std::size_t g = 0; g < RL_BUFF_GATE_COUNT; ++g )
-    {
-      const rl_buff_gate& gate = RL_BUFF_GATES[ g ];
-      if ( a.token == nullptr || std::strcmp( gate.action_token, a.token ) != 0 )
-        continue;
-      const buff_reading* b = s.find_buff( gate.buff_name );
-      const bool present = ( b != nullptr && b->present );
-      if ( gate.forbidden )
-      {
-        // forbiddenBuff: deny when the named buff IS present.
-        if ( present )
-          denied = true;
-      }
-      else
-      {
-        // requiresBuff: deny when the named buff is ABSENT.
-        if ( !present )
-          denied = true;
-      }
-    }
-    if ( denied )
-    {
-      out_mask[ i ] = 0;
-      continue;
-    }
+    // R2 (RETIRED, subsumed by R0 above): buff gate (mask.py's
+    // maskRules.buffGates) used to be ANDed here, fail-closed. Every
+    // registered buffGates entry is a transcription of a shaman
+    // `ready()` override that `a->ready()` -- and therefore R0's
+    // `action_ready` bit -- already calls virtually: stormstrike_t,
+    // windstrike_t, sundering_t, primordial_storm_t, lightning_bolt_t,
+    // tempest_t (all six in `~/code/simc/engine/class_modules/
+    // sc_shaman.cpp`). R0 is strictly MORE precise than this declarative
+    // buff-presence-only check for at least one of the six (windstrike_t's
+    // real predicate additionally refuses in the LAST FRACTION of an
+    // Ascendance window, `remains() <= queue_delay()`, which a bare
+    // buff-presence gate cannot express at all) -- see mask.py's own
+    // docstring, R-3, for the full receipt trail.
 
-    // R3/R4: cooldown-row legality. "A cast action WITHOUT a cooldownRow,
-    // OR whose named row is ABSENT from request['cooldowns']: legal."
-    // Deliberate FAIL-OPEN exception to this repo's usual fail-closed
-    // mask convention (mask.py:22-32) -- do not harmonise with R2 above.
-    // Captured into a bool (rather than an early `continue`, as before
-    // 221-01) so R5 below can AND the shared cooldown row on top of it.
-    bool own_row_ready = true;
-    if ( a.cooldown_row != nullptr )
-    {
-      const cooldown_reading* row = s.find_cooldown( a.cooldown_row );
-      own_row_ready = ( row == nullptr ) ? true : cd_ready_now( *row );
-    }
-    if ( !own_row_ready )
-    {
-      out_mask[ i ] = 0;
-      continue;
-    }
+    // R3/R4 (RETIRED, subsumed by R0 above): the action's own
+    // `cooldown_row` readiness (`action_t::ready()`'s
+    // `if ( !cooldown->is_ready() ) return false;`, `action.cpp:2634` at
+    // the pin this recomposition landed against) used to be checked here
+    // via `s.find_cooldown(a.cooldown_row)` + `cd_ready_now(...)`. This is
+    // the rule R-2 measured as WRONG for a proc-driven cooldown-pointer
+    // swap: the action's `cooldown` member can be reassigned to a bypass
+    // row the declarative dump never even emits (the row is created with
+    // no duration, so decision_dump.cpp's `duration <= 0` skip drops it
+    // entirely) -- `a->ready()` dereferences whichever object the pointer
+    // ACTUALLY names, which R0's `action_ready` bit already reflects
+    // through the same resolver `accept_cast` uses.
 
-    // R5: shared cooldown row AND (221-01, Pattern 1) -- when this action
-    // declares `cooldown_row_shared` (e.g. a trinket sharing an item-
-    // cooldown-category row with a sibling trinket), that row must ALSO
-    // read ready. Keeps the SAME fail-open reading R3/R4 use for the own
-    // row: a shared row ABSENT from `s.cooldowns` means "this shared-
-    // cooldown group has never started" and does not deny -- this only
-    // ANDs in a PRESENT-but-not-ready shared row.
-    if ( a.cooldown_row_shared != nullptr )
-    {
-      const cooldown_reading* shared_row = s.find_cooldown( a.cooldown_row_shared );
-      if ( shared_row != nullptr && !cd_ready_now( *shared_row ) )
-      {
-        out_mask[ i ] = 0;
-        continue;
-      }
-    }
+    // R5 (RETIRED, subsumed by R0 above): shared cooldown row AND (221-01,
+    // Pattern 1) -- `cooldown_row_shared` readiness used to be ANDed on
+    // top of the own-row rule. `use_item_t::ready()`
+    // (`~/code/simc/engine/player/player.cpp`, `bool ready() override`
+    // near line 10251) already returns false when
+    // `cooldown_group->remains() > 0` before falling through to
+    // `action_t::ready()` -- R0's bit already executes this through the
+    // same resolver.
 
     // Deliberately NOT evaluated here: RL_TALENT_GATES[] (221-01,
     // ACT-01/ACT-02). Talent legality is DECLARATIVE data for the
