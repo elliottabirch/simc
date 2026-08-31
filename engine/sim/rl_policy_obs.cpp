@@ -478,7 +478,9 @@ enum class direct_id
   // sim_auras
   sim_aura_skyfury,
   // scalars (Task 3)
-  raid_event_next_in
+  raid_event_next_in,
+  // scalars (260831-0hh, BL-02)
+  time_to_bloodlust
 };
 
 // rl_family_kind::cooldown's own `direct`-style dispatch (220-05 Task 2):
@@ -733,6 +735,15 @@ slot_binding resolve_scalar_leaf( const rl_leaf_desc& leaf )
     // that switch arm's own comment for the missing-substitution rule.
     b.kind = slot_binding_kind::direct;
     b.direct = direct_id::raid_event_next_in;
+    return b;
+  }
+  if ( std::strcmp( leaf.leaf, "time_to_bloodlust" ) == 0 )
+  {
+    // 260831-0hh (BL-02): engine-emitted countdown, computed in build_obs
+    // via player_t::calculate_time_to_bloodlust() -- never through
+    // create_expression, mirroring raid_event_next_in's own direct dispatch.
+    b.kind = slot_binding_kind::direct;
+    b.direct = direct_id::time_to_bloodlust;
     return b;
   }
   // anything else this task does not bind.
@@ -2099,6 +2110,19 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t, flo
               status = lookup_status::present;
               break;
             }
+
+            // 260831-0hh (BL-02): engine-emitted bloodlust countdown. Uses
+            // the member function, not a raw sim->bloodlust_time -
+            // current_time() -- calculate_time_to_bloodlust() correctly
+            // suppresses an Exhaustion-locked bloodlust (player.cpp:
+            // 12880-12886) and its "no future bloodlust" sentinel return
+            // (3 * expected_iteration_time) is benign under this leaf's
+            // clipDiv scaler (saturates to 1.0, needs no substitution,
+            // unlike raid_event_next_in above).
+            case direct_id::time_to_bloodlust:
+              raw = p->calculate_time_to_bloodlust();
+              status = lookup_status::present;
+              break;
 
             default:
               status = lookup_status::absent;
