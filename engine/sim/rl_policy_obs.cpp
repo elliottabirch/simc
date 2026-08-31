@@ -2532,11 +2532,18 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
 // `return remains <= 0.0` fallback -- is the ENTIRE single-charge contract,
 // not a default to trim. Losing it makes every single-charge spell read as
 // permanently castable.
+//
+// 260831-lg6 (D-1): build_mask's own R3/R4/R5 call sites (the only callers
+// in this file) were retired -- engine truth is authoritative there now,
+// so this function has no live caller left. Kept defined, never deleted
+// (same "comment, not silent deletion" discipline as build_mask's own
+// retired blocks), `[[maybe_unused]]` to keep the build warning-clean
+// rather than pretending a caller still exists.
 // ---------------------------------------------------------------------------
 
 namespace
 {
-bool cd_ready_now( const cooldown_reading& row )
+[[maybe_unused]] bool cd_ready_now( const cooldown_reading& row )
 {
   // A JSON null `remains` coerces to 0.0, i.e. ready -- so an absent
   // has_remains reads as ready, matching `.get("remains", 0.0) or 0.0`.
