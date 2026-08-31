@@ -582,47 +582,60 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
   {
     const bool foreground = ( et == execute_type::FOREGROUND );
 
-    // tstl-sylvanas phase 220, plan 220-01 (OBS-07). rl_obs_timing=1 wraps
+    // tstl-sylvanas phase 220, plan 220-01 (OBS-07), REORDERED by
+    // 260831-mk7 (D-3, mask-as-input): rl_obs_timing=1 still wraps
     // read_state+build_obs -- and ONLY that pair, not build_mask/forward --
-    // in a steady_clock stopwatch. The clock calls themselves are guarded
-    // on the flag: when the option is off this takes ZERO samples, not two
-    // samples it throws away. See sim.hpp's rl_obs_timing/rl_obs_ns doc
-    // comment for why no mutex is needed on the push below.
+    // in a steady_clock stopwatch, but the two calls are no longer
+    // adjacent (build_mask, the allow-list AND, and the all-illegal
+    // refusal now run BETWEEN them, because build_obs needs the FINAL
+    // mask to fill its own trailing `legality` family). The span is
+    // therefore taken as TWO SEGMENTS -- read_state's own elapsed time
+    // plus build_obs's own elapsed time -- and pushed as their SUM, so the
+    // 220-01 pin ("read_state+build_obs, and ONLY that pair") stays
+    // honestly true of what is actually measured, never silently widened
+    // to swallow build_mask/the AND/the refusal in between. The clock
+    // calls themselves are guarded on the flag: when the option is off
+    // this takes ZERO samples, not samples it throws away. See sim.hpp's
+    // rl_obs_timing/rl_obs_ns doc comment for why no mutex is needed on
+    // the push below.
     const bool obs_timing = sim->rl_obs_timing;
-    const chrono::wall_clock::time_point obs_t0 =
-        obs_timing ? chrono::wall_clock::now() : chrono::wall_clock::time_point{};
 
     // tstl-sylvanas phase 220, plan 220-04 (OBS-02/OBS-07). bind_slots() is
     // resolved ONCE per actor (a file-static cache keyed on `const
     // player_t*` inside rl_policy_obs.cpp) and is amortised across the
     // whole run -- called here, BEFORE read_state, and deliberately OUTSIDE
-    // the rl_obs_timing stopwatch below, which still spans exactly
-    // read_state+build_obs as plan 220-01 pinned it.
+    // the rl_obs_timing stopwatch, which spans only read_state+build_obs
+    // (see the two-segment note above).
     const rl_policy::slot_table& table = rl_policy::bind_slots( p );
 
+    const chrono::wall_clock::time_point read_state_t0 =
+        obs_timing ? chrono::wall_clock::now() : chrono::wall_clock::time_point{};
     const rl_policy::rl_state_t state = rl_policy::read_state( p, foreground );
-
-    float obs[ RL_OBS_DIM ];
-    rl_policy::build_obs( p, state, table, obs );
-
+    std::chrono::nanoseconds obs_timing_ns{ 0 };
     if ( obs_timing )
     {
-      const chrono::wall_clock::time_point obs_t1 = chrono::wall_clock::now();
-      sim->rl_obs_ns.push_back(
-          std::chrono::duration_cast<std::chrono::nanoseconds>( obs_t1 - obs_t0 ).count() );
+      const chrono::wall_clock::time_point read_state_t1 = chrono::wall_clock::now();
+      obs_timing_ns += std::chrono::duration_cast<std::chrono::nanoseconds>( read_state_t1 - read_state_t0 );
     }
 
+    // 260831-mk7 (D-3): build_mask MOVES UP, ahead of build_obs -- the
+    // engine's own order is now read_state -> build_mask -> [allow-list
+    // AND] -> [all-illegal refusal] -> build_obs -> forward, matching
+    // episode.py's Python-side D-04 site (mask.legal() computed before
+    // obs.encode()) and this quick task's own top-of-file order comment.
     std::uint8_t mask[ RL_ACTION_DIM ];
     rl_policy::build_mask( state, mask );
     // NET-01 (arm subsets, Phase 222): a config-declared action allow-list,
     // carried on the loaded blob, ANDed ONCE here so every downstream
-    // consumer -- masked_argmax below, the epsilon draw's legal_indices,
-    // the Q-margin/top_q diagnostics, and record_decision's translog row --
-    // sees the SAME restricted mask. build_mask stays PURE over the POD
-    // (unchanged, Phase 221's own ruling); the translog therefore records
-    // the RESTRICTED mask alongside the FULL-width obs, which is exactly
-    // right: the log stays arm-independent and the Python side does its own
-    // gather.
+    // consumer -- build_obs's own legality slots below, masked_argmax, the
+    // epsilon draw's legal_indices, the Q-margin/top_q diagnostics, and
+    // record_decision's translog row -- sees the SAME restricted mask.
+    // build_mask stays PURE over the POD (unchanged, Phase 221's own
+    // ruling); the translog therefore records the RESTRICTED mask
+    // alongside the obs vector whose OWN legality slots now carry this
+    // SAME restricted mask too (260831-mk7) -- the log stays arm-
+    // independent and the Python side does its own gather for everything
+    // EXCEPT the legality slots, which are baked in at this width already.
     {
       const std::uint32_t allowed = sim->solver_policy_weights->allowed_actions;
       for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
@@ -639,7 +652,9 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // languages)". Python already does -- episode.py's post-AND
     // EmptyMask raise, policy_loaders._policy's post-AND
     // _assert_mask_not_empty. This mirrors both, on the C++ side, BEFORE
-    // forward()/masked_argmax ever see the mask.
+    // build_obs/forward()/masked_argmax ever see the mask (260831-mk7:
+    // this refusal now ALSO gates what build_obs's own legality slots
+    // would otherwise bake in from an all-illegal, misleading mask).
     //
     // This is not defensive -- masked_argmax() does NOT fall back to
     // index 0 on an all-illegal row (see its own definition below): every
@@ -663,6 +678,19 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
             "common here",
             seq ) );
       }
+    }
+
+    // 260831-mk7 (D-1/D-3): build_obs now takes the FINAL mask (post-AND,
+    // post-refusal) and fills its own trailing `legality` family from it.
+    const chrono::wall_clock::time_point build_obs_t0 =
+        obs_timing ? chrono::wall_clock::now() : chrono::wall_clock::time_point{};
+    float obs[ RL_OBS_DIM ];
+    rl_policy::build_obs( p, state, table, mask, obs );
+    if ( obs_timing )
+    {
+      const chrono::wall_clock::time_point build_obs_t1 = chrono::wall_clock::now();
+      obs_timing_ns += std::chrono::duration_cast<std::chrono::nanoseconds>( build_obs_t1 - build_obs_t0 );
+      sim->rl_obs_ns.push_back( obs_timing_ns.count() );
     }
 
     float q[ RL_ACTION_DIM ];

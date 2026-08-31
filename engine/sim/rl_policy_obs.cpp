@@ -446,6 +446,7 @@ enum class slot_binding_kind
   action_expression,
   enemy_slot,
   direct,
+  legality,   // 260831-mk7 (D-1/D-2): the mask-as-input legality family
   unresolved
 };
 
@@ -572,6 +573,13 @@ struct slot_binding
   action_t* bound_action = nullptr;              // non-owning; the engine owns every action_t
   action_state_t* shared_action_state = nullptr; // non-owning; owned by slot_table::owned_action_states,
                                                   // shared by all three shared_* leaves of this SAME action
+
+  // kind == legality (260831-mk7, D-1/D-2): the action index this slot's
+  // ordinal member name resolves to -- parsed ONCE at bind time from
+  // `mem.member` ("00".."25"), never re-parsed per decision. -1 means
+  // unresolved (caught by the bind-time dispatch below, which never
+  // constructs a `legality`-kind binding with this left at -1).
+  int legality_action_index = -1;
 };
 
 struct slot_table
@@ -748,6 +756,36 @@ slot_binding resolve_scalar_leaf( const rl_leaf_desc& leaf )
   }
   // anything else this task does not bind.
   b.kind = slot_binding_kind::unresolved;
+  return b;
+}
+
+// rl_family_kind::legality resolution (260831-mk7, D-1/D-2): one member per
+// declared action, member NAME is a zero-padded ORDINAL INDEX -- never an
+// action token (the census artifact's own derivation rule, mirrored here:
+// genericity.selftest.py's Half-1 token derivation would otherwise promote
+// action labels to forbidden tokens). The ordinal in the member name IS the
+// action index -- parsed here, once, at bind time via strtol, never
+// re-parsed per decision and never derived from a second source (no
+// engine handle to resolve at all: build_obs reads the CALLER's own
+// already-computed `mask` argument directly at this index, D-3).
+slot_binding resolve_legality_leaf( const char* member_name, const rl_leaf_desc& leaf )
+{
+  slot_binding b;
+  b.leaf = &leaf;
+  char* end = nullptr;
+  long parsed = std::strtol( member_name, &end, 10 );
+  if ( member_name[ 0 ] == '\0' || end == member_name || *end != '\0' || parsed < 0 ||
+       static_cast<std::size_t>( parsed ) >= RL_ACTION_DIM )
+  {
+    // A generator/artifact mismatch (a non-numeric or out-of-range member
+    // name under a family declaring materializedFromActions), not a
+    // runtime data problem -- unresolved, matching every other resolver's
+    // own convention for a shape it cannot bind.
+    b.kind = slot_binding_kind::unresolved;
+    return b;
+  }
+  b.kind = slot_binding_kind::legality;
+  b.legality_action_index = static_cast<int>( parsed );
   return b;
 }
 
@@ -1757,6 +1795,10 @@ const slot_table& bind_slots( player_t* p )
             // 220-06 Task 3 -- see resolve_action_leaf's own comment.
             binding = resolve_action_leaf( p, mem.engine_token, leaf, table );
             break;
+          case rl_family_kind::legality:
+            // 260831-mk7 (D-1/D-2) -- see resolve_legality_leaf's own comment.
+            binding = resolve_legality_leaf( mem.member, leaf );
+            break;
           default:
             binding.kind = slot_binding_kind::unresolved;
             binding.leaf = &leaf;
@@ -1817,7 +1859,8 @@ const slot_table& bind_slots( player_t* p )
 // buff binding means) was already decided once, at bind time, above.
 // ---------------------------------------------------------------------------
 
-void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t, float out_obs[ RL_OBS_DIM ] )
+void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
+                const std::uint8_t mask[ RL_ACTION_DIM ], float out_obs[ RL_OBS_DIM ] )
 {
   // 220-06 Task 1: the enemy-slot candidate array is computed ONCE per
   // decision here, never per slot -- see compute_enemy_slot_candidates' own
@@ -2398,6 +2441,20 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t, flo
               status = lookup_status::absent;
               break;
           }
+          break;
+        }
+        case slot_binding_kind::legality:
+        {
+          // 260831-mk7 (D-1/D-3): reads the CALLER's own already-computed
+          // `mask` argument directly at this slot's own action index --
+          // POST allow-list AND, POST the all-illegal refusal (the caller,
+          // solver_control.cpp, computes and finalizes `mask` BEFORE
+          // calling build_obs now -- see rl_policy.hpp's own updated
+          // build_obs doc comment). Never a second legality computation:
+          // this is exactly the same bits masked_argmax/the epsilon draw/
+          // record_decision's own packed-mask column see.
+          raw = mask[ b.legality_action_index ] != 0 ? 1.0 : 0.0;
+          status = lookup_status::present;
           break;
         }
         case slot_binding_kind::unresolved:

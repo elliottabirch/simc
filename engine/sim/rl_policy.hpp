@@ -187,11 +187,25 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground );
 const slot_table& bind_slots( player_t* p );
 
 // ---- Stage 2 ----
-// build_mask/build_wait remain PURE over the rl_state_t POD (unchanged).
+// build_mask/build_wait remain PURE over the rl_state_t POD (unchanged --
+// 260831-mk7 does not touch this purity contract; it adds a PARAMETER to
+// build_obs, it does not move any legality logic into build_mask).
 // build_obs now ALSO reads the engine directly through `t`'s resolved
 // handles and, for a `direct` binding, through `p` itself -- see this
 // header's own updated "Stage 2" comment above.
-void        build_obs ( const player_t* p, const rl_state_t& s, const slot_table& t, float out_obs[ RL_OBS_DIM ] );
+//
+// 260831-mk7 (D-1/D-3, mask-as-input): `mask` is the CALLER's own
+// already-computed legality mask -- POST allow-list AND, POST the
+// all-illegal refusal (solver_control.cpp's own read_state -> build_mask
+// -> [allow-list AND] -> [all-illegal refusal] -> build_obs order, moved
+// from the pre-mk7 read_state -> build_obs -> build_mask order). build_obs
+// fills the trailing `legality` family's slots directly from `mask`, one
+// float (0.0f/1.0f) per action index, resolved at bind time from the
+// slot's own ordinal member name (rl_policy_obs.cpp's own bind-time
+// dispatch) -- never a second legality computation, and never a reason to
+// widen `rl_state_t`'s own POD (the mask is passed by reference, not
+// copied into the state struct).
+void        build_obs ( const player_t* p, const rl_state_t& s, const slot_table& t, const std::uint8_t mask[ RL_ACTION_DIM ], float out_obs[ RL_OBS_DIM ] );
 void        build_mask( const rl_state_t& s, std::uint8_t out_mask[ RL_ACTION_DIM ] );
 wait_result build_wait( const rl_state_t& s, const rl_wait_anchor& anchor );
 

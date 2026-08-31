@@ -20,8 +20,8 @@
 
 // ---- Fixed structural preamble (structure, not registry data) ----
 
-enum class rl_family { player_buffs, cooldowns, enemy_slots, action_leaves, deck, stats, swing_cast, position, pets, items, raid_events, sim_auras, scalars };
-enum class rl_family_kind { buff, cooldown, enemy_slot, action_expression, expression, direct, scalar };
+enum class rl_family { player_buffs, cooldowns, enemy_slots, action_leaves, deck, stats, swing_cast, position, pets, items, raid_events, sim_auras, legality, scalars };
+enum class rl_family_kind { buff, cooldown, enemy_slot, action_expression, expression, direct, legality, scalar };
 enum class rl_kind { k_int, k_float, k_seconds, k_bucket };
 enum class rl_action_kind { cast, wait };
 // 221-03 (ACT-05/ACT-06): the four declared anchor kinds a kind==wait action may carry; `none` reproduces today's next-event-minimum build_wait() behaviour byte-for-byte.
@@ -99,14 +99,14 @@ struct rl_talent_gate
 inline constexpr const char* RL_REGISTRY_ID = "enhancement";
 inline constexpr const char* RL_ACTOR_NAME = "MID2_Shaman_Enhancement_Stormbringer";
 inline constexpr int RL_ENCODER_VERSION = 2;
-inline constexpr std::size_t RL_OBS_DIM = 210;
-inline constexpr std::size_t RL_ACTION_DIM = 24;
+inline constexpr std::size_t RL_OBS_DIM = 236;
+inline constexpr std::size_t RL_ACTION_DIM = 26;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
-inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v2:7313a2490cea27a71a103c0214616ed321fca720aa861f00bd469ec5893a69de";
+inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v2:0a1f5127c18ee7d72e45f52040f56233da2c43aa38dff2541b7491990bc3fa6a";
 inline constexpr const char* RL_MASK_RULES_SHA = "25c87a07570a5855cf5558302d90ba73557c0476ad57d62c117ccaa186f02243";
-inline constexpr const char* RL_ACTION_SPACE_SHA = "54fb0e9886e0c73b6980dc9e48b8de9d2c8430f194fee43d9316ac8c1e6ccf10";
+inline constexpr const char* RL_ACTION_SPACE_SHA = "1fadf4ed553b45e704d773719ab238e618eee4e35df9cd6a9a993636ff008665";
 
 // ---- Observation name list (the materialised ordering) ----
 
@@ -316,6 +316,32 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "raid_events.raid_move.remains",
   "raid_events.raid_move.distance",
   "raid_events.raid_move.up",
+  "legality.00.flag",
+  "legality.01.flag",
+  "legality.02.flag",
+  "legality.03.flag",
+  "legality.04.flag",
+  "legality.05.flag",
+  "legality.06.flag",
+  "legality.07.flag",
+  "legality.08.flag",
+  "legality.09.flag",
+  "legality.10.flag",
+  "legality.11.flag",
+  "legality.12.flag",
+  "legality.13.flag",
+  "legality.14.flag",
+  "legality.15.flag",
+  "legality.16.flag",
+  "legality.17.flag",
+  "legality.18.flag",
+  "legality.19.flag",
+  "legality.20.flag",
+  "legality.21.flag",
+  "legality.22.flag",
+  "legality.23.flag",
+  "legality.24.flag",
+  "legality.25.flag",
   "fight_remains",
   "active_enemies",
   "t",
@@ -857,10 +883,117 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_RAID_EVENTS_MEMBERS[] = {
   { "raid_move", "movement", RL_OBS_FAMILY_RAID_EVENTS_LEAVES_1, 4 },
 };
 
-inline constexpr double RL_BUCKETS_SLOT206[] = { 1.0, 2.0, 5.0 };
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_0[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_1[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_2[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_3[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_4[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_5[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_6[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_7[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_8[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_9[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_10[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_11[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_12[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_13[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_14[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_15[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_16[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_17[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_18[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_19[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_20[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_21[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_22[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_23[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_24[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_25[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_obs_member RL_OBS_FAMILY_LEGALITY_MEMBERS[] = {
+  { "00", "00", RL_OBS_FAMILY_LEGALITY_LEAVES_0, 1 },
+  { "01", "01", RL_OBS_FAMILY_LEGALITY_LEAVES_1, 1 },
+  { "02", "02", RL_OBS_FAMILY_LEGALITY_LEAVES_2, 1 },
+  { "03", "03", RL_OBS_FAMILY_LEGALITY_LEAVES_3, 1 },
+  { "04", "04", RL_OBS_FAMILY_LEGALITY_LEAVES_4, 1 },
+  { "05", "05", RL_OBS_FAMILY_LEGALITY_LEAVES_5, 1 },
+  { "06", "06", RL_OBS_FAMILY_LEGALITY_LEAVES_6, 1 },
+  { "07", "07", RL_OBS_FAMILY_LEGALITY_LEAVES_7, 1 },
+  { "08", "08", RL_OBS_FAMILY_LEGALITY_LEAVES_8, 1 },
+  { "09", "09", RL_OBS_FAMILY_LEGALITY_LEAVES_9, 1 },
+  { "10", "10", RL_OBS_FAMILY_LEGALITY_LEAVES_10, 1 },
+  { "11", "11", RL_OBS_FAMILY_LEGALITY_LEAVES_11, 1 },
+  { "12", "12", RL_OBS_FAMILY_LEGALITY_LEAVES_12, 1 },
+  { "13", "13", RL_OBS_FAMILY_LEGALITY_LEAVES_13, 1 },
+  { "14", "14", RL_OBS_FAMILY_LEGALITY_LEAVES_14, 1 },
+  { "15", "15", RL_OBS_FAMILY_LEGALITY_LEAVES_15, 1 },
+  { "16", "16", RL_OBS_FAMILY_LEGALITY_LEAVES_16, 1 },
+  { "17", "17", RL_OBS_FAMILY_LEGALITY_LEAVES_17, 1 },
+  { "18", "18", RL_OBS_FAMILY_LEGALITY_LEAVES_18, 1 },
+  { "19", "19", RL_OBS_FAMILY_LEGALITY_LEAVES_19, 1 },
+  { "20", "20", RL_OBS_FAMILY_LEGALITY_LEAVES_20, 1 },
+  { "21", "21", RL_OBS_FAMILY_LEGALITY_LEAVES_21, 1 },
+  { "22", "22", RL_OBS_FAMILY_LEGALITY_LEAVES_22, 1 },
+  { "23", "23", RL_OBS_FAMILY_LEGALITY_LEAVES_23, 1 },
+  { "24", "24", RL_OBS_FAMILY_LEGALITY_LEAVES_24, 1 },
+  { "25", "25", RL_OBS_FAMILY_LEGALITY_LEAVES_25, 1 },
+};
+
+inline constexpr double RL_BUCKETS_SLOT232[] = { 1.0, 2.0, 5.0 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "fight_remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, true },
-    { "active_enemies", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT206, 3, false },
+    { "active_enemies", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT232, 3, false },
     { "t", rl_kind::k_seconds, 0.0, false, 1.0, true, 300.0, nullptr, 0, false },
     { "raid_event_next_in", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
     { "time_to_bloodlust", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
@@ -869,7 +1002,7 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_SCALARS_MEMBERS[] = {
   { "", "", RL_OBS_FAMILY_SCALARS_LEAVES_0, 5 },
 };
 
-inline constexpr std::size_t RL_OBS_FAMILY_COUNT = 9;
+inline constexpr std::size_t RL_OBS_FAMILY_COUNT = 10;
 
 inline constexpr rl_obs_family RL_OBS_FAMILIES[RL_OBS_FAMILY_COUNT] = {
   { rl_family::player_buffs, "player_buffs", rl_family_kind::buff, false, RL_OBS_FAMILY_PLAYER_BUFFS_MEMBERS, 28, 0, 53 },
@@ -880,7 +1013,8 @@ inline constexpr rl_obs_family RL_OBS_FAMILIES[RL_OBS_FAMILY_COUNT] = {
   { rl_family::stats, "stats", rl_family_kind::direct, false, RL_OBS_FAMILY_STATS_MEMBERS, 4, 187, 4 },
   { rl_family::swing_cast, "swing_cast", rl_family_kind::direct, false, RL_OBS_FAMILY_SWING_CAST_MEMBERS, 4, 191, 4 },
   { rl_family::raid_events, "raid_events", rl_family_kind::expression, false, RL_OBS_FAMILY_RAID_EVENTS_MEMBERS, 2, 195, 10 },
-  { rl_family::scalars, "scalars", rl_family_kind::scalar, true, RL_OBS_FAMILY_SCALARS_MEMBERS, 1, 205, 5 },
+  { rl_family::legality, "legality", rl_family_kind::legality, false, RL_OBS_FAMILY_LEGALITY_MEMBERS, 26, 205, 26 },
+  { rl_family::scalars, "scalars", rl_family_kind::scalar, true, RL_OBS_FAMILY_SCALARS_MEMBERS, 1, 231, 5 },
 };
 
 // ---- Action descriptors ----
@@ -910,6 +1044,8 @@ inline constexpr rl_action_desc RL_ACTIONS[RL_ACTION_DIM] = {
   { 21, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_swing_oh", { rl_wait_anchor_kind::swing, nullptr, rl_swing_hand::oh } },
   { 22, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_maelstrom", { rl_wait_anchor_kind::maelstrom, nullptr, rl_swing_hand::none } },
   { 23, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_gcd", { rl_wait_anchor_kind::gcd, nullptr, rl_swing_hand::none } },
+  { 24, "potion", rl_action_kind::cast, "potion", nullptr, "potion", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
+  { 25, "use_item_zuljins_guillotine_technique", rl_action_kind::cast, nullptr, nullptr, "use_item_zuljins_guillotine_technique", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
 };
 
 // ---- Buff-gate table ----
