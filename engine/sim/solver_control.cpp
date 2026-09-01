@@ -642,6 +642,54 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
         mask[ i ] = static_cast<std::uint8_t>( mask[ i ] & ( ( allowed >> static_cast<std::uint32_t>( i ) ) & 1u ) );
     }
 
+    // Quick task tj1 (2026-09-01, timing-jitter exploration). Per-episode
+    // cooldown-timing hold, ANDed in AFTER the allow-list AND immediately
+    // above and BEFORE the all-illegal refusal immediately below -- so the
+    // refusal's own "post-AND" framing already covers this AND too, and a
+    // hold that would manufacture an all-illegal mask is caught by the
+    // SAME fail-safe shape 222-07 built for the allow-list AND, not a
+    // second bespoke one. Disabled (the common case, and every non-tj1
+    // caller): solver_hold_until_release_s is empty, one .empty() check,
+    // zero further cost.
+    if ( !sim->solver_hold_until_release_s.empty() )
+    {
+      // Scratch copy so the fail-safe below can fall back to the pre-hold
+      // mask (post allow-list AND) without re-deriving it.
+      std::uint8_t held_mask[ RL_ACTION_DIM ];
+      std::memcpy( held_mask, mask, sizeof( mask ) );
+      bool any_hold_applied = false;
+      const double now_s = sim->current_time().total_seconds();
+      for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+      {
+        const double release_s = sim->solver_hold_until_release_s[ i ];
+        if ( release_s >= 0.0 && now_s < release_s )
+        {
+          held_mask[ i ] = 0;
+          any_hold_applied = true;
+        }
+      }
+      if ( any_hold_applied )
+      {
+        bool held_any_legal = false;
+        for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+          held_any_legal = held_any_legal || ( held_mask[ i ] != 0 );
+        if ( held_any_legal )
+        {
+          std::memcpy( mask, held_mask, sizeof( mask ) );
+        }
+        else
+        {
+          // Fail-safe (tj1 design doc, explicit requirement): never let the
+          // hold manufacture an empty mask. Ignore the hold for THIS
+          // decision only -- `mask` stands exactly as the allow-list AND
+          // above left it -- and count the override so a training run can
+          // report how often its declared hold set collided with the
+          // engine's own legality gate.
+          ++sim->solver_hold_until_override_count;
+        }
+      }
+    }
+
     // 222-07 (CR-04): the allow-list AND above can manufacture an
     // all-illegal mask that build_mask's own upstream refusal already
     // passed -- 222-RESEARCH.md's Pitfall 16 names this exactly ("a
