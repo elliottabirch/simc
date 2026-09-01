@@ -1262,6 +1262,15 @@ public:
   /// Maelstrom Weapon blocklist, allowlist; (spell_id, { override_state, proc tracking object })
   std::vector<mw_proc_state> mw_proc_state_list;
 
+  /// 260901-pb1 LEVER A: the Maelstrom Weapon proc callback, stored at its
+  /// construction site (create_special_effects, `new maelstrom_weapon_cb_t(...)`)
+  /// so its public `proc_chance` member (dbc_proc_callback_t::proc_chance) is
+  /// readable from a read-only RL observation accessor -- the callback is
+  /// otherwise constructed-and-discarded, never stored anywhere. Null when
+  /// the Maelstrom Weapon talent is not taken (the callback is never
+  /// constructed).
+  dbc_proc_callback_t* maelstrom_weapon_cb = nullptr;
+
   /// Maelstrom generator/spender tracking
   std::vector<std::pair<simple_sample_data_t, simple_sample_data_t>> mw_source_list;
   std::vector<std::array<simple_sample_data_t, 11>> mw_spend_list;
@@ -2108,6 +2117,21 @@ public:
   { return get_mw_proc_state( &( action ) ); }
 
   double windfury_proc_chance();
+
+  // 260901-pb1 LEVER A: read-only, side-effect-free clones of the two
+  // proc-chance formulas above/below, exposed for the RL observation layer
+  // (D-6: "the roll sites keep their real randomness" -- these accessors
+  // change only what a READER sees, never a roll). windfury_proc_chance_current()
+  // is windfury_proc_chance() with buff.doom_winds->check() instead of ->up()
+  // (buff.hpp:196-206: up() skews benefit tracking when called from a read
+  // path) and the same std::min(1.0, x) clamp the "windfury_chance" APL
+  // expression already applies. stormsurge_proc_chance_current() clones
+  // stormstrike_attack_t::stormsurge_proc_chance() (virtual + file-local on
+  // the action, so a shaman_t-level accessor is needed here), with the
+  // sim->print_debug call dropped -- a read-path accessor must not emit
+  // debug spam on every decision.
+  double windfury_proc_chance_current() const;
+  double stormsurge_proc_chance_current() const;
 
   // triggers
   void trigger_maelstrom_gain( double maelstrom_gain, gain_t* gain = nullptr );
@@ -10649,6 +10673,35 @@ std::unique_ptr<expr_t> shaman_t::create_expression( util::string_view name )
     } );
   }
 
+  // 260901-pb1 LEVER A (D-2): the `proc_chances` observation family's three
+  // members, forwarded through create_expression exactly like `deck`'s own
+  // members are (3c95780dda's "deck-family shape") -- the class-agnostic RL
+  // binding seam (rl_policy_obs.cpp's resolve_expression_leaf) resolves
+  // these generically via player_t::create_expression, never a spell/class
+  // token in that shared file. Distinct from the pre-existing
+  // "windfury_chance" expression above: THIS one is the check()-idiom read
+  // path (D-6), not the up()-idiom roll-time value.
+  if ( util::str_compare_ci( splits[ 0 ], "windfury_proc_chance_current" ) )
+  {
+    return make_fn_expr( splits[ 0 ], [ this ]() {
+      return windfury_proc_chance_current();
+    } );
+  }
+
+  if ( util::str_compare_ci( splits[ 0 ], "stormsurge_proc_chance_current" ) )
+  {
+    return make_fn_expr( splits[ 0 ], [ this ]() {
+      return stormsurge_proc_chance_current();
+    } );
+  }
+
+  if ( util::str_compare_ci( splits[ 0 ], "maelstrom_weapon_proc_chance_current" ) )
+  {
+    return make_fn_expr( splits[ 0 ], [ this ]() {
+      return maelstrom_weapon_cb ? maelstrom_weapon_cb->proc_chance : 0.0;
+    } );
+  }
+
   if ( util::str_compare_ci( splits[ 0 ], "lashing_flames" ) )
   {
     return make_ref_expr( splits[ 0 ], buff_state_lashing_flames );
@@ -11012,7 +11065,10 @@ void shaman_t::create_special_effects()
 
     special_effects.push_back( mw_effect );
 
-    new maelstrom_weapon_cb_t( *mw_effect );
+    // 260901-pb1 LEVER A: store the callback pointer -- previously
+    // constructed-and-discarded -- so its public `proc_chance` member is
+    // readable by the RL observation layer's read-only accessor.
+    maelstrom_weapon_cb = new maelstrom_weapon_cb_t( *mw_effect );
   }
 }
 
@@ -11979,6 +12035,43 @@ double shaman_t::windfury_proc_chance()
   }
 
   return proc_chance;
+}
+
+// 260901-pb1 LEVER A: side-effect-free clone of windfury_proc_chance() above
+// for the RL observation read path -- buff.doom_winds->check() instead of
+// ->up() (buff.hpp:196-206: up() skews benefit tracking when called from a
+// read path), clamped std::min(1.0, x) matching the existing
+// "windfury_chance" APL expression's own clamp (see create_expression,
+// "windfury_chance" branch, just above trigger_windfury_weapon further down
+// this file).
+double shaman_t::windfury_proc_chance_current() const
+{
+  double proc_chance = spell.windfury_weapon->proc_chance();
+  double proc_mul = mastery.enhanced_elements->effectN( 4 ).mastery_value() *
+    ( 1.0 + talent.storms_wrath->effectN( 2 ).percent() );
+
+  proc_chance += cache.mastery() * proc_mul;
+  if ( buff.doom_winds->check() )
+  {
+    proc_chance *= 1 + talent.doom_winds->effectN( 1 ).trigger()->effectN( 1 ).percent();
+  }
+
+  return std::min( 1.0, proc_chance );
+}
+
+// 260901-pb1 LEVER A: side-effect-free clone of
+// stormstrike_attack_t::stormsurge_proc_chance() (this file, the
+// stormstrike_attack_t struct) for the RL observation read path -- that
+// method is virtual and file-local on the action, so a shaman_t-level
+// accessor is needed for the class-agnostic RL binding seam
+// (rl_policy_obs.cpp). The sim->print_debug call is dropped -- a read-path
+// accessor must not emit debug spam on every decision.
+double shaman_t::stormsurge_proc_chance_current() const
+{
+  double base_mul = mastery.enhanced_elements->effectN( 3 ).mastery_value() *
+    ( 1.0 + talent.storms_wrath->effectN( 1 ).percent() );
+
+  return spec.stormbringer->proc_chance() + cache.mastery() * base_mul;
 }
 
 void shaman_t::trigger_windfury_weapon( const action_state_t* state, double override_chance )

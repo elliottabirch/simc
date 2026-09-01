@@ -1483,6 +1483,18 @@ slot_binding resolve_action_leaf( player_t* p, const std::string& engine_token, 
       if ( action_t* dmg = p->find_action( "voltaic_blaze_damage" ) )
         damage_action = dmg;
     }
+    else if ( engine_token == "stormstrike" )
+    {
+      // 260901-pb1 LEVER A: `stormstrike` is the same dispatcher/carrier
+      // shape as `windstrike` just above (stormstrike_t fires both a
+      // main-hand and (talented) off-hand stormstrike_attack_t child; the
+      // real damage-dealing action is separately named and separately
+      // find_action()-able) -- mirrors this file's own
+      // resolve_cooldown_leaf "strike" -> "stormstrike" precedent, one
+      // level deeper (dispatcher action -> its own mh child).
+      if ( action_t* mh = p->find_action( "stormstrike_mh" ) )
+        damage_action = mh;
+    }
 
     slot_binding b;
     b.leaf = &leaf;
@@ -1798,6 +1810,16 @@ const slot_table& bind_slots( player_t* p )
           case rl_family_kind::legality:
             // 260831-mk7 (D-1/D-2) -- see resolve_legality_leaf's own comment.
             binding = resolve_legality_leaf( mem.member, leaf );
+            break;
+          case rl_family_kind::proc_chance:
+            // 260901-pb1 LEVER A (D-2): same class-agnostic seam as `deck`
+            // just above -- mem.engine_token names a shaman_t::create_expression
+            // forward (windfury_proc_chance_current / stormsurge_proc_chance_current
+            // / maelstrom_weapon_proc_chance_current), resolved generically. A
+            // distinct rl_family_kind (not folded into `expression`) so this
+            // widen's own diff self-names, per the census family's own
+            // $comment.
+            binding = resolve_expression_leaf( p, mem.engine_token, leaf, table );
             break;
           default:
             binding.kind = slot_binding_kind::unresolved;

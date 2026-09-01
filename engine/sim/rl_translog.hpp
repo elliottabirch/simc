@@ -117,7 +117,10 @@ inline constexpr std::uint32_t FORMAT_VERSION = 4u;
 // honest: RECORD_SIZE(W) = roundup8(35 + 4*W), so a mistyped literal
 // cannot silently drift from the formula and still compile (tstl 220-03,
 // OBS-06).
-inline constexpr std::uint32_t RECORD_SIZE = 984u;  // 260831-mk7: roundup8(35 + 4*236)
+inline constexpr std::uint32_t RECORD_SIZE = 1024u;  // 260901-pb1 Task 2: roundup8(35 + 4*246) -- W=246 at
+                                                       // FORMAT_VERSION 4; Task 3 immediately moves this to
+                                                       // the v5 layout in the same commit series, so no
+                                                       // intermediate v4/W=246 layout ever ships alone.
 static_assert( RECORD_SIZE == ( ( 35u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) + 7u ) / 8u ) * 8u,
                "RECORD_SIZE must be roundup8(35 + 4*RL_OBS_DIM)" );
 static_assert( RL_OBS_DIM >= 4, "footer_record's zero40[RL_OBS_DIM-3] needs at least one element" );
