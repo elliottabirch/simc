@@ -488,7 +488,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // request's own `resolved_action` stays pre-reply/`apl_choice`-based,
     // exactly as PROTOCOL.md documents (the reply hasn't been read yet); only
     // decision_dump::record()'s own call opts into reply-gating (defect (b)).
-    decision_dump::write_state_fields( req, p, apl_choice );
+    decision_dump::write_state_fields( req, p, apl_choice, false, et == execute_type::FOREGROUND );
     req << "}\n";
     req.flush();
 
