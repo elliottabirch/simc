@@ -178,6 +178,40 @@ std::string boundary_name( execute_type et );
 // (build_mask's own wait-legality rule reads it) -- both call sites pass
 // `et == execute_type::FOREGROUND`, converted once by the caller exactly
 // like solver_control.cpp's in-process transport already does.
+//
+// ACTOR SCOPE (post-landing fix, measured against a real HecticAddCleave
+// capture): additionally gated on `p->resources.is_active(
+// RESOURCE_MAELSTROM )`, the same predicate phase 165-01's own maelstrom-
+// scoped decision_dump additions already use as this codebase's "is this
+// actor the shaman this RL schema targets" check. `decision_dump::record()`
+// fires from `player_t::execute_action()` for EVERY actor in the sim (the
+// primary shaman, its own pets, AND every enemy/target actor) -- `obs`/
+// `obs_mask` are `null` for any actor this predicate excludes. Necessary
+// because `build_obs()`'s only pre-260901-od1 caller (solver_control.cpp's
+// in-process transport) is gated to the ONE actor `solver_policy=` names,
+// so it was never exercised against a non-shaman actor before this task
+// wired it into decision_dump's all-actor hook -- measured: `bind_slots`/
+// `read_state`/`build_mask` all complete cleanly for every actor type, but
+// `build_obs()` itself segfaults the first time it runs for an enemy
+// actor. Zero effect on the schema's actual target: `demos.rows_from_dump`'s
+// consumer (`project_fight`'s `actor_name` filter) never reads a pet's or
+// an enemy's own dump rows regardless.
+//
+// A SECOND crash (found the same session, via a real gdb backtrace on a
+// RelWithDebInfo build) proved the Maelstrom-active predicate ALONE is not
+// sufficient: `resources_t::active_resource` defaults to `true` for every
+// `resource_e` (player_resources.hpp's ctor) and is only narrowed to `false`
+// per-resource inside the generic player_t init path that walks
+// `power_type_data_t::is_active_for_class()` -- an enemy actor (a
+// TANK_DUMMY-type target, measured as "Fluffy_Pillow_1") still read
+// `is_active(RESOURCE_MAELSTROM) == true`, reached `build_obs()`, and
+// segfaulted inside the `movement.remains` expression's lambda
+// (`buffs.movement->remains()`, player.cpp:12293 -- `buffs.movement` is
+// constructed ONLY for non-enemy actors, player.cpp:4904, permanently null
+// for every enemy). The gate now ALSO checks `!p->is_enemy()` (player.hpp's
+// own `_is_enemy(type)` -- ENEMY/ENEMY_ADD/ENEMY_ADD_BOSS/TANK_DUMMY), an
+// explicit, unambiguous actor-class exclusion rather than trusting the
+// resource predicate alone.
 void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool solver_reply_gated = false,
                           bool boundary_is_foreground = true );
 

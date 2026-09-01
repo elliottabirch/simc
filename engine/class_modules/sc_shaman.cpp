@@ -10584,7 +10584,26 @@ std::unique_ptr<expr_t> shaman_t::create_expression( util::string_view name )
         }
       };
 
-      return make_fn_expr( name, [ this, &max_remains_fn ]() {
+      // 260901-od1 (crash fix): `max_remains_fn` is captured BY VALUE, not
+      // by reference. The prior `[ this, &max_remains_fn ]` captured a
+      // REFERENCE to a local stack variable that goes out of scope the
+      // moment this create_expression() call returns -- but the returned
+      // expr_t is held forever (rl_policy_obs.cpp's slot_table::
+      // owned_expressions, process-lifetime, bound ONCE per actor) and
+      // evaluate()'d on every future decision, long after the local frame
+      // is gone. A dangling-reference read is undefined behavior that can
+      // silently "work" for a while (nothing yet overwrote that stack
+      // slot) before segfaulting once the stack layout differs enough --
+      // measured directly: 90/90 patchwerk-shape decision-dump captures
+      // never crashed, but every HecticAddCleave-shape capture segfaulted
+      // inside buff_t::remains() (pet_t::expiration is a buff_t*),
+      // reached through this exact lambda via
+      // rl_policy::build_obs -> fn_expr_t::evaluate ->
+      // decision_dump::write_state_fields. `max_remains_fn` itself
+      // captures nothing (an empty `[]` lambda, effectively a stateless
+      // function object), so capturing it BY VALUE is zero-cost and
+      // trivially correct.
+      return make_fn_expr( name, [ this, max_remains_fn ]() {
         auto it = std::max_element( pet.all_wolves.cbegin(), pet.all_wolves.cend(), max_remains_fn );
         if ( it == pet.all_wolves.end() )
           {

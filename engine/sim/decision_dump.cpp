@@ -836,7 +836,48 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   // so this is available on a bare APL-driven decision_dump=<file> run.
   // Gated identically to action_resolvable/action_ready immediately above
   // (WR-12 single-sim/single-thread cache-safety precondition).
-  if ( p->sim->threads == 1 && p->sim->profileset_map.empty() )
+  // 260901-od1 post-landing fix (real HecticAddCleave capture, seed 101):
+  // measured via a temporary stderr trace that `bind_slots`/`read_state`/
+  // `build_mask` all complete cleanly for EVERY actor type that reaches
+  // this function (the primary shaman, its own pets, AND enemy/target
+  // actors -- decision_dump::record() fires from player_t::execute_action()
+  // unconditionally, for every actor in the sim, not just the RL-relevant
+  // one) but `build_obs()` itself segfaults the FIRST time it is called
+  // for a non-shaman actor (measured crash: an enemy target actor named
+  // "Fluffy_Pillow_1" under HecticAddCleave). `build_obs`'s only
+  // pre-260901-od1 caller (solver_control.cpp's in-process transport) is
+  // gated to the ONE actor `solver_policy=` names -- it was NEVER
+  // exercised against an enemy/pillow-dummy actor before this task wired
+  // it into decision_dump's all-actor hook, so whatever assumption inside
+  // build_obs breaks for that actor class was latent, not introduced here.
+  // Scoped the SAME way every other shaman-specific decision_dump
+  // addition already is (phase 165-01's `emit_maelstrom_ext` gate,
+  // maelstrom/charges_fractional/duration/refreshable/enemy_debuff_counts)
+  // -- `p->resources.is_active( RESOURCE_MAELSTROM )` is this codebase's
+  // established "is this actor the shaman this schema targets" predicate,
+  // deliberately NOT the player's own primary-resource accessor (shaman_t
+  // overrides that to report RESOURCE_MANA). Pets and enemies alike read
+  // false here (measured: the pet actor completed build_obs without
+  // crashing every time it was reached, but is excluded anyway since
+  // `demos.rows_from_dump`'s consumer -- `project_fight`'s actor_name
+  // filter -- never reads a pet's or an enemy's own dump rows), so this
+  // scoping has zero effect on the schema's actual target and removes the
+  // untested actor classes from ever reaching build_obs at all.
+  // SECOND crash, found the same session (real gdb backtrace, RelWithDebInfo
+  // build): the Maelstrom-active check ALONE did not exclude an enemy actor
+  // (`resources_t::active_resource` defaults to `true` for every resource_e
+  // and an enemy actor was measured still reading is_active(MAELSTROM)==true)
+  // -- that enemy actor then reached build_obs() and segfaulted inside the
+  // `movement.remains` expression's lambda (`buffs.movement->remains()`,
+  // player.cpp -- `buffs.movement` is constructed ONLY for non-enemy actors,
+  // permanently null for every enemy). `!p->is_enemy()` (player.hpp's own
+  // `_is_enemy(type)` -- ENEMY/ENEMY_ADD/ENEMY_ADD_BOSS/TANK_DUMMY) is an
+  // EXPLICIT, unambiguous actor-class exclusion, added rather than trusting
+  // the resource predicate alone to be sufficient for every actor type this
+  // hook is called with. See decision_dump.hpp's own "ACTOR SCOPE" doc
+  // comment for the full writeup of both crashes.
+  if ( p->sim->threads == 1 && p->sim->profileset_map.empty() && !p->is_enemy() &&
+       p->resources.is_active( RESOURCE_MAELSTROM ) )
   {
     const rl_policy::slot_table& table = rl_policy::bind_slots( p );
     const rl_policy::rl_state_t state = rl_policy::read_state( p, boundary_is_foreground );
