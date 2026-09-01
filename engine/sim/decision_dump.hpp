@@ -149,7 +149,37 @@ std::string boundary_name( execute_type et );
 // reward source at each decision boundary; additive on both call sites
 // (decision_dump::record() and solver_control's request line) since both
 // share this function.
-void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool solver_reply_gated = false );
+//
+// `obs`/`obs_mask` (260901-od1, kill-the-dual-encoder-seam) -- the SAME
+// engine-encoded observation vector (RL_OBS_DIM floats) and legality mask
+// (RL_ACTION_DIM 0/1 ints) `solver_control.cpp`'s in-process transport
+// builds via `rl_policy::bind_slots` -> `rl_policy::read_state` ->
+// `rl_policy::build_mask` -> `rl_policy::build_obs`, run here in that same
+// order so the offline decision-dump consumer (scripts/rl/demos.py) never
+// has to re-encode observations from the dump's own named fields itself --
+// that re-encode was the root cause of the dual-encoder seam this task
+// closes (obs.encode() resolving a registry source like
+// `player_buffs.<name>.stacks` against a JSON shape the dump never
+// actually emitted under that name). Gated by the SAME single-sim/single-
+// thread predicate (`p->sim->threads == 1 && p->sim->profileset_map.empty()`)
+// as `action_resolvable`/`action_ready` above, for the same WR-12 cache-
+// safety reason -- `null` for both arrays on a multi-threaded/profileset
+// run. Requires NO solver_policy= / solver_control= -- `bind_slots` is
+// registry-constants-driven (rl_policy_constants.h), not policy-driven, so
+// this is available on a bare APL-driven `decision_dump=<file>` run.
+// Deliberately does NOT apply solver_control's arm-subset allow-list AND
+// or its all-illegal protocol_abort refusal -- both are training-arm
+// concepts (RLW1 v3's `allowed_actions`) with no meaning for a dump-only
+// run; `obs_mask` here is the RAW engine legality mask `build_mask()`
+// computes, from which a consumer can derive its own arm-specific
+// restriction if it needs one.
+//
+// `boundary_is_foreground` feeds `rl_state_t::boundary_is_foreground`
+// (build_mask's own wait-legality rule reads it) -- both call sites pass
+// `et == execute_type::FOREGROUND`, converted once by the caller exactly
+// like solver_control.cpp's in-process transport already does.
+void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool solver_reply_gated = false,
+                          bool boundary_is_foreground = true );
 
 // JSON helpers shared with solver_control (P3b) so both hooks emit
 // byte-identical escaping/clamping for the same field kinds.

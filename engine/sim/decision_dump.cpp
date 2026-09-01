@@ -345,7 +345,8 @@ void write_buff_remains( std::ostream& out, timespan_t remains )
 // committed fixture corpora plus RUN_ARMS_DRIFT=1 replay. Four consumers:
 // `maelstrom.deficit`, `cooldown.lava_burst.charges_fractional`,
 // `dot.flame_shock.refreshable`, `lightning_rod` (via enemy_debuff_counts).
-void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool solver_reply_gated )
+void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool solver_reply_gated,
+                          bool boundary_is_foreground )
 {
   sim_t* sim = p->sim;
 
@@ -820,6 +821,53 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
     out << ",\"action_resolvable\":null";
     out << ",\"action_ready\":null";
   }
+
+  // 260901-od1 (kill-the-dual-encoder-seam) -- the engine-encoded
+  // observation vector + legality mask, run through the SAME
+  // bind_slots -> read_state -> build_mask -> build_obs pipeline (same
+  // order) solver_control.cpp's in-process transport uses
+  // (solver_control.cpp's own read_state -> build_mask -> [allow-list AND]
+  // -> [all-illegal refusal] -> build_obs comment, ~line 590) -- minus the
+  // allow-list AND and the all-illegal refusal, both arm-subset training
+  // concepts with no meaning for a dump-only run (see this function's own
+  // doc comment in decision_dump.hpp for the full rationale). No
+  // solver_policy= is read anywhere in this pipeline -- bind_slots is
+  // registry-constants-driven (rl_policy_constants.h), not policy-driven --
+  // so this is available on a bare APL-driven decision_dump=<file> run.
+  // Gated identically to action_resolvable/action_ready immediately above
+  // (WR-12 single-sim/single-thread cache-safety precondition).
+  if ( p->sim->threads == 1 && p->sim->profileset_map.empty() )
+  {
+    const rl_policy::slot_table& table = rl_policy::bind_slots( p );
+    const rl_policy::rl_state_t state = rl_policy::read_state( p, boundary_is_foreground );
+    std::uint8_t obs_mask[ RL_ACTION_DIM ];
+    rl_policy::build_mask( state, obs_mask );
+    float obs[ RL_OBS_DIM ];
+    rl_policy::build_obs( p, state, table, obs_mask, obs );
+
+    out << ",\"obs\":[";
+    for ( std::size_t i = 0; i < RL_OBS_DIM; ++i )
+    {
+      if ( i > 0 )
+        out << ",";
+      out << obs[ i ];
+    }
+    out << "]";
+
+    out << ",\"obs_mask\":[";
+    for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+    {
+      if ( i > 0 )
+        out << ",";
+      out << static_cast<int>( obs_mask[ i ] );
+    }
+    out << "]";
+  }
+  else
+  {
+    out << ",\"obs\":null";
+    out << ",\"obs_mask\":null";
+  }
 }
 
 void record( player_t* p, action_t* chosen, execute_type et )
@@ -879,7 +927,8 @@ void record( player_t* p, action_t* chosen, execute_type et )
   // own JSONL consumers, `mask.py`'s `request.get(key)`) tolerates an
   // unknown/absent key, so record()'s own byte-shape claim above is
   // unaffected -- only write_state_fields' output grows.
-  write_state_fields( line, p, chosen, !sim->solver_control_str.empty() || !sim->solver_policy_str.empty() );
+  write_state_fields( line, p, chosen, !sim->solver_control_str.empty() || !sim->solver_policy_str.empty(),
+                       et == execute_type::FOREGROUND );
 
   line << "}\n";
 
