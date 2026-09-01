@@ -355,6 +355,51 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     return nullptr;
   }
 
+  // 260901-rearm-agent-autos fix: the block above only ever arms both hands
+  // ONCE per fight (`solver_control_auto_attack_started` never resets mid-
+  // fight). Live's implicit-with-combat start is a one-shot, but a repeating
+  // swing normally keeps re-arming itself from inside `action_t::execute()`
+  // (`action.cpp`, `if ( repeating && !proc ) schedule_execute();`) every
+  // time it actually lands. `shaman_t::moving()` (`sc_shaman.cpp`) cancels
+  // both swings on every movement raid event, and a cancelled swing never
+  // reaches `execute()` -- so under the APL it re-arms via the APL's own
+  // `actions+=/auto_attack` priority-list entry re-selecting on the next
+  // FOREGROUND boundary (`auto_attack_t::ready()`: `!p()->is_moving() &&
+  // main_hand_attack->execute_event == nullptr`), but under solver_control
+  // that APL choice is discarded wholesale (`player.cpp`,
+  // `solver_control::choose()` replaces it), and nothing else ever
+  // re-arms the swing -- so a single movement window during the fight
+  // permanently ends the actor's white damage (measured:
+  // 260901-tg1-agent-target-selection/RESEARCH-engine.md Q6c, main-hand
+  // swings 181.88 apl / 7.29 agent on hectic-add-cleave, last policy
+  // main-hand execute at t=1.786 of a 120s fight). The SAME failure shape
+  // also covers a melee target dying mid-swing: `action_execute_event_t::
+  // execute()` nulls `execute_event` unconditionally before checking
+  // `can_execute`, and only calls `action->execute()` (the repeating
+  // reschedule) when `can_execute` is true -- so a target-death stall is
+  // structurally identical to a movement stall and is fixed by the same
+  // predicate, for free.
+  //
+  // Re-arm here, every FOREGROUND decision boundary (mirroring
+  // `auto_attack_t::ready()`'s own predicate exactly, not a looser one --
+  // the agent must not re-arm FASTER than the APL arm can, only at parity
+  // with it), whenever a hand is idle and the actor is not moving. Gated on
+  // `et == execute_type::FOREGROUND` for the same reason the one-time start
+  // block above is: an off-GCD/cast-while-casting poll is not a boundary
+  // the reference APL's own `auto_attack` priority-list entry would be
+  // re-evaluated on either, so re-arming there would let the agent arm
+  // faster than parity allows. No yield/return here (unlike the block
+  // above) -- this is not the fight's first decision boundary, so there is
+  // no same-tick pull event ordering to protect; scheduling and falling
+  // through to the rest of `choose()` is sufficient.
+  if ( et == execute_type::FOREGROUND && !p->is_moving() )
+  {
+    if ( p->main_hand_attack && p->main_hand_attack->execute_event == nullptr )
+      p->main_hand_attack->schedule_execute();
+    if ( p->off_hand_attack && p->off_hand_attack->execute_event == nullptr )
+      p->off_hand_attack->schedule_execute();
+  }
+
   // CR-01 fix (210-CR-FIX): in-process transport actor filter, mirroring
   // the FIFO driver's own D-11/B-3 Python-side filter (episode.py:591-596).
   // The in-process policy's action space belongs to ONE actor
