@@ -196,6 +196,9 @@ void record_decision( sim_t* sim, const player_t* p, std::uint64_t seq, const fl
 
   decision_record r{};
   r.damage = p->solver_damage_so_far;
+  // Version 5 (260901-pb1 Task 3, D-3/D-4): the crit-expectation-corrected
+  // sibling, read exactly the same way as r.damage above.
+  r.damage_expected = p->solver_damage_expected_so_far;
   r.t = static_cast<float>( sim->current_time().total_seconds() );
   std::memcpy( r.obs, obs, sizeof( r.obs ) );
   r.q_margin = q_margin;
@@ -251,6 +254,9 @@ void record_close( sim_t* sim )
 
   close_record r{};
   r.final_damage_total = p->solver_damage_so_far;
+  // Version 5 (260901-pb1 Task 3, D-3/D-4): the crit-expectation-corrected
+  // sibling, complete by combat_end exactly like final_damage_total above.
+  r.final_damage_expected_total = p->solver_damage_expected_so_far;
   // This IS the quantity report.json reports as "fight_length"
   // (player_collected_data.cpp:317); sim->current_time() is a different
   // quantity the engine explicitly allows to differ from it (the <=

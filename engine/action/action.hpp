@@ -233,6 +233,14 @@ public:
   /// Self explanatory.
   bool may_hit, may_miss, may_dodge, may_parry, may_glance, may_block, may_crit, tick_may_crit;
 
+  /// 260901-pb1 Lever B: true only for the windfury_attack_t occurrence action
+  /// itself (set in its ctor). Its realized damage is excluded from
+  /// player_t::solver_damage_expected_so_far -- the windfury OCCURRENCE is
+  /// priced separately, once, at the trigger_windfury_weapon roll site
+  /// (chance x priced-attack expectation), so counting the realized attacks'
+  /// own crit-expectation here on top would double count.
+  bool is_windfury_occurrence;
+
   /// Whether or not the ability/dot ticks immediately on usage.
   bool tick_zero;
 
@@ -1064,6 +1072,12 @@ public:
   virtual void assess_damage( result_amount_type, action_state_t* state );
 
   virtual void record_data(action_state_t* data);
+
+  // 260901-pb1 Lever B: accrues the crit-expectation-corrected sibling of
+  // record_data's realized-amount write into
+  // player_t::solver_damage_expected_so_far. See action.cpp for the formula
+  // and rationale (TRACER-RECEIPT.md hook pin).
+  void accrue_expected_damage( action_state_t* state );
 
   virtual void schedule_execute( action_state_t* state = nullptr );
 

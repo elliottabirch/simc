@@ -389,6 +389,14 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   // actor, unlike the resource-scoped fields below.
   out << ",\"solver_damage_so_far\":" << p->solver_damage_so_far;
 
+  // solver_damage_expected_so_far (260901-pb1 Task 3, D-3/D-4, Lever B):
+  // the crit-expectation-corrected sibling of solver_damage_so_far above --
+  // same population, same pet routing, same reset cadence -- ADDITIVE on
+  // this wire exactly like solver_damage_so_far itself was (absent on every
+  // pre-change record, which every downstream reader treats as 0). Emitted
+  // unconditionally, same rule as above.
+  out << ",\"solver_damage_expected_so_far\":" << p->solver_damage_expected_so_far;
+
   // Swing timer, main-hand.
   if ( p->main_hand_attack && p->main_hand_attack->execute_event )
     out << ",\"swing_mh_remains\":" << p->main_hand_attack->execute_event->remains().total_seconds();

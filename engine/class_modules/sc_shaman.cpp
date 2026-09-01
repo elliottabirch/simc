@@ -4587,6 +4587,11 @@ struct windfury_attack_t : public shaman_attack_t
 
     // Windfury can not proc itself
     may_proc_windfury = false;
+
+    // 260901-pb1 Lever B: this action's realized damage is excluded from the
+    // expected-damage accumulator; the windfury occurrence is priced once,
+    // separately, at the trigger_windfury_weapon roll site.
+    is_windfury_occurrence = true;
   }
 };
 
@@ -12074,6 +12079,44 @@ double shaman_t::stormsurge_proc_chance_current() const
   return spec.stormbringer->proc_chance() + cache.mastery() * base_mul;
 }
 
+namespace
+{
+// 260901-pb1 Lever B: prices a windfury_mh-shaped attack's crit-expected
+// direct damage via the same get_state -> set target -> snapshot_state ->
+// calculate_direct_amount -> target_mitigation recipe rl_policy_obs.cpp's
+// shared_action_leaf_cache uses for hit_damage/crit_pct_current
+// (rl_policy_obs.cpp:1902-1926) -- so the WF occurrence leg's pricing never
+// drifts from how the obs path prices the identical action. Class-agnostic
+// on purpose (takes action_t*/player_t*, no shaman dependency) even though
+// only called from shaman_t here.
+double expected_windfury_attack_damage( action_t* a, player_t* target )
+{
+  if ( a == nullptr || target == nullptr )
+    return 0.0;
+
+  action_state_t* state = a->get_state();
+  state->target      = target;
+  state->n_targets    = 1;
+  state->chain_target = 0;
+  state->result       = RESULT_HIT;
+
+  a->snapshot_state( state, result_amount_type::NONE );
+
+  double hit_damage = a->calculate_direct_amount( state );
+  state->result_amount = hit_damage;
+  if ( state->target != nullptr )
+    state->target->target_mitigation( a->get_school(), result_amount_type::DMG_DIRECT, state );
+  hit_damage = state->result_amount;
+
+  double crit_chance = clamp( state->composite_crit_chance(), 0.0, 1.0 );
+  double crit_bonus  = a->total_crit_bonus( state );
+
+  action_state_t::release( state );
+
+  return hit_damage * ( 1.0 + crit_chance * crit_bonus );
+}
+}  // namespace
+
 void shaman_t::trigger_windfury_weapon( const action_state_t* state, double override_chance )
 {
   assert( debug_cast<shaman_attack_t*>( state->action ) != nullptr && "Windfury Weapon called on invalid action type" );
@@ -12093,28 +12136,54 @@ void shaman_t::trigger_windfury_weapon( const action_state_t* state, double over
     return;
   }
 
-  if ( state->action->weapon->slot == SLOT_MAIN_HAND &&
-       rng().roll( override_chance != -1.0 ? override_chance : windfury_proc_chance() ) )
+  if ( state->action->weapon->slot == SLOT_MAIN_HAND )
   {
-    action_t* a = windfury_mh;
+    double wf_chance = override_chance != -1.0 ? override_chance : windfury_proc_chance();
 
-    // Note, windfury needs to do a discrete execute event because in AoE situations, Forceful Winds
-    // must be let to stack (fully) before any Windfury Attacks are executed. In this case, the
-    // schedule must be done through a pre-snapshotted state object to preserve targeting
-    // information.
-    trigger_secondary_ability( state, a );
+    // 260901-pb1 Lever B: price the windfury OCCURRENCE via its
+    // expectation -- chance x priced-attack expectation -- computed
+    // UNCONDITIONALLY here, before either roll below, so both rolls stay
+    // real (D-6: roll sites keep their real randomness; only the reward
+    // reads this differently). windfury_mh's own realized damage is
+    // excluded from the expected accumulator via
+    // action_t::is_windfury_occurrence (set in windfury_attack_t's ctor),
+    // so this is the ONLY place windfury damage is priced into the
+    // expected total -- never both. 2 guaranteed attacks + a 3rd gated on
+    // BOTH the WF proc and talent.unruly_winds (compound probability
+    // wf_chance * unruly_winds_chance -- must NOT be nested inside the
+    // `if (rng().roll(wf_chance))` block below, that would double-apply
+    // wf_chance). One level of pricing depth only (D-3 declared
+    // truncation: the would-be attacks' own downstream rolls -- MW gain,
+    // flametongue, stormflurry -- are NOT priced). Stormwell's
+    // override_chance=1.0 path is handled automatically: wf_chance is 1.0
+    // there too, same formula, so the two accumulators stay consistent.
+    double wf_attack_expected  = expected_windfury_attack_damage( windfury_mh, state->target );
+    double unruly_winds_chance = talent.unruly_winds->effectN( 1 ).percent();
+    solver_damage_expected_so_far +=
+        wf_chance * ( 2.0 * wf_attack_expected + unruly_winds_chance * wf_attack_expected );
 
-    trigger_secondary_ability( state, a );
-
-    double chance = talent.unruly_winds->effectN( 1 ).percent();
-
-    if ( rng().roll( chance ) )
+    if ( rng().roll( wf_chance ) )
     {
-      trigger_secondary_ability( state, a );
-      proc.windfury_uw->occur();
-    }
+      action_t* a = windfury_mh;
 
-    attack->proc_wf->occur();
+      // Note, windfury needs to do a discrete execute event because in AoE situations, Forceful Winds
+      // must be let to stack (fully) before any Windfury Attacks are executed. In this case, the
+      // schedule must be done through a pre-snapshotted state object to preserve targeting
+      // information.
+      trigger_secondary_ability( state, a );
+
+      trigger_secondary_ability( state, a );
+
+      double chance = talent.unruly_winds->effectN( 1 ).percent();
+
+      if ( rng().roll( chance ) )
+      {
+        trigger_secondary_ability( state, a );
+        proc.windfury_uw->occur();
+      }
+
+      attack->proc_wf->occur();
+    }
   }
 }
 

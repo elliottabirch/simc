@@ -397,6 +397,7 @@ action_t::action_t( action_e ty, util::string_view token, player_t* p, const spe
     may_block( true ),
     may_crit(),
     tick_may_crit(),
+    is_windfury_occurrence(),
     tick_zero(),
     tick_on_application(),
     hasted_ticks(),
@@ -2141,6 +2142,7 @@ void action_t::assess_damage( result_amount_type rt, action_state_t* state )
     }
 
     record_data( state );
+    accrue_expected_damage( state );
   }
 }
 
@@ -2152,6 +2154,57 @@ void action_t::record_data( action_state_t* data )
   stats->add_result( data->result_amount, data->result_total, report_amount_type( data ), data->result,
                      ( may_block || player->position() != POSITION_BACK ) ? data->block_result : BLOCK_RESULT_UNKNOWN,
                      data->target );
+}
+
+// action_t::accrue_expected_damage ==========================================
+// 260901-pb1 Lever B (tstl-sylvanas D-3/D-4/D-6): writes the
+// crit-expectation-corrected sibling of record_data's realized write into
+// player_t::solver_damage_expected_so_far. Per event, replaces the realized
+// crit outcome with its expectation:
+//   expected = base_noncrit_amount * (1 + crit_chance * (crit_mult - 1))
+// where (crit_mult - 1) is exactly total_crit_bonus(state) -- the same pure,
+// side-effect-free function action_t::calculate_crit_damage_bonus applies on
+// a real crit -- so this never re-derives crit economics independently of
+// the real crit-application path. base_noncrit_amount is backed out of the
+// already-crit-adjusted state->result_amount (this hook runs after
+// calculate_crit_damage_bonus has already multiplied result_total in place
+// for a real crit); for every other result (hit, glance, block, miss, dodge,
+// parry) state->result_amount already IS the non-crit amount, so no back-out
+// is needed. Windfury occurrence actions are excluded here -- their
+// occurrence is priced once, separately, at the trigger_windfury_weapon roll
+// site (D-3) -- and pets route to the owner exactly as
+// stats_t::add_result's pet->owner branch does for the realized accumulator
+// (stats.cpp:199), independently replicated here since this hook does not
+// route through stats_t::add_result.
+void action_t::accrue_expected_damage( action_state_t* state )
+{
+  if ( !stats )
+    return;
+
+  if ( is_windfury_occurrence )
+    return;
+
+  double crit_bonus = total_crit_bonus( state );
+
+  double base_noncrit_amount = state->result_amount;
+  if ( state->result == RESULT_CRIT && crit_bonus != -1.0 )
+    base_noncrit_amount = state->result_amount / ( 1.0 + crit_bonus );
+
+  double crit_chance = clamp( state->composite_crit_chance(), 0.0, 1.0 );
+  double expected_amount = base_noncrit_amount * ( 1.0 + crit_chance * crit_bonus );
+
+  if ( !player->is_pet() )
+  {
+    player->solver_damage_expected_so_far += expected_amount;
+  }
+  else
+  {
+    player->cast_pet()->owner->solver_damage_expected_so_far += expected_amount;
+    if ( sim->report_pets_separately )
+    {
+      player->solver_damage_expected_so_far += expected_amount;
+    }
+  }
 }
 
 // Should be called only by foreground action executions (i.e., Player-Ready event calls

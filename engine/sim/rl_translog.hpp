@@ -82,10 +82,32 @@
 // one-byte `mask` cannot be losslessly reinterpreted as the new `uint32`
 // slot at a different offset.
 //
+// Version 5 (260901-pb1 Task 3, Lever B: expectation-corrected reward):
+// inserts one new `double` field into decision_record (`damage_expected`,
+// immediately after `damage`) and into close_record
+// (`final_damage_expected_total`, immediately after `final_damage_total`) --
+// the crit-expectation-corrected sibling of each realized-damage field,
+// D-3/D-4. Both insertions are exactly 8 bytes, at the same relative
+// position (right after the first 8-byte field), so every offset from `t`/
+// `fight_length` onward in those two structs shifts by a uniform `+8`.
+// footer_record gets NO new named field (T3 emits its expected-total
+// footer counterpart nowhere in this file -- the reward source's terminal
+// reconciliation reads `final_damage_expected_total` off the LAST close
+// row directly, not off a run-level footer aggregate) -- its `zero40`
+// padding array instead grows by 2 more `uint32` elements (also +8 bytes)
+// so its own `iteration`/`zero_action`/`flags`/`thread`/`kind`/`reserved`
+// tail lands at the SAME shifted offsets D-02 requires across all three
+// row kinds. `RECORD_SIZE(W)` moves from `roundup8(35 + 4*W)` to
+// `roundup8(43 + 4*W)` (`1024` -> `1032` at `W = 246`, the width Task 2
+// landed in this same commit series). Version-4 files are orphaned by
+// design (the reader refuses on an exact version mismatch, same rule as
+// every prior bump) -- there is no `damage_expected` to backfill into an
+// old row.
+//
 // A `RECORD_SIZE(W)` row shape carries all three kinds (decision,
 // fight-close, footer) and the `kind` byte sits at the same offset
-// (`33 + 4*W`, 69 at `W = 9`) in every one of them (D-02), so a reader can
-// classify a row before it interprets it.
+// (`41 + 4*W`, at `W = 246` that is `41 + 984 = 1025`) in every one of them
+// (D-02), so a reader can classify a row before it interprets it.
 
 #pragma once
 
@@ -108,22 +130,21 @@ namespace rl_translog
 // trailing NUL is part of the magic itself.
 inline constexpr char MAGIC[ 4 ] = { 'R', 'L', 'T', 'L' };
 inline constexpr std::uint32_t ENDIAN_CANARY = 0x01020304u;
-inline constexpr std::uint32_t FORMAT_VERSION = 4u;
+inline constexpr std::uint32_t FORMAT_VERSION = 5u;
 // RECORD_SIZE stays an integer LITERAL, not a computed expression --
 // scripts/rl/obs_transport_coupling.selftest.py parses this file's own
 // source text for an `ast.Constant`-shaped literal on both sides of the
 // language boundary, and a computed expression here would break that
 // parse. The static_assert immediately below is what keeps the literal
-// honest: RECORD_SIZE(W) = roundup8(35 + 4*W), so a mistyped literal
+// honest: RECORD_SIZE(W) = roundup8(43 + 4*W), so a mistyped literal
 // cannot silently drift from the formula and still compile (tstl 220-03,
-// OBS-06).
-inline constexpr std::uint32_t RECORD_SIZE = 1024u;  // 260901-pb1 Task 2: roundup8(35 + 4*246) -- W=246 at
-                                                       // FORMAT_VERSION 4; Task 3 immediately moves this to
-                                                       // the v5 layout in the same commit series, so no
-                                                       // intermediate v4/W=246 layout ever ships alone.
-static_assert( RECORD_SIZE == ( ( 35u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) + 7u ) / 8u ) * 8u,
-               "RECORD_SIZE must be roundup8(35 + 4*RL_OBS_DIM)" );
-static_assert( RL_OBS_DIM >= 4, "footer_record's zero40[RL_OBS_DIM-3] needs at least one element" );
+// OBS-06; formula updated 260901-pb1 Task 3, version 5 -- see top-of-file
+// comment).
+inline constexpr std::uint32_t RECORD_SIZE = 1032u;  // 260901-pb1 Task 3: roundup8(43 + 4*246) -- W=246,
+                                                       // FORMAT_VERSION 5.
+static_assert( RECORD_SIZE == ( ( 43u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) + 7u ) / 8u ) * 8u,
+               "RECORD_SIZE must be roundup8(43 + 4*RL_OBS_DIM)" );
+static_assert( RL_OBS_DIM >= 2, "footer_record's zero40[RL_OBS_DIM-1] needs at least one element" );
 inline constexpr std::uint32_t HEADER_SIZE = 256u;
 
 // Row kind discriminator (offset 62 in every row struct below, D-02). Zero
@@ -190,48 +211,55 @@ inline constexpr std::uint8_t FLAG_COLLECTED = 1u << 4;
 
 struct decision_record
 {
-  double damage;             // @0  -- p->solver_damage_so_far at this boundary
-  float t;                   // @8  -- sim->current_time().total_seconds()
-  float obs[ RL_OBS_DIM ];   // @12 -- @12..(11+4W) (12..47 at W=9) -- the full, live obs
-                              //         vector, copied straight across (version 2: no separate
-                              //         frozen-width literal, see top-of-file comment)
-  float q_margin;            // @12+4W (48 at W=9) -- best minus second-best legal Q, or quiet NaN
-  float top_q;                // @16+4W (52 at W=9) -- version 3: best LEGAL Q (the net's own
-                              //         remaining-value estimate at this boundary), or quiet NaN
-                              //         if no action was legal -- see top-of-file comment
-  std::uint32_t seq;         // @20+4W (56 at W=9) -- sim->solver_control_seq at this boundary
-  std::uint32_t mask;        // @24+4W (60 at W=9) -- version 4: one bit per legal action,
-                              //         declaration order, now a full uint32 (was a uint8 @62 in
-                              //         versions <=3) -- widened to pre-pay Phase 221's 24-slot
-                              //         action set (see top-of-file comment)
-  std::uint16_t iteration;   // @28+4W (64 at W=9) -- sim->current_iteration
-  std::uint8_t action;       // @30+4W (66 at W=9) -- chosen action index
-  std::uint8_t flags;        // @31+4W (67 at W=9)
-  std::uint8_t thread;       // @32+4W (68 at W=9) -- sim->thread_index
-  std::uint8_t kind;         // @33+4W (69 at W=9) -- KIND_DECISION
-  std::uint8_t reserved;     // @34+4W (70 at W=9) -- written zero
+  double damage;              // @0  -- p->solver_damage_so_far at this boundary
+  double damage_expected;     // @8  -- version 5 (260901-pb1 Task 3, D-3/D-4): the crit-
+                               //         expectation-corrected sibling, p->solver_damage_expected_so_far
+                               //         at this boundary -- see top-of-file comment
+  float t;                    // @16 -- sim->current_time().total_seconds()
+  float obs[ RL_OBS_DIM ];    // @20 -- @20..(19+4W) -- the full, live obs
+                               //         vector, copied straight across (version 2: no separate
+                               //         frozen-width literal, see top-of-file comment)
+  float q_margin;             // @20+4W -- best minus second-best legal Q, or quiet NaN
+  float top_q;                 // @24+4W -- version 3: best LEGAL Q (the net's own
+                               //         remaining-value estimate at this boundary), or quiet NaN
+                               //         if no action was legal -- see top-of-file comment
+  std::uint32_t seq;          // @28+4W -- sim->solver_control_seq at this boundary
+  std::uint32_t mask;         // @32+4W -- version 4: one bit per legal action,
+                               //         declaration order, now a full uint32 (was a uint8 in
+                               //         versions <=3) -- widened to pre-pay Phase 221's 24-slot
+                               //         action set (see top-of-file comment)
+  std::uint16_t iteration;    // @36+4W -- sim->current_iteration
+  std::uint8_t action;        // @38+4W -- chosen action index
+  std::uint8_t flags;         // @39+4W
+  std::uint8_t thread;        // @40+4W -- sim->thread_index
+  std::uint8_t kind;          // @41+4W -- KIND_DECISION
+  std::uint8_t reserved;      // @42+4W -- written zero
 };
 
 struct close_record
 {
-  double final_damage_total;     // @0  -- p->solver_damage_so_far, complete by combat_end
-  float fight_length;             // @8  -- p->iteration_fight_length.total_seconds()
-  std::uint32_t zero12[ RL_OBS_DIM + 2 ];  // @12..(19+4W) (12..55 at W=9) -- written zero
-                                  //         (version 4: sized as W+2 to keep decision_count
-                                  //         aligned with decision_record's own shifted seq
-                                  //         offset, see top-of-file comment)
-  std::uint32_t decision_count;  // @20+4W (56 at W=9) -- decision rows appended for this fight
-  std::uint32_t zero_mask;        // @24+4W (60 at W=9) -- version 4: widened to uint32 to sit at
-                                  //         decision_record's own mask offset; written zero.
-                                  //         Collapses the old zero62/zero63 uint8 PAIR (the mask
-                                  //         byte they straddled is now this single uint32)
-  std::uint16_t iteration;       // @28+4W (64 at W=9)
-  std::uint8_t zero_action;       // @30+4W (66 at W=9) -- written zero, sits at decision_record's
-                                  //         own action offset
-  std::uint8_t flags;             // @31+4W (67 at W=9) -- FLAG_COLLECTED set per D-09; others zero this phase
-  std::uint8_t thread;             // @32+4W (68 at W=9)
-  std::uint8_t kind;               // @33+4W (69 at W=9) -- KIND_CLOSE
-  std::uint8_t reserved;           // @34+4W (70 at W=9) -- written zero
+  double final_damage_total;            // @0  -- p->solver_damage_so_far, complete by combat_end
+  double final_damage_expected_total;   // @8  -- version 5 (260901-pb1 Task 3, D-3/D-4): the
+                                          //         crit-expectation-corrected sibling,
+                                          //         p->solver_damage_expected_so_far, complete by
+                                          //         combat_end -- see top-of-file comment
+  float fight_length;                    // @16 -- p->iteration_fight_length.total_seconds()
+  std::uint32_t zero12[ RL_OBS_DIM + 2 ]; // @20..(27+4W) -- written zero
+                                          //         (version 4: sized as W+2 to keep decision_count
+                                          //         aligned with decision_record's own shifted seq
+                                          //         offset, see top-of-file comment)
+  std::uint32_t decision_count;          // @28+4W -- decision rows appended for this fight
+  std::uint32_t zero_mask;                // @32+4W -- version 4: widened to uint32 to sit at
+                                          //         decision_record's own mask offset; written zero.
+                                          //         Collapses the old zero62/zero63 uint8 PAIR (the mask
+                                          //         byte they straddled is now this single uint32)
+  std::uint16_t iteration;                // @36+4W
+  std::uint8_t zero_action;               // @38+4W -- written zero, sits at decision_record's
+                                          //         own action offset
+  std::uint8_t flags;                      // @39+4W -- FLAG_COLLECTED set per D-09; others zero this phase
+  std::uint8_t thread;                      // @40+4W
+  std::uint8_t kind;                         // @41+4W -- KIND_CLOSE
+  std::uint8_t reserved;                      // @42+4W -- written zero
 };
 
 // 212-CR-FIX BL-01: this footer carries two DIFFERENT populations of fight,
@@ -262,19 +290,22 @@ struct footer_record
   double summed_close_damage;          // @24 -- writer's own running sum of close-row damage; ALL fights, warm-up included
   std::uint32_t collected_fight_count; // @32 -- count of close rows with FLAG_COLLECTED set (excludes warm-up); was the unused `zero32` slot
   std::uint32_t zero36;                 // @36
-  std::uint32_t zero40[ RL_OBS_DIM - 3 ]; // @40..(27+4W) (40..63 at W=9, i.e. zero40[6]) -- version 4:
-                                          //         sized as W-3 to keep the following iteration
-                                          //         field aligned with decision_record's own
-                                          //         shifted iteration offset (28+4W), see
-                                          //         top-of-file comment
-  std::uint16_t iteration;              // @28+4W (64 at W=9) -- written 0xFFFF, a sentinel: no fight owns the footer
-  std::uint8_t zero_action;              // @30+4W (66 at W=9) -- written zero, collapses the old
+  std::uint32_t zero40[ RL_OBS_DIM - 1 ]; // @40..(35+4W) -- version 5 (260901-pb1 Task 3): grown
+                                          //         by 2 more elements (was W-3) purely to absorb
+                                          //         decision_record/close_record's shared +8-byte
+                                          //         shift -- footer_record gets NO new NAMED field
+                                          //         (see top-of-file comment); sized W-1 to keep the
+                                          //         following iteration field aligned with
+                                          //         decision_record's own shifted iteration offset
+                                          //         (36+4W)
+  std::uint16_t iteration;              // @36+4W -- written 0xFFFF, a sentinel: no fight owns the footer
+  std::uint8_t zero_action;              // @38+4W -- written zero, collapses the old
                                           //         zero62/zero63 uint8 PAIR (see close_record's
                                           //         own zero_mask comment)
-  std::uint8_t flags;                    // @31+4W (67 at W=9) -- written zero
-  std::uint8_t thread;                   // @32+4W (68 at W=9)
-  std::uint8_t kind;                     // @33+4W (69 at W=9) -- KIND_FOOTER
-  std::uint8_t reserved;                 // @34+4W (70 at W=9) -- written zero
+  std::uint8_t flags;                    // @39+4W -- written zero
+  std::uint8_t thread;                   // @40+4W
+  std::uint8_t kind;                     // @41+4W -- KIND_FOOTER
+  std::uint8_t reserved;                 // @42+4W -- written zero
 };
 
 // The header. The two fields at @20/@24 used to be pure alignment padding
@@ -351,33 +382,35 @@ static_assert( alignof( file_header ) == 8, "file_header must be 8-aligned" );
 // is what makes the NEXT width move (220-04) a one-number change: every
 // assertion below re-derives itself from RL_OBS_DIM.
 static_assert( offsetof( decision_record, damage ) == 0 );
-static_assert( offsetof( decision_record, t ) == 8 );
-static_assert( offsetof( decision_record, obs ) == 12 );
-static_assert( offsetof( decision_record, q_margin ) == 12u + 4u * RL_OBS_DIM );
-static_assert( offsetof( decision_record, top_q ) == 16u + 4u * RL_OBS_DIM );
-static_assert( offsetof( decision_record, seq ) == 20u + 4u * RL_OBS_DIM );
-static_assert( offsetof( decision_record, mask ) == 24u + 4u * RL_OBS_DIM );
-static_assert( offsetof( decision_record, iteration ) == 28u + 4u * RL_OBS_DIM );
-static_assert( offsetof( decision_record, action ) == 30u + 4u * RL_OBS_DIM );
-static_assert( offsetof( decision_record, flags ) == 31u + 4u * RL_OBS_DIM );
-static_assert( offsetof( decision_record, thread ) == 32u + 4u * RL_OBS_DIM );
-static_assert( offsetof( decision_record, kind ) == 33u + 4u * RL_OBS_DIM );
-static_assert( offsetof( decision_record, reserved ) == 34u + 4u * RL_OBS_DIM );
+static_assert( offsetof( decision_record, damage_expected ) == 8 );
+static_assert( offsetof( decision_record, t ) == 16 );
+static_assert( offsetof( decision_record, obs ) == 20 );
+static_assert( offsetof( decision_record, q_margin ) == 20u + 4u * RL_OBS_DIM );
+static_assert( offsetof( decision_record, top_q ) == 24u + 4u * RL_OBS_DIM );
+static_assert( offsetof( decision_record, seq ) == 28u + 4u * RL_OBS_DIM );
+static_assert( offsetof( decision_record, mask ) == 32u + 4u * RL_OBS_DIM );
+static_assert( offsetof( decision_record, iteration ) == 36u + 4u * RL_OBS_DIM );
+static_assert( offsetof( decision_record, action ) == 38u + 4u * RL_OBS_DIM );
+static_assert( offsetof( decision_record, flags ) == 39u + 4u * RL_OBS_DIM );
+static_assert( offsetof( decision_record, thread ) == 40u + 4u * RL_OBS_DIM );
+static_assert( offsetof( decision_record, kind ) == 41u + 4u * RL_OBS_DIM );
+static_assert( offsetof( decision_record, reserved ) == 42u + 4u * RL_OBS_DIM );
 
-// close_record field offsets -- version 4, same W-parametrised form.
+// close_record field offsets -- version 5, same W-parametrised form.
 static_assert( offsetof( close_record, final_damage_total ) == 0 );
-static_assert( offsetof( close_record, fight_length ) == 8 );
-static_assert( offsetof( close_record, zero12 ) == 12 );
-static_assert( offsetof( close_record, decision_count ) == 20u + 4u * RL_OBS_DIM );
-static_assert( offsetof( close_record, zero_mask ) == 24u + 4u * RL_OBS_DIM );
-static_assert( offsetof( close_record, iteration ) == 28u + 4u * RL_OBS_DIM );
-static_assert( offsetof( close_record, zero_action ) == 30u + 4u * RL_OBS_DIM );
-static_assert( offsetof( close_record, flags ) == 31u + 4u * RL_OBS_DIM );
-static_assert( offsetof( close_record, thread ) == 32u + 4u * RL_OBS_DIM );
-static_assert( offsetof( close_record, kind ) == 33u + 4u * RL_OBS_DIM );
-static_assert( offsetof( close_record, reserved ) == 34u + 4u * RL_OBS_DIM );
+static_assert( offsetof( close_record, final_damage_expected_total ) == 8 );
+static_assert( offsetof( close_record, fight_length ) == 16 );
+static_assert( offsetof( close_record, zero12 ) == 20 );
+static_assert( offsetof( close_record, decision_count ) == 28u + 4u * RL_OBS_DIM );
+static_assert( offsetof( close_record, zero_mask ) == 32u + 4u * RL_OBS_DIM );
+static_assert( offsetof( close_record, iteration ) == 36u + 4u * RL_OBS_DIM );
+static_assert( offsetof( close_record, zero_action ) == 38u + 4u * RL_OBS_DIM );
+static_assert( offsetof( close_record, flags ) == 39u + 4u * RL_OBS_DIM );
+static_assert( offsetof( close_record, thread ) == 40u + 4u * RL_OBS_DIM );
+static_assert( offsetof( close_record, kind ) == 41u + 4u * RL_OBS_DIM );
+static_assert( offsetof( close_record, reserved ) == 42u + 4u * RL_OBS_DIM );
 
-// footer_record field offsets -- version 4, same W-parametrised form.
+// footer_record field offsets -- version 5, same W-parametrised form.
 static_assert( offsetof( footer_record, engine_run_aggregate ) == 0 );
 static_assert( offsetof( footer_record, mean_collected_fight_length ) == 8 );
 static_assert( offsetof( footer_record, fight_count ) == 12 );
@@ -387,12 +420,12 @@ static_assert( offsetof( footer_record, summed_close_damage ) == 24 );
 static_assert( offsetof( footer_record, collected_fight_count ) == 32 );
 static_assert( offsetof( footer_record, zero36 ) == 36 );
 static_assert( offsetof( footer_record, zero40 ) == 40 );
-static_assert( offsetof( footer_record, iteration ) == 28u + 4u * RL_OBS_DIM );
-static_assert( offsetof( footer_record, zero_action ) == 30u + 4u * RL_OBS_DIM );
-static_assert( offsetof( footer_record, flags ) == 31u + 4u * RL_OBS_DIM );
-static_assert( offsetof( footer_record, thread ) == 32u + 4u * RL_OBS_DIM );
-static_assert( offsetof( footer_record, kind ) == 33u + 4u * RL_OBS_DIM );
-static_assert( offsetof( footer_record, reserved ) == 34u + 4u * RL_OBS_DIM );
+static_assert( offsetof( footer_record, iteration ) == 36u + 4u * RL_OBS_DIM );
+static_assert( offsetof( footer_record, zero_action ) == 38u + 4u * RL_OBS_DIM );
+static_assert( offsetof( footer_record, flags ) == 39u + 4u * RL_OBS_DIM );
+static_assert( offsetof( footer_record, thread ) == 40u + 4u * RL_OBS_DIM );
+static_assert( offsetof( footer_record, kind ) == 41u + 4u * RL_OBS_DIM );
+static_assert( offsetof( footer_record, reserved ) == 42u + 4u * RL_OBS_DIM );
 
 // file_header field offsets
 static_assert( offsetof( file_header, magic ) == 0 );
@@ -412,10 +445,10 @@ static_assert( offsetof( file_header, action_space_sha ) == 184 );
 // same offset in every row shape).
 static_assert( offsetof( decision_record, kind ) == offsetof( close_record, kind ) );
 static_assert( offsetof( close_record, kind ) == offsetof( footer_record, kind ) );
-static_assert( offsetof( decision_record, kind ) == 33u + 4u * RL_OBS_DIM );
+static_assert( offsetof( decision_record, kind ) == 41u + 4u * RL_OBS_DIM );
 static_assert( offsetof( decision_record, reserved ) == offsetof( close_record, reserved ) );
 static_assert( offsetof( close_record, reserved ) == offsetof( footer_record, reserved ) );
-static_assert( offsetof( decision_record, reserved ) == 34u + 4u * RL_OBS_DIM );
+static_assert( offsetof( decision_record, reserved ) == 42u + 4u * RL_OBS_DIM );
 
 // Dimension guards.
 static_assert( RL_ACTION_DIM <= 32,

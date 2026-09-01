@@ -433,6 +433,15 @@ struct player_t : public actor_t
   // stats_t::add_result's pet->owner routing. Reset every iteration in
   // player_t::datacollection_begin() alongside iteration_dmg above.
   double solver_damage_so_far;
+  // Expectation-corrected sibling of solver_damage_so_far (260901-pb1 Lever
+  // B, tstl-sylvanas D-3/D-4): per damage event accrues
+  // base(non-crit) * (1 + crit_chance * (crit_mult - 1)) instead of the
+  // realized (crit-rolled) amount. Windfury occurrence is priced separately
+  // at the roll site and excluded here via action_t::is_windfury_occurrence.
+  // Reset alongside solver_damage_so_far every iteration in
+  // player_t::datacollection_begin(). Pets routed to owner identically to
+  // stats_t::add_result's pet->owner branch (stats.cpp:199).
+  double solver_damage_expected_so_far;
   double dpr;
   struct incoming_damage_entry_t {
     timespan_t time;
