@@ -24,6 +24,7 @@
 #include "sim/event.hpp"
 #include "sim/expressions.hpp"
 #include "sim/proc.hpp"
+#include "sim/rl_target_select.hpp"
 #include "sim/sim.hpp"
 #include "util/generic.hpp"
 #include "util/io.hpp"
@@ -234,6 +235,53 @@ struct action_execute_event_t : public player_event_t
     }
 
     action->execute_event = nullptr;
+
+    // 228-02 (D-14, TGT-03): if the pick read_action_gate_bits/accept_cast resolved this action's
+    // target to (rl_target_select) died or went immune between the decision and THIS execute
+    // event firing, re-resolve HERE rather than silently dropping the cast (the prior behaviour:
+    // `can_execute` below would simply read false with no signal at all, no abort, no re-resolve
+    // -- 228-RESEARCH.md section 4). Ladder, every arm counted (rl_target_select::
+    // record_reresolution): (a) keep the current target if it is still target_ready -- the
+    // common case, no fallback needed; (b) else fall back to the player's OWN current target if
+    // THAT is target_ready; (c) else leave the existing no-op boundary unchanged (`can_execute`
+    // reads false below exactly as it always has). This is NOT the protocol-abort path -- that
+    // stays reserved for the impossible case (the agent chose an action the mask said was
+    // illegal).
+    //
+    // Scoped to an RL-controlled sim (`sim->solver_control_str`/`solver_policy_str` non-empty --
+    // the SAME sim-level gate solver_control.cpp's own choose() checks at its own :278/:1053)
+    // AND to one of the eight targeted registry actions (rl_target_select::is_targeted_action):
+    // the scripted (APL) arm never populates a pick for any action (accept_cast/set_target are
+    // never reached for it), so this whole block is INERT for it -- `target_ready(target)` below
+    // is never even evaluated for a scripted actor's cast, and every other action on an RL actor
+    // (self/ground/item, the two SHAPED actions plan 228-03 owns) is equally untouched. This is
+    // what makes `apl-full`'s numbers untouched by this plan (228-SELECTOR-RECEIPT.md's blast
+    // radius section states and, where cheap, verifies this).
+    if ( has_cast_time && target && !target->is_sleeping() &&
+         !( sim().solver_control_str.empty() && sim().solver_policy_str.empty() ) &&
+         rl_target_select::is_targeted_action( action ) )
+    {
+      if ( action->target_ready( target ) )
+      {
+        rl_target_select::record_reresolution( rl_target_select::reresolution_arm::kept_the_pick );
+      }
+      else
+      {
+        player_t* fallback = p()->target;
+        if ( fallback && fallback != target && action->target_ready( fallback ) )
+        {
+          target = fallback;
+          action->set_target( fallback );
+          rl_target_select::record_reresolution(
+              rl_target_select::reresolution_arm::fell_back_to_player_target );
+        }
+        else
+        {
+          rl_target_select::record_reresolution(
+              rl_target_select::reresolution_arm::left_no_op_boundary );
+        }
+      }
+    }
 
     // Note, presumes that if the action is instant, it will still be ready, since it was ready on
     // the (near) previous event. Does check target sleepiness, since technically there can be
