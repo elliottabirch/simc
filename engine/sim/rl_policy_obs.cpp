@@ -352,7 +352,21 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
     // `select_target()`, `line_cooldown` and an RNG skill roll) -- using
     // that one here would make the mask disagree with the engine's own
     // FATAL gate about what "ready" means.
-    out_ready[ i ] = ( out_resolvable[ i ] && a->ready() ) ? 1 : 0;
+    //
+    // 260902/FORK-01: AND the engine's own target gate (alive, not immune
+    // while harmful, in range -- action.cpp:2462-2477) -- the SAME predicate
+    // action_execute_event_t::execute re-checks at execute time
+    // (action.cpp:243). Without this, a cast could be offered to the agent
+    // that the engine itself would refuse to land on its current target --
+    // e.g. a melee ability legal at 20 yards. `a->target`, not `p->target`:
+    // Phase 228's per-spell selectors substitute exactly this argument.
+    // `out_resolvable[i]` already short-circuits `&&` for a null action
+    // handle (wait entries), so `target_ready` is never reached without a
+    // resolved cast action; `a->target != nullptr` is an explicit guard
+    // against dereferencing a null target inside `target_ready`'s first
+    // line (`candidate_target->is_sleeping()`).
+    out_ready[ i ] = ( out_resolvable[ i ] && a->ready() && a->target != nullptr &&
+                        a->target_ready( a->target ) ) ? 1 : 0;
   }
 }
 
