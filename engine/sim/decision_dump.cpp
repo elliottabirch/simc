@@ -20,6 +20,7 @@
 #include "util/concurrency.hpp"
 #include "util/io.hpp"
 
+#include <cstring>
 #include <map>
 #include <stdexcept>
 
@@ -923,6 +924,33 @@ void record( player_t* p, action_t* chosen, execute_type et )
 {
   sim_t* sim = p->sim;
   if ( sim->decision_dump_file_str.empty() )
+    return;
+
+  // 260902/FORK-03+FORK-05 -- this hook fires from player_t::execute_action()
+  // (player.cpp:207 and :7538) for EVERY actor in the sim, unconditionally --
+  // monsters, adds, pets, the registered agent, on every boundary. Below this
+  // point, write_state_fields() and the action_resolvable/action_ready and
+  // obs/obs_mask blocks all call into rl_policy::read_action_gate_bits /
+  // build_obs, and build_obs' shared-action-leaf lambda
+  // (rl_policy_obs.cpp:1925-1930) sets `a->target_cache.is_valid = false`
+  // and rebuilds `a->target_list()` for every multi-target action it
+  // touches -- a WRITE into engine state from what is supposed to be a
+  // read-only diagnostic. With one enemy the rebuilt list is trivially
+  // identical to the stale one (invisible); with several it perturbs the
+  // random stream downstream of it (measured: an add-bearing fight's DPS
+  // mean moved from 343514.6 to 349746.6 at the same seed with only a
+  // decision_dump= line added). Mirror solver_control.cpp:421's own
+  // actor-identity gate exactly -- the same exact strcmp against
+  // RL_ACTOR_NAME, never a prefix match (a prefix over the actor's name
+  // also matches every one of its pet records) -- so nothing below this
+  // point runs at all for anyone but the registered agent. `p->is_pet()`
+  // is kept as an explicit second conjunct even though the name gate
+  // alone already excludes the pet (belt-and-braces, D-13 amended):
+  // `is_pet()` is ALSO true for ENEMY_ADD and ENEMY_ADD_BOSS
+  // (player.hpp:968), so this makes "no pet rows, no raid-event-add rows"
+  // an explicit, named property of the gate rather than an accident of
+  // the actor-name check alone.
+  if ( std::strcmp( p->name(), RL_ACTOR_NAME ) != 0 || p->is_pet() )
     return;
 
   // The stream and its mutex live on the ROOT sim only (see sim.hpp) -- with

@@ -557,7 +557,8 @@ enum class action_leaf_kind
 {
   plain_expression,
   shared_hit_damage, shared_crit_pct_current, shared_persistent_multiplier, shared_da_multiplier,
-  dot_molten_weapon_ticking, dot_molten_weapon_remains
+  dot_molten_weapon_ticking, dot_molten_weapon_remains,
+  spell_targets_count
 };
 
 struct slot_binding
@@ -1568,10 +1569,41 @@ slot_binding resolve_action_leaf( player_t* p, const std::string& engine_token, 
   if ( leaf_name == "pet_surging_totem_remains" )
     return resolve_expression_leaf( p, "pet.surging_totem.remains", leaf, table );
 
-  // Everything else this census declares (ready, travel_time, spell_targets,
-  // and any of cast_time/execute_time/cost/usable_in/available_targets/the
-  // charge leaves this census happens to use) is a plain action-scoped
-  // expression -- a->create_expression(leaf_name). Never resolved through a
+  // 260902/FORK-03 (Candidate 1, sealed, second site) -- "spell_targets" is
+  // special-cased OUT of the generic create_expression fallback below.
+  // action_t::create_expression's own "spell_targets" branch
+  // (action.cpp:3860-3928, spell_targets_t::evaluate_spell()) UNCONDITIONALLY
+  // sets `spell->target_cache.is_valid = false` and calls `spell->
+  // target_list()` on every evaluation -- no is_valid guard at all, unlike
+  // the shared-leaf site above. For a shaman chain-bounce action
+  // (chain_lightning et al.) under distance_targeting_enabled=1, that
+  // forced resolve draws from sim->rng() via __check_distance_targeting
+  // (sc_shaman.cpp:1004-1067) EVERY decision this leaf is read, regardless
+  // of cache state -- measured via a backtrace probe landing exactly on
+  // spell_targets_t::evaluate() from decision_dump::record() ->
+  // write_state_fields() -> build_obs(). Editing action.cpp's generic
+  // expression semantics is out of this plan's scope (every APL's
+  // `spell_targets.<x>` condition would be affected, not just this
+  // diagnostic) -- instead this ONE leaf is bound directly to the SAME
+  // non-perturbing cache-respecting read the shared-leaf site above uses,
+  // never touching create_expression for it at all. In this schema
+  // "spell_targets" is always a bare (undotted) name, i.e. self-referring
+  // to `a` -- action.cpp's own splitter defaults `name_of_spell` to the
+  // action's own name_str whenever no "." qualifier is present.
+  if ( leaf_name == "spell_targets" )
+  {
+    slot_binding b;
+    b.leaf = &leaf;
+    b.kind = slot_binding_kind::action_expression;
+    b.action_leaf = action_leaf_kind::spell_targets_count;
+    b.bound_action = a;
+    return b;
+  }
+
+  // Everything else this census declares (ready, travel_time, and any of
+  // cast_time/execute_time/cost/usable_in/available_targets/the charge
+  // leaves this census happens to use) is a plain action-scoped expression
+  // -- a->create_expression(leaf_name). Never resolved through a
   // "cooldown.<spell>.*" name (the dead-alias-row trap, 220-RESEARCH.md
   // Pitfall 6) -- this path always goes through the ACTION. `multiplier`
   // moved OUT of this fallback (221-07 WR-01) -- see the shared-snapshot
@@ -1938,8 +1970,32 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
     int num_targets = a->n_targets();
     if ( num_targets == -1 || num_targets > 1 )
     {
-      a->target_cache.is_valid = false;
-      const int max_targets = static_cast<int>( a->target_list().size() );
+      // 260902/FORK-03 (Candidate 1, sealed) -- do NOT force a->target_list()
+      // to resolve here, and do NOT invalidate the cache to force a future
+      // resolve either. action_t::target_list() recomputes via
+      // available_targets() + check_distance_targeting() whenever its cache
+      // is invalid (action.cpp:1758-1769); for a shaman chain-bounce action
+      // under distance_targeting_enabled=1, that recompute
+      // (__check_distance_targeting, sc_shaman.cpp:1004-1067) draws from
+      // sim->rng().range(...) to randomly search for the best bounce path --
+      // measured: this is the actual random-stream perturbation this task's
+      // tracer exists to close (an add-bearing fight's DPS mean moved from
+      // 343514.6 to 349746.6 at the same seed with only a decision_dump=
+      // line added; the combat log's first divergence is this action's own
+      // "Total attempts at finding path" debug line, present twice extra
+      // per decision the instant the dump is on). This observation leaf is
+      // a read-only estimate for an RL training signal; it must never be
+      // the FIRST caller to force a randomized target-list resolution that
+      // the real decision hasn't asked for yet -- doing so consumes RNG
+      // draws earlier in the stream than the unmodified fight would, which
+      // shifts every subsequent random outcome. Read the target cache's
+      // CURRENT size only if it is already valid (a real cast recently
+      // resolved it); otherwise fall back to 1 rather than forcing a
+      // resolve -- an approximate hit_damage leaf on an invalid-cache
+      // decision is strictly preferable to perturbing the fight itself.
+      const int max_targets = a->target_cache.is_valid
+                                   ? static_cast<int>( a->target_cache.list.size() )
+                                   : 1;
       num_targets = ( num_targets < 0 ) ? max_targets : std::min( max_targets, num_targets );
     }
     state->n_targets = std::max( 1, num_targets );
@@ -2445,6 +2501,23 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
                   : ( b.action_leaf == action_leaf_kind::shared_crit_pct_current ) ? vals[ 1 ]
                   : ( b.action_leaf == action_leaf_kind::shared_persistent_multiplier ) ? vals[ 2 ]
                   : vals[ 3 ];
+              status = lookup_status::present;
+              break;
+            }
+            case action_leaf_kind::spell_targets_count:
+            {
+              // Mirrors the shared-leaf site's own fix: read the target
+              // cache's CURRENT size only if already valid; never force a
+              // resolve (see this leaf's own bind-time comment above for
+              // why forcing one here can draw from the sim's shared RNG).
+              if ( b.bound_action == nullptr )
+              {
+                status = lookup_status::absent;
+                break;
+              }
+              raw = b.bound_action->target_cache.is_valid
+                        ? static_cast<double>( b.bound_action->target_cache.list.size() )
+                        : 1.0;
               status = lookup_status::present;
               break;
             }
