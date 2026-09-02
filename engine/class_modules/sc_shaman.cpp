@@ -5813,37 +5813,26 @@ struct sundering_t : public shaman_attack_t
     target_filter_callback = sundering_rect_filter();
   }
 
-  // 228-03 Task 2 (D-10's shaped row, ledger 1.4 option (a), QUESTIONS Q1's default). Crash
-  // Lightning and Sundering pick a DIRECTION to face, not a cast target: reuses plan 228-02's
-  // `rl_target_select::select()` verbatim (same generic filter, same sticky/preference/
-  // current-target/identity-pair ladder) with a shape-aware preference. `set_target(pick)` keeps
-  // `a->target` tracking the facing pick so the ladder's own sticky-first step is meaningful
-  // across casts (Claude's Discretion, 228-CONTEXT.md: "whether the shaped-spell selector shares
-  // the targeted-spell precedence code" -- it does, in full, including sticky; a Sundering that
-  // never called set_target would leave a->target pinned at its ctor-default player->target
-  // forever, and the sticky clause would trivially win every decision before the shape score was
-  // ever consulted). `target_cache.is_valid = false` forces `target_list()` (called inside the
-  // base `execute()` below) to recompute the AoE hit set under the NEW facing -- without this,
-  // the cache would stay valid from an earlier cast's facing (nothing else invalidates it: the
-  // action's own `target` field only changes via `set_target`, and the sim's non-sleeping-list
-  // callback fires on arise/death, not on a facing-direction change).
-  void update_shaped_facing()
+  // OR-2 (owner ruling 2026-09-02, QUESTIONS Q1, 228-04 Task 1 Step 0b): Sundering gets NO
+  // selector and NEVER turns the player -- superseding this comment's own prior default
+  // (228-CONTEXT.md D-10's shaped row / ledger section 0 R2-1). `rl_target_select::select()`
+  // with `preference_shaped_sundering`, the `set_target()` call and the `p()->face()` turn are
+  // all REMOVED. `target_cache.is_valid = false` is KEPT (Rule 1 fix, not part of OR-2's removal
+  // list): the player's facing still moves for OTHER reasons between decisions (228-01's
+  // cast-target facing, `solver_control.cpp:163`), and `sundering_rect_filter()` reads
+  // `player->facing_x/y` directly -- without a per-cast invalidation the AoE hit-set filter would
+  // silently keep evaluating against a stale facing snapshot from whenever the cache last filled,
+  // since nothing else invalidates it for a facing-only change.
+  void invalidate_shaped_target_cache()
   {
     if ( !sim->facing_shapes )
       return;
-    player_t* pick = rl_target_select::select( this, /*harmful=*/true,
-                                                rl_target_select::preference_shaped_sundering );
-    if ( pick )
-    {
-      set_target( pick );
-      p()->face( *pick );
-    }
     target_cache.is_valid = false;
   }
 
   void execute() override
   {
-    update_shaped_facing();
+    invalidate_shaped_target_cache();
 
     shaman_attack_t::execute();
 
@@ -6169,27 +6158,19 @@ struct crash_lightning_t : public shaman_attack_t
     return m;
   }
 
-  // 228-03 Task 2 -- same shape-aware facing update as `sundering_t::update_shaped_facing()`
-  // (see that function's own comment for the full rationale: reusing plan 228-02's `select()`
-  // ladder verbatim, `set_target` so the sticky clause is meaningful, and the explicit
-  // `target_cache.is_valid = false` forcing a recompute under the new facing).
-  void update_shaped_facing()
+  // OR-2 (owner ruling 2026-09-02, QUESTIONS Q1, 228-04 Task 1 Step 0b) -- same removal as
+  // `sundering_t::invalidate_shaped_target_cache()` above: no selector, no turn. See that
+  // function's own comment for the full rationale on why cache invalidation is kept.
+  void invalidate_shaped_target_cache()
   {
     if ( !sim->facing_shapes )
       return;
-    player_t* pick = rl_target_select::select( this, /*harmful=*/true,
-                                                rl_target_select::preference_shaped_crash_lightning );
-    if ( pick )
-    {
-      set_target( pick );
-      p()->face( *pick );
-    }
     target_cache.is_valid = false;
   }
 
   void execute() override
   {
-    update_shaped_facing();
+    invalidate_shaped_target_cache();
 
     shaman_attack_t::execute();
 

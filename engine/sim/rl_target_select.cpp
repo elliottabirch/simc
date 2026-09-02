@@ -263,7 +263,7 @@ preference_fn preference_for( const action_t* resolved )
     return nullptr;
   const std::string& n = resolved->name_str;
   if ( n == "stormstrike" || n == "windstrike" || n == "primordial_storm" || n == "lightning_bolt" )
-    return preference_longest_time_to_die;
+    return preference_shortest_time_to_die;
   if ( n == "lava_lash" )
     return preference_lava_lash;
   if ( n == "voltaic_blaze" )
@@ -275,26 +275,51 @@ preference_fn preference_for( const action_t* resolved )
   return nullptr;
 }
 
-double preference_longest_time_to_die( const action_t* a, const enemy_fact& fact )
+double preference_shortest_time_to_die( const action_t* a, const enemy_fact& fact )
 {
-  // D-15: "outlives the cast" -- a candidate that will still be alive after this cast lands
-  // always outranks one that will not, so an about-to-despawn add never wins over one that will
-  // actually survive to be hit. If NO candidate outlives the cast (every one would be excluded),
-  // this still returns a valid, ordered answer via the plain time_to_die term below -- never
-  // "invalid" (228-02 ledger row: D-10's own text spells this fallback out explicitly only for
-  // Voltaic Blaze; the same reasoning is applied here since a preference must never return null).
+  // OR-1 (owner ruling 2026-09-02, QUESTIONS Q15 alternative (b), 228-04 Task 1 Step 0c):
+  // supersedes ledger P228-7 (R-B, "keep D-10 as written") and P228-24. Owner's reasoning
+  // verbatim: adds die first, so the single-target spells should finish them rather than parking
+  // on the boss. D-15's "outlives the cast" dominance clause is UNCHANGED -- a candidate that
+  // will still be alive after this cast lands always outranks one that will not, so an
+  // about-to-despawn add never wins over one that will actually survive to be hit. What inverted
+  // is the ordering WITHIN each group: a SHORTER time to die now scores higher (subtracted from
+  // the dominance offset rather than added to it), so among several valid outliving-the-cast
+  // candidates this preference now parks on the shortest-lived one -- exactly the opposite of
+  // this function's pre-OR-1 name and behaviour (renamed from the pre-228-04 longest-lived-preferring function of the same shape).
+  // R-B's measured consequence INVERTS too: under the rig's fixed_time=1, a boss's time_to_die is
+  // the whole fight clock with no per-actor term (research 3.3) -- since 600.0 (D-16's clip) is
+  // far larger than any real add's remaining life, the boss's dominance-offset score
+  // (1.0e9 - time_to_die) is now always LOWER than any add's, so this preference parks on the
+  // shortest-lived valid add and falls back to the boss only when no add passes generic_filter.
+  // If NO candidate outlives the cast (every one would be excluded), this still returns a valid,
+  // ordered answer via the plain time_to_die term below -- never "invalid" (228-02 ledger row:
+  // D-10's own text spells this fallback out explicitly only for Voltaic Blaze; the same
+  // reasoning is applied here since a preference must never return null). The dominance offset
+  // (1.0e9) stays far larger than any time-to-die the D-16 clip allows (600.0 s) after inversion,
+  // so an outliving candidate can never score below a non-outliving one.
   double outlives_margin = fact.time_to_die - a->execute_time().total_seconds();
-  return ( outlives_margin > 0.0 ) ? ( 1.0e9 + fact.time_to_die ) : fact.time_to_die;
+  return ( outlives_margin > 0.0 ) ? ( 1.0e9 - fact.time_to_die ) : fact.time_to_die;
 }
 
-double preference_lava_lash( const action_t*, const enemy_fact& fact )
+double preference_lava_lash( const action_t* a, const enemy_fact& fact )
 {
-  // Among Flame Shock carriers in reach, the SHORTEST remaining wins (offset above every
-  // non-carrier so carriers are always preferred); else the longest-lived. Copies the STRUCTURE
-  // of shortest_duration_target() (sc_shaman.cpp:6877-6911).
+  // OR-1 (owner ruling 2026-09-02, 228-04 Task 1 Step 0c(b)): the carrier clause is UNCHANGED --
+  // among Flame Shock carriers in reach the shortest remaining wins (offset above every
+  // non-carrier so carriers are always preferred), copying the STRUCTURE of
+  // shortest_duration_target() (sc_shaman.cpp:6877-6911). The non-carrier fallback now CALLS the
+  // flipped base preference (`preference_shortest_time_to_die`) rather than re-implementing the
+  // ordering (D-03: no third copy of any rule) -- but the base's own dominance offset (1.0e9)
+  // means its outlives-the-cast branch can itself approach 1.0e9 (as time_to_die -> 0), so the
+  // carrier branch's offset is raised to 2.0e9 (a full 1.0e9 above the base's ceiling) to keep
+  // the two ranges provably disjoint: carrier ranges over roughly
+  // [2.0e9 - flame_shock_duration, 2.0e9], the base's return value never reaches 1.0e9, so
+  // carrier always outranks non-carrier regardless of how short flame_shock_remaining or
+  // time_to_die get (re-checked, not assumed -- both ranges are written out in
+  // 228-SCHEMA-RECEIPT.md).
   if ( fact.flame_shock_remaining > 0.0 )
-    return 1.0e9 - fact.flame_shock_remaining;
-  return fact.time_to_die;
+    return 2.0e9 - fact.flame_shock_remaining;
+  return preference_shortest_time_to_die( a, fact );
 }
 
 double preference_voltaic_blaze( const action_t*, const enemy_fact& fact )
@@ -355,60 +380,14 @@ bool sundering_rect_contains( double px, double py, double fx, double fy, double
          perp <= SUNDERING_RECT_HALF_WIDTH_YARDS + bounding_allowance;
 }
 
-namespace
-{
-// Shared fold for both shaped preferences: given a HYPOTHETICAL facing toward `fact.candidate`,
-// count how many alive enemies (including the candidate itself) would fall inside the named
-// shape, and sum their remaining life -- encoded as one scalar (count dominates, life breaks a
-// tied count) so `select()` needs no second code path for the shaped ladder.
-template <typename ShapeFn>
-double shaped_score( const action_t* a, const enemy_fact& fact, ShapeFn shape_contains )
-{
-  double px = a->player->x_position;
-  double py = a->player->y_position;
-  double dx = fact.candidate->x_position - px;
-  double dy = fact.candidate->y_position - py;
-  double len = std::sqrt( dx * dx + dy * dy );
-  double fx, fy;
-  if ( len <= 0.0 )
-  {
-    // Coincident with the player: no meaningful direction: keep the player's own current
-    // facing rather than fabricate one (matches player_t::face()'s own coincident-position
-    // no-op -- never divides by zero).
-    fx = a->player->facing_x;
-    fy = a->player->facing_y;
-  }
-  else
-  {
-    fx = dx / len;
-    fy = dy / len;
-  }
-
-  int    count       = 0;
-  double summed_life = 0.0;
-  for ( player_t* other : a->sim->target_non_sleeping_list )
-  {
-    if ( !other->is_enemy() )
-      continue;
-    if ( shape_contains( px, py, fx, fy, other->x_position, other->y_position, other->combat_reach ) )
-    {
-      ++count;
-      summed_life += other->time_to_percent( 0 ).total_seconds();
-    }
-  }
-  return static_cast<double>( count ) * 1.0e9 + summed_life;
-}
-}  // namespace
-
-double preference_shaped_crash_lightning( const action_t* a, const enemy_fact& fact )
-{
-  return shaped_score( a, fact, crash_lightning_cone_contains );
-}
-
-double preference_shaped_sundering( const action_t* a, const enemy_fact& fact )
-{
-  return shaped_score( a, fact, sundering_rect_contains );
-}
+// OR-2 (owner ruling 2026-09-02, QUESTIONS Q1): Crash Lightning and Sundering get NO selector
+// and never turn the player. Wave 3 (clone a613171c41) wired `preference_shaped_crash_lightning`,
+// `preference_shaped_sundering` and the `shaped_score` helper into `select()` under a superseded
+// turn-toward-shape default (228-CONTEXT.md D-10's shaped row / ledger section 0 R2-1) -- all
+// three are REMOVED here (228-04 Task 1 Step 0b). The geometry predicates immediately below
+// (`crash_lightning_cone_contains`, `sundering_rect_contains`) are KEPT as the ONE shared copy:
+// `sc_shaman.cpp`'s AoE hit filters and this plan's own descriptive shape facts (228-04 Task 2)
+// both read them from the CURRENT facing, never a hypothetical one.
 
 void record_reresolution( reresolution_arm arm )
 {

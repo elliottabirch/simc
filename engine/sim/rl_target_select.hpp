@@ -133,16 +133,20 @@ preference_fn preference_for( const action_t* resolved );
 // preference_for) so the agreement probe and any future caller can name one directly.
 // ---------------------------------------------------------------------------------------------
 
-// stormstrike, windstrike, primordial_storm, lightning_bolt: longest time to die among candidates
-// that outlive the cast (D-15: time_to_die - cast_time > 0). R-B's consequence: under the rig's
-// fixed_time=1, every boss-type enemy's time_to_die is the fight clock with no per-actor term
-// (research 3.3), so this preference cannot order two bosses at all and parks on the boss over any
-// add unless the boss fails generic_filter -- recorded prominently in 228-SELECTOR-RECEIPT.md, not
-// changed. If NO candidate outlives the cast, this still returns an ordered, non-null answer
-// (never "invalid") by falling back to plain time_to_die ordering among the generic-filtered set
-// -- the same "never invalid" reasoning D-10 states explicitly for Voltaic Blaze, applied here as
-// a 228-02 ledger row since D-10's own text does not spell out this particular sub-case.
-double preference_longest_time_to_die( const action_t* a, const enemy_fact& fact );
+// stormstrike, windstrike, primordial_storm, lightning_bolt: OR-1 (owner ruling 2026-09-02,
+// QUESTIONS Q15 alternative (b), 228-04 Task 1 Step 0c) -- SHORTEST time to die among candidates
+// that outlive the cast (D-15: time_to_die - cast_time > 0), superseding the pre-228-04 longest-
+// lived rule (renamed from the pre-228-04 longest-lived-preferring function of the same shape; ledger P228-7/R-B and P228-24 are
+// superseded). R-B's consequence INVERTS: under the rig's fixed_time=1, every boss-type enemy's
+// time_to_die is the fight clock with no per-actor term (research 3.3), which is now the LOWEST
+// possible score under the shortest-lived ordering -- this preference now parks on the shortest-
+// lived valid add and falls back to the boss only when no add passes generic_filter (the opposite
+// of 228-SELECTOR-RECEIPT.md's recorded pre-228-04 behaviour). If NO candidate outlives the cast,
+// this still returns an ordered, non-null answer (never "invalid") by falling back to plain
+// time_to_die ordering among the generic-filtered set -- the same "never invalid" reasoning D-10
+// states explicitly for Voltaic Blaze, applied here as a 228-02 ledger row since D-10's own text
+// does not spell out this particular sub-case.
+double preference_shortest_time_to_die( const action_t* a, const enemy_fact& fact );
 
 // lava_lash: among Flame Shock carriers in reach, the SHORTEST Flame Shock remaining, else the
 // longest-lived -- copies the STRUCTURE of the fork's own shortest_duration_target()
@@ -226,17 +230,10 @@ bool crash_lightning_cone_contains( double px, double py, double fx, double fy, 
 bool sundering_rect_contains( double px, double py, double fx, double fy, double cx, double cy,
                                double bounding_allowance );
 
-// The two shaped preferences (D-10's shaped row, ledger 1.4 option (a), QUESTIONS Q1's default).
-// Score = (count of alive enemies that would fall inside the shape if the player faced
-// `fact.candidate`) * 1e9 + (their summed remaining life) -- the same single-scalar-encodes-a-
-// ladder idiom `preference_chain_lightning`/`preference_tempest` already use above, so `select()`
-// needs no second code path: count strictly dominates, summed life breaks a tied count, and
-// select()'s own (3) current-target / (4) identity-pair tie-breaks apply after that unchanged.
-// Passed to `select(a, /*harmful=*/true, ...)` exactly like any other preference_fn -- no second
-// copy of the precedence ladder (sticky, preference, current-target, identity-pair all reused
-// verbatim). Every count is deterministic geometry over `a->sim->target_non_sleeping_list`, never
-// a forced `target_list()` resolve (R-D; SHAPE_COUNTS_DETERMINISTIC's own grep asserts this).
-double preference_shaped_crash_lightning( const action_t* a, const enemy_fact& fact );
-double preference_shaped_sundering( const action_t* a, const enemy_fact& fact );
+// OR-2 (owner ruling 2026-09-02, QUESTIONS Q1, 228-04 Task 1 Step 0b): the two shaped
+// preferences that used to live here (`preference_shaped_crash_lightning`,
+// `preference_shaped_sundering`) are REMOVED -- Crash Lightning and Sundering never pick a
+// direction, they cast in the CURRENT facing. The geometry predicates above stay as the one
+// shared copy the shaman module's AoE hit filters read from.
 
 } // namespace rl_target_select
