@@ -12,6 +12,7 @@
 #include "sim/sim.hpp"
 
 #include <cassert>
+#include <cmath>
 #include <cstring>
 #include <tuple>
 #include <unordered_map>
@@ -317,6 +318,96 @@ double preference_tempest( const action_t*, const enemy_fact& fact )
   // Same formula as chain_lightning's, applied to Tempest's own resolved radius (measured 8.0) --
   // the addon's 8-yard cluster-centre rule.
   return static_cast<double>( fact.neighbours_within_splash ) * 1.0e6 + fact.time_to_die;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Shaped spells (228-03). Pure geometry -- plain doubles, no engine pointer beyond what the
+// candidate loop below needs to read positions and combat_reach.
+// ---------------------------------------------------------------------------------------------
+
+bool crash_lightning_cone_contains( double px, double py, double fx, double fy, double cx, double cy,
+                                     double bounding_allowance )
+{
+  double dx   = cx - px;
+  double dy   = cy - py;
+  double dist = std::sqrt( dx * dx + dy * dy );
+  if ( dist - bounding_allowance > CRASH_LIGHTNING_CONE_RADIUS_YARDS )
+    return false;
+  if ( dist <= 0.0 )
+    return true;  // coincident with the player: no meaningful "behind" for a zero-length vector.
+  double dot = ( fx * dx + fy * dy ) / dist;
+  return dot >= CRASH_LIGHTNING_CONE_COS_HALF_ANGLE;
+}
+
+bool sundering_rect_contains( double px, double py, double fx, double fy, double cx, double cy,
+                               double bounding_allowance )
+{
+  double dx = cx - px;
+  double dy = cy - py;
+  // Facing-axis (fx,fy) projection, and the perpendicular projection (rotate facing 90 degrees:
+  // (-fy, fx)). Both directions get the candidate's own bounding allowance, mirroring the cone's
+  // treatment and the spell record's own "Add Target (Dest) Combat Reach to AOE" attribute on
+  // both Sundering effects -- an add's own hitbox size, not a literal that could drift from the
+  // spell record's own stated behaviour.
+  double along = dx * fx + dy * fy;
+  double perp  = std::fabs( dx * ( -fy ) + dy * fx );
+  return along >= -bounding_allowance && along <= SUNDERING_RECT_LENGTH_YARDS + bounding_allowance &&
+         perp <= SUNDERING_RECT_HALF_WIDTH_YARDS + bounding_allowance;
+}
+
+namespace
+{
+// Shared fold for both shaped preferences: given a HYPOTHETICAL facing toward `fact.candidate`,
+// count how many alive enemies (including the candidate itself) would fall inside the named
+// shape, and sum their remaining life -- encoded as one scalar (count dominates, life breaks a
+// tied count) so `select()` needs no second code path for the shaped ladder.
+template <typename ShapeFn>
+double shaped_score( const action_t* a, const enemy_fact& fact, ShapeFn shape_contains )
+{
+  double px = a->player->x_position;
+  double py = a->player->y_position;
+  double dx = fact.candidate->x_position - px;
+  double dy = fact.candidate->y_position - py;
+  double len = std::sqrt( dx * dx + dy * dy );
+  double fx, fy;
+  if ( len <= 0.0 )
+  {
+    // Coincident with the player: no meaningful direction: keep the player's own current
+    // facing rather than fabricate one (matches player_t::face()'s own coincident-position
+    // no-op -- never divides by zero).
+    fx = a->player->facing_x;
+    fy = a->player->facing_y;
+  }
+  else
+  {
+    fx = dx / len;
+    fy = dy / len;
+  }
+
+  int    count       = 0;
+  double summed_life = 0.0;
+  for ( player_t* other : a->sim->target_non_sleeping_list )
+  {
+    if ( !other->is_enemy() )
+      continue;
+    if ( shape_contains( px, py, fx, fy, other->x_position, other->y_position, other->combat_reach ) )
+    {
+      ++count;
+      summed_life += other->time_to_percent( 0 ).total_seconds();
+    }
+  }
+  return static_cast<double>( count ) * 1.0e9 + summed_life;
+}
+}  // namespace
+
+double preference_shaped_crash_lightning( const action_t* a, const enemy_fact& fact )
+{
+  return shaped_score( a, fact, crash_lightning_cone_contains );
+}
+
+double preference_shaped_sundering( const action_t* a, const enemy_fact& fact )
+{
+  return shaped_score( a, fact, sundering_rect_contains );
 }
 
 void record_reresolution( reresolution_arm arm )

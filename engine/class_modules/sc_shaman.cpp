@@ -33,6 +33,7 @@
 #include "sim/cooldown.hpp"
 #include "sim/proc.hpp"
 #include "sim/proc_rng.hpp"
+#include "sim/rl_target_select.hpp"
 #include "util/string_view.hpp"
 
 #include <cassert>
@@ -5998,6 +5999,42 @@ struct thunderstrike_ward_t : public weapon_imbue_t
 
 struct crash_lightning_t : public shaman_attack_t
 {
+  // 228-03 Task 1 (TGT-01, D-08, R-A / P228-6). In the game Crash Lightning is a PLAYER-CENTRED
+  // CONE along the facing direction, not the engine's stock target-radiated circle
+  // (action.cpp:5356-5378, "Abilities with range/radius radiate from the TARGET" -- what this
+  // replaces and why: the spell's own effect type is "Enemies in Cone to Targeted Enemy (104)").
+  // Member factory returning a target-filter callback, assigned in the constructor -- the same
+  // shape sc_death_knight.cpp uses in a dozen places (dk_dot_or_debuff_only,
+  // secondary_targets_only): a lambda capturing `this`, not a new virtual. Runs inside
+  // `available_targets` (action.cpp:1730-1756), BEFORE `check_distance_targeting` -- it applies
+  // to the PRIMARY target too (available_targets pushes `target` through the same callback), so
+  // the primary is safe only because facing turns to the cast target and the cone is centred on
+  // the player along that axis (asserted from a real hit set below, not argued -- Step 3).
+  //
+  // Returns true UNCONDITIONALLY when `sim->facing_shapes` is off -- the option-off path is
+  // byte-identical to today's stock circle-radiate behaviour (T-228-03-01; the single-target
+  // identity run in 228-03 Task 2 asserts this for the whole scripted arm).
+  //
+  // Geometry: radius 8 yards (spell data, `action_t::radius`, matches the addon's
+  // CRASH_LIGHTNING_CONE_RADIUS_YARDS) and cos(60) = 0.5 half-angle for a 120-degree full cone --
+  // SOLE SOURCE is the addon's exported CRASH_LIGHTNING_CONE_COS_HALF_ANGLE
+  // (src/ext_rotation_shaman_enhancement_bb/enhancementShamanContext.ts:222-224); the angle
+  // appears nowhere else authoritative in this codebase (this binary's own `spell_query` now
+  // ALSO prints "Cone Angle : 120 degrees", a corroborating measurement, not a second source --
+  // see 228-SHAPE-RECEIPT.md). `rl_target_select::crash_lightning_cone_contains` is the ONE
+  // place both this filter and 228-03 Task 2's shaped preference read that pair from -- no second
+  // copy of either number in this file.
+  target_filter_callback_t crash_lightning_cone_filter()
+  {
+    return [ this ]( const action_t*, player_t* candidate ) {
+      if ( !sim->facing_shapes )
+        return true;
+      return rl_target_select::crash_lightning_cone_contains(
+          player->x_position, player->y_position, player->facing_x, player->facing_y,
+          candidate->x_position, candidate->y_position, candidate->combat_reach );
+    };
+  }
+
   crash_lightning_t( shaman_t* player, util::string_view options_str )
     : shaman_attack_t( "crash_lightning", player, player->talent.crash_lightning )
   {
@@ -6008,6 +6045,8 @@ struct crash_lightning_t : public shaman_attack_t
 
     weapon  = &( p()->main_hand_weapon );
     ap_type = attack_power_type::WEAPON_BOTH;
+
+    target_filter_callback = crash_lightning_cone_filter();
 
     player->crash_lightning.emplace_back( this );
   }

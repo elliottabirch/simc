@@ -192,4 +192,51 @@ struct reresolution_counts
 
 reresolution_counts get_reresolution_counts();
 
+// ---------------------------------------------------------------------------------------------
+// Shaped spells (228-03, TGT-01/D-08, R-A / P228-6). Crash Lightning and Sundering pick a
+// DIRECTION to face, not a cast target -- the "pick" is the enemy whose direction, if faced,
+// puts the most enemies inside the spell's own shape. ONE named constant pair per spell, here,
+// so `sc_shaman.cpp`'s per-action target filter callback and the two shaped preferences below
+// (and nowhere else in the fork) share EXACTLY one copy of each number -- the "no second copy of
+// the cone angle" prohibition applies to this file too, not only to the addon-vs-fork pair.
+//
+// Crash Lightning: 8-yard radius (spell data, `action_t::radius`, matches the addon's
+// CRASH_LIGHTNING_CONE_RADIUS_YARDS); 120-degree full cone / cos(60) = 0.5 half-angle -- SOLE
+// SOURCE is the addon's exported CRASH_LIGHTNING_CONE_COS_HALF_ANGLE
+// (enhancementShamanContext.ts:222-224); this binary's own `spell_query=spell.id=187874` ALSO
+// now prints "Cone Angle : 120 degrees" directly (a corroborating, not a competing, source --
+// the addon constant is still cited as the sole source per D-08/R-A's own wording; the receipt
+// records the corroboration).
+constexpr double CRASH_LIGHTNING_CONE_RADIUS_YARDS   = 8.0;
+constexpr double CRASH_LIGHTNING_CONE_COS_HALF_ANGLE = 0.5;
+
+// Sundering: 11 yards long (spell record effect radius), 4.5 yards WIDE, read as the FULL width
+// (QUESTIONS Q14) -- half-width 2.25 yards either side of the facing axis.
+constexpr double SUNDERING_RECT_LENGTH_YARDS     = 11.0;
+constexpr double SUNDERING_RECT_HALF_WIDTH_YARDS = 2.25;
+
+// Pure geometry predicates -- plain doubles only, no engine pointer (R-D: deterministic
+// geometry, never a target-cache read). `(px,py)` is the player's position, `(fx,fy)` a UNIT
+// facing vector (real, from `player_t::facing_x/y`, OR a hypothetical direction the shaped
+// preference is trying), `(cx,cy)` the candidate's position, `bounding_allowance` the
+// candidate's own `combat_reach` (both shapes' spell records carry "Add Target (Dest) Combat
+// Reach to AOE" -- the allowance is real, not invented).
+bool crash_lightning_cone_contains( double px, double py, double fx, double fy, double cx, double cy,
+                                     double bounding_allowance );
+bool sundering_rect_contains( double px, double py, double fx, double fy, double cx, double cy,
+                               double bounding_allowance );
+
+// The two shaped preferences (D-10's shaped row, ledger 1.4 option (a), QUESTIONS Q1's default).
+// Score = (count of alive enemies that would fall inside the shape if the player faced
+// `fact.candidate`) * 1e9 + (their summed remaining life) -- the same single-scalar-encodes-a-
+// ladder idiom `preference_chain_lightning`/`preference_tempest` already use above, so `select()`
+// needs no second code path: count strictly dominates, summed life breaks a tied count, and
+// select()'s own (3) current-target / (4) identity-pair tie-breaks apply after that unchanged.
+// Passed to `select(a, /*harmful=*/true, ...)` exactly like any other preference_fn -- no second
+// copy of the precedence ladder (sticky, preference, current-target, identity-pair all reused
+// verbatim). Every count is deterministic geometry over `a->sim->target_non_sleeping_list`, never
+// a forced `target_list()` resolve (R-D; SHAPE_COUNTS_DETERMINISTIC's own grep asserts this).
+double preference_shaped_crash_lightning( const action_t* a, const enemy_fact& fact );
+double preference_shaped_sundering( const action_t* a, const enemy_fact& fact );
+
 } // namespace rl_target_select
