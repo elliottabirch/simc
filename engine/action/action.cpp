@@ -2473,6 +2473,19 @@ bool action_t::target_ready( player_t* candidate_target )
        player->get_player_distance( *candidate_target ) > range + candidate_target->combat_reach )
     return false;
 
+  // Facing (228-01, D-06/D-07, R-E). Scoped harmful && range >= 0 on purpose: target_ready is
+  // also called for self/friendly/trinket actions (measured Range -1.000 on
+  // use_item_voracious_heart_of_ulatek, Range 0.000 on ascendance and berserking) -- an
+  // unguarded test would facing-gate every trinket. The generic cone is the 180-degree
+  // half-plane (cos_half_angle = 0.0): the game refuses a cast only when the target is behind
+  // you; a narrower cone would charge a turn the game does not (QUESTIONS Q3 records the
+  // alternative). Splash/area radius are untouched by this clause on purpose --
+  // check_distance_targeting, available_targets and target_list are not touched anywhere in
+  // this plan, which is what makes a behind enemy still splashable from a front target.
+  if ( sim->facing_enabled && harmful && range >= 0 &&
+       !player->is_in_front( *candidate_target, 0.0 ) )
+    return false;
+
   return true;
 }
 

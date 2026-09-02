@@ -981,6 +981,12 @@ struct sim_t : private sc_thread_t
   bool maximize_reporting;
   std::string apikey, user_apitoken;
   bool distance_targeting_enabled;
+  // 228-01, D-06/R-F: the cast-target in-front test (action_t::target_ready's fourth guard).
+  bool facing_enabled;
+  // 228-01, R-F: the player-centred cone/rectangle target filter for shaped spells (Crash
+  // Lightning, Sundering). Registered here; stays INERT until plan 228-03 installs the filter
+  // that reads it -- not dead code, the consumer lands in a later plan.
+  bool facing_shapes;
   bool ignore_invulnerable_targets;
   bool enable_dps_healing;
   bool count_overheal_as_heal;

@@ -485,6 +485,12 @@ struct player_t : public actor_t
 
   // Position
   double x_position, y_position, default_x_position, default_y_position;
+  // Facing (228-01, D-04): a unit vector this player faces, turned instantly (no turn rate,
+  // D-05) toward the current cast target at every `player_t::acquire_target` retarget and at
+  // the fork's own cast-target set site. Initialised toward the default target (measured:
+  // player at x=-5.000,y=0.000 facing the boss at x=-0.000,y=0.000 -- see player.cpp ctor)
+  // and reset beside the position pair in `player_t::reset()`.
+  double facing_x, facing_y;
 
   struct consumables_t {
     buff_t* flask;
@@ -999,6 +1005,15 @@ public:
   double get_player_distance( const player_t& ) const;
   double get_ground_aoe_distance( const action_state_t& ) const;
   double get_position_distance( double m = 0, double v = 0 ) const;
+  // Facing (228-01, D-04/D-05): re-aim this player's facing vector at `t`, instantly, no turn
+  // rate. Rejected alternative: `change_position` -- that setter takes a `position_e` enum and
+  // never touches x_position/y_position or a facing vector, so it is not a substitute for this.
+  void face( const player_t& t );
+  // Normalised dot product of this player's facing vector with the direction toward `t`,
+  // compared >= against `cos_half_angle` (0.0 == the generic 180-degree half-plane, D-07).
+  // Coincident positions (zero-length direction vector) return true rather than dividing by
+  // zero -- a target standing exactly on the player is never "behind" them.
+  bool is_in_front( const player_t& t, double cos_half_angle ) const;
   double compute_incoming_damage( timespan_t interval) const;
   double compute_incoming_magic_damage( timespan_t interval ) const;
   double calculate_time_to_bloodlust() const;

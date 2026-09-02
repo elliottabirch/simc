@@ -1611,6 +1611,8 @@ sim_t::sim_t()
     maximize_reporting( false ),
     apikey( get_api_key() ),
     distance_targeting_enabled( false ),
+    facing_enabled( false ),
+    facing_shapes( false ),
     ignore_invulnerable_targets( false ),
     enable_dps_healing( false ),
     count_overheal_as_heal( false ),
@@ -4193,6 +4195,8 @@ void sim_t::create_options()
   add_option( opt_string( "apikey", apikey ) );
   add_option( opt_string( "apitoken", user_apitoken ) );
   add_option( opt_bool( "distance_targeting_enabled", distance_targeting_enabled ) );
+  add_option( opt_bool( "facing_enabled", facing_enabled ) );
+  add_option( opt_bool( "facing_shapes", facing_shapes ) );
   add_option( opt_bool( "ignore_invulnerable_targets", ignore_invulnerable_targets ) );
   add_option( opt_bool( "enable_dps_healing", enable_dps_healing ) );
   add_option( opt_bool( "count_overheal_as_heal", count_overheal_as_heal ) );
