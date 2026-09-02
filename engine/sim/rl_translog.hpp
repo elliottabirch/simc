@@ -140,8 +140,10 @@ inline constexpr std::uint32_t FORMAT_VERSION = 5u;
 // cannot silently drift from the formula and still compile (tstl 220-03,
 // OBS-06; formula updated 260901-pb1 Task 3, version 5 -- see top-of-file
 // comment).
-inline constexpr std::uint32_t RECORD_SIZE = 1032u;  // 260901-pb1 Task 3: roundup8(43 + 4*246) -- W=246,
-                                                       // FORMAT_VERSION 5.
+inline constexpr std::uint32_t RECORD_SIZE = 936u;  // 260902-context-scaling D: roundup8(43 + 4*223) -- W=223,
+                                                      // FORMAT_VERSION 5 (unchanged -- pure width move, no new
+                                                      // fields added to the row shape this time). Previous:
+                                                      // 1032u at W=246 (260901-pb1 Task 3).
 static_assert( RECORD_SIZE == ( ( 43u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) + 7u ) / 8u ) * 8u,
                "RECORD_SIZE must be roundup8(43 + 4*RL_OBS_DIM)" );
 static_assert( RL_OBS_DIM >= 2, "footer_record's zero40[RL_OBS_DIM-1] needs at least one element" );
