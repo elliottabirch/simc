@@ -40,6 +40,14 @@ namespace
 // episode-driver.py's PROTOCOL_VERSION) must move in lockstep.
 constexpr int SOLVER_CONTROL_PROTOCOL_VERSION = 2;
 
+// 260902/FORK-04 (226-05-PLAN.md Task 1): a hand-authored, LOCAL constant --
+// deliberately NOT added to the registry-generated rl_policy_constants.h
+// (this phase's own prohibition: "No maskRules entry, no regeneration or
+// hand-edit of rl_policy_constants.h"). Used only by accept_wait()'s
+// fight-end clamp below to keep a clamped wait strictly before
+// `sim->expected_iteration_time`; see that call site for the full mechanism.
+constexpr double WAIT_END_OF_FIGHT_EPSILON_SECONDS = 0.001;
+
 [[noreturn]] void protocol_abort( const std::string& msg )
 {
   fmt::print( stderr, "solver_control: FATAL: {}\n", msg );
@@ -146,8 +154,38 @@ void accept_wait( sim_t* sim, execute_type et, double sec, const std::string& co
   // definitions read_state() uses -- never a third independent walk of
   // sim->raid_events. No raid event pending (next_raid_event_in() returns
   // false) means no clamp from that source, per read_state()'s own policy.
-  const double fight_remaining =
-      std::max( ( sim->expected_iteration_time - sim->current_time() ).total_seconds(), 0.0 );
+  //
+  // 260902/FORK-04 (226-05-PLAN.md Task 1, `226-STALL-RECEIPT.md` Section 9):
+  // the fight-end bound is shaved by WAIT_END_OF_FIGHT_EPSILON_SECONDS so the
+  // resulting Player-Ready event lands STRICTLY before `expected_iteration_time`,
+  // never exactly on it. Without this, a wait clamped to exactly
+  // `fight_remaining` schedules `player_ready_event_t` at the SAME timestamp
+  // as `sim_end_event_t` (sim.cpp:2026, `make_event<sim_end_event_t>(*this,
+  // *this, expected_iteration_time)`). `sim_end_event_t` is inserted once,
+  // near iteration start (`sim.cpp:2026`), so it always carries a lower
+  // insertion id than any mid-fight-scheduled ready event; same-timestamp
+  // ties in `event_manager_t::add_event` resolve by ascending insertion id,
+  // so `sim_end_event_t::execute()` (`sim.cpp:1017-1020`, `cancel_iteration()`)
+  // always runs FIRST and tears the iteration down before the tied
+  // Player-Ready event's callback is ever reached -- silently discarding
+  // the actor's own re-decision. This directly contradicts this function's
+  // own documented invariant two paragraphs below ("Waiting a hair past a
+  // raid event or past fight end is harmless (the engine re-decides at the
+  // next boundary either way)") for the one case that invariant did not
+  // anticipate: fight-end EXACTLY, not "a hair past" it. Measured
+  // (226-05-PLAN.md Task 2's twenty-seed sweep, `pairB.simc`-derived, seeds
+  // 5 and 31337): the actor's decision stream silently and permanently
+  // stopped at t=573.916 and t=392.000 respectively, in both cases because
+  // the immediately-prior wait request (28.86s / 233.024s) was clamped to
+  // land at EXACTLY `expected_iteration_time` (600.000s). Fixed at the
+  // clamp's own source, per-decision, as a bound adjustment only -- never a
+  // process external to this function that notices the actor went quiet and
+  // pokes it back to life: the fight-end bound itself is shaved before the
+  // comparison, so `sec` can never resolve to a value that reproduces the tie.
+  const double fight_remaining = std::max(
+      ( sim->expected_iteration_time - sim->current_time() ).total_seconds() -
+          WAIT_END_OF_FIGHT_EPSILON_SECONDS,
+      0.0 );
   if ( fight_remaining < sec )
     sec = fight_remaining;
   double raid_event_bound = 0.0;
