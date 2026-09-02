@@ -2092,7 +2092,23 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
     {
       // Only fight_remains is derived in this schema: episode.maxTime - t,
       // floored at 0 (obs.py:236-243).
-      raw = std::max( RL_EPISODE_MAX_TIME - s.t, 0.0 );
+      //
+      // 260902/227-RA: RL_EPISODE_MAX_TIME is a compile-time constant baked
+      // for the single rlReady spec's declared 300s episode. The rig now
+      // also emits 450s/600s route-template shapes (227-CONTEXT.md
+      // TMPL-02); on those this leaf read "0s left" for the entire back
+      // half of the fight. The sim's own runtime max_time is exact here --
+      // the rig always emits fixed_time=1, vary_combat_length=0 combat, so
+      // there is no per-iteration variance to average over (unlike
+      // sim_t::expected_max_time(), which folds in vary_combat_length and
+      // is deliberately NOT used). Falls back to the generated constant
+      // only when max_time is not strictly positive (a mis-initialised
+      // sim), so the constant keeps a reader and this leaf never subtracts
+      // from zero.
+      const double fight_len = p->sim->max_time.total_seconds() > 0.0
+                                    ? p->sim->max_time.total_seconds()
+                                    : RL_EPISODE_MAX_TIME;
+      raw = std::max( fight_len - s.t, 0.0 );
       status = lookup_status::present;
     }
     else
@@ -2297,7 +2313,17 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
             {
               double v = 0.0;
               if ( !next_raid_event_in( p->sim, v ) )
-                v = std::max( RL_EPISODE_MAX_TIME - s.t, 0.0 );
+              {
+                // 260902/227-RA: same runtime-length substitution as the
+                // fight_remains derived branch above -- see that comment
+                // for the full citation. The rig's fixed-length combat
+                // makes p->sim->max_time exact here; RL_EPISODE_MAX_TIME
+                // is used only as the defensive fallback.
+                const double fight_len = p->sim->max_time.total_seconds() > 0.0
+                                              ? p->sim->max_time.total_seconds()
+                                              : RL_EPISODE_MAX_TIME;
+                v = std::max( fight_len - s.t, 0.0 );
+              }
               raw = v;
               status = lookup_status::present;
               break;
@@ -2691,6 +2717,36 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
     else if ( status == lookup_status::permanent )
     {
       encoded = RL_PERMANENT_SATURATION;
+    }
+    else if ( !f.derived && b.kind == slot_binding_kind::direct && b.direct == direct_id::t &&
+              f.kind == rl_kind::k_seconds && f.has_clip_div )
+    {
+      // 260902/227-RA: the clock leaf ('t') normalises by the simulation's
+      // own runtime fight length, not by the constant `clip_div` baked
+      // into the generated descriptor table (still 300.0, unchanged --
+      // the spec's declared divisor is deliberately left alone so
+      // `gen_obs_schema.py --check` stays green; only the VALUE computed
+      // here moves). The rig's fixed-length combat makes max_time exact.
+      // Falls back to the descriptor's own clip_div when max_time is not
+      // strictly positive, matching the fallback used at the other two
+      // 227-RA sites above.
+      //
+      // `!f.derived` is REQUIRED here, not decorative: resolve_scalar_leaf
+      // (above) deliberately binds the derived `fight_remains` leaf's own
+      // slot_binding to `direct_id::t` too (its own comment: "a defined
+      // value ... so a future reader never has to wonder" -- the wondering
+      // happens exactly here). `fight_remains` also has kind=k_seconds and
+      // has_clip_div=true (clipDiv 60), so without this guard this branch
+      // would silently hijack fight_remains' encoding as well, re-scaling
+      // an already-correct site-1 value by max_time/60 instead of the
+      // schema's own 60s clip. Caught by a same-seed old-vs-new binary dump
+      // diff on the 300s fixture during this task's own verification
+      // (227-LENGTH-RECEIPT.md).
+      const double fight_len = p->sim->max_time.total_seconds() > 0.0
+                                    ? p->sim->max_time.total_seconds()
+                                    : f.clip_div;
+      const double clipped = std::max( std::min( raw, fight_len ), 0.0 );
+      encoded = clipped / fight_len;
     }
     else
     {

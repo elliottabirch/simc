@@ -98,13 +98,13 @@ struct rl_talent_gate
 
 inline constexpr const char* RL_REGISTRY_ID = "enhancement";
 inline constexpr const char* RL_ACTOR_NAME = "MID2_Shaman_Enhancement_Stormbringer";
-inline constexpr int RL_ENCODER_VERSION = 2;
+inline constexpr int RL_ENCODER_VERSION = 3;
 inline constexpr std::size_t RL_OBS_DIM = 246;
 inline constexpr std::size_t RL_ACTION_DIM = 26;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
-inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v2:f7f4adb8d475629e4ca858dfdca9111f8ce0b4791732a1237bbeeff4fe2fc0cc";
+inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v3:96a31ccfbd3c7eaf97eed6452a984756c7f67e78e00c6f221a3b9b9f00134045";
 inline constexpr const char* RL_MASK_RULES_SHA = "e7b395d2886a54529bf3a86581492ebe69eec56aa1e4abfce670d68c808cb7be";
 inline constexpr const char* RL_ACTION_SPACE_SHA = "1fadf4ed553b45e704d773719ab238e618eee4e35df9cd6a9a993636ff008665";
 
