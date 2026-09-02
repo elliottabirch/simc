@@ -1608,7 +1608,25 @@ slot_binding resolve_action_leaf( player_t* p, const std::string& engine_token, 
   // "spell_targets" is always a bare (undotted) name, i.e. self-referring
   // to `a` -- action.cpp's own splitter defaults `name_of_spell` to the
   // action's own name_str whenever no "." qualifier is present.
-  if ( leaf_name == "spell_targets" )
+  //
+  // WR-04 (260902/cr2 code review): the RNG-drawing resolve this special
+  // case exists to avoid is ONLY reachable through action.cpp:3861's
+  // `sim->distance_targeting_enabled` branch (spell_targets_t itself, the
+  // struct whose evaluate_spell() draws RNG via __check_distance_targeting).
+  // action.cpp's `else` branch (:3928-3939, distance targeting OFF) never
+  // touches target_cache or target_list() at all -- it draws no RNG and
+  // returns either a constant 1.0 (single enemy, no adds/pull raid event)
+  // or `sim->active_enemies` directly. The bind-time special case below
+  // was unconditional and therefore silently overrode BOTH branches, so a
+  // profile with distance_targeting_enabled=0 lost SimC's own
+  // active_enemies semantics for no RNG reason. Scoped to the branch it is
+  // actually arguing about: distance targeting off falls through to
+  // create_expression unchanged, regaining the real else-branch. (If
+  // CR-01's active_enemies-based fallback below converges the two
+  // branches' values, this scoping becomes moot in practice but stays
+  // correct in principle -- the two paths remain semantically distinct
+  // reads even when numerically equal.)
+  if ( leaf_name == "spell_targets" && p->sim->distance_targeting_enabled )
   {
     slot_binding b;
     b.leaf = &leaf;
@@ -2008,12 +2026,37 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
       // draws earlier in the stream than the unmodified fight would, which
       // shifts every subsequent random outcome. Read the target cache's
       // CURRENT size only if it is already valid (a real cast recently
-      // resolved it); otherwise fall back to 1 rather than forcing a
-      // resolve -- an approximate hit_damage leaf on an invalid-cache
-      // decision is strictly preferable to perturbing the fight itself.
+      // resolved it).
+      //
+      // CR-01 (260902/cr2 code review, FIX AT SOURCE): on an INVALID cache
+      // this used to fall back to a hard 1, which under-counts every add
+      // window -- action_t::target_cache is invalidated on EVERY enemy
+      // add/removal (action.cpp:5205's target_non_sleeping_list callback)
+      // and by adds/move_enemy/pull raid events (raid_event.cpp:274,:688,
+      // :882), so the cache reads invalid from the instant an add spawns
+      // until this action's OWN next real cast resolves it -- exactly the
+      // multi-target windows this milestone exists to add. This leaf ALSO
+      // governs slot 135 (action_leaves.chain_lightning.spell_targets,
+      // scripts/rl/specs/enhancement.json), so a hard-1 fallback here fed
+      // the agent an enemy-count OBSERVATION of 1 while several enemies
+      // stood there, not merely an approximate hit_damage precision term.
+      // Neither lie is acceptable: a hard 1 under-counts in add windows;
+      // the engine's live enemy count over-counts an action whose own
+      // chain/cleave range caps it below that count. Fall back to
+      // min(live enemy count, this action's own n_targets() cap) when the
+      // cap is a real positive number, else the live count alone (an
+      // unlimited/AoE action, n_targets() <= 0, has no cap to intersect
+      // with) -- RNG-free either way (`s.active_enemies` is populated in
+      // read_state() from `sim->active_enemies`, no target-list resolve).
+      // 228-CONTEXT.md R-D names the honest fix: deterministic per-target
+      // geometry computed from positions, replacing this stopgap outright.
+      const int live_enemies = s.has_active_enemies
+                                    ? static_cast<int>( s.active_enemies )
+                                    : static_cast<int>( p->sim->active_enemies );
+      const int nt = num_targets;
       const int max_targets = a->target_cache.is_valid
                                    ? static_cast<int>( a->target_cache.list.size() )
-                                   : 1;
+                                   : ( nt > 0 ? std::min( live_enemies, nt ) : live_enemies );
       num_targets = ( num_targets < 0 ) ? max_targets : std::min( max_targets, num_targets );
     }
     state->n_targets = std::max( 1, num_targets );
@@ -2529,9 +2572,30 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
                 status = lookup_status::absent;
                 break;
               }
-              raw = b.bound_action->target_cache.is_valid
-                        ? static_cast<double>( b.bound_action->target_cache.list.size() )
-                        : 1.0;
+              // CR-01 (260902/cr2 code review, FIX AT SOURCE): same fix as
+              // the shared hit_damage site above, applied to the actual
+              // observation slot (action_leaves.chain_lightning.spell_targets,
+              // scripts/rl/specs/enhancement.json) the review's concrete
+              // failure named -- an invalid cache used to read a hard 1.0
+              // here, in exactly the add windows this milestone adds. Fall
+              // back to min(live enemy count, this action's own n_targets()
+              // cap) when the cap is a real positive number, else the live
+              // count alone -- RNG-free (`s.active_enemies`, no
+              // target-list resolve). 228-CONTEXT.md R-D names the honest
+              // fix (deterministic per-target geometry) this stopgap holds
+              // the line until.
+              if ( b.bound_action->target_cache.is_valid )
+              {
+                raw = static_cast<double>( b.bound_action->target_cache.list.size() );
+              }
+              else
+              {
+                const int live_enemies = s.has_active_enemies
+                                              ? static_cast<int>( s.active_enemies )
+                                              : static_cast<int>( p->sim->active_enemies );
+                const int nt = b.bound_action->n_targets();
+                raw = static_cast<double>( nt > 0 ? std::min( live_enemies, nt ) : live_enemies );
+              }
               status = lookup_status::present;
               break;
             }

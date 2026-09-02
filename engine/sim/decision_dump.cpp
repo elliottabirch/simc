@@ -771,6 +771,20 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
       out << ",\"wait_anchor\":\"" << json_escape( sim->solver_control_last_wait_anchor_label ) << "\"";
     else
       out << ",\"wait_anchor\":null";
+    // 260902/cr2 (CR-03/WR-08's fix): wait_source -- which clock produced
+    // this wait's seconds ("cooldown:<row>" / "swing_mh" / "gcd" /
+    // "reask_cap" / "floor", or an anchored-wait source), plumbed the
+    // EXACT same way wait_anchor immediately above is: gated on
+    // solver_reply_gated + reply_type=="wait", null otherwise, and null on
+    // the FIFO transport (the wire "wait" reply carries no source
+    // identity -- PROTOCOL.md's `{"sec": float}` shape -- so
+    // solver_control_last_wait_source stays empty there, same reason
+    // wait_anchor stays empty on that transport). Never re-derived --
+    // carried straight from the wait_result build_wait() returned.
+    if ( sim->solver_control_last_reply_type == "wait" && !sim->solver_control_last_wait_source.empty() )
+      out << ",\"wait_source\":\"" << json_escape( sim->solver_control_last_wait_source ) << "\"";
+    else
+      out << ",\"wait_source\":null";
   }
 
   // 221-01 (ACT-02, Pattern 3) -- the engine-truth legality layer, emitted
@@ -950,17 +964,22 @@ void record( player_t* p, action_t* chosen, execute_type et )
   // identical to the stale one (invisible); with several it perturbs the
   // random stream downstream of it (measured: an add-bearing fight's DPS
   // mean moved from 343514.6 to 349746.6 at the same seed with only a
-  // decision_dump= line added). Mirror solver_control.cpp:421's own
-  // actor-identity gate exactly -- the same exact strcmp against
-  // RL_ACTOR_NAME, never a prefix match (a prefix over the actor's name
-  // also matches every one of its pet records) -- so nothing below this
-  // point runs at all for anyone but the registered agent. `p->is_pet()`
-  // is kept as an explicit second conjunct even though the name gate
-  // alone already excludes the pet (belt-and-braces, D-13 amended):
-  // `is_pet()` is ALSO true for ENEMY_ADD and ENEMY_ADD_BOSS
-  // (player.hpp:968), so this makes "no pet rows, no raid-event-add rows"
-  // an explicit, named property of the gate rather than an accident of
-  // the actor-name check alone.
+  // decision_dump= line added). Mirror solver_control.cpp:459's own
+  // actor-identity gate -- the same exact strcmp against RL_ACTOR_NAME,
+  // never a prefix match (a prefix over the actor's name also matches
+  // every one of its pet records). 260902/cr2 (WR-06's fix): corrected
+  // from a prior "mirror :421 exactly" citation -- :421 is the
+  // auto-attack re-arm block, not an actor gate, and the two gates are
+  // NOT identical predicates. Two deliberate deltas from :459: (a) this
+  // gate is unconditional, while :459's `sim->solver_control_str.empty()
+  // &&` conjunct applies only on the in-process transport (the FIFO arm
+  // filters which actor's rows it sees on the Python side instead); (b)
+  // `p->is_pet()` is added here as an explicit second conjunct
+  // (belt-and-braces, D-13 amended) even though the name gate alone
+  // already excludes the pet -- `is_pet()` is ALSO true for ENEMY_ADD and
+  // ENEMY_ADD_BOSS (player.hpp:968), so this makes "no pet rows, no
+  // raid-event-add rows" an explicit, named property of the gate rather
+  // than an accident of the actor-name check alone.
   if ( std::strcmp( p->name(), RL_ACTOR_NAME ) != 0 || p->is_pet() )
     return;
 

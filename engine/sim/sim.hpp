@@ -752,6 +752,18 @@ struct sim_t : private sc_thread_t
   bool solver_control_has_requested_wait_sec = false;
   double solver_control_last_requested_wait_sec = 0.0;
   std::string solver_control_last_wait_anchor_label;
+  // 260902/cr2 (WR-08's fix, review CR-03): the wait_result's own `source`
+  // string ("cooldown:<row>" / "swing_mh" / "gcd" / "reask_cap" / "floor",
+  // or an anchored-wait source like "wait_next_event"'s siblings) -- NEVER
+  // re-derived, just carried from the SAME wait_result build_wait()
+  // already returns. Set/cleared beside solver_control_last_wait_anchor_label
+  // above, on the identical schedule: cleared at the top of EVERY reply's
+  // handling on both transports, set only on the in-process arm's "wait"
+  // branch (the FIFO arm's wire "wait" reply carries no source identity --
+  // PROTOCOL.md's `{"sec": float}` shape -- so this stays empty/null on
+  // that transport, same as the anchor label). Read by
+  // decision_dump::write_state_fields() to emit "wait_source".
+  std::string solver_control_last_wait_source;
   // In-process exploration draw (Phase 213, D-08, ruling 213-G17). A
   // DEDICATED stream, re-seeded once per fight from that fight's own seed
   // (solver_control::reset_iteration()) -- it must NEVER be the engine's

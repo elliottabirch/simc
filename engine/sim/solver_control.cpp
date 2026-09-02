@@ -180,8 +180,25 @@ void accept_wait( sim_t* sim, execute_type et, double sec, const std::string& co
   // land at EXACTLY `expected_iteration_time` (600.000s). Fixed at the
   // clamp's own source, per-decision, as a bound adjustment only -- never a
   // process external to this function that notices the actor went quiet and
-  // pokes it back to life: the fight-end bound itself is shaved before the
-  // comparison, so `sec` can never resolve to a value that reproduces the tie.
+  // pokes it back to life.
+  //
+  // WR-01 (260902/cr2 code review, measured, NOT an absolute invariant as
+  // previously claimed here): the CR-04 re-floor below (`sec <
+  // RL_WAIT_FLOOR_SECONDS -> RL_WAIT_FLOOR_SECONDS`) runs AFTER this shave
+  // and CAN put `sec` back exactly on the tie. Walking `timespan_t`'s
+  // integer-millisecond arithmetic (`from_seconds` truncates): at R = 50ms
+  // remaining, `fight_remaining` = 0.050 - 0.001 = 0.049, then
+  // `0.049 < 0.05` re-floors to 0.05 -- `from_seconds(0.05)` = 50 ticks,
+  // landing the Player-Ready event at EXACTLY `expected_iteration_time`
+  // again, tying with `sim_end_event_t` a second time. So the shave does
+  // NOT hold across every `sec` -- it holds everywhere except a 1ms-wide
+  // band at R=50ms, where the outcome is the same harmless-in-practice
+  // loss (one re-decision skipped in the fight's final 50ms) the pre-fix
+  // bug caused at every R, just far rarer. Re-shaving after the re-floor
+  // would close this exactly (carried as a todo:
+  // 2026-09-02-fork04-fight-end-reshave-after-floor.md) -- NOT done here;
+  // this is a comment-only correction, the code below this point is
+  // byte-identical to before it.
   const double fight_remaining = std::max(
       ( sim->expected_iteration_time - sim->current_time() ).total_seconds() -
           WAIT_END_OF_FIGHT_EPSILON_SECONDS,
@@ -563,6 +580,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     sim->solver_control_has_requested_wait_sec = false;
     sim->solver_control_last_requested_wait_sec = 0.0;
     sim->solver_control_last_wait_anchor_label.clear();
+    sim->solver_control_last_wait_source.clear();
 
     if ( type == "cast" )
     {
@@ -887,6 +905,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     sim->solver_control_has_requested_wait_sec = false;
     sim->solver_control_last_requested_wait_sec = 0.0;
     sim->solver_control_last_wait_anchor_label.clear();
+    sim->solver_control_last_wait_source.clear();
 
     // Confidence gap (Phase 212, plan 212-01, TLOG-02): the largest legal Q
     // minus the second largest, considering only entries whose mask byte is
@@ -984,6 +1003,10 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     sim->solver_control_has_requested_wait_sec = true;
     sim->solver_control_last_requested_wait_sec = wr.seconds;
     sim->solver_control_last_wait_anchor_label = action.label ? action.label : "";
+    // 260902/cr2 (CR-03/WR-08's fix): carry the SAME wait_result::source
+    // build_wait() already computed -- never re-derived. Empty on the
+    // FIFO arm by construction (never reaches this in-process branch).
+    sim->solver_control_last_wait_source = wr.source;
     // Flight recorder decision row, wait branch. wr.floored is the fifth
     // flag bit's only source -- it says the wait length came from the
     // floor rather than from a real timer. No-op when rl_translog= is
