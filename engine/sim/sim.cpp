@@ -4862,6 +4862,30 @@ void sim_t::setup( sim_control_t* c )
     }
   }
 
+  // 260902/FORK-03 (D-11 post-research ruling, Research Open Question 3):
+  // the SAME defect class as the solver_policy= refusal just above, but on
+  // the BARE decision_dump= path -- decision_dump::record() has called the
+  // observation build's hit_damage leaves (rl_policy_obs.cpp's
+  // get_shared_action_leaves) since the observation columns were added to
+  // the dump (260901-od1), and those leaves end in
+  // action_t::calculate_direct_amount(), which draws from the sim RNG when
+  // average_range=0 -- independent of, and not fixed by, this same task's
+  // target-cache read-only fix (that fix stops the leaves from FORCING a
+  // target-list resolve; it does not touch calculate_direct_amount's own
+  // average_range branch). A run combining a dump line with
+  // average_range=0 would silently make even a bare, solver_policy=-less
+  // dump non-read-only. Refuse loudly rather than depend on the default,
+  // exactly as the solver_policy= case above does -- this check is
+  // independent of that one so it also fires when decision_dump= is used
+  // WITHOUT solver_policy=.
+  if ( !decision_dump_file_str.empty() && !average_range )
+  {
+    throw sc_runtime_error(
+        "decision_dump= requires average_range=1: the RL observation's hit_damage leaves call "
+        "calculate_direct_amount(), which draws from the sim RNG when average_range=0, making the "
+        "dump's observation columns no longer read-only." );
+  }
+
   // Flight recorder clamp (phase 212, plan 212-01, TLOG-01/02/03). Same
   // shape as solver_control='s and solver_policy='s clamps just above --
   // the stream, its mutex and its row buffer are root-owned only (see
