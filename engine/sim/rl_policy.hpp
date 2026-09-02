@@ -92,6 +92,21 @@ struct rl_state_t
   double swing_mh_remains    = 0.0;   bool has_swing_mh_remains   = false;
   double swing_oh_remains    = 0.0;   bool has_swing_oh_remains   = false;   // quick task 260826-38t, D-2R slot 8
   double active_enemies      = 0.0;   bool has_active_enemies     = false;
+
+  // FORK-04b (260902/226-07) -- the re-ask-period cap on the unanchored
+  // wait (build_wait's anchor.kind == none branch, rl_policy_obs.cpp).
+  // Same PLAYER-scoped formulas decision_dump.cpp's gcd_length/
+  // auto_attack_interval keys and the swing_cast_gcd_length/
+  // swing_cast_auto_attack_interval obs leaves use -- read ONCE here in
+  // read_state(), never re-derived at the obs-leaf switch or at the cap
+  // site (the "one reader" rule this file's swing/gcd obs-leaf comment
+  // already states). Both are unconditionally well-defined (0.0 is a
+  // real "no main-hand weapon" reading for auto_attack_interval, not an
+  // absence), so has_* is set true unconditionally in read_state() --
+  // kept as an explicit flag anyway for the same reason every other
+  // field on this POD carries one.
+  double gcd_length          = 0.0;   bool has_gcd_length         = false;
+  double auto_attack_interval = 0.0;  bool has_auto_attack_interval = false;
   bool   boundary_is_foreground = true;   // converted ONCE from execute_type by the caller
 
   // 221-03 (ACT-05/ACT-06) -- the two anchored-wait clamp inputs. Filled

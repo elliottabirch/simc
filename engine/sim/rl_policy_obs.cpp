@@ -152,6 +152,24 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground )
   s.gcd_remains = decision_dump::clamp_nonneg( ( p->gcd_ready - sim->current_time() ).total_seconds() );
   s.has_gcd_remains = true;
 
+  // FORK-04b (260902/226-07) -- gcd_length/auto_attack_interval, read ONCE
+  // here (the "one reader" rule) so build_wait's re-ask-period cap and the
+  // swing_cast_gcd_length/swing_cast_auto_attack_interval obs leaves below
+  // both read this SAME POD value, never a second independently-maintained
+  // formula. Identical to decision_dump.cpp's gcd_length/auto_attack_interval
+  // keys (both PLAYER-scoped, not action-scoped).
+  {
+    timespan_t player_gcd = p->base_gcd * p->cache.attack_haste();
+    if ( player_gcd < p->min_gcd )
+      player_gcd = p->min_gcd;
+    s.gcd_length = player_gcd.total_seconds();
+    s.has_gcd_length = true;
+  }
+  s.auto_attack_interval = p->main_hand_attack
+      ? ( p->main_hand_weapon.swing_time * p->cache.auto_attack_speed() ).total_seconds()
+      : 0.0;
+  s.has_auto_attack_interval = true;
+
   // Same source decision_dump.cpp's swing-timer emitter reads.
   if ( p->main_hand_attack && p->main_hand_attack->execute_event )
   {
@@ -2160,18 +2178,14 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
               }
               break;
             case direct_id::swing_cast_gcd_length:
-            {
-              timespan_t player_gcd = p->base_gcd * p->cache.attack_haste();
-              if ( player_gcd < p->min_gcd )
-                player_gcd = p->min_gcd;
-              raw = player_gcd.total_seconds();
+              // FORK-04b (260902/226-07): reads the POD read_state() already
+              // populated -- one reader, not re-derived here (see that
+              // field's own comment in rl_policy.hpp).
+              raw = s.gcd_length;
               status = lookup_status::present;
               break;
-            }
             case direct_id::swing_cast_auto_attack_interval:
-              raw = p->main_hand_attack
-                ? ( p->main_hand_weapon.swing_time * p->cache.auto_attack_speed() ).total_seconds()
-                : 0.0;
+              raw = s.auto_attack_interval;
               status = lookup_status::present;
               break;
             case direct_id::swing_cast_casting_remains:
@@ -2930,9 +2944,11 @@ void build_mask( const rl_state_t& s, std::uint8_t out_mask[ RL_ACTION_DIM ] )
 }
 
 // ---------------------------------------------------------------------------
-// build_wait -- REAL. anchor.kind == none mirrors mask.py:175-243 exactly
-// (next_event_wait_detail), BYTE FOR BYTE -- same candidate set, same
-// tie-break, same floor (RESEARCH Pitfall 7). An anchored kind (221-03,
+// build_wait -- REAL. anchor.kind == none mirrors mask.py's
+// next_event_wait_detail() exactly, BYTE FOR BYTE -- same candidate set,
+// same tie-break, the same FORK-04b re-ask-period cap (260902/226-07:
+// caps the winning candidate at max(gcd_length, auto_attack_interval)
+// before the floor), same floor (RESEARCH Pitfall 7). An anchored kind (221-03,
 // ACT-05/ACT-06) instead calls the SAME read_anchored_wait() pure reader
 // build_mask()'s wait-legality rule calls above, then clamps to the two
 // known bounds and floors -- never a second, independently-maintained
@@ -3029,8 +3045,66 @@ wait_result build_wait( const rl_state_t& s, const rl_wait_anchor& anchor )
   else
     source = winner.literal_source;
 
-  const bool floored = winner.seconds < RL_WAIT_FLOOR_SECONDS;
-  const double seconds = std::max( winner.seconds, RL_WAIT_FLOOR_SECONDS );
+  double seconds_pre_floor = winner.seconds;
+
+  // FORK-04b (260902/226-07) -- the re-ask-period cap. Named mechanism:
+  // when the swing clocks are absent (target immune/moving/out of reach)
+  // and every rotational cooldown reads 0, the winner above can be a
+  // long NON-rotational cooldown (a potion, a racial) -- up to 233 s on
+  // the measured seed 31337 t=392.000 decision (226-STALL-RECEIPT.md
+  // §13). An unanchored wait's emitted seconds must never exceed ONE
+  // re-ask period = max(gcd_length, auto_attack_interval), read from the
+  // SAME rl_state_t fields the swing_cast_gcd_length/
+  // swing_cast_auto_attack_interval obs leaves read (never a third,
+  // independently-derived source). Mirrors mask.py's
+  // next_event_wait_detail() byte-for-byte -- same cap, same "reask_cap"
+  // source label, applied here BEFORE the floor exactly as the Python
+  // side applies it before its own floor. The eight event-anchored
+  // waits (anchor.kind != none, above), accept_wait()'s own fight-end/
+  // raid-event clamps, the floor and the tie-break are ALL untouched by
+  // this cap -- it lives only in this anchor.kind == none branch.
+  // Scoped to COOLDOWN-sourced winners only (winner.is_cooldown) --
+  // measured deviation from a literal "cap any winner" reading (plan
+  // checker, byte-identity Patchwerk run): a swing_mh/gcd-sourced winner
+  // is ALREADY bounded by auto_attack_interval/gcd_length by construction
+  // (swing_mh_remains counts down from a scheduled event whose full
+  // period IS auto_attack_interval; gcd_remains counts down from
+  // gcd_length), so capping it serves no purpose -- and doing so anyway
+  // made the byte-identity control FAIL: `execute_event->remains()`
+  // (swing_mh_remains, an absolute-time subtraction) and a FRESH
+  // `swing_time * auto_attack_speed()` recompute (auto_attack_interval)
+  // are two independently-rounded floating-point paths that are not
+  // always bit-equal even when representing the same instant, so an
+  // uncapped-by-construction swing/gcd winner could spuriously read a
+  // few microseconds above the cap and get needlessly relabelled. The
+  // cap's entire justification (226-STALL-RECEIPT.md section 13) is the
+  // NON-rotational-cooldown winner case (swing clocks absent, a potion/
+  // racial cooldown wins) -- restricting to winner.is_cooldown captures
+  // exactly that case and nothing else, with no new epsilon constant.
+  if ( winner.is_cooldown )
+  {
+    bool has_cap = false;
+    double cap = 0.0;
+    if ( s.has_gcd_length && s.gcd_length > 0.0 )
+    {
+      cap = s.gcd_length;
+      has_cap = true;
+    }
+    if ( s.has_auto_attack_interval && s.auto_attack_interval > 0.0 )
+    {
+      if ( !has_cap || s.auto_attack_interval > cap )
+        cap = s.auto_attack_interval;
+      has_cap = true;
+    }
+    if ( has_cap && seconds_pre_floor > cap )
+    {
+      seconds_pre_floor = cap;
+      source = "reask_cap";
+    }
+  }
+
+  const bool floored = seconds_pre_floor < RL_WAIT_FLOOR_SECONDS;
+  const double seconds = std::max( seconds_pre_floor, RL_WAIT_FLOOR_SECONDS );
   return wait_result{ seconds, source, floored };
 }
 } // namespace rl_policy
