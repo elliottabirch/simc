@@ -31,6 +31,7 @@
 #include "sim/event.hpp"
 #include "sim/expressions.hpp"
 #include "sim/raid_event.hpp"
+#include "sim/rl_target_select.hpp"
 #include "sim/sim.hpp"
 #include "sim/solver_control.hpp"
 #include "util/io.hpp"
@@ -330,6 +331,14 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
   assert( p->sim->threads == 1 && p->sim->profileset_map.empty() &&
           "rl_policy action-handle cache is single-sim/single-thread by construction (221-01)" );
 
+  // 228-02 (D-12, TGT-02/03): bump this player's decision stamp ONCE per read_action_gate_bits
+  // call (never per targeted action below) -- every targeted action's pick filled in THIS call
+  // carries the identical stamp, which is what lets accept_cast's later lookup_pick() call
+  // (solver_control.cpp) distinguish "the pick belongs to this decision" from "stale, refuse by
+  // name" without ever recomputing. The return value itself is not needed here -- fill_pick()
+  // reads the just-bumped stamp back out of the same table.
+  rl_target_select::begin_decision( p );
+
   auto cached = g_action_handle_cache.find( p );
   if ( cached == g_action_handle_cache.end() )
   {
@@ -371,13 +380,31 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
     // that one here would make the mask disagree with the engine's own
     // FATAL gate about what "ready" means.
     //
+    // 228-02 (D-11, TGT-02/03): for exactly the eight targeted registry actions
+    // (rl_target_select::is_targeted_action), the per-decision selector pick SUBSTITUTES for
+    // `a->target` in the conjunct FORK-01 (260902) left this exact seam for -- "`a->target`, not
+    // `p->target`: Phase 228's per-spell selectors substitute exactly this argument." The pick is
+    // computed ONCE here (fill_pick, D-12) and READ -- never recomputed -- by accept_cast
+    // (solver_control.cpp) via lookup_pick(). Every OTHER action (self/ground/item, the two
+    // SHAPED actions plan 228-03 owns, and every kind==wait entry) is completely untouched: same
+    // `a->target`/`a->target_ready(a->target)` pair as before this plan.
+    if ( out_resolvable[ i ] && rl_target_select::is_targeted_action( a ) )
+    {
+      rl_target_select::fill_pick( a, /*harmful=*/true, rl_target_select::preference_for( a ) );
+      bool      found = false;
+      player_t* pick  = rl_target_select::lookup_pick( a, &found );
+      assert( found &&
+              "rl_target_select: a pick just filled for this decision must be immediately "
+              "readable (228-02, D-12)" );
+      out_ready[ i ] = ( a->ready() && pick != nullptr && a->target_ready( pick ) ) ? 1 : 0;
+      continue;
+    }
     // 260902/FORK-01: AND the engine's own target gate (alive, not immune
     // while harmful, in range -- action.cpp:2462-2477) -- the SAME predicate
     // action_execute_event_t::execute re-checks at execute time
     // (action.cpp:243). Without this, a cast could be offered to the agent
     // that the engine itself would refuse to land on its current target --
-    // e.g. a melee ability legal at 20 yards. `a->target`, not `p->target`:
-    // Phase 228's per-spell selectors substitute exactly this argument.
+    // e.g. a melee ability legal at 20 yards.
     // `out_resolvable[i]` already short-circuits `&&` for a null action
     // handle (wait entries), so `target_ready` is never reached without a
     // resolved cast action; `a->target != nullptr` is an explicit guard

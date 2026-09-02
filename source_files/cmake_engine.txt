@@ -154,6 +154,7 @@ sim/decision_dump.hpp
 sim/solver_control.hpp
 sim/rl_policy.hpp
 sim/rl_policy_constants.h
+sim/rl_target_select.hpp
 sim/rl_translog.hpp
 sim/expressions.hpp
 sim/gain.hpp
@@ -353,6 +354,7 @@ sim/decision_dump.cpp
 sim/solver_control.cpp
 sim/rl_policy_obs.cpp
 sim/rl_policy_net.cpp
+sim/rl_target_select.cpp
 sim/rl_translog.cpp
 sim/expressions.cpp
 sim/gear_stats.cpp

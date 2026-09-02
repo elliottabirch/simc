@@ -11,6 +11,7 @@
 #include "player/player.hpp"
 #include "sim/event.hpp"
 #include "sim/rl_policy.hpp"
+#include "sim/rl_target_select.hpp"
 #include "sim/rl_translog.hpp"
 #include "sim/sim.hpp"
 #include "util/io.hpp"
@@ -125,6 +126,43 @@ action_t* accept_cast( player_t* p, const std::string& action_name, std::uint64_
   if ( !resolved->ready() )
     protocol_abort( "'cast' reply named a not-ready action '" + action_name + "' (seq=" +
                      std::to_string( seq ) + ")" );
+
+  // 228-02 (D-13, TGT-02): for exactly the eight targeted registry actions, apply the SAME pick
+  // read_action_gate_bits already computed for this decision (rl_policy_obs.cpp's fill_pick) --
+  // READ, never recomputed (D-12). A pick not stamped for THIS decision is a mask/cast
+  // disagreement (T-228-02-02) and refuses by name here, in this file's own protocol_abort idiom,
+  // rather than silently recomputing a possibly-different answer.
+  if ( rl_target_select::is_targeted_action( resolved ) )
+  {
+    bool      found = false;
+    player_t* pick  = rl_target_select::lookup_pick( resolved, &found );
+    if ( !found || !pick )
+      protocol_abort( "'cast' reply named targeted action '" + action_name +
+                       "' (seq=" + std::to_string( seq ) +
+                       "') with no pick stamped for this decision -- refusing rather than "
+                       "recomputing (228-02, D-12)" );
+
+    // action_t::set_target -- NEVER a raw `resolved->target = pick` write (it skips the AoE
+    // target-cache invalidation, leaving a stale cache and a silently wrong hit set) and NEVER
+    // SimC's own `target_number` option (it numbers over a DIFFERENT list and freezes retargeting
+    // permanently) and NEVER a walk over `p->action_list` (there is exactly one action here to
+    // retarget, not a search problem).
+    resolved->set_target( pick );
+    // Casting on a unit IS targeting it in game (D-13, ledger R11): the player's own target and
+    // BOTH weapon swings follow the pick, so white damage (Windfury/Flametongue procs) lands on
+    // the enemy the agent is actually fighting, not a stale prior target. `solver_control.cpp`'s
+    // own FOREGROUND re-arm (below, :395-401 in this file) guarantees both swing objects are live
+    // by the time any cast reaches this function.
+    p->target = pick;
+    if ( p->main_hand_attack )
+      p->main_hand_attack->set_target( pick );
+    if ( p->off_hand_attack )
+      p->off_hand_attack->set_target( pick );
+    // Facing turns to the cast target AT cast time (D-05's second call site -- 228-01 added the
+    // model and the target_ready guard clause but deliberately left this call site to this plan).
+    p->face( *pick );
+  }
+
   return resolved;
 }
 

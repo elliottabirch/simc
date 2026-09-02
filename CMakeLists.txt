@@ -71,6 +71,11 @@ execute_process(
 )
 
 # link in all activated targets
+# 228-02 (TGT-02/TGT-03): engine/sim/rl_target_select.hpp/.cpp are the new per-spell target
+# selector translation unit -- listed in source_files/cmake_engine.txt (engine/CMakeLists.txt's
+# own include(../source_files/cmake_engine.txt)) beside the other engine/sim/*.cpp units, not
+# here. This top-level CMakeLists.txt has no per-file source list of its own to add rl_target_select
+# to; this comment is the breadcrumb for a reader who starts here.
 add_subdirectory(engine)
 if (BUILD_GUI)
   add_subdirectory(qt)
