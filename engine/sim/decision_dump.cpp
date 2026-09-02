@@ -865,13 +865,24 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   // -- `p->resources.is_active( RESOURCE_MAELSTROM )` is this codebase's
   // established "is this actor the shaman this schema targets" predicate,
   // deliberately NOT the player's own primary-resource accessor (shaman_t
-  // overrides that to report RESOURCE_MANA). Pets and enemies alike read
-  // false here (measured: the pet actor completed build_obs without
-  // crashing every time it was reached, but is excluded anyway since
-  // `demos.rows_from_dump`'s consumer -- `project_fight`'s actor_name
-  // filter -- never reads a pet's or an enemy's own dump rows), so this
-  // scoping has zero effect on the schema's actual target and removes the
-  // untested actor classes from ever reaching build_obs at all.
+  // overrides that to report RESOURCE_MANA). CORRECTED 260902/FORK-05
+  // (D-13 amended -- the sentence this replaced was wrong for pets, and a
+  // comment that contradicts itself in one sentence sent two prior readers
+  // to the wrong actor set): this resource predicate does NOT exclude the
+  // wolf pet -- `resources_t::active_resource` defaults to `true` for
+  // every `resource_e`, so a friendly `lightning_wolf` pet also reads
+  // `is_active(RESOURCE_MAELSTROM) == true` and reaches `build_obs`
+  // (measured: the pet actor completed `build_obs` without crashing every
+  // time it was reached). What actually excludes pets (and every
+  // raid-event add) from the dump today is the OUTER actor-identity gate
+  // at the top of `record()` (260902/FORK-03+FORK-05): its `p->is_pet()`
+  // conjunct is TRUE not only for the wolf (`PLAYER_PET`) but also for
+  // `ENEMY_ADD` and `ENEMY_ADD_BOSS` (`player.hpp:968`), so it strips every
+  // raid-event add's rows as well. `demos.rows_from_dump`'s consumer --
+  // `project_fight`'s actor_name filter -- never read a pet's or an
+  // enemy's own dump rows anyway, so this scoping has zero effect on the
+  // schema's actual target and removes the untested actor classes from
+  // ever reaching build_obs at all.
   // SECOND crash, found the same session (real gdb backtrace, RelWithDebInfo
   // build): the Maelstrom-active check ALONE did not exclude an enemy actor
   // (`resources_t::active_resource` defaults to `true` for every resource_e
