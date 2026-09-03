@@ -158,10 +158,10 @@ action_t* accept_cast( player_t* p, const std::string& action_name, std::uint64_
     // the enemy the agent is actually fighting, not a stale prior target. `solver_control.cpp`'s
     // own FOREGROUND re-arm (below, :395-401 in this file) guarantees both swing objects are live
     // by the time any cast reaches this function.
+    // CR-04 (260902/cr4): the turn (D-05's second call site) is now folded INTO retarget() itself
+    // -- see that function's own doc comment (rl_target_select.cpp) -- so it is no longer a
+    // separate call at this site.
     rl_target_select::retarget( resolved, p, pick );
-    // Facing turns to the cast target AT cast time (D-05's second call site -- 228-01 added the
-    // model and the target_ready guard clause but deliberately left this call site to this plan).
-    p->face( *pick );
   }
 
   return resolved;

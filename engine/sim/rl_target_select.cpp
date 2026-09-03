@@ -52,6 +52,10 @@ std::unordered_map<const action_t*, pick_slot> g_pick_table;
 // iteration by reset( sim ) below, called from sim_t::reset()).
 reresolution_counts g_reresolution_counts;
 
+// CR-04 (260902/cr4): decisions where every one of the RL-controlled actor's registry actions
+// read not-ready -- the deadlock census. Same one-fight-totals lifetime as the counters above.
+std::uint64_t g_every_targeted_action_illegal = 0;
+
 // WR-05 (260902/cr4): a file-static candidate buffer reused across every select() call, cleared
 // (not reallocated) per call -- same single-thread precondition begin_decision's own assert
 // states (a second concurrent select() on this buffer would race). Avoids a fresh heap allocation
@@ -77,11 +81,15 @@ bool generic_filter( const action_t* a, player_t* candidate, bool harmful )
        a->player->get_player_distance( *candidate ) > a->range + candidate->combat_reach )
     return false;
 
-  // G4 -- in front, gated on sim->facing_enabled exactly as target_ready's own clause (R-E:
-  // harmful && range >= 0 only, so a self/friendly/trinket action is never facing-gated).
-  if ( a->sim->facing_enabled && harmful && a->range >= 0 &&
-       !a->player->is_in_front( *candidate, 0.0 ) )
-    return false;
+  // G4 REMOVED (260902/cr4, CR-04 RULING (a)): a behind candidate is no longer excluded from the
+  // selector's own candidate set. facing_enabled's meaning changed from "a behind target is
+  // refused" to "the player turns to face what it casts at" -- the turn (accept_cast/retarget(),
+  // and the scripted arm's own cast-commit site) makes a selected-behind candidate legal BY THE
+  // TIME it is actually cast on, so excluding it here would just deadlock the selector on a
+  // candidate set that no longer needs excluding. "In front" survives only as the RAW,
+  // non-gating `enemy_fact::in_front` field (observation ground truth) and inside the two SHAPED
+  // actions' own cone/rectangle geometry (unaffected by this change -- OR-2 keeps them from ever
+  // turning).
 
   return true;
 }
@@ -361,14 +369,16 @@ player_t* lookup_pick( const action_t* resolved, bool* out_found )
 
 void reset( sim_t* )
 {
-  // WR-11 (260902/cr4): called from sim_t::reset() (sim.cpp), once per iteration -- clears all
-  // three module globals so a stale pick, stamp or re-resolution count from a PRIOR iteration can
-  // never leak into the next one. `sim` itself is unused (the tables are keyed on `player_t*`, not
+  // WR-11 (260902/cr4): called from sim_t::reset() (sim.cpp), once per iteration -- clears every
+  // module global (the original three, plus CR-04's deadlock counter added later the same task)
+  // so a stale pick, stamp or count from a PRIOR iteration can never leak into the next one.
+  // `sim` itself is unused (the tables are keyed on `player_t*`, not
   // sim identity, per this module's own single-sim/single-thread precondition) but is taken by
   // pointer to mirror raid_event_t::reset( sim )'s own signature at the call site.
   g_decision_stamp.clear();
   g_pick_table.clear();
   g_reresolution_counts = reresolution_counts{};
+  g_every_targeted_action_illegal = 0;  // CR-04 (260902/cr4)
 }
 
 bool is_targeted_action( const action_t* resolved )
@@ -527,6 +537,14 @@ void retarget( action_t* a, player_t* p, player_t* pick )
     p->main_hand_attack->set_target( pick );
   if ( p->off_hand_attack )
     p->off_hand_attack->set_target( pick );
+  // CR-04 (260902/cr4, RULING (a)): the turn folds into this shared function too -- both callers
+  // (accept_cast, the mid-cast re-resolution ladder's fallback arm) are retargeting an RL-actor's
+  // OWN registry action (never a SHAPED one -- crash_lightning/sundering are never in the
+  // registry `is_targeted_action` governs, so they never reach `retarget()` at all; OR-2 is
+  // structurally preserved here with no extra exclusion needed). Gated on `facing_enabled` so the
+  // option keeps a real meaning when off.
+  if ( p->sim->facing_enabled )
+    p->face( *pick );
 }
 
 void record_reresolution( reresolution_arm arm )
@@ -542,6 +560,16 @@ void record_reresolution( reresolution_arm arm )
 reresolution_counts get_reresolution_counts()
 {
   return g_reresolution_counts;
+}
+
+void record_every_targeted_action_illegal()
+{
+  ++g_every_targeted_action_illegal;
+}
+
+std::uint64_t get_every_targeted_action_illegal_count()
+{
+  return g_every_targeted_action_illegal;
 }
 
 } // namespace rl_target_select

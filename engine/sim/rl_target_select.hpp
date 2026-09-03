@@ -230,6 +230,17 @@ struct reresolution_counts
 
 reresolution_counts get_reresolution_counts();
 
+// CR-04 (260902/cr4): "decisions where every targeted action was illegal" -- the deadlock state
+// CR-04's review finding named (an agent with `facing_enabled=1` and no legal move at all,
+// silently). Required under every one of the RULING's three alternatives (turn / explicit turn
+// action / accept-the-deadlock) so the state is visible in the census instead of silent. Bumped
+// ONCE per decision BOUNDARY (never per targeted action) from read_action_gate_bits
+// (rl_policy_obs.cpp) when NONE of the RL-controlled actor's registry actions read `ready` this
+// decision. Never reset mid-fight independently -- cleared by the SAME `reset( sim )` hook as the
+// other three module globals (WR-11), so it is also genuinely one fight's total.
+void record_every_targeted_action_illegal();
+std::uint64_t get_every_targeted_action_illegal_count();
+
 // WR-11 (260902/cr4, mirrors decision_dump.cpp's own g_action_handle_cache fix): clears all three
 // module globals (the decision-stamp table, the per-decision pick table, and the re-resolution
 // counters) -- called from the engine's own per-iteration reset (`sim_t::reset()`, sim.cpp,

@@ -15201,9 +15201,27 @@ void player_t::face( const player_t& t )
   // Coincident positions: leave the facing vector unchanged rather than dividing by zero.
   if ( len <= 0.0 )
     return;
-  facing_x = delta_x / len;
-  facing_y = delta_y / len;
-  ++facing_epoch;  // WR-03 (260902/cr4): bumped only when the vector actually moves.
+  double new_facing_x = delta_x / len;
+  double new_facing_y = delta_y / len;
+  // WR-03 (260902/cr4): the epoch bumps ONLY when the vector's VALUE actually changes -- not
+  // merely whenever this function runs without hitting the coincident-position guard above. CR-04
+  // (260902/cr4) calls face() far more often than 228-01 ever did (every non-background foreground
+  // cast, not only a retarget event), so a same-value "bump" here would invalidate the two shaped
+  // actions' target cache on every single ordinary cast even when facing never moved -- exact
+  // equality is safe: both sides are the SAME computation (delta/len) whenever the source position
+  // pair repeats, never a numerically-drifting accumulation.
+  if ( new_facing_x != facing_x || new_facing_y != facing_y )
+    ++facing_epoch;
+  facing_x = new_facing_x;
+  facing_y = new_facing_y;
+  // CR-04 (260902/cr4): the ONE direct debug print of the facing vector itself -- every existing
+  // print in this codebase logs POSITIONS, never facing_x/y directly, so a probe proving "the
+  // player turned" had no log line to read before this. `facing_cast_target.py`'s
+  // `turned-then-cast` mode reads this line; it changes no behaviour, `debug=1`-gated like every
+  // other print in this function's neighbourhood.
+  if ( sim->debug )
+    sim->out_debug.printf( "%s faces %s: facing_x=%.6f, facing_y=%.6f, facing_epoch=%llu",
+        name(), t.name(), facing_x, facing_y, static_cast<unsigned long long>( facing_epoch ) );
 }
 
 bool player_t::is_in_front( const player_t& t, double cos_half_angle ) const

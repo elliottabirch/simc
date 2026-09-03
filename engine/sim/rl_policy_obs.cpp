@@ -404,6 +404,12 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
     cached = g_action_handle_cache.emplace( p, std::move( handles ) ).first;
   }
 
+  // CR-04 (260902/cr4): tracks whether this decision offered at least one legal registry action
+  // to the RL-controlled actor, and whether any registry action existed to offer at all -- feeds
+  // the "every targeted action was illegal" deadlock counter below.
+  bool any_targeted_action_seen  = false;
+  bool any_targeted_action_ready = false;
+
   const std::vector<action_t*>& handles = cached->second;
   for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
   {
@@ -445,6 +451,7 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
     if ( out_resolvable[ i ] && p->sim->target_select_enabled && is_rl_actor &&
          rl_target_select::is_targeted_action( a ) )
     {
+      any_targeted_action_seen = true;
       if ( is_decision_boundary )
       {
         rl_target_select::fill_pick( a, /*harmful=*/true, rl_target_select::preference_for( a ) );
@@ -464,6 +471,8 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
         // stamp bump, no fill_pick -- both would corrupt a stamp a boundary call never opened.
         out_ready[ i ] = ( a->ready() && a->target != nullptr && a->target_ready( a->target ) ) ? 1 : 0;
       }
+      if ( out_ready[ i ] )
+        any_targeted_action_ready = true;
       continue;
     }
     // 260902/FORK-01: AND the engine's own target gate (alive, not immune
@@ -483,6 +492,12 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
 
   if ( is_decision_boundary )
   {
+    // CR-04 (260902/cr4): the deadlock census -- ONE registry action existing but none of them
+    // ready this decision, for the RL-controlled actor, on the boundary call only (never
+    // double-counted by the later non-boundary decision_dump::record() call).
+    if ( any_targeted_action_seen && !any_targeted_action_ready )
+      rl_target_select::record_every_targeted_action_illegal();
+
     // 260902/cr4 (CR-02): cache what THIS boundary call just computed, tagged with the player and
     // the CURRENT stamp -- the later non-boundary call (decision_dump::record()) reads this back
     // instead of recomputing.

@@ -981,7 +981,16 @@ struct sim_t : private sc_thread_t
   bool maximize_reporting;
   std::string apikey, user_apitoken;
   bool distance_targeting_enabled;
-  // 228-01, D-06/R-F: the cast-target in-front test (action_t::target_ready's fourth guard).
+  // 228-01, D-06/R-F: ORIGINALLY the cast-target in-front test (action_t::target_ready's fourth
+  // guard, refusing a cast at a behind target). RE-POINTED by 260902/cr4 CR-04 RULING (a): that
+  // fourth guard is REMOVED, and this option now instead gates the TURN -- a targeted cast at an
+  // enemy behind the player turns the player to face it first, instantly (Q3), at the
+  // cast-target-set site (accept_cast/retarget() on the RL arm, action_t::schedule_execute() on
+  // the scripted arm). Off means the stock engine, no facing model at all -- 228-01's own D-24
+  // overlay pair (facing_enabled=0 vs =1) is still a real comparison, now of "does the player
+  // turn" rather than "is a behind cast refused". "In front" survives only inside the two SHAPED
+  // actions' own cone/rectangle geometry (facing_shapes) and the splash-exemption rule, both
+  // unaffected by this re-pointing.
   bool facing_enabled;
   // 228-01, R-F: the player-centred cone/rectangle target filter for shaped spells (Crash
   // Lightning, Sundering). Registered here; stays INERT until plan 228-03 installs the filter
