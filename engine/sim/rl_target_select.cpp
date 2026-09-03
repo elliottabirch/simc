@@ -217,18 +217,16 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
   if ( candidates.size() == 1 )
     return candidates.front();
 
-  // (1) sticky -- keep the action's own previous pick if it still passes generic_filter. Re-
-  // checked EVERY decision (P-4): never assume the engine's own acquire_target invalidated it.
+  // CR-03 (260902/cr4, RULING (a) -- PREFERENCE FIRST): the sticky early-return that used to
+  // live here is GONE. `previous` (the action's own prior pick, still needed for build_enemy_fact
+  // /the tie-break below) is still read, but no longer decides the pick on its own -- it is now
+  // ONLY the FIRST tie-break among candidates the preference scores EQUALLY. (2) preference,
+  // highest score wins; (3) among EQUAL scores, the action's own previous pick (`a->target`,
+  // re-checked every decision -- P-4, unchanged from the sticky clause's own discipline); (4)
+  // among still-equal, the player's CURRENT target (p->target, which may differ from the action's
+  // own previous pick); (5) final tie-break on the stable (actor_index, actor_spawn_index)
+  // identity pair, ascending -- a total order, so a run is reproducible (TGT-02 edge: ordering).
   player_t* previous = a->target;
-  if ( previous )
-    for ( player_t* c : candidates )
-      if ( c == previous )
-        return previous;
-
-  // (2) preference, highest score wins; (3) tie-break on the player's CURRENT target (p->target,
-  // which may differ from the action's own previous pick a->target above); (4) final tie-break on
-  // the stable (actor_index, actor_spawn_index) identity pair, ascending -- a total order, so a
-  // run is reproducible (TGT-02 edge: ordering).
   player_t* current_target = a->player->target;
   player_t* best           = nullptr;
   double    best_score     = 0.0;
@@ -257,13 +255,23 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
     }
     else
     {
-      bool c_is_current    = ( c == current_target );
-      bool best_is_current = ( best == current_target );
-      if ( c_is_current != best_is_current )
-        better = c_is_current;
+      // CR-03 (260902/cr4): sticky is now a TIE-BREAK, checked first among equal scores.
+      bool c_is_prev    = ( c == previous );
+      bool best_is_prev = ( best == previous );
+      if ( c_is_prev != best_is_prev )
+      {
+        better = c_is_prev;
+      }
       else
-        better = std::tie( c->actor_index, c->actor_spawn_index ) <
-                 std::tie( best->actor_index, best->actor_spawn_index );
+      {
+        bool c_is_current    = ( c == current_target );
+        bool best_is_current = ( best == current_target );
+        if ( c_is_current != best_is_current )
+          better = c_is_current;
+        else
+          better = std::tie( c->actor_index, c->actor_spawn_index ) <
+                   std::tie( best->actor_index, best->actor_spawn_index );
+      }
     }
 
     if ( better )
