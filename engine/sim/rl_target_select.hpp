@@ -26,6 +26,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 class action_t;
 class player_t;
@@ -86,6 +87,16 @@ bool generic_filter( const action_t* a, player_t* candidate, bool harmful );
 // the action's own current target (a->target) at call time -- passed explicitly so callers that
 // already have it (select() below) do not pay a second lookup.
 enemy_fact build_enemy_fact( const action_t* a, player_t* candidate, player_t* previous_pick );
+
+// 228-07 (TGT-07, D-21): builds the FULL candidate set for one targeted action -- every enemy
+// `generic_filter` would pass -- as complete `enemy_fact` records, in
+// `sim->target_non_sleeping_list` order. Reuses `generic_filter`/`build_enemy_fact` VERBATIM (the
+// exact functions `select()` itself calls) so this exported list can never drift from the
+// selector's own real candidate set (D-20: no third copy of the filter). Exists so a caller
+// outside this module (the decision dump, 228-07's parity harness field) can hand the SAME
+// per-enemy numbers the fork's own preference sees to an external reimplementation of the rules,
+// rather than the reimplementation trusting only the fork's OWN chosen pick.
+std::vector<enemy_fact> build_candidate_facts( const action_t* a, bool harmful );
 
 // A preference: given the resolved action and a candidate's fact record, return an ordering score
 // (HIGHER WINS). The generic filter has already excluded anything genuinely invalid; a preference

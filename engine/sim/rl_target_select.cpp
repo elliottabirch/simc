@@ -185,6 +185,21 @@ enemy_fact build_enemy_fact( const action_t* a, player_t* candidate, player_t* p
   return f;
 }
 
+// 228-07 (TGT-07, D-21): the FULL candidate set for one targeted action, as complete enemy_fact
+// records -- reuses generic_filter/build_enemy_fact VERBATIM (the exact functions select() itself
+// calls below), so this can never enumerate a different candidate set than the one the preference
+// actually scores. `previous_pick` mirrors select()'s own `a->target` read (P-4: re-checked every
+// call, never cached).
+std::vector<enemy_fact> build_candidate_facts( const action_t* a, bool harmful )
+{
+  std::vector<enemy_fact> out;
+  player_t* previous = a->target;
+  for ( player_t* t : a->sim->target_non_sleeping_list )
+    if ( t->is_enemy() && generic_filter( a, t, harmful ) )
+      out.push_back( build_enemy_fact( a, t, previous ) );
+  return out;
+}
+
 
 
 namespace

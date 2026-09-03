@@ -22,10 +22,12 @@
 #include "util/io.hpp"
 
 #include <cstring>
+#include <algorithm>
 #include <map>
 #include <stdexcept>
 
 #include <set>
+#include <vector>
 #include <sstream>
 
 namespace
@@ -972,6 +974,115 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   {
     out << ",\"targeted_picks\":null";
     out << ",\"chosen_pick\":null";
+  }
+
+  // 228-07 (TGT-07, D-21) -- the parity harness's engine-sourced corpus. For each of the eight
+  // TARGETED registry actions, the FULL candidate set (every enemy `generic_filter` would pass,
+  // via `rl_target_select::build_candidate_facts` -- the SAME function select() itself consults,
+  // D-20: no re-derivation) as complete fact records, keyed by the stable
+  // (actor_index, actor_spawn_index) identity pair so an external reimplementation of the eight
+  // preferences (spec/helpers/enhancementTargetRulesReplay.ts) can be handed the SAME numbers the
+  // fork's own preference sees and asked to reproduce `targeted_picks[token]` above -- never a
+  // record rebuilt from any OTHER key on this row (T-228-07-02). Gated identically to
+  // targeted_picks/chosen_pick above (WR-12): `null` under threads>1/profileset. `x`/`y` are the
+  // candidate's absolute world position (`x_position`/`y_position`) -- read here for the first
+  // time on this row because only a per-candidate record (not the single-pick summary above) has
+  // a use for two candidates' positions relative to each other (chain_lightning/tempest's own
+  // neighbour count already exists as `neighbours_within_splash`/`neighbours_within_jump` below;
+  // `x`/`y` let an external reimplementation cross-check that count independently, matching the
+  // hand-written fixture corpus's own planar-position schema, spec/fixtures/selector-parity/).
+  if ( p->sim->threads == 1 && p->sim->profileset_map.empty() )
+  {
+    out << ",\"candidate_facts\":{";
+    const std::size_t n_targeted = rl_target_select::targeted_action_token_count();
+    const char* const* targeted_tokens = rl_target_select::targeted_action_tokens();
+    for ( std::size_t i = 0; i < n_targeted; ++i )
+    {
+      if ( i > 0 )
+        out << ",";
+      const char* token = targeted_tokens[ i ];
+      out << "\"" << token << "\":";
+      action_t* a = p->find_action( token );
+      if ( a == nullptr )
+      {
+        out << "null";
+        continue;
+      }
+      const std::vector<rl_target_select::enemy_fact> candidates =
+          rl_target_select::build_candidate_facts( a, /*harmful=*/true );
+      // `cast_time_ms` -- `a->execute_time()`, the SAME call
+      // `preference_shortest_time_to_die`'s own outlives-the-cast dominance clause reads (D-15,
+      // unchanged by OR-1). Per-token, not per-candidate (it does not depend on which candidate is
+      // scored) -- exported here so an external reimplementation of that clause is handed the
+      // EXACT cast time the fork's own preference used, never a guessed or hardcoded per-spell
+      // constant (T-228-07-02's "no re-derivation" reasoning, applied to this scalar too).
+      out << "{\"cast_time_ms\":" << ( a->execute_time().total_seconds() * 1000.0 )
+          << ",\"candidates\":[";
+      for ( std::size_t ci = 0; ci < candidates.size(); ++ci )
+      {
+        if ( ci > 0 )
+          out << ",";
+        const rl_target_select::enemy_fact& fact = candidates[ ci ];
+        out << "{\"actor_index\":" << fact.actor_index
+            << ",\"actor_spawn_index\":" << fact.actor_spawn_index
+            << ",\"x\":" << ( fact.candidate ? fact.candidate->x_position : 0.0 )
+            << ",\"y\":" << ( fact.candidate ? fact.candidate->y_position : 0.0 )
+            << ",\"distance\":" << fact.distance
+            << ",\"in_front\":" << ( fact.in_front ? "true" : "false" )
+            << ",\"in_reach\":" << ( fact.in_reach ? "true" : "false" )
+            << ",\"in_range\":" << ( fact.in_range ? "true" : "false" )
+            << ",\"alive\":" << ( fact.alive ? "true" : "false" )
+            << ",\"immune\":" << ( fact.immune ? "true" : "false" )
+            << ",\"immunity_remaining\":" << fact.immunity_remaining
+            << ",\"time_to_die\":" << fact.time_to_die
+            << ",\"health_pct\":" << fact.health_pct
+            << ",\"is_boss\":" << ( fact.is_boss ? "true" : "false" )
+            << ",\"flame_shock_remaining\":" << fact.flame_shock_remaining
+            << ",\"neighbours_within_splash\":" << fact.neighbours_within_splash
+            << ",\"neighbours_within_jump\":" << fact.neighbours_within_jump
+            << ",\"is_current_target\":" << ( fact.is_current_target ? "true" : "false" )
+            << ",\"is_previous_pick\":" << ( fact.is_previous_pick ? "true" : "false" )
+            << "}";
+      }
+      out << "]}";
+    }
+    out << "}";
+  }
+  else
+  {
+    out << ",\"candidate_facts\":null";
+  }
+
+  // 228-07 (TGT-07, D-21) -- the SHAPE half of the parity harness's engine-sourced corpus.
+  // `shape_facts` below (228-10/228-11) is the fork's own SUMMARY (enemies_hit,
+  // summed_remaining_life, long_lived_count); an external reimplementation needs the per-enemy
+  // geometry that summary was folded from, plus the player's own current position/facing, to
+  // recompute it independently and compare. Never gated on WR-12 (same reasoning as
+  // target_aggregates below: a stateless read of target_non_sleeping_list/x_position/y_position/
+  // facing_x/facing_y, safe under any threading configuration) -- and NOT restricted to any one
+  // action's own generic_filter (crash_lightning_cone_contains/sundering_rect_contains iterate
+  // every enemy on target_non_sleeping_list with no immunity/range/harmful filter at all, D-16 --
+  // reusing candidate_facts above would silently drop an immune or out-of-range enemy the shape
+  // math still counts).
+  {
+    out << ",\"player_position\":{\"x\":" << p->x_position << ",\"y\":" << p->y_position
+        << ",\"facing_x\":" << p->facing_x << ",\"facing_y\":" << p->facing_y << "}";
+    out << ",\"all_enemies\":[";
+    bool first_enemy = true;
+    for ( player_t* t : p->sim->target_non_sleeping_list )
+    {
+      if ( !t->is_enemy() )
+        continue;
+      if ( !first_enemy )
+        out << ",";
+      first_enemy = false;
+      const double ttd = std::min( t->time_to_percent( 0 ).total_seconds(), 600.0 );  // WR-10 clip
+      out << "{\"actor_index\":" << t->actor_index << ",\"actor_spawn_index\":" << t->actor_spawn_index
+          << ",\"x\":" << t->x_position << ",\"y\":" << t->y_position
+          << ",\"combat_reach\":" << t->combat_reach << ",\"time_to_die\":" << ttd
+          << ",\"is_boss\":" << ( t->is_boss() ? "true" : "false" ) << "}";
+    }
+    out << "]";
   }
 
   // 228-10 Task 1 Steps 3/4/5 (D-16/D-17/TGT-05/TGT-06) -- the identity-free aggregates, the
