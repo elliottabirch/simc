@@ -661,6 +661,13 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
       << ( p->main_hand_attack ? ( p->main_hand_weapon.swing_time * p->cache.auto_attack_speed() ).total_seconds()
                                 : 0.0 );
 
+  // 228-10 Task 1 Step 6(b) (Q18): the immunity-remaining wire field mask.py's own mirror reads
+  // reaches this SAME wire (write_state_fields is shared by both the JSONL dump append and the
+  // FIFO request-line build, exactly like gcd_length/auto_attack_interval above) via the single
+  // top-level "immunity_remaining" key emitted later in this function, alongside "immunity_in"
+  // (the D-16 aggregate block) -- ONE key serves both the aggregate reader and Q18's wait mirror,
+  // never two independently-emitted copies of the same number under the same name.
+
   // Resolved action identity (116-02; solver-path gating added 2026-07-29 fix
   // bundle, defect (b)) - the SimC-internal name_str of the action actually
   // about to execute at this boundary, unwrapping a sequence/strict_sequence
@@ -906,12 +913,27 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
           << ",\"distance\":" << fact.distance
           << ",\"in_front\":" << ( fact.in_front ? "true" : "false" )
           << ",\"in_reach\":" << ( fact.in_reach ? "true" : "false" )
+          << ",\"in_range\":" << ( fact.in_range ? "true" : "false" )
           << ",\"alive\":" << ( fact.alive ? "true" : "false" )
           << ",\"immune\":" << ( fact.immune ? "true" : "false" )
+          << ",\"immunity_remaining\":" << fact.immunity_remaining
           << ",\"time_to_die\":" << fact.time_to_die
           << ",\"health_pct\":" << fact.health_pct
           << ",\"is_boss\":" << ( fact.is_boss ? "true" : "false" )
           << ",\"flame_shock_remaining\":" << fact.flame_shock_remaining
+          // 228-10 Task 1 Step 1 (D-03/D-16): the per-enemy facts new to this plan --
+          // Burning Core, Lightning Rod, the trinket (venomfang) and omnium
+          // (rune_of_unleashed_fire_lingering) debuffs already on the wire via the old
+          // enemy-slot family, now also on the per-targeted-action pick record.
+          << ",\"burning_core_remaining\":" << fact.burning_core_remaining
+          << ",\"lightning_rod_stacks\":" << fact.lightning_rod_stacks
+          << ",\"lightning_rod_remaining\":" << fact.lightning_rod_remaining
+          << ",\"venomfang_remaining\":" << fact.venomfang_remaining
+          << ",\"venomfang_debuff_stacks\":" << fact.venomfang_debuff_stacks
+          << ",\"venomfang_debuff_remaining\":" << fact.venomfang_debuff_remaining
+          << ",\"rune_of_unleashed_fire_lingering_remaining\":" << fact.rune_of_unleashed_fire_lingering_remaining
+          << ",\"neighbours_within_splash\":" << fact.neighbours_within_splash
+          << ",\"neighbours_within_jump\":" << fact.neighbours_within_jump
           << ",\"is_current_target\":" << ( fact.is_current_target ? "true" : "false" )
           << ",\"is_previous_pick\":" << ( fact.is_previous_pick ? "true" : "false" )
           << "}";
@@ -950,6 +972,66 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   {
     out << ",\"targeted_picks\":null";
     out << ",\"chosen_pick\":null";
+  }
+
+  // 228-10 Task 1 Steps 3/4/5 (D-16/D-17/TGT-05/TGT-06) -- the identity-free aggregates, the
+  // fight-wide immunity timers and the two shaped-spell hit-set facts, every one an ADDITIVE
+  // key (no existing key's shape changes). None of these three computations touch
+  // rl_target_select's file-static pick/stamp tables, so unlike targeted_picks/chosen_pick above
+  // they are NOT gated on the WR-12 single-sim/single-thread precondition -- each is a plain,
+  // stateless read of live engine state (target_non_sleeping_list, sim->raid_events,
+  // player_t::facing_x/y), safe under any threading configuration.
+  {
+    const rl_policy::fight_wide_aggregates_t agg = rl_policy::compute_fight_wide_aggregates( p );
+    out << ",\"target_aggregates\":{";
+    out << "\"enemies_total\":" << agg.enemies_total;
+    out << ",\"enemies_in_melee\":" << agg.enemies_in_melee;
+    out << ",\"enemies_within_8yd\":" << agg.enemies_within_8yd;
+    out << ",\"enemies_within_40yd\":" << agg.enemies_within_40yd;
+    out << ",\"enemies_in_front\":" << agg.enemies_in_front;
+    out << ",\"flame_shock_carrier_count\":" << agg.flame_shock_carrier_count;
+    out << ",\"soonest_time_to_die\":";
+    if ( agg.has_soonest_time_to_die ) out << agg.soonest_time_to_die; else out << "null";
+    out << ",\"longest_time_to_die\":";
+    if ( agg.has_longest_time_to_die ) out << agg.longest_time_to_die; else out << "null";
+    out << ",\"dying_within_5s\":" << agg.dying_within_5s;
+    out << ",\"dying_within_15s\":" << agg.dying_within_15s;
+    out << ",\"nearest_enemy_distance\":";
+    if ( agg.has_nearest_enemy_distance ) out << agg.nearest_enemy_distance; else out << "null";
+    out << "}";
+  }
+
+  // TGT-06/D-17/Q18 -- the fight-wide immunity timers, both from the ONE
+  // compute_invulnerability_window() read (D-12: read once, use twice -- the SAME function
+  // read_state() calls to fill rl_state_t::immunity_remaining for Q18's wait candidate). Nothing
+  // pending/active encodes as 0.0 (never a saturation sentinel, never null) -- the value this
+  // plan's receipt records as the wire's "nothing pending" convention.
+  {
+    const rl_policy::invulnerability_window_t iw = rl_policy::compute_invulnerability_window( sim );
+    out << ",\"immunity_in\":" << ( iw.has_next ? iw.next_in : 0.0 );
+    out << ",\"immunity_remaining\":" << ( iw.active ? iw.remaining : 0.0 );
+  }
+
+  // D-16 shaped-spell block (TGT-04, OR-2) -- Crash Lightning and Sundering carry no pick (never
+  // in targeted_picks above), but the observation still needs "what would this shape hit from
+  // here" -- computed from the CURRENT facing only, through the ONE shared geometry copy
+  // (rl_target_select::crash_lightning_cone_contains / sundering_rect_contains).
+  {
+    const rl_policy::shape_hit_result_t cl = rl_policy::compute_crash_lightning_shape( p );
+    out << ",\"shape_facts\":{";
+    out << "\"crash_lightning\":{";
+    out << "\"enemies_hit\":" << cl.enemies_hit;
+    out << ",\"summed_remaining_life\":" << cl.summed_remaining_life;
+    out << ",\"long_lived_count\":" << cl.long_lived_count;
+    out << "}";
+
+    const rl_policy::shape_hit_result_t su = rl_policy::compute_sundering_shape( p );
+    out << ",\"sundering\":{";
+    out << "\"enemies_hit\":" << su.enemies_hit;
+    out << ",\"summed_remaining_life\":" << su.summed_remaining_life;
+    out << ",\"long_lived_count\":" << su.long_lived_count;
+    out << "}";
+    out << "}";
   }
 
   // 260901-od1 (kill-the-dual-encoder-seam) -- the engine-encoded

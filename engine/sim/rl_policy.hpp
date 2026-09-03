@@ -122,6 +122,14 @@ struct rl_state_t
   double fight_remains        = 0.0;   bool has_fight_remains        = false;
   double raid_event_next_in   = 0.0;   bool has_raid_event_next_in   = false;
 
+  // 228-10 (Q18, D-12 "read once, use twice") -- the SAME immunity-remaining value the dump's
+  // aggregate `immunity_remaining` key reports, read here through the ONE shared
+  // `compute_invulnerability_window()` function so build_wait's new unanchored-wait candidate
+  // and the observation-facing number can never independently drift. `has_immunity_remaining`
+  // is false whenever no invulnerability is currently active (the "nothing pending" case for
+  // THIS field -- distinct from raid_event_next_in's own nothing-pending case above).
+  double immunity_remaining   = 0.0;   bool has_immunity_remaining   = false;
+
   // 221-01 (ACT-02, Pattern 1), RECOMPOSED 260831-lg6 (D-1) -- the
   // engine-truth legality layer, action-id order, exactly RL_ACTION_DIM
   // wide. Filled by read_state() calling read_action_gate_bits() below
@@ -189,6 +197,79 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
 // (see rl_state_t::has_raid_event_next_in's own doc comment above for the
 // two deliberately-different policies).
 bool next_raid_event_in( const sim_t* sim, double& out_seconds );
+
+// ---------------------------------------------------------------------------------------------
+// 228-10 Task 1 Step 3/4 (D-16/D-17/TGT-05/TGT-06). Two new engine-wide computations, each ONE
+// function shared by every consumer (decision_dump.cpp's own aggregate keys AND, for the
+// immunity window, read_state()'s own new rl_state_t::immunity_remaining field -- D-12's "read
+// once, use twice").
+// ---------------------------------------------------------------------------------------------
+
+// The identity-free aggregates (D-16): fight-wide counts and timers over
+// `sim->target_non_sleeping_list`, computed ONCE per call. `has_*` flags mirror this file's own
+// convention -- "no enemies at all" is possible only in a degenerate/teardown state, but the
+// flag is kept rather than assumed away.
+struct fight_wide_aggregates_t
+{
+  int    enemies_total              = 0;
+  int    enemies_in_melee           = 0;
+  int    enemies_within_8yd         = 0;
+  int    enemies_within_40yd        = 0;
+  int    enemies_in_front           = 0;
+  int    flame_shock_carrier_count  = 0;   // NEW counter -- walks DOTS over non-sleeping enemies,
+                                            // never buff_list (the existing enemy_debuff_counts
+                                            // counter can never see a dot -- P-5).
+  bool   has_soonest_time_to_die    = false;
+  double soonest_time_to_die        = 0.0;
+  bool   has_longest_time_to_die    = false;
+  double longest_time_to_die        = 0.0;
+  int    dying_within_5s            = 0;   // time_to_die <= 5.0 (AT OR BELOW -- stated identically
+  int    dying_within_15s           = 0;   // to this counter's own 15s sibling, so the two can
+                                            // never disagree about the crossing point)
+  bool   has_nearest_enemy_distance = false;
+  double nearest_enemy_distance     = 0.0;
+};
+
+fight_wide_aggregates_t compute_fight_wide_aggregates( player_t* p );
+
+// TGT-06/D-17/Q18: the fight-wide invulnerability schedule, filtered from `sim->raid_events` by
+// `type == "invulnerable"` -- COPIES `next_raid_event_in`'s own loop/discard-the-sentinel
+// convention (never a second, independently-maintained walk), extended to also report the
+// ACTIVE window's own remaining time via the matching event's `up()`/`remains()` (valid only
+// while `up()`, per raid_event_t::remains()'s own precondition). `next_in`/`remaining` are 0.0
+// when nothing is pending/active respectively -- the "nothing pending" wire value this plan's
+// receipt records, matching every existing `*_remaining` field's own zero-is-absent convention
+// on this codebase (never a saturation sentinel, never null).
+struct invulnerability_window_t
+{
+  bool   has_next  = false;
+  double next_in   = 0.0;
+  bool   active    = false;
+  double remaining = 0.0;
+};
+
+invulnerability_window_t compute_invulnerability_window( const sim_t* sim );
+
+// 228-10 Task 1 Step 5 (D-16 shaped-spell block, TGT-04, OR-2): descriptive shape facts for the
+// two SHAPED actions, computed from the CURRENT facing ONLY (there is no hypothetical direction
+// to evaluate under OR-2). Both call the ONE shared geometry copy
+// (rl_target_select::crash_lightning_cone_contains / sundering_rect_contains) against every
+// live, non-sleeping enemy -- never a second copy, never a target-cache read (R-D). Lives here
+// (the observation writer's own file/namespace), not in rl_target_select, because computing a
+// descriptive fact about the CURRENT facing is this file's own concern -- the selector module
+// governs picks, and the shaped actions have none (OR-2). "Long-lived" reuses the SAME
+// threshold the identity-free aggregates' own dying-within-15s counter uses
+// (rl_target_select::DYING_WITHIN_LATER_SECONDS) -- an orchestrator default, since D-16 names
+// the field but not its numeric boundary; see the receipt/ledger for the row.
+struct shape_hit_result_t
+{
+  int    enemies_hit           = 0;
+  double summed_remaining_life = 0.0;
+  int    long_lived_count      = 0;
+};
+
+shape_hit_result_t compute_crash_lightning_shape( player_t* p );
+shape_hit_result_t compute_sundering_shape( player_t* p );
 
 // WR-05 fix (210-CR-FIX): `source` is a `std::string`, not a `const char*`
 // into shared storage. `wait_result` is part of the pinned POD interface --

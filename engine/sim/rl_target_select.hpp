@@ -58,6 +58,21 @@ struct enemy_fact
   bool      is_previous_pick        = false;  // candidate == a->target (the action's own previous pick -- P-4: re-checked every decision, never assumed still valid)
   size_t    actor_index             = 0;
   int       actor_spawn_index       = 0;      // STICKY_KEY is the PAIR (R-C / P228-8), never actor_index alone
+
+  // 228-10 Task 1 Step 1 (D-03/D-16): the per-enemy facts D-16 names that plan 228-02's record
+  // did not already carry. Every one is read directly off the CANDIDATE (never the current
+  // target only, P-5's fix point), via buff_t::find()/player_t::find_dot() -- a non-allocating
+  // scan of the candidate's own buff_list/dot_list, the SAME non-creating idiom
+  // flame_shock_remaining above already uses (WR-04) -- never buff_t::get()/get_dot(), which
+  // CREATES the object on a candidate that has never had it. 0.0 / 0 is "absent", matching every
+  // other *_remaining field's own convention on this struct.
+  double    burning_core_remaining  = 0.0;    // tier-set proc window (buff, source == a->player)
+  int       lightning_rod_stacks    = 0;      // Stormbringer debuff (buff, source == a->player)
+  double    lightning_rod_remaining = 0.0;
+  double    venomfang_remaining     = 0.0;    // trinket-sourced dot (source == a->player)
+  int       venomfang_debuff_stacks = 0;      // trinket-sourced buff (source == a->player)
+  double    venomfang_debuff_remaining = 0.0;
+  double    rune_of_unleashed_fire_lingering_remaining = 0.0;  // omnium-sourced dot (source == a->player)
 };
 
 // The four-clause generic filter (D-09), checked in the SAME order action_t::target_ready checks
@@ -284,6 +299,24 @@ constexpr double CRASH_LIGHTNING_CONE_COS_HALF_ANGLE = 0.5;
 constexpr double SUNDERING_RECT_LENGTH_YARDS     = 11.0;
 constexpr double SUNDERING_RECT_HALF_WIDTH_YARDS = 2.25;
 
+// 228-10 (D-16 aggregates + shaped block, orchestrator default -- see the ledger): the ONE named
+// threshold both the identity-free aggregates' "dying within 15s" counter and the shaped block's
+// "long-lived" counter share -- D-16 names both fields but not a numeric boundary, so this plan
+// reuses the SAME number for both rather than inventing a second, undeclared one. Header-level so
+// both rl_policy_obs.cpp (the aggregates) and this file's own shape facts read the identical
+// constant across translation units.
+constexpr double DYING_WITHIN_LATER_SECONDS = 15.0;
+constexpr double DYING_WITHIN_SOON_SECONDS  = 5.0;
+
+// 228-10 (D-16 aggregates): the two RAW distance thresholds the identity-free aggregates use
+// ("within 8 yd", "within 40 yd" -- plain distance, no combat_reach allowance, since these are
+// visibility-window counts, not legality tests). "In melee" uses MELEE_RANGE_YARDS + the
+// candidate's own combat_reach, matching DISCUSSION-targeting-rules-and-fields.md 2.2's own
+// "inside 5 yards + its hitbox" wording.
+constexpr double MELEE_RANGE_YARDS      = 5.0;
+constexpr double NEAR_RANGE_YARDS       = 8.0;
+constexpr double VISIBILITY_RANGE_YARDS = 40.0;
+
 // WR-02 (260902/cr4): the candidate's own `bounding_allowance` (combat_reach) is a hitbox
 // extension of the CANDIDATE's position, not of the spell's own width -- so both shapes apply it
 // the SAME way: on the cone's radius (crash_lightning_cone_contains, unchanged) and on the
@@ -308,5 +341,13 @@ bool sundering_rect_contains( double px, double py, double fx, double fy, double
 // `preference_shaped_sundering`) are REMOVED -- Crash Lightning and Sundering never pick a
 // direction, they cast in the CURRENT facing. The geometry predicates above stay as the one
 // shared copy the shaman module's AoE hit filters read from.
+
+// 228-10 Task 1 Step 5 (D-16 shaped-spell block): the shape-fact COMPUTATION itself lives in
+// rl_policy_obs.cpp / namespace rl_policy (rl_policy::compute_crash_lightning_shape /
+// compute_sundering_shape) -- it is the OBSERVATION writer's own concern, not the selector
+// module's, and this plan's own verify gate checks that those two computations call the
+// geometry predicates directly from rl_policy_obs.cpp, never through a second wrapper here. The
+// geometry predicates above (crash_lightning_cone_contains / sundering_rect_contains) remain the
+// ONE shared copy both that computation and sc_shaman.cpp's own AoE hit filters call.
 
 } // namespace rl_target_select

@@ -139,6 +139,168 @@ bool next_raid_event_in( const sim_t* sim, double& out_seconds )
 }
 
 // ---------------------------------------------------------------------------
+// 228-10 Task 1 Step 3 (D-16 identity-free aggregates, TGT-05). ONE walk of
+// `target_non_sleeping_list`, shared by decision_dump.cpp's new aggregate keys. Flame Shock
+// carrier count is NEW code (P-5): it walks DOTS via `find_dot`, the same non-allocating idiom
+// `build_enemy_fact`'s own flame_shock_remaining uses -- never `buff_list`, which the existing
+// `enemy_debuff_counts` counter (decision_dump.cpp) walks and can therefore never see a dot at
+// all. The gate proving this is the buff_list.count baseline compare in this plan's own verify
+// block.
+// ---------------------------------------------------------------------------
+
+fight_wide_aggregates_t compute_fight_wide_aggregates( player_t* p )
+{
+  using rl_target_select::DYING_WITHIN_LATER_SECONDS;
+  using rl_target_select::DYING_WITHIN_SOON_SECONDS;
+  using rl_target_select::MELEE_RANGE_YARDS;
+  using rl_target_select::NEAR_RANGE_YARDS;
+  using rl_target_select::VISIBILITY_RANGE_YARDS;
+
+  fight_wide_aggregates_t agg;
+  for ( player_t* t : p->sim->target_non_sleeping_list )
+  {
+    if ( !t->is_enemy() )
+      continue;
+    ++agg.enemies_total;
+
+    const double dist = p->get_player_distance( *t );
+    if ( dist <= MELEE_RANGE_YARDS + t->combat_reach )
+      ++agg.enemies_in_melee;
+    if ( dist <= NEAR_RANGE_YARDS )
+      ++agg.enemies_within_8yd;
+    if ( dist <= VISIBILITY_RANGE_YARDS )
+      ++agg.enemies_within_40yd;
+    if ( p->is_in_front( *t, 0.0 ) )
+      ++agg.enemies_in_front;
+
+    // NEW code (P-5): walks DOTS over the non-sleeping list, never buff_list.
+    dot_t* fs = t->find_dot( "flame_shock", p );
+    if ( fs && fs->is_ticking() )
+      ++agg.flame_shock_carrier_count;
+
+    const double ttd = std::min( t->time_to_percent( 0 ).total_seconds(), 600.0 );
+    if ( !agg.has_soonest_time_to_die || ttd < agg.soonest_time_to_die )
+    {
+      agg.has_soonest_time_to_die = true;
+      agg.soonest_time_to_die     = ttd;
+    }
+    if ( !agg.has_longest_time_to_die || ttd > agg.longest_time_to_die )
+    {
+      agg.has_longest_time_to_die = true;
+      agg.longest_time_to_die     = ttd;
+    }
+    // Stated explicitly and IDENTICALLY (at-or-below counts, above does not) so the two
+    // thresholds can never disagree at the crossing point.
+    if ( ttd <= DYING_WITHIN_SOON_SECONDS )
+      ++agg.dying_within_5s;
+    if ( ttd <= DYING_WITHIN_LATER_SECONDS )
+      ++agg.dying_within_15s;
+
+    if ( !agg.has_nearest_enemy_distance || dist < agg.nearest_enemy_distance )
+    {
+      agg.has_nearest_enemy_distance = true;
+      agg.nearest_enemy_distance     = dist;
+    }
+  }
+  return agg;
+}
+
+// ---------------------------------------------------------------------------
+// 228-10 Task 1 Step 4(b) (D-17/TGT-06/Q18). COPIES next_raid_event_in's own loop/discard
+// convention, filtered to `type == "invulnerable"`, extended to also report the ACTIVE window's
+// remaining time. This is the ONE function both decision_dump.cpp's aggregate keys and
+// read_state()'s new rl_state_t::immunity_remaining field call (D-12: read once, use twice) --
+// never a second, independently-maintained walk of sim->raid_events.
+// ---------------------------------------------------------------------------
+
+invulnerability_window_t compute_invulnerability_window( const sim_t* sim )
+{
+  invulnerability_window_t w;
+  const double fight_remaining =
+      std::max( ( sim->expected_iteration_time - sim->current_time() ).total_seconds(), 0.0 );
+
+  for ( const auto& re : sim->raid_events )
+  {
+    if ( !re || re->type != "invulnerable" )
+      continue;
+
+    if ( re->up() )
+    {
+      // remains() asserts is_up -- only called on the up() == true branch, per its own
+      // documented precondition (raid_event.hpp).
+      const double remaining = re->remains().total_seconds();
+      if ( !w.active || remaining < w.remaining )
+      {
+        w.active    = true;
+        w.remaining = remaining;
+      }
+      continue;
+    }
+
+    // Not currently up -- until_next() discards the ~9.2e12 "nothing pending" saturation value
+    // the SAME way next_raid_event_in() does above: any candidate larger than the remaining
+    // fight is, by construction, not really pending.
+    const double candidate = re->until_next().total_seconds();
+    if ( candidate <= 0.0 || candidate > fight_remaining )
+      continue;
+    if ( !w.has_next || candidate < w.next_in )
+    {
+      w.has_next = true;
+      w.next_in  = candidate;
+    }
+  }
+  return w;
+}
+
+// ---------------------------------------------------------------------------
+// 228-10 Task 1 Step 5 (D-16 shaped-spell block, TGT-04, OR-2). CURRENT facing only -- no
+// hypothetical direction, no target-cache read (R-D). Calls the ONE shared geometry copy
+// (rl_target_select::crash_lightning_cone_contains / sundering_rect_contains) directly -- this
+// plan's own verify gate requires that call site to live in THIS file (the observation writer),
+// never wrapped a second time in the selector module.
+// ---------------------------------------------------------------------------
+
+shape_hit_result_t compute_crash_lightning_shape( player_t* p )
+{
+  shape_hit_result_t r;
+  for ( player_t* t : p->sim->target_non_sleeping_list )
+  {
+    if ( !t->is_enemy() )
+      continue;
+    if ( !rl_target_select::crash_lightning_cone_contains( p->x_position, p->y_position, p->facing_x,
+                                                            p->facing_y, t->x_position, t->y_position,
+                                                            t->combat_reach ) )
+      continue;
+    ++r.enemies_hit;
+    const double ttd = std::min( t->time_to_percent( 0 ).total_seconds(), 600.0 );  // WR-10 clip
+    r.summed_remaining_life += ttd;
+    if ( ttd > rl_target_select::DYING_WITHIN_LATER_SECONDS )
+      ++r.long_lived_count;
+  }
+  return r;
+}
+
+shape_hit_result_t compute_sundering_shape( player_t* p )
+{
+  shape_hit_result_t r;
+  for ( player_t* t : p->sim->target_non_sleeping_list )
+  {
+    if ( !t->is_enemy() )
+      continue;
+    if ( !rl_target_select::sundering_rect_contains( p->x_position, p->y_position, p->facing_x,
+                                                       p->facing_y, t->x_position, t->y_position,
+                                                       t->combat_reach ) )
+      continue;
+    ++r.enemies_hit;
+    const double ttd = std::min( t->time_to_percent( 0 ).total_seconds(), 600.0 );  // WR-10 clip
+    r.summed_remaining_life += ttd;
+    if ( ttd > rl_target_select::DYING_WITHIN_LATER_SECONDS )
+      ++r.long_lived_count;
+  }
+  return r;
+}
+
+// ---------------------------------------------------------------------------
 // Stage 1: read_state -- needs the engine, not exercised by the standalone
 // test executable (plan 210-07).
 // ---------------------------------------------------------------------------
@@ -160,6 +322,19 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground )
   s.fight_remains = std::max( ( sim->expected_iteration_time - sim->current_time() ).total_seconds(), 0.0 );
   s.has_fight_remains = true;
   s.has_raid_event_next_in = next_raid_event_in( sim, s.raid_event_next_in );
+
+  // 228-10 (Q18, D-12 "read once, use twice") -- the SAME compute_invulnerability_window() call
+  // decision_dump.cpp's own immunity_remaining/immunity_in aggregate keys use. Only the ACTIVE
+  // window's remaining time becomes a wait candidate (build_wait, below) -- "seconds to the next
+  // one" is not a reason to wake up early, only "seconds until the current one ends" is.
+  {
+    const invulnerability_window_t iw = compute_invulnerability_window( sim );
+    if ( iw.active && iw.remaining > 0.0 )
+    {
+      s.immunity_remaining     = iw.remaining;
+      s.has_immunity_remaining = true;
+    }
+  }
 
   // Same formula as decision_dump.cpp:355's gcd_remains -- shared helper,
   // not a re-derived expression, so the two can never drift.
@@ -3393,6 +3568,19 @@ wait_result build_wait( const rl_state_t& s, const rl_wait_anchor& anchor )
     if ( row->has_recharge_time && row->recharge_time > 0.0 )
       candidates.push_back( { row->recharge_time, true, &row->name, nullptr } );
   }
+
+  // 228-10 Task 1 Step 6(a) (Q18, owner ruling 2026-09-02 alternative (b)): the
+  // immunity-remaining candidate -- the SAME value read_state() already computed via
+  // compute_invulnerability_window() (D-12: read once, use twice; never a second walk of
+  // sim->raid_events here). Appended after the cooldown-row loop, before swing_mh -- the SAME
+  // relative position scripts/rl/mask.py's next_event_wait_detail() appends its own mirror
+  // candidate, so a tie between this and a cooldown-row/swing/gcd candidate breaks identically
+  // on both sides (P-3's append-order-is-tie-break rule). The 226-07 re-ask-period cap is
+  // scoped to `winner.is_cooldown` only (below) and never applies to this literal-source
+  // candidate -- an immunity window ending is exactly the kind of external event the cap exists
+  // to let the wait reach, not something to clamp down to one re-ask period.
+  if ( s.has_immunity_remaining && s.immunity_remaining > 0.0 )
+    candidates.push_back( { s.immunity_remaining, false, nullptr, "immunity_remaining" } );
 
   if ( s.has_swing_mh_remains && s.swing_mh_remains > 0.0 )
     candidates.push_back( { s.swing_mh_remains, false, nullptr, "swing_mh" } );

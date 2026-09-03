@@ -159,8 +159,33 @@ enemy_fact build_enemy_fact( const action_t* a, player_t* candidate, player_t* p
   f.actor_index        = candidate->actor_index;
   f.actor_spawn_index  = candidate->actor_spawn_index;
 
+  // 228-10 Task 1 Step 1 (D-03/D-16): the missing per-enemy facts, added ONCE here and read from
+  // here by the dump (and later the observation) -- never a second copy. Every lookup uses the
+  // non-allocating `find`/`find_dot` idiom (WR-04's own convention above): buff_t::find() scans
+  // buff_list without creating; player_t::find_dot() scans dot_list without creating. `source`
+  // is always `a->player` -- these are debuffs THIS actor puts on the candidate, mirroring
+  // flame_shock_remaining's own `a->player` source above.
+  if ( buff_t* bc = buff_t::find( candidate, "burning_core", a->player ) )
+    f.burning_core_remaining = bc->remains().total_seconds();
+  if ( buff_t* lr = buff_t::find( candidate, "lightning_rod", a->player ) )
+  {
+    f.lightning_rod_stacks    = lr->check();
+    f.lightning_rod_remaining = lr->remains().total_seconds();
+  }
+  if ( dot_t* vf = candidate->find_dot( "venomfang", a->player ) )
+    f.venomfang_remaining = vf->remains().total_seconds();
+  if ( buff_t* vfd = buff_t::find( candidate, "venomfang_debuff", a->player ) )
+  {
+    f.venomfang_debuff_stacks    = vfd->check();
+    f.venomfang_debuff_remaining = vfd->remains().total_seconds();
+  }
+  if ( dot_t* ruf = candidate->find_dot( "rune_of_unleashed_fire_lingering", a->player ) )
+    f.rune_of_unleashed_fire_lingering_remaining = ruf->remains().total_seconds();
+
   return f;
 }
+
+
 
 namespace
 {
