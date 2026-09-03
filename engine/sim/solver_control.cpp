@@ -132,32 +132,33 @@ action_t* accept_cast( player_t* p, const std::string& action_name, std::uint64_
   // READ, never recomputed (D-12). A pick not stamped for THIS decision is a mask/cast
   // disagreement (T-228-02-02) and refuses by name here, in this file's own protocol_abort idiom,
   // rather than silently recomputing a possibly-different answer.
-  if ( rl_target_select::is_targeted_action( resolved ) )
+  //
+  // CR-05 (260902/cr4): `is_targeted_action` is a pure NAME match; additionally scoped here to the
+  // RL-controlled actor (exact strcmp against RL_ACTOR_NAME, never a prefix -- mirrors choose()'s
+  // own gate at this file's :514), non-pet -- belt-and-braces alongside rl_policy_obs.cpp's own
+  // actor scope, since accept_cast is reached only via the FIFO/in-process "cast" reply the driver
+  // sends for the RL actor it controls, never structurally guaranteed by this file alone.
+  // CR-06 (260902/cr4): the selector kill switch -- off means accept_cast never retargets/turns
+  // for a registry action, matching the pre-228-02 cast path.
+  const bool is_rl_actor = std::strcmp( p->name(), RL_ACTOR_NAME ) == 0 && !p->is_pet();
+  if ( p->sim->target_select_enabled && is_rl_actor && rl_target_select::is_targeted_action( resolved ) )
   {
     bool      found = false;
     player_t* pick  = rl_target_select::lookup_pick( resolved, &found );
     if ( !found || !pick )
       protocol_abort( "'cast' reply named targeted action '" + action_name +
                        "' (seq=" + std::to_string( seq ) +
-                       "') with no pick stamped for this decision -- refusing rather than "
+                       ") with no pick stamped for this decision -- refusing rather than "
                        "recomputing (228-02, D-12)" );
 
-    // action_t::set_target -- NEVER a raw `resolved->target = pick` write (it skips the AoE
-    // target-cache invalidation, leaving a stale cache and a silently wrong hit set) and NEVER
-    // SimC's own `target_number` option (it numbers over a DIFFERENT list and freezes retargeting
-    // permanently) and NEVER a walk over `p->action_list` (there is exactly one action here to
-    // retarget, not a search problem).
-    resolved->set_target( pick );
+    // WR-07 (260902/cr4): the ONE retarget function this call site and the mid-cast re-resolution
+    // ladder's fallback arm (action.cpp) both call -- see rl_target_select.hpp's own doc comment.
     // Casting on a unit IS targeting it in game (D-13, ledger R11): the player's own target and
     // BOTH weapon swings follow the pick, so white damage (Windfury/Flametongue procs) lands on
     // the enemy the agent is actually fighting, not a stale prior target. `solver_control.cpp`'s
     // own FOREGROUND re-arm (below, :395-401 in this file) guarantees both swing objects are live
     // by the time any cast reaches this function.
-    p->target = pick;
-    if ( p->main_hand_attack )
-      p->main_hand_attack->set_target( pick );
-    if ( p->off_hand_attack )
-      p->off_hand_attack->set_target( pick );
+    rl_target_select::retarget( resolved, p, pick );
     // Facing turns to the cast target AT cast time (D-05's second call site -- 228-01 added the
     // model and the target_ready guard clause but deliberately left this call site to this plan).
     p->face( *pick );
@@ -581,7 +582,11 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // request's own `resolved_action` stays pre-reply/`apl_choice`-based,
     // exactly as PROTOCOL.md documents (the reply hasn't been read yet); only
     // decision_dump::record()'s own call opts into reply-gating (defect (b)).
-    decision_dump::write_state_fields( req, p, apl_choice, false, et == execute_type::FOREGROUND );
+    // 260902/cr4 (CR-02): this FIFO request-line build IS the decision boundary -- it runs before
+    // the reply has been read and before accept_cast has retargeted/turned the player, so this is
+    // the state the decision is actually made from.
+    decision_dump::write_state_fields( req, p, apl_choice, false, et == execute_type::FOREGROUND,
+                                        /*is_decision_boundary=*/true );
     req << "}\n";
     req.flush();
 

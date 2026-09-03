@@ -212,8 +212,14 @@ std::string boundary_name( execute_type et );
 // own `_is_enemy(type)` -- ENEMY/ENEMY_ADD/ENEMY_ADD_BOSS/TANK_DUMMY), an
 // explicit, unambiguous actor-class exclusion rather than trusting the
 // resource predicate alone.
-void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool solver_reply_gated = false,
-                          bool boundary_is_foreground = true );
+// 260902/cr4 (CR-02): `is_decision_boundary` carries NO default -- both call sites (solver_control
+// .cpp's FIFO request-line build, and decision_dump::record()'s own call below) state it
+// explicitly. True at the request-line build (built before the reply/accept_cast have run for
+// this decision); false at record()'s call (which always runs AFTER solver_control::choose() has
+// already retargeted/turned the player). Threaded straight through to
+// rl_policy::read_action_gate_bits -- see that function's own doc comment for the full mechanism.
+void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool solver_reply_gated,
+                          bool boundary_is_foreground, bool is_decision_boundary );
 
 // JSON helpers shared with solver_control (P3b) so both hooks emit
 // byte-identical escaping/clamping for the same field kinds.

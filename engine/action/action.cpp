@@ -250,16 +250,27 @@ struct action_execute_event_t : public player_event_t
     //
     // Scoped to an RL-controlled sim (`sim->solver_control_str`/`solver_policy_str` non-empty --
     // the SAME sim-level gate solver_control.cpp's own choose() checks at its own :278/:1053)
-    // AND to one of the eight targeted registry actions (rl_target_select::is_targeted_action):
-    // the scripted (APL) arm never populates a pick for any action (accept_cast/set_target are
-    // never reached for it), so this whole block is INERT for it -- `target_ready(target)` below
-    // is never even evaluated for a scripted actor's cast, and every other action on an RL actor
-    // (self/ground/item, the two SHAPED actions plan 228-03 owns) is equally untouched. This is
-    // what makes `apl-full`'s numbers untouched by this plan (228-SELECTOR-RECEIPT.md's blast
+    // AND (260902/cr4, CR-05) to an action that WAS actually governed by the selector this
+    // decision -- `rl_target_select::lookup_pick( action, &found ) && found`, the
+    // this-action's-pick-was-governed-by-the-selector-this-decision predicate the comment already
+    // describes, replacing the prior `is_targeted_action( action )` NAME match. A name match alone
+    // cannot distinguish the RL player's own `chain_lightning` from `ancestor_t`'s pet action of
+    // the identical name -- `lookup_pick` cannot collide this way because only the RL-controlled,
+    // non-pet actor's actions are ever stamped (rl_policy_obs.cpp's read_action_gate_bits actor
+    // scope). The scripted (APL) arm never populates a pick for any action (accept_cast/set_target
+    // are never reached for it), so this whole block is INERT for it -- `target_ready(target)`
+    // below is never even evaluated for a scripted actor's cast, and every other action on an RL
+    // actor (self/ground/item, the two SHAPED actions plan 228-03 owns) is equally untouched. This
+    // is what makes `apl-full`'s numbers untouched by this plan (228-SELECTOR-RECEIPT.md's blast
     // radius section states and, where cheap, verifies this).
+    // CR-06 (260902/cr4): the selector kill switch -- off means the ladder never fires, matching
+    // the pre-228-02 no-op-boundary-on-death behaviour (sim.hpp's own option comment).
+    bool has_governed_pick = false;
+    if ( sim().target_select_enabled )
+      rl_target_select::lookup_pick( action, &has_governed_pick );
     if ( has_cast_time && target && !target->is_sleeping() &&
          !( sim().solver_control_str.empty() && sim().solver_policy_str.empty() ) &&
-         rl_target_select::is_targeted_action( action ) )
+         sim().target_select_enabled && has_governed_pick )
     {
       if ( action->target_ready( target ) )
       {
@@ -271,7 +282,13 @@ struct action_execute_event_t : public player_event_t
         if ( fallback && fallback != target && action->target_ready( fallback ) )
         {
           target = fallback;
-          action->set_target( fallback );
+          // WR-07 (260902/cr4): the ONE retarget function this ladder's fallback arm and
+          // accept_cast (solver_control.cpp) both call -- see rl_target_select.hpp's own doc
+          // comment. `pre_execute_state->target` (this event's own carried state, if any) is not
+          // re-pointed here: it was NOT found anywhere in this ladder's dependency chain --
+          // `target` is a plain local variable, never read back off `pre_execute_state` after this
+          // point in `execute()` -- so there is nothing to re-point or assert-unused.
+          rl_target_select::retarget( action, p(), fallback );
           rl_target_select::record_reresolution(
               rl_target_select::reresolution_arm::fell_back_to_player_target );
         }

@@ -491,6 +491,14 @@ struct player_t : public actor_t
   // player at x=-5.000,y=0.000 facing the boss at x=-0.000,y=0.000 -- see player.cpp ctor)
   // and reset beside the position pair in `player_t::reset()`.
   double facing_x, facing_y;
+  // WR-03 (260902/cr4): bumped by `face()` ONLY when the facing vector actually moves (never on
+  // the coincident-position early return), reset beside the position pair and `facing_x/y` in
+  // `player_t::reset()`. The two shaped actions (Crash Lightning, Sundering) invalidate their AoE
+  // target cache on an epoch CHANGE at the point they hand out their target list -- see
+  // sc_shaman.cpp's `invalidate_shaped_target_cache()` -- so `spell_targets.*` expressions and
+  // Storm Unleashed 3's repeating `target_list()` walk always see the CURRENT cone/rectangle
+  // wherever facing changed, not only at the shaped action's own cast time.
+  uint64_t facing_epoch;
 
   struct consumables_t {
     buff_t* flask;

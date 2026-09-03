@@ -62,6 +62,19 @@ namespace
 // rather than beside g_slot_table_cache) purely because C++ requires the
 // declaration precede first use in the same translation unit.
 std::unordered_map<const player_t*, std::vector<action_t*>> g_action_handle_cache;
+
+// 260902/cr4 (CR-02): the two output arrays a BOUNDARY read_action_gate_bits call computed for
+// the CURRENT decision stamp, cached so the later non-boundary call (decision_dump::record(),
+// which always runs after solver_control::choose() has already retargeted/turned the player)
+// returns the PRE-decision mask instead of recomputing against state the cast already mutated.
+struct gate_bits_cache_entry
+{
+  std::uint64_t stamp     = 0;
+  bool          has_stamp = false;
+  std::uint8_t  resolvable[ RL_ACTION_DIM ] = {};
+  std::uint8_t  ready     [ RL_ACTION_DIM ] = {};
+};
+std::unordered_map<const player_t*, gate_bits_cache_entry> g_gate_bits_cache;
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -301,7 +314,9 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground )
   // 221-01 (ACT-02, Pattern 1) -- the engine-truth legality layer. Filled
   // via the SAME function decision_dump::write_state_fields calls, so this
   // POD and the wire/dump arrays can never drift apart (Pattern 3).
-  read_action_gate_bits( p, s.action_resolvable, s.action_ready );
+  // 260902/cr4 (CR-02): read_state() is ALWAYS the decision boundary -- it is the in-process arm's
+  // own per-decision state read, called before any reply/accept_cast has run.
+  read_action_gate_bits( p, s.action_resolvable, s.action_ready, /*is_decision_boundary=*/true );
 
   return s;
 }
@@ -323,21 +338,49 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground )
 // ---------------------------------------------------------------------------
 
 void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_ACTION_DIM ],
-                             std::uint8_t out_ready[ RL_ACTION_DIM ] )
+                             std::uint8_t out_ready[ RL_ACTION_DIM ], bool is_decision_boundary,
+                             bool* out_used_dump_time_compute )
 {
+  if ( out_used_dump_time_compute )
+    *out_used_dump_time_compute = false;
+
   // Same WR-12 single-sim/single-thread precondition bind_slots() asserts
   // above -- this cache is keyed on a bare const player_t* with no sim
   // identity and no clear.
   assert( p->sim->threads == 1 && p->sim->profileset_map.empty() &&
           "rl_policy action-handle cache is single-sim/single-thread by construction (221-01)" );
 
-  // 228-02 (D-12, TGT-02/03): bump this player's decision stamp ONCE per read_action_gate_bits
-  // call (never per targeted action below) -- every targeted action's pick filled in THIS call
-  // carries the identical stamp, which is what lets accept_cast's later lookup_pick() call
-  // (solver_control.cpp) distinguish "the pick belongs to this decision" from "stale, refuse by
-  // name" without ever recomputing. The return value itself is not needed here -- fill_pick()
-  // reads the just-bumped stamp back out of the same table.
-  rl_target_select::begin_decision( p );
+  // 260902/cr4 (CR-02): a NON-boundary call (decision_dump::record(), which always runs AFTER
+  // solver_control::choose() has already retargeted/turned the player for THIS decision) returns
+  // the cached PRE-decision mask a boundary call computed for the CURRENT stamp, rather than
+  // recomputing against state the cast already mutated -- recomputing here is the exact defect
+  // this task fixes. When no cache matches (a scripted actor with decision_dump= and no solver
+  // arm never takes the boundary path), fall through to the plain compute below WITHOUT bumping
+  // the stamp and WITHOUT filling any pick (the `is_decision_boundary` checks inside the loop
+  // below gate that), and report the dump-time compute via the out-parameter.
+  if ( !is_decision_boundary )
+  {
+    auto cache_it = g_gate_bits_cache.find( p );
+    std::uint64_t current_stamp = rl_target_select::current_decision_stamp( p );
+    if ( cache_it != g_gate_bits_cache.end() && cache_it->second.has_stamp &&
+         cache_it->second.stamp == current_stamp )
+    {
+      std::memcpy( out_resolvable, cache_it->second.resolvable, RL_ACTION_DIM );
+      std::memcpy( out_ready, cache_it->second.ready, RL_ACTION_DIM );
+      return;
+    }
+    if ( out_used_dump_time_compute )
+      *out_used_dump_time_compute = true;
+  }
+  else
+  {
+    // 228-02 (D-12, TGT-02/03): bump this player's decision stamp ONCE per BOUNDARY
+    // read_action_gate_bits call (never per targeted action below) -- every targeted action's
+    // pick filled in THIS call carries the identical stamp, which is what lets accept_cast's
+    // later lookup_pick() call (solver_control.cpp) distinguish "the pick belongs to this
+    // decision" from "stale, refuse by name" without ever recomputing.
+    rl_target_select::begin_decision( p );
+  }
 
   auto cached = g_action_handle_cache.find( p );
   if ( cached == g_action_handle_cache.end() )
@@ -388,15 +431,39 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
     // (solver_control.cpp) via lookup_pick(). Every OTHER action (self/ground/item, the two
     // SHAPED actions plan 228-03 owns, and every kind==wait entry) is completely untouched: same
     // `a->target`/`a->target_ready(a->target)` pair as before this plan.
-    if ( out_resolvable[ i ] && rl_target_select::is_targeted_action( a ) )
+    //
+    // CR-05 (260902/cr4): `is_targeted_action` is a pure NAME match -- `ancestor_t`'s own pet
+    // `chain_lightning_t` (sc_shaman.cpp) shares the SAME name_str as the RL player's spell, so
+    // the substitution is additionally scoped to the RL-controlled actor (exact strcmp against
+    // RL_ACTOR_NAME, mirroring solver_control.cpp's own accept_cast/choose() gate -- never a
+    // prefix match, which would also match every one of that actor's pet records), non-pet. A
+    // pet's (or any other actor's) same-named action falls through to the untouched
+    // `a->target`/`a->target_ready(a->target)` path below, exactly like a self/ground/item action.
+    // CR-06 (260902/cr4): the selector kill switch -- off means an RL run takes exactly the
+    // pre-228-02 path (see sim.hpp's own option comment).
+    const bool is_rl_actor = std::strcmp( p->name(), RL_ACTOR_NAME ) == 0 && !p->is_pet();
+    if ( out_resolvable[ i ] && p->sim->target_select_enabled && is_rl_actor &&
+         rl_target_select::is_targeted_action( a ) )
     {
-      rl_target_select::fill_pick( a, /*harmful=*/true, rl_target_select::preference_for( a ) );
-      bool      found = false;
-      player_t* pick  = rl_target_select::lookup_pick( a, &found );
-      assert( found &&
-              "rl_target_select: a pick just filled for this decision must be immediately "
-              "readable (228-02, D-12)" );
-      out_ready[ i ] = ( a->ready() && pick != nullptr && a->target_ready( pick ) ) ? 1 : 0;
+      if ( is_decision_boundary )
+      {
+        rl_target_select::fill_pick( a, /*harmful=*/true, rl_target_select::preference_for( a ) );
+        bool      found = false;
+        player_t* pick  = rl_target_select::lookup_pick( a, &found );
+        assert( found &&
+                "rl_target_select: a pick just filled for this decision must be immediately "
+                "readable (228-02, D-12)" );
+        out_ready[ i ] = ( a->ready() && pick != nullptr && a->target_ready( pick ) ) ? 1 : 0;
+      }
+      else
+      {
+        // 260902/cr4 (CR-02): reached only when the earlier cache lookup above found nothing for
+        // this decision (a scripted actor with decision_dump= and no solver arm never took the
+        // boundary path) -- compute the plain gate bits off the action's CURRENT target rather
+        // than a per-decision selector pick, since none was ever stamped for this decision. No
+        // stamp bump, no fill_pick -- both would corrupt a stamp a boundary call never opened.
+        out_ready[ i ] = ( a->ready() && a->target != nullptr && a->target_ready( a->target ) ) ? 1 : 0;
+      }
       continue;
     }
     // 260902/FORK-01: AND the engine's own target gate (alive, not immune
@@ -412,6 +479,18 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
     // line (`candidate_target->is_sleeping()`).
     out_ready[ i ] = ( out_resolvable[ i ] && a->ready() && a->target != nullptr &&
                         a->target_ready( a->target ) ) ? 1 : 0;
+  }
+
+  if ( is_decision_boundary )
+  {
+    // 260902/cr4 (CR-02): cache what THIS boundary call just computed, tagged with the player and
+    // the CURRENT stamp -- the later non-boundary call (decision_dump::record()) reads this back
+    // instead of recomputing.
+    gate_bits_cache_entry& entry = g_gate_bits_cache[ p ];
+    entry.stamp     = rl_target_select::current_decision_stamp( p );
+    entry.has_stamp = true;
+    std::memcpy( entry.resolvable, out_resolvable, RL_ACTION_DIM );
+    std::memcpy( entry.ready, out_ready, RL_ACTION_DIM );
   }
 }
 

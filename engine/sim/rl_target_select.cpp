@@ -6,6 +6,7 @@
 #include "sim/rl_target_select.hpp"
 
 #include "action/action.hpp"
+#include "action/attack.hpp"
 #include "action/dot.hpp"
 #include "buff/buff.hpp"
 #include "player/player.hpp"
@@ -47,8 +48,15 @@ struct pick_slot
 };
 std::unordered_map<const action_t*, pick_slot> g_pick_table;
 
-// D-14's re-resolution ladder counters -- one fight's totals, never reset mid-run.
+// D-14's re-resolution ladder counters -- one fight's totals (WR-11, 260902/cr4: cleared every
+// iteration by reset( sim ) below, called from sim_t::reset()).
 reresolution_counts g_reresolution_counts;
+
+// WR-05 (260902/cr4): a file-static candidate buffer reused across every select() call, cleared
+// (not reallocated) per call -- same single-thread precondition begin_decision's own assert
+// states (a second concurrent select() on this buffer would race). Avoids a fresh heap allocation
+// on every targeted action's every decision.
+std::vector<player_t*> g_candidate_buffer;
 
 } // anonymous namespace
 
@@ -97,19 +105,33 @@ enemy_fact build_enemy_fact( const action_t* a, player_t* candidate, player_t* p
   // separately (D-16: the observation writer needs ground truth, not the gated legality bit).
   f.in_front = a->player->is_in_front( *candidate, 0.0 );
 
-  f.time_to_die = candidate->time_to_percent( 0 ).total_seconds();
+  // WR-10 (260902/cr4): clipped at 600.0s AT THE SOURCE -- ties preference_shortest_time_to_die's
+  // 1.0e9 and preference_lava_lash's 2.0e9 dominance offsets to a provable bound rather than one
+  // conditional on fixed_time=1 (under fixed_time=1 no candidate's raw time_to_percent(0) exceeds
+  // max_time anyway, but an unclipped value is a theoretical hazard the offsets should not have to
+  // assume away). Byte identity on a 600s shape confirms this changes nothing today.
+  f.time_to_die = std::min( candidate->time_to_percent( 0 ).total_seconds(), 600.0 );
   f.health_pct  = candidate->health_percentage();
   f.is_boss     = candidate->is_boss();
 
-  // Flame Shock on an ARBITRARY enemy, not only the current target (P-5's fix point) -- generic
-  // player_t::get_dot API, no shaman-specific type needed.
-  dot_t* fs = candidate->get_dot( "flame_shock", a->player );
+  // WR-04 (260902/cr4): `find_dot` -- a non-allocating scan of the candidate's existing dot_list --
+  // instead of `get_dot`, which CREATES a dot_t on every candidate that has never been Flame
+  // Shocked, growing `dot_list` on what this function's own callers treat as a read-only query.
+  // Flame Shock on an ARBITRARY enemy, not only the current target (P-5's fix point).
+  dot_t* fs = candidate->find_dot( "flame_shock", a->player );
   f.flame_shock_remaining = fs ? fs->remains().total_seconds() : 0.0;
 
   // R-D: deterministic geometry, never a target-cache read -- count of alive enemies within THIS
-  // action's own radius of the candidate. Chain Lightning's one declared radius (10.0) serves
-  // both fields (see rl_target_select.hpp's neighbours_within_splash comment); a shaped spell's
-  // true splash geometry is plan 228-03's, not this plan's.
+  // action's OWN resolved radius of the candidate (a->radius: 10.0 for chain_lightning, 8.0 for
+  // tempest -- WHICHEVER action called build_enemy_fact -- never a hardcoded chain_lightning
+  // constant, WR-06 260902/cr4 correcting this comment's prior claim that one fixed 10.0 "serves
+  // both" fields regardless of caller). Both `neighbours_within_splash` and `neighbours_within_jump`
+  // are set from the SAME `neighbours` count on purpose -- they are equal by construction today
+  // because no action currently needs the splash count and the jump count to differ, not because
+  // the two concepts are the same; a future action that DOES need them to differ would compute two
+  // separate counts here and stop assigning one to both. Both field NAMES are kept (228-11-PLAN.md
+  // declares both as schema leaves) -- only this comment moves. A shaped spell's true splash
+  // geometry is plan 228-03's, not this plan's.
   int neighbours = 0;
   if ( a->radius > 0.0 )
   {
@@ -132,9 +154,53 @@ enemy_fact build_enemy_fact( const action_t* a, player_t* candidate, player_t* p
   return f;
 }
 
+namespace
+{
+// WR-05 (260902/cr4): the cheap half of select()'s scoring-loop fact build -- see that call
+// site's own comment. NOT exposed in the header: build_enemy_fact() (above) is the one and only
+// public fact-record builder every OTHER caller (the future observation writer, 228-04 onward)
+// uses, with every field filled exactly as before this task.
+enemy_fact build_enemy_fact_for_scoring( const action_t* a, player_t* candidate, player_t* previous_pick,
+                                          preference_fn pref )
+{
+  enemy_fact f;
+  f.candidate   = candidate;
+  f.time_to_die = std::min( candidate->time_to_percent( 0 ).total_seconds(), 600.0 );  // WR-10
+
+  if ( pref == preference_lava_lash || pref == preference_voltaic_blaze )
+  {
+    dot_t* fs = candidate->find_dot( "flame_shock", a->player );  // WR-04
+    f.flame_shock_remaining = fs ? fs->remains().total_seconds() : 0.0;
+  }
+
+  if ( a->radius > 0.0 )
+  {
+    int neighbours = 0;
+    for ( player_t* other : a->sim->target_non_sleeping_list )
+    {
+      if ( other == candidate || !other->is_enemy() )
+        continue;
+      if ( candidate->get_player_distance( *other ) <= a->radius + other->combat_reach )
+        ++neighbours;
+    }
+    f.neighbours_within_splash = neighbours;
+    f.neighbours_within_jump   = neighbours;
+  }
+
+  f.is_current_target = ( candidate == a->player->target );
+  f.is_previous_pick  = ( candidate == previous_pick );
+  f.actor_index       = candidate->actor_index;
+  f.actor_spawn_index = candidate->actor_spawn_index;
+  return f;
+}
+} // anonymous namespace
+
 player_t* select( action_t* a, bool harmful, preference_fn pref )
 {
-  std::vector<player_t*> candidates;
+  // WR-05 (260902/cr4): reuse the file-static buffer instead of allocating a fresh vector every
+  // call -- cleared, not reallocated (capacity survives across calls after the first).
+  std::vector<player_t*>& candidates = g_candidate_buffer;
+  candidates.clear();
   candidates.reserve( a->sim->target_non_sleeping_list.size() );
   for ( player_t* t : a->sim->target_non_sleeping_list )
     if ( t->is_enemy() && generic_filter( a, t, harmful ) )
@@ -168,7 +234,13 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
   double    best_score     = 0.0;
   for ( player_t* c : candidates )
   {
-    enemy_fact fact  = build_enemy_fact( a, c, previous );
+    // WR-05 (260902/cr4): the SCORING loop drives exactly one of the eight preference functions --
+    // none of them read distance/in_reach/in_range/in_front/alive/immune/immunity_remaining/
+    // health_pct/is_boss (generic_filter already excluded anything those would have rejected), so
+    // this lite build skips them and skips the Flame Shock find_dot() lookup unless the dispatched
+    // preference is one of the two that read it. build_enemy_fact() itself is UNCHANGED -- it is
+    // what external readers (the observation writer, 228-04 onward) call, with every field filled.
+    enemy_fact fact  = build_enemy_fact_for_scoring( a, c, previous, pref );
     double     score = pref( a, fact );
 
     if ( !best )
@@ -203,22 +275,54 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
   return best;
 }
 
+namespace
+{
+// WR-11 (260902/cr4): the single-sim/single-thread precondition this whole module is built on,
+// factored into one predicate -- mirrors decision_dump.cpp:~820's own fix for the sibling
+// g_action_handle_cache. `threads != 1 || !profileset_map.empty()` now DEGRADES the three module
+// globals (no picks filled, no stamps bumped, lookup always reports not-found) instead of merely
+// asserting -- an assert compiles out under NDEBUG, silently leaving an unlocked, unkeyed-by-sim
+// std::unordered_map to race. The `assert` below is KEPT beside the runtime check as a debug-build
+// tripwire (it still fires first in a debug build, before the degrade path is ever reached).
+bool multi_sim_or_multi_thread( const sim_t* sim )
+{
+  return sim->threads != 1 || !sim->profileset_map.empty();
+}
+} // anonymous namespace
+
 std::uint64_t begin_decision( const player_t* p )
 {
-  // Same WR-12 single-sim/single-thread precondition rl_policy_obs.cpp's action-handle cache
-  // asserts -- this table is keyed on a bare const player_t* with no sim identity and no clear.
   assert( p->sim->threads == 1 && p->sim->profileset_map.empty() &&
           "rl_target_select's decision stamp is single-sim/single-thread by construction (228-02, "
           "mirrors 221-01's action-handle cache)" );
+  if ( multi_sim_or_multi_thread( p->sim ) )
+    return 0;  // WR-11 degrade: no stamp bump, caller must not fill or trust any pick this "decision".
   return ++g_decision_stamp[ p ];
+}
+
+std::uint64_t current_decision_stamp( const player_t* p )
+{
+  auto it = g_decision_stamp.find( p );
+  return it == g_decision_stamp.end() ? 0 : it->second;
 }
 
 void fill_pick( action_t* resolved, bool harmful, preference_fn pref )
 {
   if ( !resolved )
     return;
+  if ( multi_sim_or_multi_thread( resolved->player->sim ) )
+    return;  // WR-11 degrade: never fill a pick under threads>1/profileset -- lookup_pick below
+             // then reports not-found for it, the same documented fail-open decision_dump.cpp's
+             // own action_resolvable/action_ready arrays already use for this precondition.
   std::uint64_t stamp = g_decision_stamp[ resolved->player ];
-  player_t*     pick  = select( resolved, harmful, pref );
+  // CR-02 (260902/cr4): idempotent WITHIN a decision -- a second fill_pick call for the SAME
+  // action at the SAME stamp must never trigger a second select() call (the design invariant this
+  // whole module exists to hold): return immediately when the table already carries this
+  // decision's stamp for this action.
+  auto existing = g_pick_table.find( resolved );
+  if ( existing != g_pick_table.end() && existing->second.has_stamp && existing->second.stamp == stamp )
+    return;
+  player_t* pick = select( resolved, harmful, pref );
   g_pick_table[ resolved ] = pick_slot{ pick, stamp, true };
 }
 
@@ -245,6 +349,18 @@ player_t* lookup_pick( const action_t* resolved, bool* out_found )
   if ( out_found )
     *out_found = true;
   return it->second.pick;
+}
+
+void reset( sim_t* )
+{
+  // WR-11 (260902/cr4): called from sim_t::reset() (sim.cpp), once per iteration -- clears all
+  // three module globals so a stale pick, stamp or re-resolution count from a PRIOR iteration can
+  // never leak into the next one. `sim` itself is unused (the tables are keyed on `player_t*`, not
+  // sim identity, per this module's own single-sim/single-thread precondition) but is taken by
+  // pointer to mirror raid_event_t::reset( sim )'s own signature at the call site.
+  g_decision_stamp.clear();
+  g_pick_table.clear();
+  g_reresolution_counts = reresolution_counts{};
 }
 
 bool is_targeted_action( const action_t* resolved )
@@ -298,6 +414,12 @@ double preference_shortest_time_to_die( const action_t* a, const enemy_fact& fac
   // reasoning is applied here since a preference must never return null). The dominance offset
   // (1.0e9) stays far larger than any time-to-die the D-16 clip allows (600.0 s) after inversion,
   // so an outliving candidate can never score below a non-outliving one.
+  // IN-04 (260902/cr4): stated explicitly, since the two branches order in OPPOSITE directions --
+  // the OUTLIVING group (candidates that survive past this cast) orders SHORTEST-time-to-die
+  // first (1.0e9 - time_to_die: subtracting less scores higher for a smaller time_to_die); the
+  // NON-outliving group (candidates that will not survive to be hit) orders LONGEST-time-to-die
+  // first (the bare time_to_die term: a larger raw value scores higher), i.e. closest to actually
+  // surviving the cast. Behaviour is UNCHANGED by this comment -- see ledger row for this task.
   double outlives_margin = fact.time_to_die - a->execute_time().total_seconds();
   return ( outlives_margin > 0.0 ) ? ( 1.0e9 - fact.time_to_die ) : fact.time_to_die;
 }
@@ -367,17 +489,15 @@ bool crash_lightning_cone_contains( double px, double py, double fx, double fy, 
 bool sundering_rect_contains( double px, double py, double fx, double fy, double cx, double cy,
                                double bounding_allowance )
 {
+  // Facing-axis (fx,fy) and perpendicular (rotate facing 90 degrees: (-fy,fx)) projections. WR-02
+  // (260902/cr4): allowance applied ALONG only, dropped from PERP -- convention stated once in
+  // rl_target_select.hpp beside the shape constants.
   double dx = cx - px;
   double dy = cy - py;
-  // Facing-axis (fx,fy) projection, and the perpendicular projection (rotate facing 90 degrees:
-  // (-fy, fx)). Both directions get the candidate's own bounding allowance, mirroring the cone's
-  // treatment and the spell record's own "Add Target (Dest) Combat Reach to AOE" attribute on
-  // both Sundering effects -- an add's own hitbox size, not a literal that could drift from the
-  // spell record's own stated behaviour.
   double along = dx * fx + dy * fy;
   double perp  = std::fabs( dx * ( -fy ) + dy * fx );
   return along >= -bounding_allowance && along <= SUNDERING_RECT_LENGTH_YARDS + bounding_allowance &&
-         perp <= SUNDERING_RECT_HALF_WIDTH_YARDS + bounding_allowance;
+         perp <= SUNDERING_RECT_HALF_WIDTH_YARDS;
 }
 
 // OR-2 (owner ruling 2026-09-02, QUESTIONS Q1): Crash Lightning and Sundering get NO selector
@@ -388,6 +508,18 @@ bool sundering_rect_contains( double px, double py, double fx, double fy, double
 // (`crash_lightning_cone_contains`, `sundering_rect_contains`) are KEPT as the ONE shared copy:
 // `sc_shaman.cpp`'s AoE hit filters and this plan's own descriptive shape facts (228-04 Task 2)
 // both read them from the CURRENT facing, never a hypothetical one.
+
+void retarget( action_t* a, player_t* p, player_t* pick )
+{
+  // WR-07 (260902/cr4): action_t::set_target -- NEVER a raw `a->target = pick` write (it skips the
+  // AoE target-cache invalidation, leaving a stale cache and a silently wrong hit set).
+  a->set_target( pick );
+  p->target = pick;
+  if ( p->main_hand_attack )
+    p->main_hand_attack->set_target( pick );
+  if ( p->off_hand_attack )
+    p->off_hand_attack->set_target( pick );
+}
 
 void record_reresolution( reresolution_arm arm )
 {

@@ -3012,12 +3012,22 @@ public:
       }
     }
 
+    // CR-01 (260902/cr4), extended scope: this shared CRTP wrapper (every shaman melee/spell
+    // action routes execute() through it, not only the two shaped ones) has its OWN unconditional
+    // execute_state derefs, discovered via gdb backtrace while proving CR-01's own fixture --
+    // `shaman_attack_t::execute()` (the crash_lightning_t/sundering_t base call) reaches HERE
+    // before either struct's own guard ever runs, so a null execute_state was crashing inside
+    // this function regardless of the two structs' own fixes. Same reasoning as those fixes: a
+    // cast that hit NOTHING should not evaluate result-dependent bookkeeping keyed to a struck
+    // target -- `p()->specialization() == SHAMAN_ELEMENTAL` is trivially false for the two shaped
+    // actions (enhancement-only) so `trigger_maelstrom_gain` is unreachable for them either way,
+    // but is left alone here since it is not part of this task's fixture.
     if ( p()->specialization() == SHAMAN_ELEMENTAL )
     {
       trigger_maelstrom_gain( ab::execute_state );
     }
 
-    if ( p()->talent.flurry.ok() && this->execute_state->result == RESULT_CRIT )
+    if ( this->execute_state && p()->talent.flurry.ok() && this->execute_state->result == RESULT_CRIT )
     {
       p()->buff.flurry->trigger( p()->buff.flurry->max_stack() );
     }
@@ -3032,7 +3042,10 @@ public:
       p()->buff.ancestral_swiftness->decrement();
     }
 
-    this->p()->consume_maelstrom_weapon( this->execute_state, mw_consumed_stacks );
+    // consume_maelstrom_weapon( state, stacks ) itself dereferences `state->action` unconditionally
+    // (sc_shaman.cpp) -- guarded at this, its ONLY call site with a possibly-null execute_state.
+    if ( this->execute_state )
+      this->p()->consume_maelstrom_weapon( this->execute_state, mw_consumed_stacks );
   }
 
   void schedule_execute( action_state_t* execute_state = nullptr ) override
@@ -5817,26 +5830,53 @@ struct sundering_t : public shaman_attack_t
   // selector and NEVER turns the player -- superseding this comment's own prior default
   // (228-CONTEXT.md D-10's shaped row / ledger section 0 R2-1). `rl_target_select::select()`
   // with `preference_shaped_sundering`, the `set_target()` call and the `p()->face()` turn are
-  // all REMOVED. `target_cache.is_valid = false` is KEPT (Rule 1 fix, not part of OR-2's removal
-  // list): the player's facing still moves for OTHER reasons between decisions (228-01's
-  // cast-target facing, `solver_control.cpp:163`), and `sundering_rect_filter()` reads
-  // `player->facing_x/y` directly -- without a per-cast invalidation the AoE hit-set filter would
-  // silently keep evaluating against a stale facing snapshot from whenever the cache last filled,
-  // since nothing else invalidates it for a facing-only change.
-  void invalidate_shaped_target_cache()
+  // all REMOVED. Cache invalidation is KEPT (Rule 1 fix, not part of OR-2's removal list): the
+  // player's facing still moves for OTHER reasons between decisions (228-01's cast-target facing,
+  // `solver_control.cpp:163`), and `sundering_rect_filter()` reads `player->facing_x/y` directly --
+  // without invalidation the AoE hit-set filter would silently keep evaluating against a stale
+  // facing snapshot from whenever the cache last filled.
+  //
+  // WR-03 (260902/cr4): reduced to an EPOCH check -- `player_t::facing_epoch` bumps every time
+  // `face()` actually moves the vector (never on the coincident-position no-op), so comparing the
+  // last-seen epoch against the CURRENT one catches every facing change, not only the ones that
+  // happen to occur inside this action's OWN execute(). Made `const` so it can run from
+  // `target_list() const` below -- the ONE point every reader (this action's own execute(), the
+  // `spell_targets.*` expression, Storm Unleashed 3's repeating walk) actually hands out the list.
+  mutable uint64_t last_seen_facing_epoch = 0;
+
+  void invalidate_shaped_target_cache() const
   {
     if ( !sim->facing_shapes )
       return;
-    target_cache.is_valid = false;
+    if ( player->facing_epoch != last_seen_facing_epoch )
+    {
+      target_cache.is_valid  = false;
+      last_seen_facing_epoch = player->facing_epoch;
+    }
+  }
+
+  std::vector<player_t*>& target_list() const override
+  {
+    invalidate_shaped_target_cache();
+    return shaman_attack_t::target_list();
   }
 
   void execute() override
   {
-    invalidate_shaped_target_cache();
-
     shaman_attack_t::execute();
 
-    p()->trigger_earthsurge( execute_state );
+    // CR-01 (260902/cr4): `execute_state` can be nullptr when the shaped rectangle filter emptied
+    // the hit set (action.cpp:1974's own "execute_state can be nullptr if there are not valid
+    // targets to hit on" -- the base class's OWN guard for the same reason). Enumerated: this
+    // struct's two execute_state derefs are `trigger_earthsurge( execute_state )` and (below)
+    // `trigger_tww3_totemic_enh_2pc( execute_state )` -- both eventually read `state->target`, both
+    // guarded. Everything else this override does (surging_elements/generate_maelstrom_weapon,
+    // primordial_storm, feral_spirit, whirling_earth/searing_totem) is a PLAYER-BUFF/cooldown
+    // effect that reads no target state at all -- these fire regardless of whether the cast hit
+    // anyone, exactly like the base engine's own zero-target path leaves every non-target-state
+    // side effect alone.
+    if ( execute_state )
+      p()->trigger_earthsurge( execute_state );
 
     if ( p()->buff.surging_elements->trigger() )
     {
@@ -5856,7 +5896,8 @@ struct sundering_t : public shaman_attack_t
     if ( p()->buff.whirling_earth->consume( this ) )
     {
       p()->pet.searing_totem.spawn( timespan_t::from_seconds( 8.0 + rng().range( 0.85 ) ) );
-      p()->trigger_tww3_totemic_enh_2pc( execute_state );
+      if ( execute_state )
+        p()->trigger_tww3_totemic_enh_2pc( execute_state );
     }
   }
 
@@ -6161,20 +6202,45 @@ struct crash_lightning_t : public shaman_attack_t
   // OR-2 (owner ruling 2026-09-02, QUESTIONS Q1, 228-04 Task 1 Step 0b) -- same removal as
   // `sundering_t::invalidate_shaped_target_cache()` above: no selector, no turn. See that
   // function's own comment for the full rationale on why cache invalidation is kept.
-  void invalidate_shaped_target_cache()
+  //
+  // WR-03 (260902/cr4): reduced to an EPOCH check -- see sundering_t's identical fix (this file)
+  // for the full rationale. `mutable` / `const` for the same reason: this now runs from
+  // `target_list() const` below, the ONE point every reader (this action's own execute(), the
+  // Storm Unleashed 3 repeating walk further down, any `spell_targets.*` expression) hands out
+  // the list.
+  mutable uint64_t last_seen_facing_epoch = 0;
+
+  void invalidate_shaped_target_cache() const
   {
     if ( !sim->facing_shapes )
       return;
-    target_cache.is_valid = false;
+    if ( player->facing_epoch != last_seen_facing_epoch )
+    {
+      target_cache.is_valid  = false;
+      last_seen_facing_epoch = player->facing_epoch;
+    }
+  }
+
+  std::vector<player_t*>& target_list() const override
+  {
+    invalidate_shaped_target_cache();
+    return shaman_attack_t::target_list();
   }
 
   void execute() override
   {
-    invalidate_shaped_target_cache();
-
     shaman_attack_t::execute();
 
-    if ( result_is_hit( execute_state->result ) )
+    // CR-01 (260902/cr4): `execute_state` can be nullptr when the shaped cone filter emptied the
+    // hit set (action.cpp:1974's own "execute_state can be nullptr if there are not valid targets
+    // to hit on" -- the base class's OWN guard for the same reason). Enumerated: this struct's two
+    // execute_state derefs are `result_is_hit( execute_state->result )` (direct) and (below)
+    // `trigger_thorims_invocation( execute_state )` -> `state->target` -- both guarded. Everything
+    // else this override does (tww2_enh_4pc pair, storm_unleashed->consume, the Storm Unleashed 3
+    // repeating event, the mid2_enh_4pc set-bonus snapshot) is a PLAYER-BUFF/cooldown effect that
+    // reads no target state at all -- these fire regardless of whether the cast hit anyone, exactly
+    // like the base engine's own zero-target path leaves every non-target-state side effect alone.
+    if ( execute_state && result_is_hit( execute_state->result ) )
     {
       p()->buff.crash_lightning->trigger();
 
@@ -6191,7 +6257,7 @@ struct crash_lightning_t : public shaman_attack_t
       p()->buff.tww2_enh_4pc_damage->trigger( p()->buff.tww2_enh_4pc->check() );
     }
 
-    if ( p()->buff.doom_winds->up() || p()->buff.ascendance->up() )
+    if ( execute_state && ( p()->buff.doom_winds->up() || p()->buff.ascendance->up() ) )
     {
       p()->trigger_thorims_invocation( execute_state );
     }

@@ -347,7 +347,7 @@ void write_buff_remains( std::ostream& out, timespan_t remains )
 // `maelstrom.deficit`, `cooldown.lava_burst.charges_fractional`,
 // `dot.flame_shock.refreshable`, `lightning_rod` (via enemy_debuff_counts).
 void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool solver_reply_gated,
-                          bool boundary_is_foreground )
+                          bool boundary_is_foreground, bool is_decision_boundary )
 {
   sim_t* sim = p->sim;
 
@@ -821,7 +821,17 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   {
     std::uint8_t action_resolvable[ RL_ACTION_DIM ];
     std::uint8_t action_ready[ RL_ACTION_DIM ];
-    rl_policy::read_action_gate_bits( p, action_resolvable, action_ready );
+    // 260902/cr4 (CR-02): threads the boundary distinction through -- see rl_policy.hpp's own doc
+    // comment on read_action_gate_bits for the full mechanism. `used_dump_time_compute` is true
+    // only on the non-boundary call when no cache existed (a scripted actor with decision_dump=
+    // and no solver arm never took the boundary path this decision, or ever) -- named on the dump
+    // line below so a reader can tell the arrays were computed AT DUMP TIME, off the action's
+    // current target, rather than cached from the decision that was actually made.
+    bool used_dump_time_compute = false;
+    rl_policy::read_action_gate_bits( p, action_resolvable, action_ready, is_decision_boundary,
+                                       &used_dump_time_compute );
+    if ( used_dump_time_compute )
+      out << ",\"action_gate_dump_time_compute\":true";
     out << ",\"action_resolvable\":[";
     for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
     {
@@ -1034,8 +1044,12 @@ void record( player_t* p, action_t* chosen, execute_type et )
   // own JSONL consumers, `mask.py`'s `request.get(key)`) tolerates an
   // unknown/absent key, so record()'s own byte-shape claim above is
   // unaffected -- only write_state_fields' output grows.
+  // 260902/cr4 (CR-02): record() is NEVER the decision boundary -- player.cpp's execute_action()
+  // calls solver_control::choose() (which has already retargeted/turned the player for this
+  // decision, via accept_cast) BEFORE calling decision_dump::record(). Recomputing the pick here
+  // would read the state the cast already mutated, not the state the decision was made from.
   write_state_fields( line, p, chosen, !sim->solver_control_str.empty() || !sim->solver_policy_str.empty(),
-                       et == execute_type::FOREGROUND );
+                       et == execute_type::FOREGROUND, /*is_decision_boundary=*/false );
 
   line << "}\n";
 

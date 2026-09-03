@@ -29,6 +29,7 @@
 
 class action_t;
 class player_t;
+struct sim_t;
 
 namespace rl_target_select
 {
@@ -89,6 +90,15 @@ using preference_fn = double ( * )( const action_t* a, const enemy_fact& fact );
 // legality bit must then read 0 and the unanchored wait must stay legal (T-228-02-01).
 player_t* select( action_t* a, bool harmful, preference_fn pref );
 
+// WR-07 (260902/cr4): the ONE retarget function `accept_cast` (solver_control.cpp) and the
+// mid-cast re-resolution ladder's fallback arm (action.cpp) both call, so the two can never drift
+// apart when the ladder gains a third arm. Sets `a->target` (via `set_target`, never a raw
+// `a->target = pick` write -- that skips the AoE target-cache invalidation), `p->target`, and both
+// weapon attacks to `pick`. Does NOT turn the player -- that stays a separate `p->face()` call at
+// each caller for this task (CR-04, a later gated task in this same quick-task plan, is what folds
+// the turn into this function too).
+void retarget( action_t* a, player_t* p, player_t* pick );
+
 // ---------------------------------------------------------------------------------------------
 // Per-decision pick array plumbing (D-12). `begin_decision` is called ONCE per
 // `read_action_gate_bits` invocation (never per targeted action inside that call), bumping a
@@ -100,6 +110,14 @@ player_t* select( action_t* a, bool harmful, preference_fn pref );
 // handle cache is (a bare `const player_t*`, same WR-12 single-sim/single-thread precondition).
 // ---------------------------------------------------------------------------------------------
 std::uint64_t begin_decision( const player_t* p );
+
+// Read-only query of the CURRENT decision stamp for `p` (the value `begin_decision` most recently
+// returned for this player), or 0 if no decision has ever been stamped for them. Does NOT bump the
+// counter. 260902/cr4 (CR-02): used by rl_policy_obs.cpp's non-boundary read_action_gate_bits call
+// (decision_dump::record(), which always runs AFTER solver_control::choose() has already
+// retargeted/turned the player for THIS decision) to look up its cached PRE-decision gate-bit
+// arrays by stamp, rather than trusting "an entry exists" alone.
+std::uint64_t current_decision_stamp( const player_t* p );
 
 // Computes and stores this targeted action's pick for the CURRENT decision (the stamp
 // `begin_decision` most recently returned for `resolved->player`). Called from
@@ -121,6 +139,19 @@ player_t* lookup_pick( const action_t* resolved, bool* out_found );
 // never drift from the registry's own token list. False for every self/ground/item action and for
 // the two SHAPED actions (crash_lightning, sundering -- plan 228-03's, not this plan's, per the
 // SHAPED constant in 228-02-PLAN.md).
+//
+// CR-05 (260902/cr4): this is a PURE NAME MATCH -- it says nothing about WHICH actor's action_t*
+// was passed in. `ancestor_t` (the fork totem pet, sc_shaman.cpp) constructs its own
+// `chain_lightning_t` with the SAME name_str ("chain_lightning") as the RL player's spell, so this
+// predicate alone is TRUE for the pet's action too. Every caller that uses this predicate to decide
+// whether the SELECTOR governs an action_t* MUST additionally scope to the RL-controlled actor
+// (exact strcmp against RL_ACTOR_NAME, never a prefix -- a prefix also matches every pet record),
+// non-pet, non-background -- see rl_policy_obs.cpp's read_action_gate_bits substitution and
+// solver_control.cpp's accept_cast for the two call sites that now do this. The mid-cast
+// re-resolution ladder (action.cpp) additionally no longer calls this predicate at all -- it keys
+// on `lookup_pick()`'s own found/not-found answer instead, which cannot collide by name because a
+// pet's chain_lightning action_t* is never stamped in the first place once the actor scope above
+// is enforced.
 bool is_targeted_action( const action_t* resolved );
 
 // Dispatches a resolved targeted action to its own preference function by name_str. Returns
@@ -175,8 +206,11 @@ double preference_tempest( const action_t* a, const enemy_fact& fact );
 // Mid-cast re-resolution counters (D-14, TGT-03). action_execute_event_t::execute() (action.cpp)
 // records which arm of the fallback ladder fired for every targeted action's execute event, under
 // an RL-controlled sim only (the scripted APL arm never enters this path -- see that call site's
-// own comment for the exact gate). Exposed here, read by 228-SELECTOR-RECEIPT.md's own tooling,
-// never reset mid-run (one fight's totals).
+// own comment for the exact gate). Exposed here, read by 228-SELECTOR-RECEIPT.md's own tooling.
+// WR-11 (260902/cr4): cleared every iteration by the new `reset( sim )` hook below, called from
+// `sim_t::reset()` -- genuinely one fight's totals now, not a whole-run accumulation (the prior
+// comment's "never reset mid-run" contradicted its own "(one fight's totals)" label; this fixes
+// the contradiction by making the behaviour match the label, not the other way around).
 // ---------------------------------------------------------------------------------------------
 enum class reresolution_arm
 {
@@ -195,6 +229,15 @@ struct reresolution_counts
 };
 
 reresolution_counts get_reresolution_counts();
+
+// WR-11 (260902/cr4, mirrors decision_dump.cpp's own g_action_handle_cache fix): clears all three
+// module globals (the decision-stamp table, the per-decision pick table, and the re-resolution
+// counters) -- called from the engine's own per-iteration reset (`sim_t::reset()`, sim.cpp,
+// alongside `raid_event_t::reset( this )`). A stale pick or stamp from a PRIOR iteration must never
+// leak into the next one; the getter above is therefore now genuinely "one fight's totals" (the
+// mirrored doc comment on `reresolution_counts` no longer needs the "never reset mid-run" claim
+// that used to contradict its own "(one fight's totals)" parenthetical).
+void reset( sim_t* sim );
 
 // ---------------------------------------------------------------------------------------------
 // Shaped spells (228-03, TGT-01/D-08, R-A / P228-6). Crash Lightning and Sundering pick a
@@ -218,6 +261,14 @@ constexpr double CRASH_LIGHTNING_CONE_COS_HALF_ANGLE = 0.5;
 // (QUESTIONS Q14) -- half-width 2.25 yards either side of the facing axis.
 constexpr double SUNDERING_RECT_LENGTH_YARDS     = 11.0;
 constexpr double SUNDERING_RECT_HALF_WIDTH_YARDS = 2.25;
+
+// WR-02 (260902/cr4): the candidate's own `bounding_allowance` (combat_reach) is a hitbox
+// extension of the CANDIDATE's position, not of the spell's own width -- so both shapes apply it
+// the SAME way: on the cone's radius (crash_lightning_cone_contains, unchanged) and on the
+// rectangle's ALONG axis (the length the candidate's hitbox can poke past either end), but
+// DROPPED from the rectangle's PERPENDICULAR axis (sundering_rect_contains no longer widens
+// SUNDERING_RECT_HALF_WIDTH_YARDS by it). `shape_hitset_agreement.py`'s independent
+// `_rect_contains` copy moves with this convention -- see that probe's own comment.
 
 // Pure geometry predicates -- plain doubles only, no engine pointer (R-D: deterministic
 // geometry, never a target-cache read). `(px,py)` is the player's position, `(fx,fy)` a UNIT

@@ -987,6 +987,15 @@ struct sim_t : private sc_thread_t
   // Lightning, Sundering). Registered here; stays INERT until plan 228-03 installs the filter
   // that reads it -- not dead code, the consumer lands in a later plan.
   bool facing_shapes;
+  // CR-06 (260902/cr4): the selector kill switch. Defaults OFF (like the two options above at
+  // their own introduction) so every pre-228-02 fixture and receipt keeps its old, selector-free
+  // path unless it opts in. Gates BOTH selector seams (rl_policy_obs.cpp's pick substitution,
+  // solver_control.cpp's accept_cast retarget/turn block) plus the action.cpp mid-cast
+  // re-resolution ladder. With it off, an RL run takes exactly the pre-228-02 path:
+  // `a->target`/`a->target_ready(a->target)` in the mask, no set_target/p->target/weapon-attack/
+  // turn block in accept_cast, no ladder -- this is what makes 226/227's receipts reproducible on
+  // this binary again (228-REVIEW.md CR-06).
+  bool target_select_enabled;
   bool ignore_invulnerable_targets;
   bool enable_dps_healing;
   bool count_overheal_as_heal;

@@ -29,6 +29,7 @@
 #include "sim/option.hpp"
 #include "sim/profileset.hpp"
 #include "sim/rl_policy.hpp"
+#include "sim/rl_target_select.hpp"
 #include "sim/rl_translog.hpp"
 #include "sim/scale_factor_control.hpp"
 #include "sim/sim_control.hpp"
@@ -1613,6 +1614,7 @@ sim_t::sim_t()
     distance_targeting_enabled( false ),
     facing_enabled( false ),
     facing_shapes( false ),
+    target_select_enabled( false ),  // CR-06 (260902/cr4)
     ignore_invulnerable_targets( false ),
     enable_dps_healing( false ),
     count_overheal_as_heal( false ),
@@ -1913,6 +1915,12 @@ void sim_t::reset()
   }
 
   raid_event_t::reset( this );
+
+  // WR-11 (260902/cr4): rl_target_select's three module globals (decision stamps, the per-decision
+  // pick table, the re-resolution counters) are cleared here, once per iteration -- mirrors
+  // raid_event_t::reset( this ) immediately above. A stale pick or stamp from a PRIOR iteration
+  // must never leak into the next one.
+  rl_target_select::reset( this );
 }
 
 /// Start combat.
@@ -4197,6 +4205,7 @@ void sim_t::create_options()
   add_option( opt_bool( "distance_targeting_enabled", distance_targeting_enabled ) );
   add_option( opt_bool( "facing_enabled", facing_enabled ) );
   add_option( opt_bool( "facing_shapes", facing_shapes ) );
+  add_option( opt_bool( "target_select_enabled", target_select_enabled ) );  // CR-06 (260902/cr4)
   add_option( opt_bool( "ignore_invulnerable_targets", ignore_invulnerable_targets ) );
   add_option( opt_bool( "enable_dps_healing", enable_dps_healing ) );
   add_option( opt_bool( "count_overheal_as_heal", count_overheal_as_heal ) );

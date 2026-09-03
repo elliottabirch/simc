@@ -154,8 +154,22 @@ struct rl_state_t
 // solver_control::resolve_action -- the SAME resolver accept_cast uses --
 // so the bits this function computes and the FATAL gate `accept_cast`
 // enforces can never disagree about which action_t* they mean.
+//
+// 260902/cr4 (CR-02): `is_decision_boundary` carries NO default value on this declaration --
+// every call site states true or false explicitly, by design. Three call sites exist: read_state
+// (this file's own caller, always the boundary), decision_dump::write_state_fields's FIFO
+// REQUEST-LINE call (solver_control.cpp, also the boundary -- built before the reply/accept_cast
+// have run), and decision_dump::record()'s own call (decision_dump.cpp, NEVER the boundary --
+// record() always runs AFTER solver_control::choose() has already retargeted and turned the
+// player for this decision). True bumps this player's decision stamp and fills a fresh pick for
+// every targeted action, then CACHES the two output arrays keyed on that stamp; false returns the
+// cached PRE-decision arrays instead of recomputing against state the cast already mutated -- or,
+// when no cache exists for the current stamp (a scripted actor with decision_dump= and no solver
+// arm never takes the boundary path), computes the plain gate bits without bumping the stamp and
+// without filling any pick, and reports that via `out_used_dump_time_compute` below.
 void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_ACTION_DIM ],
-                             std::uint8_t out_ready[ RL_ACTION_DIM ] );
+                             std::uint8_t out_ready[ RL_ACTION_DIM ], bool is_decision_boundary,
+                             bool* out_used_dump_time_compute = nullptr );
 
 // 221-03 (ACT-05/ACT-06) -- the ONE shared raid-event walk, called from
 // read_state() (this file), build_obs()'s raid_event_next_in leaf
