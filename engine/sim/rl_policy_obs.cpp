@@ -305,7 +305,7 @@ shape_hit_result_t compute_sundering_shape( player_t* p )
 // test executable (plan 210-07).
 // ---------------------------------------------------------------------------
 
-rl_state_t read_state( const player_t* p, bool boundary_is_foreground )
+rl_state_t read_state( const player_t* p, bool boundary_is_foreground, bool is_decision_boundary )
 {
   rl_state_t s;
   sim_t* sim = p->sim;
@@ -489,9 +489,16 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground )
   // 221-01 (ACT-02, Pattern 1) -- the engine-truth legality layer. Filled
   // via the SAME function decision_dump::write_state_fields calls, so this
   // POD and the wire/dump arrays can never drift apart (Pattern 3).
-  // 260902/cr4 (CR-02): read_state() is ALWAYS the decision boundary -- it is the in-process arm's
-  // own per-decision state read, called before any reply/accept_cast has run.
-  read_action_gate_bits( p, s.action_resolvable, s.action_ready, /*is_decision_boundary=*/true );
+  // 260902/cr4 (CR-02): solver_control.cpp's own call is ALWAYS the decision boundary -- it is
+  // the in-process arm's own per-decision state read, called before any reply/accept_cast has
+  // run, and passes is_decision_boundary=true. 228-11 Task 2 (closing a gap 228-09 disclosed):
+  // this function's OWN internal read_action_gate_bits call used to hardcode `true`
+  // unconditionally here, ignoring the caller's own context entirely -- WRONG for
+  // decision_dump.cpp's diagnostic obs-vector block, whose call always runs strictly AFTER the
+  // real decision already cast and must read the SAME cached, non-re-bumping legality/pick state
+  // write_state_fields' own adjacent read_action_gate_bits call already correctly does. Now
+  // threaded straight from this function's own parameter -- see rl_policy.hpp's own doc comment.
+  read_action_gate_bits( p, s.action_resolvable, s.action_ready, is_decision_boundary );
 
   return s;
 }

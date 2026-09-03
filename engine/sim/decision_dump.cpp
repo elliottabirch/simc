@@ -1103,7 +1103,15 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
        p->resources.is_active( RESOURCE_MAELSTROM ) )
   {
     const rl_policy::slot_table& table = rl_policy::bind_slots( p );
-    const rl_policy::rl_state_t state = rl_policy::read_state( p, boundary_is_foreground );
+    // 228-11 Task 2 (closing a gap 228-09 disclosed but did not fix, see the targeted_picks
+    // comment above): threads THIS function's own is_decision_boundary parameter (always false
+    // here -- record() is never the decision boundary, per this file's own comment at its call
+    // site) through to read_state(), instead of read_state() unconditionally assuming true. This
+    // makes read_state()'s own internal read_action_gate_bits call read the SAME cached,
+    // non-re-bumping pick/legality state this function's own adjacent call (above) already
+    // does -- the dump's obs field and the translog's engine-built vector can no longer disagree
+    // on which pick a target_fact leaf reads.
+    const rl_policy::rl_state_t state = rl_policy::read_state( p, boundary_is_foreground, is_decision_boundary );
     std::uint8_t obs_mask[ RL_ACTION_DIM ];
     rl_policy::build_mask( state, obs_mask );
     float obs[ RL_OBS_DIM ];

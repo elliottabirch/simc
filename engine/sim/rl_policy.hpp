@@ -287,7 +287,18 @@ shape_hit_result_t compute_sundering_shape( player_t* p );
 struct wait_result { double seconds = 0.0; std::string source = "floor"; bool floored = false; };
 
 // ---- Stage 1: needs the engine. NOT exercised by the standalone test executable. ----
-rl_state_t read_state( const player_t* p, bool boundary_is_foreground );
+// `is_decision_boundary` (228-11 Task 2, closing a gap 228-09 disclosed but did not fix):
+// threaded straight to this function's own internal read_action_gate_bits() call, which used to
+// hardcode `true` unconditionally regardless of the caller's own context -- correct for
+// solver_control.cpp's real per-decision call (always the boundary, pass true) but WRONG for
+// decision_dump.cpp's diagnostic obs-vector block, which runs strictly AFTER the real decision
+// already cast (pass its own is_decision_boundary, always false there) -- passing `true`
+// unconditionally re-bumped the per-player decision stamp and re-selected every targeted
+// action's pick via a fresh select() call, so the dump's own `obs` field could disagree with the
+// translog's engine-built vector on any target_fact leaf sensitive to WHICH pick won (is_current_
+// target/is_previous_pick/etc.) -- measured via dump_obs_equivalence.py on a real capture before
+// this fix (38/176 target_facts slots + 4/49 action_leaves slots exceeding tolerance).
+rl_state_t read_state( const player_t* p, bool boundary_is_foreground, bool is_decision_boundary );
 
 // ---- Slot binding (phase 220, plan 220-04, OBS-02/OBS-07) ----
 // bind_slots resolves every RL_OBS_FAMILIES member to an engine handle

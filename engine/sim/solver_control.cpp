@@ -754,7 +754,10 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
 
     const chrono::wall_clock::time_point read_state_t0 =
         obs_timing ? chrono::wall_clock::now() : chrono::wall_clock::time_point{};
-    const rl_policy::rl_state_t state = rl_policy::read_state( p, foreground );
+    // 228-11 Task 2: this call is ALWAYS the real decision boundary (the in-process arm's own
+    // per-decision state read, before any reply/accept_cast has run) -- see rl_policy.hpp's own
+    // doc comment on read_state for why decision_dump.cpp's diagnostic call must pass false.
+    const rl_policy::rl_state_t state = rl_policy::read_state( p, foreground, /*is_decision_boundary=*/true );
     std::chrono::nanoseconds obs_timing_ns{ 0 };
     if ( obs_timing )
     {
