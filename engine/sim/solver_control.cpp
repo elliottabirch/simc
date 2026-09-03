@@ -1013,7 +1013,30 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       // channel is being built (rulings 210-G21/212-G5); this comment
       // exists so the next reader does not go looking for a field that
       // was never there.
-      rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, top_q, false, exploratory );
+      //
+      // 228-09 (D-23/TGT-08): resolve THIS action's own stamped pick for the transition-log's
+      // chosen-target field, READ via lookup_pick() -- never a fresh select() (D-12). Written
+      // BEFORE accept_cast() below, same reasoning as the decision row itself (a decision that
+      // gets refused should still show what it named). `resolve_action` is a pure name lookup
+      // (the SAME one accept_cast() makes internally, solver_control.cpp:121) -- not a second
+      // selector computation.
+      std::uint16_t chosen_target_actor_index = rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK;
+      {
+        const bool is_rl_actor = std::strcmp( p->name(), RL_ACTOR_NAME ) == 0 && !p->is_pet();
+        if ( p->sim->target_select_enabled && is_rl_actor )
+        {
+          action_t* resolved_for_pick = solver_control::resolve_action( p, action.token );
+          if ( resolved_for_pick != nullptr && rl_target_select::is_targeted_action( resolved_for_pick ) )
+          {
+            bool      found = false;
+            player_t* pick  = rl_target_select::lookup_pick( resolved_for_pick, &found );
+            if ( found && pick != nullptr )
+              chosen_target_actor_index = static_cast<std::uint16_t>( pick->actor_index );
+          }
+        }
+      }
+      rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, top_q,
+                                     chosen_target_actor_index, false, exploratory );
       // 212-CR-FIX WR-06: accept_cast() can refuse a not-ready action via
       // protocol_abort() (a throw), which unwinds past combat_end()'s
       // record_close() hook entirely for this fight -- without this catch,
@@ -1053,8 +1076,10 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // Flight recorder decision row, wait branch. wr.floored is the fifth
     // flag bit's only source -- it says the wait length came from the
     // floor rather than from a real timer. No-op when rl_translog= is
-    // unset.
-    rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, top_q, wr.floored, exploratory );
+    // unset. 228-09 (D-23/TGT-08): a wait has no action to pick a target
+    // for -- always the sentinel.
+    rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, top_q,
+                                   rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK, wr.floored, exploratory );
     // 212-CR-FIX WR-06: same reasoning as the cast branch above -- flush on
     // an abort out of accept_wait() so the decision row already appended
     // survives it.

@@ -600,6 +600,10 @@ enum class slot_binding_kind
   enemy_slot,
   direct,
   legality,   // 260831-mk7 (D-1/D-2): the mask-as-input legality family
+  target_fact,  // 228-09 (D-23/TGT-08): the new per-action TARGET FACT family -- crosses
+                // action_expression's member shape (member IS the registry token) with
+                // enemy_slot's per-decision engine-truth value shape (a fact about the
+                // action's own stamped pick, never an expression string)
   unresolved
 };
 
@@ -700,6 +704,26 @@ enum class action_leaf_kind
   spell_targets_count
 };
 
+// ---------------------------------------------------------------------------
+// 228-09 (D-23/TGT-08): `target_fact` resolution (rl_family_kind::target_fact). The member IS
+// the registry token (resolve_action_leaf's own shape, `p->find_action(engine_token)`); the
+// per-decision VALUE is a fact about that action's stamped pick
+// (rl_target_select::lookup_pick() + build_enemy_fact(), enemy_slot's own per-candidate shape,
+// never a fresh select() -- D-12). `found` reports whether a pick was stamped for this action at
+// all this decision (a targeted action can be legal-but-unpicked only in the all-illegal/no-
+// candidate case, T-228-02-01); every other leaf reads `absent` when `found` is false, since a
+// fact about a pick that does not exist has no meaning. No leaf of this family is declared by any
+// census artifact yet (plan 228-11's job) -- this dispatch arm is therefore UNREACHABLE at
+// runtime today; see this plan's own receipt for the explicit statement of what that does and
+// does not prove.
+// ---------------------------------------------------------------------------
+enum class target_fact_leaf_kind
+{
+  found, distance, in_front, in_reach, alive, immune, time_to_die, health_pct,
+  is_boss, flame_shock_remaining, is_current_target, is_previous_pick,
+  actor_index, actor_spawn_index
+};
+
 struct slot_binding
 {
   slot_binding_kind kind = slot_binding_kind::unresolved;
@@ -725,8 +749,15 @@ struct slot_binding
   // kind == action_expression (220-06 Task 3).
   action_leaf_kind action_leaf = action_leaf_kind::plain_expression;
   action_t* bound_action = nullptr;              // non-owning; the engine owns every action_t
+                                                  // (ALSO used by kind == target_fact, 228-09 -- the
+                                                  // action whose stamped pick this leaf reads)
   action_state_t* shared_action_state = nullptr; // non-owning; owned by slot_table::owned_action_states,
                                                   // shared by all three shared_* leaves of this SAME action
+
+  // kind == target_fact (228-09, D-23/TGT-08): which fact about bound_action's stamped pick
+  // this leaf reads -- resolved ONCE at bind time from the leaf name, never re-parsed per
+  // decision.
+  target_fact_leaf_kind target_fact_leaf = target_fact_leaf_kind::found;
 
   // kind == legality (260831-mk7, D-1/D-2): the action index this slot's
   // ordinal member name resolves to -- parsed ONCE at bind time from
@@ -1769,6 +1800,53 @@ slot_binding resolve_action_leaf( player_t* p, const std::string& engine_token, 
   return resolve_action_expression_leaf( a, leaf_name, leaf, table );
 }
 
+// 228-09 (D-23/TGT-08): `rl_family_kind::target_fact` resolution -- bind-time only. `member` IS
+// the registry token, resolved through `find_action()` EXACTLY like `resolve_action_leaf` above
+// (a null result binds `unresolved`, per that function's own comment: an untalented action is a
+// census input, not an error). The LEAF NAME picks which fact about that action's per-decision
+// stamped pick this slot reads -- decided ONCE here, never re-parsed per decision, mirroring
+// `resolve_enemy_slot_leaf`'s own WR-03 discipline.
+slot_binding resolve_target_fact_leaf( player_t* p, const std::string& engine_token,
+                                        const rl_leaf_desc& leaf, slot_table& )
+{
+  slot_binding b;
+  b.leaf = &leaf;
+
+  action_t* a = p->find_action( engine_token );
+  if ( a == nullptr )
+  {
+    b.kind = slot_binding_kind::unresolved;
+    return b;
+  }
+
+  const std::string& leaf_name = leaf.leaf;
+  target_fact_leaf_kind fk;
+  if ( leaf_name == "found" )                       fk = target_fact_leaf_kind::found;
+  else if ( leaf_name == "distance" )                fk = target_fact_leaf_kind::distance;
+  else if ( leaf_name == "in_front" )                fk = target_fact_leaf_kind::in_front;
+  else if ( leaf_name == "in_reach" )                fk = target_fact_leaf_kind::in_reach;
+  else if ( leaf_name == "alive" )                   fk = target_fact_leaf_kind::alive;
+  else if ( leaf_name == "immune" )                  fk = target_fact_leaf_kind::immune;
+  else if ( leaf_name == "time_to_die" )             fk = target_fact_leaf_kind::time_to_die;
+  else if ( leaf_name == "health_pct" )               fk = target_fact_leaf_kind::health_pct;
+  else if ( leaf_name == "is_boss" )                  fk = target_fact_leaf_kind::is_boss;
+  else if ( leaf_name == "flame_shock_remaining" )    fk = target_fact_leaf_kind::flame_shock_remaining;
+  else if ( leaf_name == "is_current_target" )        fk = target_fact_leaf_kind::is_current_target;
+  else if ( leaf_name == "is_previous_pick" )         fk = target_fact_leaf_kind::is_previous_pick;
+  else if ( leaf_name == "actor_index" )              fk = target_fact_leaf_kind::actor_index;
+  else if ( leaf_name == "actor_spawn_index" )        fk = target_fact_leaf_kind::actor_spawn_index;
+  else
+  {
+    b.kind = slot_binding_kind::unresolved;   // artifact/generator mismatch, not a runtime fact
+    return b;
+  }
+
+  b.kind = slot_binding_kind::target_fact;
+  b.bound_action = a;
+  b.target_fact_leaf = fk;
+  return b;
+}
+
 // Writes the `rl_obs_names_out=` file ONCE per process (T-220-04-02's
 // rundir-scoped discipline, mirroring rl_translog='s open_and_write_header:
 // eager, no parent directories created, refuses loudly on a bad path
@@ -2024,6 +2102,12 @@ const slot_table& bind_slots( player_t* p )
             // $comment.
             binding = resolve_expression_leaf( p, mem.engine_token, leaf, table );
             break;
+          case rl_family_kind::target_fact:
+            // 228-09 (D-23/TGT-08) -- see resolve_target_fact_leaf's own comment. No census
+            // artifact declares a member of this family yet (plan 228-11's job) -- this arm is
+            // therefore never reached by the loop that dispatches here, only compiled.
+            binding = resolve_target_fact_leaf( p, mem.engine_token, leaf, table );
+            break;
           default:
             binding.kind = slot_binding_kind::unresolved;
             binding.leaf = &leaf;
@@ -2207,7 +2291,11 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
     const rl_leaf_desc& f = *b.leaf;
 
     double raw = 0.0;
-    lookup_status status;
+    // 228-09 (Rule 1 auto-fix): explicit initializer -- every existing branch below already sets
+    // this before it is read, but adding the new target_fact case (this plan) pushed GCC's
+    // -Wmaybe-uninitialized past its confidence threshold on this giant switch. `absent` is the
+    // header_contract default every genuinely-unresolved path already falls back to.
+    lookup_status status = lookup_status::absent;
 
     if ( f.derived )
     {
@@ -2789,6 +2877,57 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
           // record_decision's own packed-mask column see.
           raw = mask[ b.legality_action_index ] != 0 ? 1.0 : 0.0;
           status = lookup_status::present;
+          break;
+        }
+        case slot_binding_kind::target_fact:
+        {
+          // 228-09 (D-23/TGT-08): reads rl_target_select::lookup_pick() -- NEVER a fresh
+          // select() call (D-12) -- for `b.bound_action`'s per-decision stamped pick, then
+          // build_enemy_fact() for the specific fact this leaf names. UNREACHABLE today: no
+          // census artifact declares a member of this family yet (plan 228-11's job), so this
+          // branch is proven only by compiling, never by a real decision reaching it this plan
+          // (see this plan's own receipt).
+          if ( b.bound_action == nullptr )
+          {
+            status = lookup_status::absent;
+            break;
+          }
+          bool      found = false;
+          player_t* pick  = rl_target_select::lookup_pick( b.bound_action, &found );
+          if ( b.target_fact_leaf == target_fact_leaf_kind::found )
+          {
+            raw = found ? 1.0 : 0.0;
+            status = lookup_status::present;
+            break;
+          }
+          if ( !found || pick == nullptr )
+          {
+            status = lookup_status::absent;
+            break;
+          }
+          const rl_target_select::enemy_fact fact =
+              rl_target_select::build_enemy_fact( b.bound_action, pick, b.bound_action->target );
+          bool matched = true;
+          switch ( b.target_fact_leaf )
+          {
+            case target_fact_leaf_kind::distance:              raw = fact.distance; break;
+            case target_fact_leaf_kind::in_front:               raw = fact.in_front ? 1.0 : 0.0; break;
+            case target_fact_leaf_kind::in_reach:               raw = fact.in_reach ? 1.0 : 0.0; break;
+            case target_fact_leaf_kind::alive:                  raw = fact.alive ? 1.0 : 0.0; break;
+            case target_fact_leaf_kind::immune:                 raw = fact.immune ? 1.0 : 0.0; break;
+            case target_fact_leaf_kind::time_to_die:            raw = fact.time_to_die; break;
+            case target_fact_leaf_kind::health_pct:             raw = fact.health_pct; break;
+            case target_fact_leaf_kind::is_boss:                raw = fact.is_boss ? 1.0 : 0.0; break;
+            case target_fact_leaf_kind::flame_shock_remaining:  raw = fact.flame_shock_remaining; break;
+            case target_fact_leaf_kind::is_current_target:      raw = fact.is_current_target ? 1.0 : 0.0; break;
+            case target_fact_leaf_kind::is_previous_pick:       raw = fact.is_previous_pick ? 1.0 : 0.0; break;
+            case target_fact_leaf_kind::actor_index:            raw = static_cast<double>( fact.actor_index ); break;
+            case target_fact_leaf_kind::actor_spawn_index:      raw = static_cast<double>( fact.actor_spawn_index ); break;
+            default:
+              matched = false;
+              break;
+          }
+          status = matched ? lookup_status::present : lookup_status::absent;
           break;
         }
         case slot_binding_kind::unresolved:

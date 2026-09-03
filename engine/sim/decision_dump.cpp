@@ -16,6 +16,7 @@
 #include "sim/event.hpp"
 #include "sim/gain.hpp"
 #include "sim/rl_policy.hpp"
+#include "sim/rl_target_select.hpp"
 #include "sim/sim.hpp"
 #include "util/concurrency.hpp"
 #include "util/io.hpp"
@@ -853,6 +854,102 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   {
     out << ",\"action_resolvable\":null";
     out << ",\"action_ready\":null";
+  }
+
+  // 228-09 (D-23/TGT-08, dump half) -- per-decision picked-target recording. For each of the
+  // eight TARGETED registry actions, and for the CHOSEN action's own pick, record the actor
+  // index / spawn index PAIR (the STICKY_KEY, R-C/P228-8 -- never the actor index alone) plus
+  // the candidate's fact record. Every value is READ from
+  // `rl_target_select::lookup_pick()`/`build_enemy_fact()` -- no `select()` call anywhere in
+  // this block (D-12). Emitted HERE, immediately after this function's own
+  // `read_action_gate_bits` call above and BEFORE the obs block below -- this is the ONLY safe
+  // point in this function to read a pick: `read_state()`'s OWN internal call to
+  // `read_action_gate_bits` (rl_policy_obs.cpp) is unconditionally `is_decision_boundary=true`,
+  // independent of THIS function's own `is_decision_boundary` parameter, so the obs block a few
+  // lines below re-bumps the per-player decision stamp and re-fills every targeted action's pick
+  // via a FRESH `select()` call of its own -- a pre-existing behaviour of this shared function
+  // (260901-od1's obs-block addition, unchanged by 260902/cr4's is_decision_boundary widening,
+  // and out of THIS plan's scope to alter). Reading the pick here, before that nested call runs,
+  // is what keeps this block's own picks equal to the ones `accept_cast` actually cast on;
+  // reading after the obs block would read a re-computed pick from a hidden extra decision
+  // instead. Gated the SAME way action_resolvable/action_ready above are (WR-12
+  // single-sim/single-thread cache-safety precondition) -- `null` under threads>1/profileset,
+  // matching the existing fail-open convention.
+  if ( p->sim->threads == 1 && p->sim->profileset_map.empty() )
+  {
+    out << ",\"targeted_picks\":{";
+    const std::size_t n_targeted = rl_target_select::targeted_action_token_count();
+    const char* const* targeted_tokens = rl_target_select::targeted_action_tokens();
+    for ( std::size_t i = 0; i < n_targeted; ++i )
+    {
+      if ( i > 0 )
+        out << ",";
+      const char* token = targeted_tokens[ i ];
+      out << "\"" << token << "\":";
+      action_t* a = p->find_action( token );
+      if ( a == nullptr )
+      {
+        out << "null";
+        continue;
+      }
+      bool      found = false;
+      player_t* pick  = rl_target_select::lookup_pick( a, &found );
+      if ( !found || pick == nullptr )
+      {
+        out << "{\"found\":false}";
+        continue;
+      }
+      const rl_target_select::enemy_fact fact = rl_target_select::build_enemy_fact( a, pick, a->target );
+      out << "{\"found\":true"
+          << ",\"actor_index\":" << fact.actor_index
+          << ",\"actor_spawn_index\":" << fact.actor_spawn_index
+          << ",\"distance\":" << fact.distance
+          << ",\"in_front\":" << ( fact.in_front ? "true" : "false" )
+          << ",\"in_reach\":" << ( fact.in_reach ? "true" : "false" )
+          << ",\"alive\":" << ( fact.alive ? "true" : "false" )
+          << ",\"immune\":" << ( fact.immune ? "true" : "false" )
+          << ",\"time_to_die\":" << fact.time_to_die
+          << ",\"health_pct\":" << fact.health_pct
+          << ",\"is_boss\":" << ( fact.is_boss ? "true" : "false" )
+          << ",\"flame_shock_remaining\":" << fact.flame_shock_remaining
+          << ",\"is_current_target\":" << ( fact.is_current_target ? "true" : "false" )
+          << ",\"is_previous_pick\":" << ( fact.is_previous_pick ? "true" : "false" )
+          << "}";
+    }
+    out << "}";
+
+    // The CHOSEN action's own pick (D-23) -- named again at the top level (rather than making a
+    // reader cross-reference `chosen` against the map above by hand) so the equivalence probe
+    // and the translog round-trip (228-09 Task 2) can read one fixed key regardless of which
+    // token was cast this decision. `null` when the chosen action is untargeted, a wait, or a
+    // SHAPED action (Crash Lightning/Sundering never carry a pick -- OR-2, NO_SHAPED_PICK_ON_WIRE).
+    if ( chosen != nullptr && rl_target_select::is_targeted_action( chosen ) )
+    {
+      bool      found = false;
+      player_t* pick  = rl_target_select::lookup_pick( chosen, &found );
+      if ( found && pick != nullptr )
+      {
+        const rl_target_select::enemy_fact fact =
+            rl_target_select::build_enemy_fact( chosen, pick, chosen->target );
+        out << ",\"chosen_pick\":{\"found\":true"
+            << ",\"actor_index\":" << fact.actor_index
+            << ",\"actor_spawn_index\":" << fact.actor_spawn_index
+            << "}";
+      }
+      else
+      {
+        out << ",\"chosen_pick\":{\"found\":false}";
+      }
+    }
+    else
+    {
+      out << ",\"chosen_pick\":null";
+    }
+  }
+  else
+  {
+    out << ",\"targeted_picks\":null";
+    out << ",\"chosen_pick\":null";
   }
 
   // 260901-od1 (kill-the-dual-encoder-seam) -- the engine-encoded

@@ -186,7 +186,8 @@ void open_and_write_header( sim_t* sim )
 
 void record_decision( sim_t* sim, const player_t* p, std::uint64_t seq, const float obs[ RL_OBS_DIM ],
                        const std::uint8_t mask[ RL_ACTION_DIM ], int action_index, float q_margin,
-                       float top_q, bool wait_floored, bool exploratory )
+                       float top_q, std::uint16_t chosen_target_actor_index, bool wait_floored,
+                       bool exploratory )
 {
   sim_t* root = root_of( sim );
   if ( root->rl_translog_file_str.empty() )
@@ -211,6 +212,9 @@ void record_decision( sim_t* sim, const player_t* p, std::uint64_t seq, const fl
   // rather than a matching loud refusal.
   r.seq = static_cast<std::uint32_t>( seq );
   r.iteration = static_cast<std::uint16_t>( sim->current_iteration );
+  // Version 6 (228-09, D-23/TGT-08): the CHOSEN action's own stamped pick, caller-resolved
+  // (lookup_pick(), never recomputed here -- this file is a writer, not a decision-maker).
+  r.chosen_target_actor_index = chosen_target_actor_index;
 
   // Pack the legality mask one bit per action, in declaration order.
   // Version 4: widened uint8 -> uint32 (up to 32 actions instead of 8) to

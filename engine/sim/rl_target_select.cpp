@@ -391,6 +391,17 @@ bool is_targeted_action( const action_t* resolved )
   return false;
 }
 
+// 228-09 (D-23/TGT-08, dump half) -- see rl_target_select.hpp's own doc comment.
+std::size_t targeted_action_token_count()
+{
+  return sizeof( TARGETED_TOKENS ) / sizeof( TARGETED_TOKENS[ 0 ] );
+}
+
+const char* const* targeted_action_tokens()
+{
+  return TARGETED_TOKENS;
+}
+
 preference_fn preference_for( const action_t* resolved )
 {
   if ( !resolved )

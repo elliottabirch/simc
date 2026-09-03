@@ -154,6 +154,17 @@ player_t* lookup_pick( const action_t* resolved, bool* out_found );
 // is enforced.
 bool is_targeted_action( const action_t* resolved );
 
+// 228-09 (D-23/TGT-08, dump half): read-only access to the SAME eight-token list
+// `is_targeted_action` matches against (TARGETED_TOKENS, rl_target_select.cpp, anonymous
+// namespace -- not otherwise reachable outside this translation unit). Exists so a caller in a
+// DIFFERENT translation unit (decision_dump.cpp's per-decision pick dump) can walk the exact
+// registry this module governs without hand-duplicating the token list and risking drift from
+// is_targeted_action's own definition. `targeted_action_token_count()` is the array's length
+// (8 today); `targeted_action_tokens()` returns the array's base pointer, tokens in the SAME
+// order TARGETED_TOKENS declares them.
+std::size_t targeted_action_token_count();
+const char* const* targeted_action_tokens();
+
 // Dispatches a resolved targeted action to its own preference function by name_str. Returns
 // nullptr for anything is_targeted_action() would refuse (never called in that case by
 // read_action_gate_bits, but kept total rather than partial for safety).

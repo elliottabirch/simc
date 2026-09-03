@@ -108,6 +108,37 @@
 // fight-close, footer) and the `kind` byte sits at the same offset
 // (`41 + 4*W`, at `W = 246` that is `41 + 984 = 1025`) in every one of them
 // (D-02), so a reader can classify a row before it interprets it.
+//
+// Version 6 (tstl-sylvanas phase 228, plan 228-09, D-23/TGT-08 -- dump-half
+// counterpart): inserts one new `std::uint16_t chosen_target_actor_index`
+// field into `decision_record`, immediately after `iteration` -- the CHOSEN
+// action's own per-decision pick (`rl_target_select::lookup_pick()`, READ
+// never recomputed, D-12), as a candidate's `player_t::actor_index`
+// (declared `size_t` engine-side, but no realistic fight composition
+// approaches 65535 distinct actor_index values, so a 16-bit field is exact,
+// never a truncation -- this is why the field is a FULL sixteen bits and not
+// a spare byte, which WOULD truncate above 255 actors, exactly the failure
+// this version exists to avoid). `CHOSEN_TARGET_SENTINEL_NO_PICK` (0xFFFFu,
+// defined below) marks a wait, an untargeted cast, or a targeted cast with
+// no stamped pick (an all-illegal decision) -- it cannot collide with a real
+// actor_index for the same reason a 16-bit field is exact rather than
+// merely sufficient. `close_record`/`footer_record` gain a matching
+// zero-written `std::uint16_t` at the SAME relative offset (right after
+// their own `iteration` field) purely to keep `kind`/`reserved` landing at
+// the SAME offset across all three row shapes (D-02) -- neither row kind
+// gets a NAMED counterpart field, mirroring version 5's own
+// `final_damage_expected_total`-has-no-footer-counterpart precedent.
+// `RECORD_SIZE(W)` moves from `roundup8(43 + 4*W)` to `roundup8(45 + 4*W)`
+// (`1032` at both `43` and `45` when `W = 246`, since `43+984=1027` and
+// `45+984=1029` both round up to `1032` -- the two extra bytes fit inside
+// version 5's own trailing round-up slack, so the ON-DISK row size does not
+// change even though the logical field layout does). Version-5 files are
+// orphaned by design (the reader refuses on an exact version mismatch, same
+// rule as every prior bump) -- there is no `chosen_target_actor_index` to
+// backfill into an old row. This is the ONE transition-log layout bump for
+// Phase 228 (D-18) -- plan 228-11 moves only `RL_OBS_DIM` (and therefore the
+// derived `RECORD_SIZE`) inside THIS layout; it does not bump
+// `FORMAT_VERSION` again.
 
 #pragma once
 
@@ -130,22 +161,32 @@ namespace rl_translog
 // trailing NUL is part of the magic itself.
 inline constexpr char MAGIC[ 4 ] = { 'R', 'L', 'T', 'L' };
 inline constexpr std::uint32_t ENDIAN_CANARY = 0x01020304u;
-inline constexpr std::uint32_t FORMAT_VERSION = 5u;
+inline constexpr std::uint32_t FORMAT_VERSION = 6u;
 // RECORD_SIZE stays an integer LITERAL, not a computed expression --
 // scripts/rl/obs_transport_coupling.selftest.py parses this file's own
 // source text for an `ast.Constant`-shaped literal on both sides of the
 // language boundary, and a computed expression here would break that
 // parse. The static_assert immediately below is what keeps the literal
-// honest: RECORD_SIZE(W) = roundup8(43 + 4*W), so a mistyped literal
+// honest: RECORD_SIZE(W) = roundup8(45 + 4*W), so a mistyped literal
 // cannot silently drift from the formula and still compile (tstl 220-03,
-// OBS-06; formula updated 260901-pb1 Task 3, version 5 -- see top-of-file
-// comment).
-inline constexpr std::uint32_t RECORD_SIZE = 1032u;  // 260901-pb1 Task 3: roundup8(43 + 4*246) -- W=246,
-                                                       // FORMAT_VERSION 5.
-static_assert( RECORD_SIZE == ( ( 43u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) + 7u ) / 8u ) * 8u,
-               "RECORD_SIZE must be roundup8(43 + 4*RL_OBS_DIM)" );
+// OBS-06; formula updated 260901-pb1 Task 3 for version 5, updated again
+// 228-09 for version 6 -- see top-of-file comment).
+inline constexpr std::uint32_t RECORD_SIZE = 1032u;  // 228-09: roundup8(45 + 4*246) -- W=246,
+                                                       // FORMAT_VERSION 6. Numerically UNCHANGED from
+                                                       // version 5's 1032 -- the two new bytes fit
+                                                       // inside version 5's own round-up slack.
+static_assert( RECORD_SIZE == ( ( 45u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) + 7u ) / 8u ) * 8u,
+               "RECORD_SIZE must be roundup8(45 + 4*RL_OBS_DIM)" );
 static_assert( RL_OBS_DIM >= 2, "footer_record's zero40[RL_OBS_DIM-1] needs at least one element" );
 inline constexpr std::uint32_t HEADER_SIZE = 256u;
+
+// 228-09 (D-23/TGT-08): the chosen-target sentinel meaning "no pick" --
+// a wait decision, an untargeted cast, or a targeted cast whose pick was
+// not found (an all-illegal decision, CR-04's deadlock case). 0xFFFFu
+// cannot collide with a real `player_t::actor_index` (see this file's own
+// top-of-file version-6 comment for why a full 16 bits is exact, never
+// merely sufficient, for that field).
+inline constexpr std::uint16_t CHOSEN_TARGET_SENTINEL_NO_PICK = 0xFFFFu;
 
 // Row kind discriminator (offset 62 in every row struct below, D-02). Zero
 // is deliberately not a valid kind -- a zero-filled region left by a short
@@ -229,11 +270,15 @@ struct decision_record
                                //         versions <=3) -- widened to pre-pay Phase 221's 24-slot
                                //         action set (see top-of-file comment)
   std::uint16_t iteration;    // @36+4W -- sim->current_iteration
-  std::uint8_t action;        // @38+4W -- chosen action index
-  std::uint8_t flags;         // @39+4W
-  std::uint8_t thread;        // @40+4W -- sim->thread_index
-  std::uint8_t kind;          // @41+4W -- KIND_DECISION
-  std::uint8_t reserved;      // @42+4W -- written zero
+  std::uint16_t chosen_target_actor_index;  // @38+4W -- version 6 (228-09, D-23/TGT-08): the
+                               //         CHOSEN action's own stamped pick (lookup_pick(), never
+                               //         recomputed), as a player_t::actor_index, or
+                               //         CHOSEN_TARGET_SENTINEL_NO_PICK -- see top-of-file comment
+  std::uint8_t action;        // @40+4W -- chosen action index
+  std::uint8_t flags;         // @41+4W
+  std::uint8_t thread;        // @42+4W -- sim->thread_index
+  std::uint8_t kind;          // @43+4W -- KIND_DECISION
+  std::uint8_t reserved;      // @44+4W -- written zero
 };
 
 struct close_record
@@ -254,12 +299,17 @@ struct close_record
                                           //         Collapses the old zero62/zero63 uint8 PAIR (the mask
                                           //         byte they straddled is now this single uint32)
   std::uint16_t iteration;                // @36+4W
-  std::uint8_t zero_action;               // @38+4W -- written zero, sits at decision_record's
+  std::uint16_t zero_chosen_target;       // @38+4W -- version 6 (228-09): written zero, sits at
+                                          //         decision_record's own chosen_target_actor_index
+                                          //         offset -- no close-row counterpart is named,
+                                          //         mirroring version 5's own
+                                          //         final_damage_expected_total precedent
+  std::uint8_t zero_action;               // @40+4W -- written zero, sits at decision_record's
                                           //         own action offset
-  std::uint8_t flags;                      // @39+4W -- FLAG_COLLECTED set per D-09; others zero this phase
-  std::uint8_t thread;                      // @40+4W
-  std::uint8_t kind;                         // @41+4W -- KIND_CLOSE
-  std::uint8_t reserved;                      // @42+4W -- written zero
+  std::uint8_t flags;                      // @41+4W -- FLAG_COLLECTED set per D-09; others zero this phase
+  std::uint8_t thread;                      // @42+4W
+  std::uint8_t kind;                         // @43+4W -- KIND_CLOSE
+  std::uint8_t reserved;                      // @44+4W -- written zero
 };
 
 // 212-CR-FIX BL-01: this footer carries two DIFFERENT populations of fight,
@@ -299,13 +349,16 @@ struct footer_record
                                           //         decision_record's own shifted iteration offset
                                           //         (36+4W)
   std::uint16_t iteration;              // @36+4W -- written 0xFFFF, a sentinel: no fight owns the footer
-  std::uint8_t zero_action;              // @38+4W -- written zero, collapses the old
+  std::uint16_t zero_chosen_target;      // @38+4W -- version 6 (228-09): written zero, sits at
+                                          //         decision_record's own chosen_target_actor_index
+                                          //         offset -- see close_record's own comment
+  std::uint8_t zero_action;              // @40+4W -- written zero, collapses the old
                                           //         zero62/zero63 uint8 PAIR (see close_record's
                                           //         own zero_mask comment)
-  std::uint8_t flags;                    // @39+4W -- written zero
-  std::uint8_t thread;                   // @40+4W
-  std::uint8_t kind;                     // @41+4W -- KIND_FOOTER
-  std::uint8_t reserved;                 // @42+4W -- written zero
+  std::uint8_t flags;                    // @41+4W -- written zero
+  std::uint8_t thread;                   // @42+4W
+  std::uint8_t kind;                     // @43+4W -- KIND_FOOTER
+  std::uint8_t reserved;                 // @44+4W -- written zero
 };
 
 // The header. The two fields at @20/@24 used to be pure alignment padding
@@ -390,11 +443,12 @@ static_assert( offsetof( decision_record, top_q ) == 24u + 4u * RL_OBS_DIM );
 static_assert( offsetof( decision_record, seq ) == 28u + 4u * RL_OBS_DIM );
 static_assert( offsetof( decision_record, mask ) == 32u + 4u * RL_OBS_DIM );
 static_assert( offsetof( decision_record, iteration ) == 36u + 4u * RL_OBS_DIM );
-static_assert( offsetof( decision_record, action ) == 38u + 4u * RL_OBS_DIM );
-static_assert( offsetof( decision_record, flags ) == 39u + 4u * RL_OBS_DIM );
-static_assert( offsetof( decision_record, thread ) == 40u + 4u * RL_OBS_DIM );
-static_assert( offsetof( decision_record, kind ) == 41u + 4u * RL_OBS_DIM );
-static_assert( offsetof( decision_record, reserved ) == 42u + 4u * RL_OBS_DIM );
+static_assert( offsetof( decision_record, chosen_target_actor_index ) == 38u + 4u * RL_OBS_DIM );
+static_assert( offsetof( decision_record, action ) == 40u + 4u * RL_OBS_DIM );
+static_assert( offsetof( decision_record, flags ) == 41u + 4u * RL_OBS_DIM );
+static_assert( offsetof( decision_record, thread ) == 42u + 4u * RL_OBS_DIM );
+static_assert( offsetof( decision_record, kind ) == 43u + 4u * RL_OBS_DIM );
+static_assert( offsetof( decision_record, reserved ) == 44u + 4u * RL_OBS_DIM );
 
 // close_record field offsets -- version 5, same W-parametrised form.
 static_assert( offsetof( close_record, final_damage_total ) == 0 );
@@ -404,11 +458,12 @@ static_assert( offsetof( close_record, zero12 ) == 20 );
 static_assert( offsetof( close_record, decision_count ) == 28u + 4u * RL_OBS_DIM );
 static_assert( offsetof( close_record, zero_mask ) == 32u + 4u * RL_OBS_DIM );
 static_assert( offsetof( close_record, iteration ) == 36u + 4u * RL_OBS_DIM );
-static_assert( offsetof( close_record, zero_action ) == 38u + 4u * RL_OBS_DIM );
-static_assert( offsetof( close_record, flags ) == 39u + 4u * RL_OBS_DIM );
-static_assert( offsetof( close_record, thread ) == 40u + 4u * RL_OBS_DIM );
-static_assert( offsetof( close_record, kind ) == 41u + 4u * RL_OBS_DIM );
-static_assert( offsetof( close_record, reserved ) == 42u + 4u * RL_OBS_DIM );
+static_assert( offsetof( close_record, zero_chosen_target ) == 38u + 4u * RL_OBS_DIM );
+static_assert( offsetof( close_record, zero_action ) == 40u + 4u * RL_OBS_DIM );
+static_assert( offsetof( close_record, flags ) == 41u + 4u * RL_OBS_DIM );
+static_assert( offsetof( close_record, thread ) == 42u + 4u * RL_OBS_DIM );
+static_assert( offsetof( close_record, kind ) == 43u + 4u * RL_OBS_DIM );
+static_assert( offsetof( close_record, reserved ) == 44u + 4u * RL_OBS_DIM );
 
 // footer_record field offsets -- version 5, same W-parametrised form.
 static_assert( offsetof( footer_record, engine_run_aggregate ) == 0 );
@@ -421,11 +476,12 @@ static_assert( offsetof( footer_record, collected_fight_count ) == 32 );
 static_assert( offsetof( footer_record, zero36 ) == 36 );
 static_assert( offsetof( footer_record, zero40 ) == 40 );
 static_assert( offsetof( footer_record, iteration ) == 36u + 4u * RL_OBS_DIM );
-static_assert( offsetof( footer_record, zero_action ) == 38u + 4u * RL_OBS_DIM );
-static_assert( offsetof( footer_record, flags ) == 39u + 4u * RL_OBS_DIM );
-static_assert( offsetof( footer_record, thread ) == 40u + 4u * RL_OBS_DIM );
-static_assert( offsetof( footer_record, kind ) == 41u + 4u * RL_OBS_DIM );
-static_assert( offsetof( footer_record, reserved ) == 42u + 4u * RL_OBS_DIM );
+static_assert( offsetof( footer_record, zero_chosen_target ) == 38u + 4u * RL_OBS_DIM );
+static_assert( offsetof( footer_record, zero_action ) == 40u + 4u * RL_OBS_DIM );
+static_assert( offsetof( footer_record, flags ) == 41u + 4u * RL_OBS_DIM );
+static_assert( offsetof( footer_record, thread ) == 42u + 4u * RL_OBS_DIM );
+static_assert( offsetof( footer_record, kind ) == 43u + 4u * RL_OBS_DIM );
+static_assert( offsetof( footer_record, reserved ) == 44u + 4u * RL_OBS_DIM );
 
 // file_header field offsets
 static_assert( offsetof( file_header, magic ) == 0 );
@@ -445,10 +501,14 @@ static_assert( offsetof( file_header, action_space_sha ) == 184 );
 // same offset in every row shape).
 static_assert( offsetof( decision_record, kind ) == offsetof( close_record, kind ) );
 static_assert( offsetof( close_record, kind ) == offsetof( footer_record, kind ) );
-static_assert( offsetof( decision_record, kind ) == 41u + 4u * RL_OBS_DIM );
+static_assert( offsetof( decision_record, kind ) == 43u + 4u * RL_OBS_DIM );
 static_assert( offsetof( decision_record, reserved ) == offsetof( close_record, reserved ) );
 static_assert( offsetof( close_record, reserved ) == offsetof( footer_record, reserved ) );
-static_assert( offsetof( decision_record, reserved ) == 42u + 4u * RL_OBS_DIM );
+static_assert( offsetof( decision_record, reserved ) == 44u + 4u * RL_OBS_DIM );
+// 228-09 (version 6): the new chosen-target field also lands at the same offset across all
+// three row shapes -- decision_record's own NAMED field, close/footer's zero-written twins.
+static_assert( offsetof( decision_record, chosen_target_actor_index ) == offsetof( close_record, zero_chosen_target ) );
+static_assert( offsetof( close_record, zero_chosen_target ) == offsetof( footer_record, zero_chosen_target ) );
 
 // Dimension guards.
 static_assert( RL_ACTION_DIM <= 32,
@@ -503,9 +563,18 @@ void open_and_write_header( sim_t* sim );
 // value, so the two fields can never silently disagree about what "best"
 // meant at this boundary. NaN when no action was legal (mirrors q_margin's
 // own NaN-on-insufficient-legal-actions convention).
+//
+// `chosen_target_actor_index` (version 6, 228-09, D-23/TGT-08): the CHOSEN
+// action's own per-decision pick, as a `player_t::actor_index` value --
+// caller-resolved via `rl_target_select::lookup_pick()` on the SAME
+// `action_index` this call already carries, never recomputed inside this
+// function (D-12: this file is a writer, not a decision-maker). The caller
+// passes `CHOSEN_TARGET_SENTINEL_NO_PICK` for a wait, an untargeted cast,
+// or a targeted cast whose pick was not found this decision.
 void record_decision( sim_t* sim, const player_t* p, std::uint64_t seq,
                        const float obs[ RL_OBS_DIM ], const std::uint8_t mask[ RL_ACTION_DIM ],
-                       int action_index, float q_margin, float top_q, bool wait_floored,
+                       int action_index, float q_margin, float top_q,
+                       std::uint16_t chosen_target_actor_index, bool wait_floored,
                        bool exploratory );
 
 // Called from sim_t::combat_end(), after datacollection_end(). Builds and
