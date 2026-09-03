@@ -772,13 +772,16 @@ enum class slot_binding_kind
   cooldown,
   expression,
   action_expression,
-  enemy_slot,
   direct,
   legality,   // 260831-mk7 (D-1/D-2): the mask-as-input legality family
   target_fact,  // 228-09 (D-23/TGT-08): the new per-action TARGET FACT family -- crosses
                 // action_expression's member shape (member IS the registry token) with
                 // enemy_slot's per-decision engine-truth value shape (a fact about the
                 // action's own stamped pick, never an expression string)
+  shape_fact,   // 228-11 (D-16): the two SHAPED actions' own descriptive hit-set facts --
+                // member IS the action token (crash_lightning/sundering), value comes from
+                // 228-10's compute_crash_lightning_shape()/compute_sundering_shape(), never a
+                // per-candidate pick (the shaped actions have none, OR-2)
   unresolved
 };
 
@@ -813,7 +816,14 @@ enum class direct_id
   // scalars (Task 3)
   raid_event_next_in,
   // scalars (260831-0hh, BL-02)
-  time_to_bloodlust
+  time_to_bloodlust,
+  // 228-11 (D-16, TGT-05/TGT-06): the identity-free fight-wide aggregates and the two
+  // scripted-schedule immunity timers -- every value 228-10's compute_fight_wide_aggregates()/
+  // compute_invulnerability_window() already computes, cached ONCE per build_obs() call (D-12).
+  fw_enemies_total, fw_enemies_in_melee, fw_enemies_within_8yd, fw_enemies_within_40yd,
+  fw_enemies_in_front, fw_flame_shock_carrier_count, fw_soonest_time_to_die,
+  fw_longest_time_to_die, fw_dying_within_5s, fw_dying_within_15s, fw_nearest_enemy_distance,
+  fw_immunity_in, fw_immunity_remaining
 };
 
 // rl_family_kind::cooldown's own `direct`-style dispatch (220-05 Task 2):
@@ -824,37 +834,12 @@ enum class direct_id
 // `slot_binding_kind::expression` instead.
 enum class cooldown_leaf_kind { remains, charges, charges_fractional, recharge_time, max_charges };
 
-// 220-06 Task 1: the `enemy_slots` family's own per-slot dispatch. A slot's
-// ACTOR leaves (present/distance/time_to_die/health_pct/role) are read
-// directly off the per-decision candidate array (built once per build_obs
-// call, never per slot -- see build_obs' own header comment); a slot's
-// per-EFFECT leaves (Task 2) additionally need to know which of the 13
-// shaman-carried effects this leaf belongs to and whether that effect is a
-// dot (`t->dot_list`, `ticking`-shaped) or a debuff (`t->buff_list`,
-// `stacks`-shaped) -- decided ONCE at bind time by scanning the effect
-// member's OWN declared leaf set (present in `rl_obs_member::leaves` at bind
-// time), never re-derived per decision.
-enum class enemy_actor_leaf_kind { present, distance, time_to_die, health_pct, role };
-enum class enemy_effect_leaf_kind
-{
-  debuff_stacks, debuff_remains, debuff_tick_time,
-  dot_ticking, dot_remains, dot_tick_time, dot_tick_dmg, dot_pmultiplier
-};
-
-// 220-08 WR-03 (220-REVIEW.md): resolved ONCE per member at BIND time
-// (resolve_enemy_slot_leaf), never per decision -- build_obs indexes these
-// enums directly instead of re-comparing b.enemy_effect_name against a
-// 3-way/6-way string chain on every decision for every enemy slot. The
-// per-decision std::string comparisons this replaces were the exact class
-// of cost this file's own handle-table design otherwise avoids everywhere
-// else (220-04's acceptance criterion asserted "zero strcmp/str_compare_ci
-// in build_obs" without noticing operator== on b.enemy_effect_name is the
-// same work spelled differently -- this closes that gap).
-enum class enemy_dot_kind { unknown, flame_shock, rune_of_unleashed_fire_lingering, venomfang };
-enum class enemy_buff_kind
-{
-  unknown, burning_core, casting, flametongue_attack, lashing_flames, lightning_rod, venomfang_debuff
-};
+// 228-11 (D-A/TGT-05): the `enemy_slots` family (present/distance/time_to_die/health_pct/role
+// per-slot, plus the per-effect dot/debuff leaves) was REMOVED by this plan -- the five shared
+// enemy slots are gone; every targeted spell now carries its own target_fact-family leaves
+// instead (see target_fact_leaf_kind below). enemy_actor_leaf_kind/enemy_effect_leaf_kind/
+// enemy_dot_kind/enemy_buff_kind and their resolver/dispatch code were deleted in the same
+// change (SLOT_PLUMBING_DELETED) -- not left dead beside a family that no longer exists.
 
 // 220-06 Task 3: the `action_leaves` family's own per-leaf dispatch.
 // `plain_expression` covers every leaf resolved through create_expression
@@ -875,8 +860,9 @@ enum class action_leaf_kind
 {
   plain_expression,
   shared_hit_damage, shared_crit_pct_current, shared_persistent_multiplier, shared_da_multiplier,
-  dot_molten_weapon_ticking, dot_molten_weapon_remains,
-  spell_targets_count
+  dot_molten_weapon_ticking, dot_molten_weapon_remains
+  // 228-11 (Q19, D-A/R-D): spell_targets_count REMOVED -- the deterministic geometry leaf
+  // (target_fact.chain_lightning.neighbours_within_jump) replaces the spell_targets leaf outright.
 };
 
 // ---------------------------------------------------------------------------
@@ -896,8 +882,26 @@ enum class target_fact_leaf_kind
 {
   found, distance, in_front, in_reach, alive, immune, time_to_die, health_pct,
   is_boss, flame_shock_remaining, is_current_target, is_previous_pick,
-  actor_index, actor_spawn_index
+  actor_index, actor_spawn_index,
+  // 228-11 (D-16 full inventory, TGT-04/TGT-06): the leaves D-16 names beyond what 228-09 wired
+  // in -- every one already a field on enemy_fact (228-02/228-10), read the same way every
+  // existing leaf above is (build_enemy_fact() -- never a fresh select() call, D-12).
+  in_range, immunity_remaining, burning_core_remaining, lightning_rod_stacks,
+  lightning_rod_remaining, venomfang_remaining, venomfang_debuff_stacks,
+  venomfang_debuff_remaining, rune_of_unleashed_fire_lingering_remaining,
+  neighbours_within_splash, neighbours_within_jump
 };
+
+// ---------------------------------------------------------------------------
+// 228-11 (D-16, TGT-04): `shape_fact` resolution (rl_family_kind::shape_fact). The member IS the
+// action token (crash_lightning/sundering, OR-2's two SHAPED actions -- no census artifact
+// declares a member of this family before this plan). The per-decision VALUE comes from 228-10's
+// compute_crash_lightning_shape()/compute_sundering_shape(), computed from the CURRENT facing
+// only (there is no per-decision pick to read -- the shaped actions never appear in
+// targeted_picks, OR-2).
+// ---------------------------------------------------------------------------
+enum class shape_fact_action_kind { crash_lightning, sundering };
+enum class shape_fact_leaf_kind { enemies_hit, summed_remaining_life, long_lived_count };
 
 struct slot_binding
 {
@@ -910,16 +914,7 @@ struct slot_binding
   cooldown_t* cooldown = nullptr;                        // kind == cooldown
   cooldown_leaf_kind cooldown_leaf = cooldown_leaf_kind::remains;  // kind == cooldown
 
-  // kind == enemy_slot (220-06 Task 1/2).
-  int enemy_slot_index = -1;                    // which of the 5 per-decision candidate slots (0-4)
-  bool enemy_is_effect_leaf = false;             // false == the base actor leaf (present/distance/...)
-  enemy_actor_leaf_kind enemy_actor_leaf = enemy_actor_leaf_kind::present;
-  std::string enemy_effect_name;                 // e.g. "flame_shock" -- diagnostic only; build_obs
-                                                  // dispatches on the enums below, never this string
-  enemy_dot_kind enemy_dot = enemy_dot_kind::unknown;    // resolved once at bind (WR-03)
-  enemy_buff_kind enemy_buff = enemy_buff_kind::unknown; // resolved once at bind (WR-03)
-  bool enemy_effect_is_dot = false;               // true == t->dot_list scan; false == t->buff_list scan
-  enemy_effect_leaf_kind enemy_effect_leaf = enemy_effect_leaf_kind::debuff_stacks;
+  // 228-11: the enemy_slot fields formerly here were removed with the family (D-A/TGT-05).
 
   // kind == action_expression (220-06 Task 3).
   action_leaf_kind action_leaf = action_leaf_kind::plain_expression;
@@ -933,6 +928,12 @@ struct slot_binding
   // this leaf reads -- resolved ONCE at bind time from the leaf name, never re-parsed per
   // decision.
   target_fact_leaf_kind target_fact_leaf = target_fact_leaf_kind::found;
+
+  // kind == shape_fact (228-11, D-16): which SHAPED action and which of its three descriptive
+  // leaves -- both resolved ONCE at bind time from the member/leaf name, never re-parsed per
+  // decision.
+  shape_fact_action_kind shape_fact_action = shape_fact_action_kind::crash_lightning;
+  shape_fact_leaf_kind shape_fact_leaf = shape_fact_leaf_kind::enemies_hit;
 
   // kind == legality (260831-mk7, D-1/D-2): the action index this slot's
   // ordinal member name resolves to -- parsed ONCE at bind time from
@@ -1112,6 +1113,32 @@ slot_binding resolve_scalar_leaf( const rl_leaf_desc& leaf )
     // create_expression, mirroring raid_event_next_in's own direct dispatch.
     b.kind = slot_binding_kind::direct;
     b.direct = direct_id::time_to_bloodlust;
+    return b;
+  }
+  // 228-11 (D-16, TGT-05/TGT-06): the identity-free fight-wide aggregates and the two
+  // scripted-schedule immunity timers -- computed in build_obs via 228-10's
+  // compute_fight_wide_aggregates()/compute_invulnerability_window(), never through
+  // create_expression, mirroring raid_event_next_in's/time_to_bloodlust's own direct dispatch.
+  direct_id fw_id = direct_id::t;  // never read unless fw_matched is also set true below
+  bool fw_matched = true;
+  if ( std::strcmp( leaf.leaf, "enemies_total" ) == 0 )                    fw_id = direct_id::fw_enemies_total;
+  else if ( std::strcmp( leaf.leaf, "enemies_in_melee" ) == 0 )            fw_id = direct_id::fw_enemies_in_melee;
+  else if ( std::strcmp( leaf.leaf, "enemies_within_8yd" ) == 0 )          fw_id = direct_id::fw_enemies_within_8yd;
+  else if ( std::strcmp( leaf.leaf, "enemies_within_40yd" ) == 0 )         fw_id = direct_id::fw_enemies_within_40yd;
+  else if ( std::strcmp( leaf.leaf, "enemies_in_front" ) == 0 )            fw_id = direct_id::fw_enemies_in_front;
+  else if ( std::strcmp( leaf.leaf, "flame_shock_carrier_count" ) == 0 )   fw_id = direct_id::fw_flame_shock_carrier_count;
+  else if ( std::strcmp( leaf.leaf, "soonest_time_to_die" ) == 0 )         fw_id = direct_id::fw_soonest_time_to_die;
+  else if ( std::strcmp( leaf.leaf, "longest_time_to_die" ) == 0 )         fw_id = direct_id::fw_longest_time_to_die;
+  else if ( std::strcmp( leaf.leaf, "dying_within_5s" ) == 0 )             fw_id = direct_id::fw_dying_within_5s;
+  else if ( std::strcmp( leaf.leaf, "dying_within_15s" ) == 0 )            fw_id = direct_id::fw_dying_within_15s;
+  else if ( std::strcmp( leaf.leaf, "nearest_enemy_distance" ) == 0 )      fw_id = direct_id::fw_nearest_enemy_distance;
+  else if ( std::strcmp( leaf.leaf, "immunity_in" ) == 0 )                 fw_id = direct_id::fw_immunity_in;
+  else if ( std::strcmp( leaf.leaf, "immunity_remaining" ) == 0 )          fw_id = direct_id::fw_immunity_remaining;
+  else                                                                     fw_matched = false;
+  if ( fw_matched )
+  {
+    b.kind = slot_binding_kind::direct;
+    b.direct = fw_id;
     return b;
   }
   // anything else this task does not bind.
@@ -1471,184 +1498,11 @@ slot_binding resolve_sim_auras_leaf( const std::string& member, const rl_leaf_de
 }
 
 // ---------------------------------------------------------------------------
-// 220-06 Task 1/2: `enemy_slots` resolution (rl_family_kind::enemy_slot).
+// 228-11 (D-A/TGT-05): `enemy_slots` resolution (parse_enemy_slot_member, resolve_enemy_slot_leaf,
+// compute_enemy_slot_candidates, RL_ENEMY_SLOT_COUNT) was REMOVED here -- the five shared enemy
+// slots are gone, replaced by the per-action target_fact family below. get_enemy_handle_cache
+// (next) is UNCHANGED and stays -- action_leaf_kind::dot_molten_weapon_* still reads it.
 // ---------------------------------------------------------------------------
-
-constexpr std::size_t RL_ENEMY_SLOT_COUNT = 5;
-
-// "slotN" or "slotN.<effect>" -- N is a single digit 0-4 in this schema
-// (RL_ENEMY_SLOT_COUNT). Returns false for anything else (an
-// artifact/generator mismatch, handled by the caller as `unresolved`).
-bool parse_enemy_slot_member( const std::string& member, int& slot_index, std::string& effect_name )
-{
-  if ( member.size() < 5 || member.compare( 0, 4, "slot" ) != 0 )
-    return false;
-  const std::size_t dot = member.find( '.' );
-  const std::string slot_token = ( dot == std::string::npos ) ? member : member.substr( 0, dot );
-  if ( slot_token.size() != 5 || !std::isdigit( static_cast<unsigned char>( slot_token[ 4 ] ) ) )
-    return false;
-  slot_index = slot_token[ 4 ] - '0';
-  if ( slot_index < 0 || static_cast<std::size_t>( slot_index ) >= RL_ENEMY_SLOT_COUNT )
-    return false;
-  effect_name = ( dot == std::string::npos ) ? std::string() : member.substr( dot + 1 );
-  return true;
-}
-
-// rl_family_kind::enemy_slot resolution -- bind-time only. Which of the 5
-// per-decision candidate slots (Task 1) and, for a per-effect member (Task
-// 2), whether that effect is a dot (`t->dot_list`, "ticking"-shaped) or a
-// debuff (`t->buff_list`, "stacks"-shaped) is decided ONCE here by scanning
-// the effect's OWN declared leaf set (`mem.leaves`) -- never re-derived per
-// decision. The per-decision candidate array itself (WHICH player_t* answers
-// slot K this decision) is computed in build_obs, once per call -- see
-// compute_enemy_slot_candidates below; this function only records the slot
-// INDEX and leaf semantics, never a player_t* (enemies arise/despawn
-// mid-fight, so nothing actor-specific can be resolved at bind time).
-slot_binding resolve_enemy_slot_leaf( const rl_obs_member& mem, const rl_leaf_desc& leaf )
-{
-  slot_binding b;
-  b.leaf = &leaf;
-
-  int slot_index = -1;
-  std::string effect_name;
-  if ( !parse_enemy_slot_member( mem.member, slot_index, effect_name ) )
-  {
-    b.kind = slot_binding_kind::unresolved;
-    return b;
-  }
-  b.enemy_slot_index = slot_index;
-
-  if ( effect_name.empty() )
-  {
-    b.enemy_is_effect_leaf = false;
-    if ( std::strcmp( leaf.leaf, "present" ) == 0 )          b.enemy_actor_leaf = enemy_actor_leaf_kind::present;
-    else if ( std::strcmp( leaf.leaf, "distance" ) == 0 )    b.enemy_actor_leaf = enemy_actor_leaf_kind::distance;
-    else if ( std::strcmp( leaf.leaf, "time_to_die" ) == 0 ) b.enemy_actor_leaf = enemy_actor_leaf_kind::time_to_die;
-    else if ( std::strcmp( leaf.leaf, "health_pct" ) == 0 )  b.enemy_actor_leaf = enemy_actor_leaf_kind::health_pct;
-    else if ( std::strcmp( leaf.leaf, "role" ) == 0 )        b.enemy_actor_leaf = enemy_actor_leaf_kind::role;
-    else
-    {
-      b.kind = slot_binding_kind::unresolved;
-      return b;
-    }
-    b.kind = slot_binding_kind::enemy_slot;
-    return b;
-  }
-
-  bool is_dot = false;
-  for ( std::size_t i = 0; i < mem.n_leaves; ++i )
-  {
-    if ( std::strcmp( mem.leaves[ i ].leaf, "ticking" ) == 0 )
-    {
-      is_dot = true;
-      break;
-    }
-  }
-
-  b.enemy_is_effect_leaf = true;
-  b.enemy_effect_name = effect_name;
-  b.enemy_effect_is_dot = is_dot;
-  if ( is_dot )
-  {
-    if ( effect_name == "flame_shock" )                              b.enemy_dot = enemy_dot_kind::flame_shock;
-    else if ( effect_name == "rune_of_unleashed_fire_lingering" )     b.enemy_dot = enemy_dot_kind::rune_of_unleashed_fire_lingering;
-    else if ( effect_name == "venomfang" )                            b.enemy_dot = enemy_dot_kind::venomfang;
-    else                                                               b.enemy_dot = enemy_dot_kind::unknown;
-  }
-  else
-  {
-    if ( effect_name == "burning_core" )                              b.enemy_buff = enemy_buff_kind::burning_core;
-    else if ( effect_name == "casting" )                              b.enemy_buff = enemy_buff_kind::casting;
-    else if ( effect_name == "flametongue_attack" )                   b.enemy_buff = enemy_buff_kind::flametongue_attack;
-    else if ( effect_name == "lashing_flames" )                       b.enemy_buff = enemy_buff_kind::lashing_flames;
-    else if ( effect_name == "lightning_rod" )                        b.enemy_buff = enemy_buff_kind::lightning_rod;
-    else if ( effect_name == "venomfang_debuff" )                     b.enemy_buff = enemy_buff_kind::venomfang_debuff;
-    else                                                               b.enemy_buff = enemy_buff_kind::unknown;
-  }
-
-  if ( is_dot )
-  {
-    if ( std::strcmp( leaf.leaf, "ticking" ) == 0 )          b.enemy_effect_leaf = enemy_effect_leaf_kind::dot_ticking;
-    else if ( std::strcmp( leaf.leaf, "remains" ) == 0 )     b.enemy_effect_leaf = enemy_effect_leaf_kind::dot_remains;
-    else if ( std::strcmp( leaf.leaf, "tick_time" ) == 0 )   b.enemy_effect_leaf = enemy_effect_leaf_kind::dot_tick_time;
-    else if ( std::strcmp( leaf.leaf, "tick_dmg" ) == 0 )    b.enemy_effect_leaf = enemy_effect_leaf_kind::dot_tick_dmg;
-    else if ( std::strcmp( leaf.leaf, "pmultiplier" ) == 0 ) b.enemy_effect_leaf = enemy_effect_leaf_kind::dot_pmultiplier;
-    else
-    {
-      b.kind = slot_binding_kind::unresolved;
-      return b;
-    }
-  }
-  else
-  {
-    if ( std::strcmp( leaf.leaf, "stacks" ) == 0 )           b.enemy_effect_leaf = enemy_effect_leaf_kind::debuff_stacks;
-    else if ( std::strcmp( leaf.leaf, "remains" ) == 0 )     b.enemy_effect_leaf = enemy_effect_leaf_kind::debuff_remains;
-    else if ( std::strcmp( leaf.leaf, "tick_time" ) == 0 )   b.enemy_effect_leaf = enemy_effect_leaf_kind::debuff_tick_time;
-    else
-    {
-      b.kind = slot_binding_kind::unresolved;
-      return b;
-    }
-  }
-
-  b.kind = slot_binding_kind::enemy_slot;
-  return b;
-}
-
-// 220-06 Task 1: the per-decision 5-element enemy-slot candidate array,
-// built ONCE per build_obs() call -- there are up to RL_ENEMY_SLOT_COUNT *
-// (1 + 9 effects * ~2-5 leaves) enemy_slots slots per decision, all sharing
-// this ONE ordering; computing it per-slot would both be wasteful and risk
-// the ordering disagreeing with itself mid-decision. Current target first
-// by pointer identity (if present in the non-sleeping list), then the
-// remainder ascending by `time_to_percent(0)`, TIE-BROKEN ON ACTOR INDEX:
-// under `fixed_time=1` every boss-type enemy's `time_to_percent(0)` is
-// byte-identical (sc_enemy.cpp:1749-1800 -- no per-actor term at all), so on
-// a single-boss-shape fight (Patchwerk-5T) the sort is a TOTAL TIE, and
-// without this tie-break slot order would depend on arise/demise insertion
-// history and change run to run -- not reproducible, in violation of this
-// plan's own SC 3 requirement. `player_t::sim`/`player_t::target` are
-// accessible through a `const player_t*` (the pointer members themselves are
-// non-const-qualified fields on player_t, so a const player_t* still yields
-// a mutable player_t* through them -- the same pattern
-// direct_id::raid_event_next_in's own build_obs arm already relies on for
-// `p->sim->raid_events`).
-void compute_enemy_slot_candidates( const player_t* p, std::array<player_t*, RL_ENEMY_SLOT_COUNT>& out )
-{
-  out.fill( nullptr );
-
-  std::vector<player_t*> rest;
-  rest.reserve( p->sim->target_non_sleeping_list.size() );
-  player_t* current_target = p->target;
-  bool have_current_target = false;
-  for ( player_t* t : p->sim->target_non_sleeping_list )
-  {
-    if ( !have_current_target && t == current_target )
-    {
-      have_current_target = true;
-      continue;
-    }
-    rest.push_back( t );
-  }
-
-  std::sort( rest.begin(), rest.end(), []( player_t* a, player_t* b ) {
-    const double ta = a->time_to_percent( 0 ).total_seconds();
-    const double tb = b->time_to_percent( 0 ).total_seconds();
-    if ( ta != tb )
-      return ta < tb;
-    return a->actor_index < b->actor_index;   // deterministic tie-break -- see this function's own comment
-  } );
-
-  std::size_t idx = 0;
-  if ( have_current_target && idx < out.size() )
-    out[ idx++ ] = current_target;
-  for ( player_t* t : rest )
-  {
-    if ( idx >= out.size() )
-      break;
-    out[ idx++ ] = t;
-  }
-}
 
 // 220-06 Task 2: a lazily-filled per-enemy handle cache, keyed on the raw
 // `player_t*`. Filled the FIRST time an enemy appears in a candidate slot --
@@ -1914,54 +1768,12 @@ slot_binding resolve_action_leaf( player_t* p, const std::string& engine_token, 
   if ( leaf_name == "pet_surging_totem_remains" )
     return resolve_expression_leaf( p, "pet.surging_totem.remains", leaf, table );
 
-  // 260902/FORK-03 (Candidate 1, sealed, second site) -- "spell_targets" is
-  // special-cased OUT of the generic create_expression fallback below.
-  // action_t::create_expression's own "spell_targets" branch
-  // (action.cpp:3860-3928, spell_targets_t::evaluate_spell()) UNCONDITIONALLY
-  // sets `spell->target_cache.is_valid = false` and calls `spell->
-  // target_list()` on every evaluation -- no is_valid guard at all, unlike
-  // the shared-leaf site above. For a shaman chain-bounce action
-  // (chain_lightning et al.) under distance_targeting_enabled=1, that
-  // forced resolve draws from sim->rng() via __check_distance_targeting
-  // (sc_shaman.cpp:1004-1067) EVERY decision this leaf is read, regardless
-  // of cache state -- measured via a backtrace probe landing exactly on
-  // spell_targets_t::evaluate() from decision_dump::record() ->
-  // write_state_fields() -> build_obs(). Editing action.cpp's generic
-  // expression semantics is out of this plan's scope (every APL's
-  // `spell_targets.<x>` condition would be affected, not just this
-  // diagnostic) -- instead this ONE leaf is bound directly to the SAME
-  // non-perturbing cache-respecting read the shared-leaf site above uses,
-  // never touching create_expression for it at all. In this schema
-  // "spell_targets" is always a bare (undotted) name, i.e. self-referring
-  // to `a` -- action.cpp's own splitter defaults `name_of_spell` to the
-  // action's own name_str whenever no "." qualifier is present.
-  //
-  // WR-04 (260902/cr2 code review): the RNG-drawing resolve this special
-  // case exists to avoid is ONLY reachable through action.cpp:3861's
-  // `sim->distance_targeting_enabled` branch (spell_targets_t itself, the
-  // struct whose evaluate_spell() draws RNG via __check_distance_targeting).
-  // action.cpp's `else` branch (:3928-3939, distance targeting OFF) never
-  // touches target_cache or target_list() at all -- it draws no RNG and
-  // returns either a constant 1.0 (single enemy, no adds/pull raid event)
-  // or `sim->active_enemies` directly. The bind-time special case below
-  // was unconditional and therefore silently overrode BOTH branches, so a
-  // profile with distance_targeting_enabled=0 lost SimC's own
-  // active_enemies semantics for no RNG reason. Scoped to the branch it is
-  // actually arguing about: distance targeting off falls through to
-  // create_expression unchanged, regaining the real else-branch. (If
-  // CR-01's active_enemies-based fallback below converges the two
-  // branches' values, this scoping becomes moot in practice but stays
-  // correct in principle -- the two paths remain semantically distinct
-  // reads even when numerically equal.)
-  if ( leaf_name == "spell_targets" && p->sim->distance_targeting_enabled )
-  {
-    slot_binding b;
-    b.leaf = &leaf;
-    b.kind = slot_binding_kind::action_expression;
-    b.action_leaf = action_leaf_kind::spell_targets_count;
-    b.bound_action = a;
-    return b;
-  }
+  // 228-11 (Q19, D-A/R-D): the "spell_targets" special case formerly here (FORK-03
+  // Candidate 1) is REMOVED -- the census artifact no longer declares a `spell_targets` leaf
+  // (the deterministic geometry leaf, target_fact.chain_lightning.neighbours_within_jump,
+  // replaces it outright), so this bind-time special case is unreachable dead code beside a
+  // retired leaf. Its own reasoning (avoiding create_expression's forced target_list() RNG
+  // draw for "spell_targets") no longer applies to anything this schema declares.
 
   // Everything else this census declares (ready, travel_time, and any of
   // cast_time/execute_time/cost/usable_in/available_targets/the charge
@@ -1980,7 +1792,8 @@ slot_binding resolve_action_leaf( player_t* p, const std::string& engine_token, 
 // (a null result binds `unresolved`, per that function's own comment: an untalented action is a
 // census input, not an error). The LEAF NAME picks which fact about that action's per-decision
 // stamped pick this slot reads -- decided ONCE here, never re-parsed per decision, mirroring
-// `resolve_enemy_slot_leaf`'s own WR-03 discipline.
+// the retired `resolve_enemy_slot_leaf`'s own WR-03 discipline (228-11: that resolver is gone,
+// its discipline is the one this function follows).
 slot_binding resolve_target_fact_leaf( player_t* p, const std::string& engine_token,
                                         const rl_leaf_desc& leaf, slot_table& )
 {
@@ -2010,6 +1823,19 @@ slot_binding resolve_target_fact_leaf( player_t* p, const std::string& engine_to
   else if ( leaf_name == "is_previous_pick" )         fk = target_fact_leaf_kind::is_previous_pick;
   else if ( leaf_name == "actor_index" )              fk = target_fact_leaf_kind::actor_index;
   else if ( leaf_name == "actor_spawn_index" )        fk = target_fact_leaf_kind::actor_spawn_index;
+  // 228-11 (D-16 full inventory): every leaf below is already a field on enemy_fact
+  // (228-02/228-10) -- see target_fact_leaf_kind's own comment.
+  else if ( leaf_name == "in_range" )                                     fk = target_fact_leaf_kind::in_range;
+  else if ( leaf_name == "immunity_remaining" )                           fk = target_fact_leaf_kind::immunity_remaining;
+  else if ( leaf_name == "burning_core_remaining" )                       fk = target_fact_leaf_kind::burning_core_remaining;
+  else if ( leaf_name == "lightning_rod_stacks" )                         fk = target_fact_leaf_kind::lightning_rod_stacks;
+  else if ( leaf_name == "lightning_rod_remaining" )                      fk = target_fact_leaf_kind::lightning_rod_remaining;
+  else if ( leaf_name == "venomfang_remaining" )                          fk = target_fact_leaf_kind::venomfang_remaining;
+  else if ( leaf_name == "venomfang_debuff_stacks" )                      fk = target_fact_leaf_kind::venomfang_debuff_stacks;
+  else if ( leaf_name == "venomfang_debuff_remaining" )                   fk = target_fact_leaf_kind::venomfang_debuff_remaining;
+  else if ( leaf_name == "rune_of_unleashed_fire_lingering_remaining" )   fk = target_fact_leaf_kind::rune_of_unleashed_fire_lingering_remaining;
+  else if ( leaf_name == "neighbours_within_splash" )                     fk = target_fact_leaf_kind::neighbours_within_splash;
+  else if ( leaf_name == "neighbours_within_jump" )                       fk = target_fact_leaf_kind::neighbours_within_jump;
   else
   {
     b.kind = slot_binding_kind::unresolved;   // artifact/generator mismatch, not a runtime fact
@@ -2019,6 +1845,42 @@ slot_binding resolve_target_fact_leaf( player_t* p, const std::string& engine_to
   b.kind = slot_binding_kind::target_fact;
   b.bound_action = a;
   b.target_fact_leaf = fk;
+  return b;
+}
+
+// 228-11 (D-16, TGT-04): `rl_family_kind::shape_fact` resolution -- bind-time only. `member` is
+// the action token (crash_lightning/sundering, the ONLY two shaped actions); the leaf name picks
+// which of the three descriptive shape leaves this slot reads. Never resolves through
+// `find_action()` -- the value comes from a fight-wide/facing-only computation
+// (compute_crash_lightning_shape/compute_sundering_shape), not from a specific action_t*.
+slot_binding resolve_shape_fact_leaf( const std::string& engine_token, const rl_leaf_desc& leaf )
+{
+  slot_binding b;
+  b.leaf = &leaf;
+
+  shape_fact_action_kind ak;
+  if ( engine_token == "crash_lightning" )      ak = shape_fact_action_kind::crash_lightning;
+  else if ( engine_token == "sundering" )       ak = shape_fact_action_kind::sundering;
+  else
+  {
+    b.kind = slot_binding_kind::unresolved;   // artifact/generator mismatch -- not one of the two shaped tokens
+    return b;
+  }
+
+  const std::string& leaf_name = leaf.leaf;
+  shape_fact_leaf_kind fk;
+  if ( leaf_name == "enemies_hit" )                    fk = shape_fact_leaf_kind::enemies_hit;
+  else if ( leaf_name == "summed_remaining_life" )     fk = shape_fact_leaf_kind::summed_remaining_life;
+  else if ( leaf_name == "long_lived_count" )          fk = shape_fact_leaf_kind::long_lived_count;
+  else
+  {
+    b.kind = slot_binding_kind::unresolved;
+    return b;
+  }
+
+  b.kind = slot_binding_kind::shape_fact;
+  b.shape_fact_action = ak;
+  b.shape_fact_leaf = fk;
   return b;
 }
 
@@ -2255,10 +2117,6 @@ const slot_table& bind_slots( player_t* p )
             // resolve_stats_swing_cast_position_leaf's own comment.
             binding = resolve_stats_swing_cast_position_leaf( fam.id, mem.member, leaf );
             break;
-          case rl_family_kind::enemy_slot:
-            // 220-06 Task 1/2 -- see resolve_enemy_slot_leaf's own comment.
-            binding = resolve_enemy_slot_leaf( mem, leaf );
-            break;
           case rl_family_kind::action_expression:
             // 220-06 Task 3 -- see resolve_action_leaf's own comment.
             binding = resolve_action_leaf( p, mem.engine_token, leaf, table );
@@ -2278,10 +2136,12 @@ const slot_table& bind_slots( player_t* p )
             binding = resolve_expression_leaf( p, mem.engine_token, leaf, table );
             break;
           case rl_family_kind::target_fact:
-            // 228-09 (D-23/TGT-08) -- see resolve_target_fact_leaf's own comment. No census
-            // artifact declares a member of this family yet (plan 228-11's job) -- this arm is
-            // therefore never reached by the loop that dispatches here, only compiled.
+            // 228-09/228-11 (D-23/TGT-08) -- see resolve_target_fact_leaf's own comment.
             binding = resolve_target_fact_leaf( p, mem.engine_token, leaf, table );
+            break;
+          case rl_family_kind::shape_fact:
+            // 228-11 (D-16, TGT-04) -- see resolve_shape_fact_leaf's own comment.
+            binding = resolve_shape_fact_leaf( mem.engine_token, leaf );
             break;
           default:
             binding.kind = slot_binding_kind::unresolved;
@@ -2346,11 +2206,33 @@ const slot_table& bind_slots( player_t* p )
 void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
                 const std::uint8_t mask[ RL_ACTION_DIM ], float out_obs[ RL_OBS_DIM ] )
 {
-  // 220-06 Task 1: the enemy-slot candidate array is computed ONCE per
-  // decision here, never per slot -- see compute_enemy_slot_candidates' own
-  // comment.
-  std::array<player_t*, RL_ENEMY_SLOT_COUNT> enemy_candidates{};
-  compute_enemy_slot_candidates( p, enemy_candidates );
+  // 228-11 (D-16, D-12 "read once, use twice"): the identity-free fight-wide aggregates and the
+  // invulnerability window, computed AT MOST ONCE per build_obs() call -- lazily, so a decision
+  // whose schema declares none of these thirteen scalars pays nothing. `const_cast` here mirrors
+  // the ONE sanctioned call site this file already uses for the same const-vs-SimC's-own-
+  // non-const-read-API reason (read_action_gate_bits's own comment, "Open Question 5").
+  bool fw_agg_computed = false;
+  rl_policy::fight_wide_aggregates_t fw_agg;
+  auto get_fw_agg = [ & ]() -> const rl_policy::fight_wide_aggregates_t&
+  {
+    if ( !fw_agg_computed )
+    {
+      fw_agg = compute_fight_wide_aggregates( const_cast<player_t*>( p ) );
+      fw_agg_computed = true;
+    }
+    return fw_agg;
+  };
+  bool fw_iw_computed = false;
+  rl_policy::invulnerability_window_t fw_iw;
+  auto get_fw_iw = [ & ]() -> const rl_policy::invulnerability_window_t&
+  {
+    if ( !fw_iw_computed )
+    {
+      fw_iw = compute_invulnerability_window( p->sim );
+      fw_iw_computed = true;
+    }
+    return fw_iw;
+  };
 
   // 220-06 Task 3 (OBS-07): the shared-snapshot cache for
   // hit_damage/crit_pct_current/persistent_multiplier/da_multiplier (4th
@@ -2383,7 +2265,10 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
     // construction uses (action.cpp:3212-3224, constructed with an explicit
     // RESULT_HIT, not RESULT_NONE, so average_crit stays false).
     state->target = a->target;
-    int num_targets = a->n_targets();
+    int num_targets = a->aoe;   // 228-11 (Q19): a->aoe, never the retired virtual accessor -- IDENTICAL value
+                                // for every action this schema declares (none overrides the
+                                // virtual n_targets() { return aoe; } base, action.hpp:836-837),
+                                // avoiding the retired P226-45 symbol entirely (P226_45_FALLBACK_GONE).
     if ( num_targets == -1 || num_targets > 1 )
     {
       // 260902/FORK-03 (Candidate 1, sealed) -- do NOT force a->target_list()
@@ -2397,46 +2282,46 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
       // measured: this is the actual random-stream perturbation this task's
       // tracer exists to close (an add-bearing fight's DPS mean moved from
       // 343514.6 to 349746.6 at the same seed with only a decision_dump=
-      // line added; the combat log's first divergence is this action's own
-      // "Total attempts at finding path" debug line, present twice extra
-      // per decision the instant the dump is on). This observation leaf is
-      // a read-only estimate for an RL training signal; it must never be
-      // the FIRST caller to force a randomized target-list resolution that
-      // the real decision hasn't asked for yet -- doing so consumes RNG
-      // draws earlier in the stream than the unmodified fight would, which
-      // shifts every subsequent random outcome. Read the target cache's
-      // CURRENT size only if it is already valid (a real cast recently
-      // resolved it).
+      // line added). Read the target cache's CURRENT size only if it is
+      // already valid (a real cast recently resolved it).
       //
-      // CR-01 (260902/cr2 code review, FIX AT SOURCE): on an INVALID cache
-      // this used to fall back to a hard 1, which under-counts every add
-      // window -- action_t::target_cache is invalidated on EVERY enemy
-      // add/removal (action.cpp:5205's target_non_sleeping_list callback)
-      // and by adds/move_enemy/pull raid events (raid_event.cpp:274,:688,
-      // :882), so the cache reads invalid from the instant an add spawns
-      // until this action's OWN next real cast resolves it -- exactly the
-      // multi-target windows this milestone exists to add. This leaf ALSO
-      // governs slot 135 (action_leaves.chain_lightning.spell_targets,
-      // scripts/rl/specs/enhancement.json), so a hard-1 fallback here fed
-      // the agent an enemy-count OBSERVATION of 1 while several enemies
-      // stood there, not merely an approximate hit_damage precision term.
-      // Neither lie is acceptable: a hard 1 under-counts in add windows;
-      // the engine's live enemy count over-counts an action whose own
-      // chain/cleave range caps it below that count. Fall back to
-      // min(live enemy count, this action's own n_targets() cap) when the
-      // cap is a real positive number, else the live count alone (an
-      // unlimited/AoE action, n_targets() <= 0, has no cap to intersect
-      // with) -- RNG-free either way (`s.active_enemies` is populated in
-      // read_state() from `sim->active_enemies`, no target-list resolve).
-      // 228-CONTEXT.md R-D names the honest fix: deterministic per-target
-      // geometry computed from positions, replacing this stopgap outright.
+      // 228-11 (Q19, D-A/R-D): the P226-45 min(live enemy count, this action's own n_targets()
+      // cap) stopgap is DELETED (P226_45_FALLBACK_GONE) -- replaced by the SAME deterministic
+      // per-target geometry the new target_fact/shape_fact leaves already compute (228-02/
+      // 228-10), never a new computation. For a TARGETED multi-target action (chain_lightning,
+      // tempest, voltaic_blaze) the count is the current pick's own neighbours_within_splash
+      // (== neighbours_within_jump, both `a->radius`-parameterised, R-D); for the two SHAPED
+      // actions (crash_lightning, sundering) it is that action's own shape fact's enemies_hit.
+      // Both come from lookup_pick()/build_enemy_fact() and compute_crash_lightning_shape()/
+      // compute_sundering_shape() -- never select(), never target_list() (RNG-free either way).
+      // An unrecognised multi-target action (none exist in this registry today) or a targeted
+      // action with no stamped pick this decision falls back to the live enemy count alone,
+      // honestly labelled here as the one remaining imperfect case rather than silently guessed.
       const int live_enemies = s.has_active_enemies
                                     ? static_cast<int>( s.active_enemies )
                                     : static_cast<int>( p->sim->active_enemies );
-      const int nt = num_targets;
+      int geometry_count = live_enemies;
+      const std::string& an = a->name_str;
+      if ( an == "chain_lightning" || an == "tempest" || an == "voltaic_blaze" )
+      {
+        bool      pick_found = false;
+        player_t* pick       = rl_target_select::lookup_pick( a, &pick_found );
+        if ( pick_found && pick != nullptr )
+        {
+          geometry_count = rl_target_select::build_enemy_fact( a, pick, a->target ).neighbours_within_splash;
+        }
+      }
+      else if ( an == "crash_lightning" )
+      {
+        geometry_count = compute_crash_lightning_shape( const_cast<player_t*>( p ) ).enemies_hit;
+      }
+      else if ( an == "sundering" )
+      {
+        geometry_count = compute_sundering_shape( const_cast<player_t*>( p ) ).enemies_hit;
+      }
       const int max_targets = a->target_cache.is_valid
                                    ? static_cast<int>( a->target_cache.list.size() )
-                                   : ( nt > 0 ? std::min( live_enemies, nt ) : live_enemies );
+                                   : geometry_count;
       num_targets = ( num_targets < 0 ) ? max_targets : std::min( max_targets, num_targets );
     }
     state->n_targets = std::max( 1, num_targets );
@@ -2726,6 +2611,93 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
               status = lookup_status::present;
               break;
 
+            // 228-11 (D-16, TGT-05): the identity-free fight-wide aggregates -- every value
+            // already computed by 228-10's compute_fight_wide_aggregates(), cached once above.
+            // The four `has_*`-gated fields (soonest/longest time to die, nearest distance) are
+            // `absent` (their leaf's own `missing` default) in the degenerate no-enemies case,
+            // matching every other optional POD field's own convention on this file.
+            case direct_id::fw_enemies_total:
+              raw = static_cast<double>( get_fw_agg().enemies_total );
+              status = lookup_status::present;
+              break;
+            case direct_id::fw_enemies_in_melee:
+              raw = static_cast<double>( get_fw_agg().enemies_in_melee );
+              status = lookup_status::present;
+              break;
+            case direct_id::fw_enemies_within_8yd:
+              raw = static_cast<double>( get_fw_agg().enemies_within_8yd );
+              status = lookup_status::present;
+              break;
+            case direct_id::fw_enemies_within_40yd:
+              raw = static_cast<double>( get_fw_agg().enemies_within_40yd );
+              status = lookup_status::present;
+              break;
+            case direct_id::fw_enemies_in_front:
+              raw = static_cast<double>( get_fw_agg().enemies_in_front );
+              status = lookup_status::present;
+              break;
+            case direct_id::fw_flame_shock_carrier_count:
+              raw = static_cast<double>( get_fw_agg().flame_shock_carrier_count );
+              status = lookup_status::present;
+              break;
+            case direct_id::fw_soonest_time_to_die:
+              if ( get_fw_agg().has_soonest_time_to_die )
+              {
+                raw = get_fw_agg().soonest_time_to_die;
+                status = lookup_status::present;
+              }
+              else
+              {
+                status = lookup_status::absent;
+              }
+              break;
+            case direct_id::fw_longest_time_to_die:
+              if ( get_fw_agg().has_longest_time_to_die )
+              {
+                raw = get_fw_agg().longest_time_to_die;
+                status = lookup_status::present;
+              }
+              else
+              {
+                status = lookup_status::absent;
+              }
+              break;
+            case direct_id::fw_dying_within_5s:
+              raw = static_cast<double>( get_fw_agg().dying_within_5s );
+              status = lookup_status::present;
+              break;
+            case direct_id::fw_dying_within_15s:
+              raw = static_cast<double>( get_fw_agg().dying_within_15s );
+              status = lookup_status::present;
+              break;
+            case direct_id::fw_nearest_enemy_distance:
+              if ( get_fw_agg().has_nearest_enemy_distance )
+              {
+                raw = get_fw_agg().nearest_enemy_distance;
+                status = lookup_status::present;
+              }
+              else
+              {
+                status = lookup_status::absent;
+              }
+              break;
+
+            // 228-11 (D-16, D-17, TGT-06, Q18): the two scripted-schedule immunity timers.
+            // "Nothing pending"/"not active" encodes as 0.0 (never a saturation sentinel, never
+            // null) -- matching every existing `*_remaining` field's own convention (228-10's own
+            // "nothing pending" wire-value discipline).
+            case direct_id::fw_immunity_in:
+              raw = get_fw_iw().has_next ? get_fw_iw().next_in : 0.0;
+              status = lookup_status::present;
+              break;
+            case direct_id::fw_immunity_remaining:
+              // D-12 "read once, use twice": rl_state_t::immunity_remaining is the SAME value,
+              // already filled by read_state() through this SAME compute_invulnerability_window()
+              // function -- reused directly rather than recomputed.
+              raw = s.has_immunity_remaining ? s.immunity_remaining : 0.0;
+              status = lookup_status::present;
+              break;
+
             default:
               status = lookup_status::absent;
               break;
@@ -2780,174 +2752,9 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
           status = lookup_status::present;
           break;
         }
-        case slot_binding_kind::enemy_slot:
-        {
-          // 220-06 Task 1/2: the candidate array is computed once above
-          // (enemy_candidates), never per slot.
-          player_t* et = ( b.enemy_slot_index >= 0 &&
-                           static_cast<std::size_t>( b.enemy_slot_index ) < enemy_candidates.size() )
-              ? enemy_candidates[ static_cast<std::size_t>( b.enemy_slot_index ) ] : nullptr;
-          if ( et == nullptr )
-          {
-            // Absent slot -- every leaf, INCLUDING `present`, flows through
-            // this SAME absent->missing path; `present`'s own declared
-            // missing is 0 (header_contract) -- never hand-special-cased.
-            status = lookup_status::absent;
-            break;
-          }
-
-          if ( !b.enemy_is_effect_leaf )
-          {
-            switch ( b.enemy_actor_leaf )
-            {
-              case enemy_actor_leaf_kind::present:
-                raw = 1.0;
-                status = lookup_status::present;
-                break;
-              case enemy_actor_leaf_kind::distance:
-                raw = p->get_player_distance( *et );
-                status = lookup_status::present;
-                break;
-              case enemy_actor_leaf_kind::time_to_die:
-                raw = et->time_to_percent( 0 ).total_seconds();
-                status = lookup_status::present;
-                break;
-              case enemy_actor_leaf_kind::health_pct:
-                raw = et->health_percentage() / 100.0;
-                status = lookup_status::present;
-                break;
-              case enemy_actor_leaf_kind::role:
-                raw = et->is_add() ? 1.0 : 0.0;
-                status = lookup_status::present;
-                break;
-            }
-            break;
-          }
-
-          // Per-effect leaf (Task 2) -- the lazily-filled, validated-on-use
-          // handle cache (get_enemy_handle_cache's own comment explains the
-          // validation).
-          enemy_handle_cache& hc = get_enemy_handle_cache( p, et );
-          if ( b.enemy_effect_is_dot )
-          {
-            dot_t* d = nullptr;
-            switch ( b.enemy_dot )
-            {
-              case enemy_dot_kind::flame_shock:                          d = hc.flame_shock; break;
-              case enemy_dot_kind::rune_of_unleashed_fire_lingering:     d = hc.rune_of_unleashed_fire_lingering; break;
-              case enemy_dot_kind::venomfang:                            d = hc.venomfang; break;
-              case enemy_dot_kind::unknown:                              d = nullptr; break;
-            }
-            if ( d == nullptr || !d->is_ticking() )
-            {
-              status = lookup_status::absent;
-              break;
-            }
-            switch ( b.enemy_effect_leaf )
-            {
-              case enemy_effect_leaf_kind::dot_ticking:
-                raw = 1.0;
-                status = lookup_status::present;
-                break;
-              case enemy_effect_leaf_kind::dot_remains:
-                raw = d->remains().total_seconds();
-                status = lookup_status::present;
-                break;
-              case enemy_effect_leaf_kind::dot_tick_time:
-                // dot_t::tick_time is PRIVATE (dot.hpp) -- the public,
-                // equivalent read is the action's own tick_time() re-run
-                // against the dot's snapshotted state, the exact formula
-                // dot.cpp:350 uses internally.
-                raw = ( d->current_action != nullptr && d->state != nullptr )
-                    ? d->current_action->tick_time( d->state ).total_seconds() : 0.0;
-                status = lookup_status::present;
-                break;
-              case enemy_effect_leaf_kind::dot_tick_dmg:
-              {
-                // dot.cpp:487-501's own formula, replicated: this leaf is
-                // per-SLOT (any of the 5 enemies), but
-                // create_expression("dot.<name>.tick_dmg") is scoped only to
-                // the CURRENT target -- so this cannot round-trip through an
-                // expression the way the player-scoped families do. A fresh
-                // temp state is copied from the dot's own snapshotted state,
-                // RESULT forced to HIT, evaluated, and freed directly --
-                // action_t::release_state is PRIVATE (only action_t's own
-                // pooling code may call it), so this mirrors
-                // action_state_expr_t's own destructor instead
-                // (action.cpp:3199-3202's plain `delete state;`).
-                if ( d->current_action == nullptr || d->state == nullptr )
-                {
-                  raw = 0.0;
-                }
-                else
-                {
-                  action_state_t* tmp = d->current_action->get_state();
-                  tmp->copy_state( d->state );
-                  tmp->result = RESULT_HIT;
-                  raw = d->current_action->calculate_tick_amount( tmp, d->current_stack() );
-                  delete tmp;
-                }
-                status = lookup_status::present;
-                break;
-              }
-              case enemy_effect_leaf_kind::dot_pmultiplier:
-                raw = ( d->state != nullptr ) ? d->state->persistent_multiplier : 0.0;
-                status = lookup_status::present;
-                break;
-              default:
-                status = lookup_status::absent;
-                break;
-            }
-          }
-          else
-          {
-            buff_t* eb = nullptr;
-            switch ( b.enemy_buff )
-            {
-              case enemy_buff_kind::burning_core:          eb = hc.burning_core; break;
-              case enemy_buff_kind::casting:                eb = hc.casting; break;
-              case enemy_buff_kind::flametongue_attack:     eb = hc.flametongue_attack; break;
-              case enemy_buff_kind::lashing_flames:         eb = hc.lashing_flames; break;
-              case enemy_buff_kind::lightning_rod:          eb = hc.lightning_rod; break;
-              case enemy_buff_kind::venomfang_debuff:       eb = hc.venomfang_debuff; break;
-              case enemy_buff_kind::unknown:                eb = nullptr; break;
-            }
-            if ( eb == nullptr || eb->check() <= 0 )
-            {
-              status = lookup_status::absent;
-              break;
-            }
-            switch ( b.enemy_effect_leaf )
-            {
-              case enemy_effect_leaf_kind::debuff_stacks:
-                raw = static_cast<double>( eb->check() );
-                status = lookup_status::present;
-                break;
-              case enemy_effect_leaf_kind::debuff_remains:
-              {
-                const timespan_t remains = eb->remains();
-                if ( remains == timespan_t::min() )
-                {
-                  status = lookup_status::permanent;
-                }
-                else
-                {
-                  raw = remains.total_seconds();
-                  status = lookup_status::present;
-                }
-                break;
-              }
-              case enemy_effect_leaf_kind::debuff_tick_time:
-                raw = eb->tick_time().total_seconds();
-                status = lookup_status::present;
-                break;
-              default:
-                status = lookup_status::absent;
-                break;
-            }
-          }
-          break;
-        }
+        // 228-11 (D-A/TGT-05, SLOT_PLUMBING_DELETED): the enemy_slot per-slot dispatch
+        // (present/distance/time_to_die/health_pct/role + the per-effect dot/debuff leaves) was
+        // REMOVED here along with the family it served -- see target_fact below for its replacement.
         case slot_binding_kind::action_expression:
         {
           switch ( b.action_leaf )
@@ -2971,44 +2778,10 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
               status = lookup_status::present;
               break;
             }
-            case action_leaf_kind::spell_targets_count:
-            {
-              // Mirrors the shared-leaf site's own fix: read the target
-              // cache's CURRENT size only if already valid; never force a
-              // resolve (see this leaf's own bind-time comment above for
-              // why forcing one here can draw from the sim's shared RNG).
-              if ( b.bound_action == nullptr )
-              {
-                status = lookup_status::absent;
-                break;
-              }
-              // CR-01 (260902/cr2 code review, FIX AT SOURCE): same fix as
-              // the shared hit_damage site above, applied to the actual
-              // observation slot (action_leaves.chain_lightning.spell_targets,
-              // scripts/rl/specs/enhancement.json) the review's concrete
-              // failure named -- an invalid cache used to read a hard 1.0
-              // here, in exactly the add windows this milestone adds. Fall
-              // back to min(live enemy count, this action's own n_targets()
-              // cap) when the cap is a real positive number, else the live
-              // count alone -- RNG-free (`s.active_enemies`, no
-              // target-list resolve). 228-CONTEXT.md R-D names the honest
-              // fix (deterministic per-target geometry) this stopgap holds
-              // the line until.
-              if ( b.bound_action->target_cache.is_valid )
-              {
-                raw = static_cast<double>( b.bound_action->target_cache.list.size() );
-              }
-              else
-              {
-                const int live_enemies = s.has_active_enemies
-                                              ? static_cast<int>( s.active_enemies )
-                                              : static_cast<int>( p->sim->active_enemies );
-                const int nt = b.bound_action->n_targets();
-                raw = static_cast<double>( nt > 0 ? std::min( live_enemies, nt ) : live_enemies );
-              }
-              status = lookup_status::present;
-              break;
-            }
+            // 228-11 (Q19, D-A/R-D, P226_45_FALLBACK_GONE): action_leaf_kind::spell_targets_count
+            // and its P226-45 min(live enemy count, this action's own n_targets() cap) fallback
+            // were REMOVED here -- action_leaves.chain_lightning.spell_targets is no longer a
+            // declared leaf; target_fact.chain_lightning.neighbours_within_jump replaces it.
             case action_leaf_kind::dot_molten_weapon_ticking:
             case action_leaf_kind::dot_molten_weapon_remains:
             {
@@ -3056,12 +2829,9 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
         }
         case slot_binding_kind::target_fact:
         {
-          // 228-09 (D-23/TGT-08): reads rl_target_select::lookup_pick() -- NEVER a fresh
+          // 228-09/228-11 (D-23/TGT-08): reads rl_target_select::lookup_pick() -- NEVER a fresh
           // select() call (D-12) -- for `b.bound_action`'s per-decision stamped pick, then
-          // build_enemy_fact() for the specific fact this leaf names. UNREACHABLE today: no
-          // census artifact declares a member of this family yet (plan 228-11's job), so this
-          // branch is proven only by compiling, never by a real decision reaching it this plan
-          // (see this plan's own receipt).
+          // build_enemy_fact() for the specific fact this leaf names.
           if ( b.bound_action == nullptr )
           {
             status = lookup_status::absent;
@@ -3098,11 +2868,45 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
             case target_fact_leaf_kind::is_previous_pick:       raw = fact.is_previous_pick ? 1.0 : 0.0; break;
             case target_fact_leaf_kind::actor_index:            raw = static_cast<double>( fact.actor_index ); break;
             case target_fact_leaf_kind::actor_spawn_index:      raw = static_cast<double>( fact.actor_spawn_index ); break;
+            // 228-11 (D-16 full inventory): every value below already exists on enemy_fact
+            // (228-02/228-10) -- no new computation, same read-through-build_enemy_fact() path
+            // every leaf above already uses.
+            case target_fact_leaf_kind::in_range:                            raw = fact.in_range ? 1.0 : 0.0; break;
+            case target_fact_leaf_kind::immunity_remaining:                  raw = fact.immunity_remaining; break;
+            case target_fact_leaf_kind::burning_core_remaining:              raw = fact.burning_core_remaining; break;
+            case target_fact_leaf_kind::lightning_rod_stacks:                raw = static_cast<double>( fact.lightning_rod_stacks ); break;
+            case target_fact_leaf_kind::lightning_rod_remaining:             raw = fact.lightning_rod_remaining; break;
+            case target_fact_leaf_kind::venomfang_remaining:                 raw = fact.venomfang_remaining; break;
+            case target_fact_leaf_kind::venomfang_debuff_stacks:             raw = static_cast<double>( fact.venomfang_debuff_stacks ); break;
+            case target_fact_leaf_kind::venomfang_debuff_remaining:          raw = fact.venomfang_debuff_remaining; break;
+            case target_fact_leaf_kind::rune_of_unleashed_fire_lingering_remaining: raw = fact.rune_of_unleashed_fire_lingering_remaining; break;
+            case target_fact_leaf_kind::neighbours_within_splash:            raw = static_cast<double>( fact.neighbours_within_splash ); break;
+            case target_fact_leaf_kind::neighbours_within_jump:              raw = static_cast<double>( fact.neighbours_within_jump ); break;
             default:
               matched = false;
               break;
           }
           status = matched ? lookup_status::present : lookup_status::absent;
+          break;
+        }
+        case slot_binding_kind::shape_fact:
+        {
+          // 228-11 (D-16, TGT-04): reads 228-10's own compute_crash_lightning_shape()/
+          // compute_sundering_shape() -- the CURRENT facing only, no per-decision pick (the
+          // shaped actions never appear in targeted_picks, OR-2). `p` is only ever read here
+          // (const-safe: neither compute function mutates the player), so no const_cast is
+          // needed at this call site.
+          const rl_policy::shape_hit_result_t shape =
+              ( b.shape_fact_action == shape_fact_action_kind::crash_lightning )
+                  ? compute_crash_lightning_shape( const_cast<player_t*>( p ) )
+                  : compute_sundering_shape( const_cast<player_t*>( p ) );
+          switch ( b.shape_fact_leaf )
+          {
+            case shape_fact_leaf_kind::enemies_hit:            raw = static_cast<double>( shape.enemies_hit ); break;
+            case shape_fact_leaf_kind::summed_remaining_life:  raw = shape.summed_remaining_life; break;
+            case shape_fact_leaf_kind::long_lived_count:       raw = static_cast<double>( shape.long_lived_count ); break;
+          }
+          status = lookup_status::present;
           break;
         }
         case slot_binding_kind::unresolved:
