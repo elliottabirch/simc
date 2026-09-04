@@ -187,7 +187,9 @@ void open_and_write_header( sim_t* sim )
 void record_decision( sim_t* sim, const player_t* p, std::uint64_t seq, const float obs[ RL_OBS_DIM ],
                        const std::uint8_t mask[ RL_ACTION_DIM ], int action_index, float q_margin,
                        float top_q, std::uint16_t chosen_target_actor_index, bool wait_floored,
-                       bool exploratory )
+                       bool exploratory,
+                       const float* candidate_features, std::uint16_t candidate_mask,
+                       std::uint8_t candidate_count, std::uint8_t chosen_candidate_slot )
 {
   sim_t* root = root_of( sim );
   if ( root->rl_translog_file_str.empty() )
@@ -204,6 +206,25 @@ void record_decision( sim_t* sim, const player_t* p, std::uint64_t seq, const fl
   std::memcpy( r.obs, obs, sizeof( r.obs ) );
   r.q_margin = q_margin;
   r.top_q = top_q;   // version 3: best legal Q, or NaN -- see rl_translog.hpp's own field comment
+  // Version 7 (230-04, SCOR-02, R-B): the candidate block rl_target_select CAPTURED at the
+  // moment its scorer preference scored it -- never recomputed here (D-12). `candidate_features
+  // == nullptr` means no block was captured this decision (a wait, an untargeted cast, or the
+  // rules path was active): write an all-zero block with the no-pick sentinel rather than
+  // leaving the caller to zero four parameters on every non-scorer call site.
+  if ( candidate_features != nullptr )
+  {
+    std::memcpy( r.candidate_features, candidate_features, sizeof( r.candidate_features ) );
+    r.candidate_mask = candidate_mask;
+    r.candidate_count = candidate_count;
+    r.chosen_candidate_slot = chosen_candidate_slot;
+  }
+  else
+  {
+    std::memset( r.candidate_features, 0, sizeof( r.candidate_features ) );
+    r.candidate_mask = 0;
+    r.candidate_count = 0;
+    r.chosen_candidate_slot = CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
+  }
   // 212-CR-FIX NT-02: narrowed 64->32 bits silently, unlike iteration/thread
   // above and below, which assert_write_site_ranges() refuses loudly rather
   // than truncate. Deliberate asymmetry, not an oversight: 2^32 decisions is

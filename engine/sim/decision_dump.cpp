@@ -1042,6 +1042,20 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
             << ",\"neighbours_within_jump\":" << fact.neighbours_within_jump
             << ",\"is_current_target\":" << ( fact.is_current_target ? "true" : "false" )
             << ",\"is_previous_pick\":" << ( fact.is_previous_pick ? "true" : "false" )
+            // 230-04 (SCOR-02, Task 2): the seven 228-10 gap-fill fields, previously present on
+            // `targeted_picks` (the CHOSEN pick's own record, above) but missing here on the FULL
+            // candidate list -- scorer_block_equivalence.py needs every one of the 22 declared
+            // RL_TARGET_FEATURE_NAMES for EVERY candidate, not only the one that was picked, to
+            // re-derive the transition log's own candidate block and compare it against the
+            // engine's independent fact record (the probe's whole reason for existing).
+            << ",\"burning_core_remaining\":" << fact.burning_core_remaining
+            << ",\"lightning_rod_stacks\":" << fact.lightning_rod_stacks
+            << ",\"lightning_rod_remaining\":" << fact.lightning_rod_remaining
+            << ",\"venomfang_remaining\":" << fact.venomfang_remaining
+            << ",\"venomfang_debuff_stacks\":" << fact.venomfang_debuff_stacks
+            << ",\"venomfang_debuff_remaining\":" << fact.venomfang_debuff_remaining
+            << ",\"rune_of_unleashed_fire_lingering_remaining\":"
+            << fact.rune_of_unleashed_fire_lingering_remaining
             << "}";
       }
       out << "]}";

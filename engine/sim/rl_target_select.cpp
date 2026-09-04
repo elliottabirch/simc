@@ -12,9 +12,11 @@
 #include "fmt/format.h"
 #include "player/player.hpp"
 #include "sim/rl_policy.hpp"
+#include "sim/rl_translog.hpp"
 #include "sim/sim.hpp"
 #include "util/util.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstring>
@@ -56,6 +58,22 @@ struct pick_slot
   bool          has_stamp = false;
 };
 std::unordered_map<const action_t*, pick_slot> g_pick_table;
+
+// 230-04 (SCOR-02, R-B): the per-decision candidate block table, keyed on the resolved
+// action_t* exactly like g_pick_table above -- select() fills it ONLY when the scorer preference
+// is active (candidate_block::features "the facts the scorer looked at", R-B's own wording).
+// `features` is reused across calls (never reallocated once sized), same WR-05 discipline as
+// g_candidate_buffer below.
+struct candidate_block_slot
+{
+  std::vector<float> features;
+  std::uint16_t       mask        = 0;
+  std::uint8_t         count       = 0;
+  std::uint8_t         chosen_slot = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
+  std::uint64_t         stamp       = 0;
+  bool                   has_stamp   = false;
+};
+std::unordered_map<const action_t*, candidate_block_slot> g_candidate_block_table;
 
 // D-14's re-resolution ladder counters -- one fight's totals (WR-11, 260902/cr4: cleared every
 // iteration by reset( sim ) below, called from sim_t::reset()).
@@ -273,9 +291,10 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
   // shortcut below so a slot count of 0 (already refused at load, T-230-01-01) can never reach
   // this far, and before the scoring loop so a malformed blob is refused at the FIRST decision it
   // would ever be consulted, not silently mid-loop.
+  rl_policy::rl_scorer_t* scorer_scratch = nullptr;  // 230-04: non-null only when pref == preference_scorer
   if ( pref == preference_scorer )
   {
-    const rl_policy::rl_weights_t& w = *a->player->sim->solver_policy_weights;
+    rl_policy::rl_weights_t& w = *a->player->sim->solver_policy_weights;
     if ( candidates.size() > w.scorer.slots )
     {
       throw sc_runtime_error( fmt::format(
@@ -283,13 +302,44 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
           "the loaded scorer's declared slots={} -- refusing rather than truncating",
           candidates.size(), a->name_str, w.scorer.slots ) );
     }
+    // 230-04 (SCOR-02, R-B): the translog's own candidate block is a FIXED RL_TARGET_SLOTS-wide
+    // table -- a SEPARATE, tighter bound than the blob's own declared scorer.slots above (which
+    // may legally be as wide as 64, RLW1_MAX_SCORER_SLOTS). Refuse rather than write past the
+    // fixed block's own bound; this can only fire on a blob whose declared slots exceeds
+    // RL_TARGET_SLOTS, which no committed 230-* fixture does.
+    if ( candidates.size() > RL_TARGET_SLOTS )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_target_select::select: {} candidates passed the generic filter for '{}', exceeding "
+          "the transition log's fixed RL_TARGET_SLOTS={} -- refusing rather than writing past the "
+          "candidate block",
+          candidates.size(), a->name_str, RL_TARGET_SLOTS ) );
+    }
+    scorer_scratch = &w.scorer;
+
+    // Stamp the candidate block table for THIS decision up front, before any early return, so a
+    // stale block from an earlier decision can never be read as current (mirrors g_pick_table's
+    // own stamp discipline). Re-filled below as candidates are actually scored.
+    candidate_block_slot& slot = g_candidate_block_table[ a ];
+    if ( slot.features.size() != RL_TARGET_SLOTS * RL_TARGET_FEATURES )
+      slot.features.assign( RL_TARGET_SLOTS * RL_TARGET_FEATURES, 0.0f );
+    else
+      std::fill( slot.features.begin(), slot.features.end(), 0.0f );
+    slot.mask        = 0;
+    slot.count       = 0;
+    slot.chosen_slot = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
+    slot.stamp        = current_decision_stamp( a->player );
+    slot.has_stamp    = true;
   }
 
   // TGT-02 edge: single -- that candidate is the pick regardless of preference; the sticky clause
   // cannot override it (there is nothing else to be sticky about). The general algorithm below
   // would reach the identical answer without this shortcut, but stating it explicitly matches the
   // must-have's own wording and keeps the edge case visible in code, not just in behaviour.
-  if ( candidates.size() == 1 )
+  // 230-04: SKIPPED when the scorer is active -- the general loop below is what CAPTURES the
+  // candidate block (R-B), and a single-candidate decision still needs its (trivial, one-slot)
+  // block recorded, never silently skipped.
+  if ( candidates.size() == 1 && pref != preference_scorer )
     return candidates.front();
 
   // CR-03 (260902/cr4, RULING (a) -- PREFERENCE FIRST): the sticky early-return that used to
@@ -301,12 +351,14 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
   // among still-equal, the player's CURRENT target (p->target, which may differ from the action's
   // own previous pick); (5) final tie-break on the stable (actor_index, actor_spawn_index)
   // identity pair, ascending -- a total order, so a run is reproducible (TGT-02 edge: ordering).
-  player_t* previous = a->target;
-  player_t* current_target = a->player->target;
-  player_t* best           = nullptr;
-  double    best_score     = 0.0;
-  for ( player_t* c : candidates )
+  player_t*   previous      = a->target;
+  player_t*   current_target = a->player->target;
+  player_t*   best           = nullptr;
+  double      best_score     = 0.0;
+  std::size_t best_slot      = 0;  // 230-04: index of `best` within `candidates`, kept in lockstep
+  for ( std::size_t slot_index = 0; slot_index < candidates.size(); ++slot_index )
   {
+    player_t* c = candidates[ slot_index ];
     // WR-05 (260902/cr4): the SCORING loop drives exactly one of the eight rule preference
     // functions -- none of them read distance/in_reach/in_range/in_front/alive/immune/
     // immunity_remaining/health_pct/is_boss (generic_filter already excluded anything those would
@@ -324,10 +376,25 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
                                                       : build_enemy_fact_for_scoring( a, c, previous, pref );
     double     score = pref( a, fact );
 
+    // 230-04 (SCOR-02, R-B): CAPTURE, never recompute -- preference_scorer's own call just above
+    // filled `scorer_scratch->feature_scratch` with this candidate's feature vector (the SAME
+    // buffer forward_scorer just read to produce `score`); copy the declared feature prefix
+    // (excluding the trailing aiming-spell one-hot, which is per-ACTION not per-candidate) into
+    // this decision's persistent candidate block at THIS candidate's slot.
+    if ( scorer_scratch != nullptr )
+    {
+      candidate_block_slot& slot = g_candidate_block_table[ a ];
+      std::memcpy( slot.features.data() + slot_index * RL_TARGET_FEATURES,
+                   scorer_scratch->feature_scratch.data(), RL_TARGET_FEATURES * sizeof( float ) );
+      slot.mask |= static_cast<std::uint16_t>( 1u << slot_index );
+      slot.count = static_cast<std::uint8_t>( slot.count + 1 );
+    }
+
     if ( !best )
     {
       best       = c;
       best_score = score;
+      best_slot  = slot_index;
       continue;
     }
 
@@ -361,8 +428,13 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
     {
       best       = c;
       best_score = score;
+      best_slot  = slot_index;
     }
   }
+
+  if ( scorer_scratch != nullptr && best != nullptr )
+    g_candidate_block_table[ a ].chosen_slot = static_cast<std::uint8_t>( best_slot );
+
   return best;
 }
 
@@ -442,16 +514,72 @@ player_t* lookup_pick( const action_t* resolved, bool* out_found )
   return it->second.pick;
 }
 
+// 230-04 (SCOR-02, R-B): mirrors lookup_pick's own stamp-comparison discipline exactly -- a
+// block found in the table but stamped for an EARLIER decision is staleness, refused by name
+// (`*out_found = false`) rather than returned, the same D-12 "never fall back to a fresh
+// computation" reasoning lookup_pick's own comment states.
+candidate_block lookup_candidate_block( const action_t* resolved, bool* out_found )
+{
+  auto it = g_candidate_block_table.find( resolved );
+  if ( it == g_candidate_block_table.end() || !it->second.has_stamp )
+  {
+    if ( out_found )
+      *out_found = false;
+    return candidate_block{};
+  }
+  auto stamp_it = g_decision_stamp.find( resolved->player );
+  std::uint64_t current_stamp = ( stamp_it == g_decision_stamp.end() ) ? 0 : stamp_it->second;
+  if ( it->second.stamp != current_stamp )
+  {
+    if ( out_found )
+      *out_found = false;
+    return candidate_block{};
+  }
+  if ( out_found )
+    *out_found = true;
+  candidate_block block;
+  block.features    = it->second.features.data();
+  block.mask         = it->second.mask;
+  block.count        = it->second.count;
+  block.chosen_slot  = it->second.chosen_slot;
+  return block;
+}
+
+bool apply_candidate_exploration( const action_t* resolved, player_t* replacement,
+                                   std::uint8_t replacement_slot )
+{
+  auto it = g_pick_table.find( resolved );
+  if ( it == g_pick_table.end() || !it->second.has_stamp )
+    return false;
+  auto stamp_it = g_decision_stamp.find( resolved->player );
+  std::uint64_t current_stamp = ( stamp_it == g_decision_stamp.end() ) ? 0 : stamp_it->second;
+  if ( it->second.stamp != current_stamp )
+    return false;
+
+  // The row records what happened, never what was intended (must_haves): overwrite the STAMPED
+  // pick so accept_cast()'s own lookup_pick() call -- reached AFTER this function returns, per
+  // solver_control.cpp's own call ordering -- sees the replacement, not the scorer's original.
+  it->second.pick = replacement;
+
+  auto block_it = g_candidate_block_table.find( resolved );
+  if ( block_it != g_candidate_block_table.end() && block_it->second.has_stamp &&
+       block_it->second.stamp == current_stamp )
+    block_it->second.chosen_slot = replacement_slot;
+
+  return true;
+}
+
 void reset( sim_t* )
 {
   // WR-11 (260902/cr4): called from sim_t::reset() (sim.cpp), once per iteration -- clears every
-  // module global (the original three, plus CR-04's deadlock counter added later the same task)
-  // so a stale pick, stamp or count from a PRIOR iteration can never leak into the next one.
-  // `sim` itself is unused (the tables are keyed on `player_t*`, not
-  // sim identity, per this module's own single-sim/single-thread precondition) but is taken by
-  // pointer to mirror raid_event_t::reset( sim )'s own signature at the call site.
+  // module global (the original three, plus CR-04's deadlock counter added later the same task,
+  // plus 230-04's candidate block table) so a stale pick, stamp or count from a PRIOR iteration
+  // can never leak into the next one. `sim` itself is unused (the tables are keyed on
+  // `player_t*`, not sim identity, per this module's own single-sim/single-thread precondition)
+  // but is taken by pointer to mirror raid_event_t::reset( sim )'s own signature at the call site.
   g_decision_stamp.clear();
   g_pick_table.clear();
+  g_candidate_block_table.clear();  // 230-04
   g_reresolution_counts = reresolution_counts{};
   g_every_targeted_action_illegal = 0;  // CR-04 (260902/cr4)
 }

@@ -158,6 +158,42 @@ void fill_pick( action_t* resolved, bool harmful, preference_fn pref );
 // three-copies failure the fork already learned once for action lookup).
 player_t* lookup_pick( const action_t* resolved, bool* out_found );
 
+// 230-04 (SCOR-02, R-B): the per-decision candidate block select() CAPTURED for `resolved` when
+// the scorer preference was active -- the feature block preference_scorer actually scored for
+// each candidate (CAPTURED at the moment it scored it, never recomputed here, mirroring
+// lookup_pick's own D-12 discipline), the mask of which slots were real, the live candidate
+// count, and the slot the pick actually took. `features` points at
+// `RL_TARGET_SLOTS * RL_TARGET_FEATURES` floats, slot-major, owned by this module and valid only
+// until the NEXT call into this module for the SAME action -- copy out before that if the caller
+// needs to keep it (rl_translog::record_decision's own contract: memcpy's it into the row
+// immediately, never retains the pointer).
+struct candidate_block
+{
+  const float*  features    = nullptr;
+  std::uint16_t mask        = 0;
+  std::uint8_t  count       = 0;
+  std::uint8_t  chosen_slot = 0xFFu;  // mirrors rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK
+};
+
+// Reads the candidate block stamped for `resolved` at the CURRENT decision. `*out_found` is
+// false when no block was captured this decision (a wait, an untargeted cast, or the rules path
+// was active -- the scorer never ran for this action this decision) -- the caller must then pass
+// a null candidate block to rl_translog::record_decision, never fabricate one.
+candidate_block lookup_candidate_block( const action_t* resolved, bool* out_found );
+
+// 230-04 (SCOR-02, R-B): applies the SECOND exploration dial's replacement pick -- the ONLY
+// mutator of an already-stamped pick, called from solver_control.cpp's cast branch AFTER the
+// action has been chosen (never from inside select()/fill_pick, which fill gate bits for every
+// targeted spell every decision, not only the one actually cast). Overwrites BOTH the stamped
+// pick (so accept_cast()'s own lookup_pick() call, and the mid-cast re-resolution ladder, see the
+// REPLACED candidate, never the scorer's original one) and the candidate block's chosen_slot (so
+// the transition log records what happened, never what was intended). Returns false, changing
+// nothing, when no pick was stamped for `resolved` at the current decision -- mirrors
+// lookup_pick's own staleness discipline; the caller must then leave the original pick and
+// candidate block untouched.
+bool apply_candidate_exploration( const action_t* resolved, player_t* replacement,
+                                   std::uint8_t replacement_slot );
+
 // True for exactly the eight targeted registry tokens this plan governs (stormstrike,
 // lightning_bolt, chain_lightning, tempest, windstrike, lava_lash, voltaic_blaze,
 // primordial_storm) -- matched against `resolved->name_str`, the SAME string

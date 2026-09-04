@@ -895,6 +895,14 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     int idx = greedy_idx;
     bool exploratory = false;
 
+    // 230-04 (SCOR-02, R-B): a SECOND dial, over CANDIDATES, draws from this SAME dedicated
+    // `sim->solver_explore_rng` stream further below (after the action itself has been chosen
+    // and only when that action is targeted) -- see this file's own candidate-dial block for the
+    // full contract. With the rotation frozen (this phase) the ACTION dial below is pinned at
+    // zero and the CANDIDATE dial carries the schedule; in a future alternation (the rotation
+    // retrained with the scorer frozen) it is the other way round -- a reader of either dial
+    // should find this comment pointing at the other one.
+    //
     // Phase 213 D-08: the random-action dial. Tested against zero BEFORE
     // touching the generator -- at a dial of exactly zero the engine takes
     // ZERO draws, which is what keeps every scoring run and every pre-213
@@ -1024,6 +1032,20 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       // (the SAME one accept_cast() makes internally, solver_control.cpp:121) -- not a second
       // selector computation.
       std::uint16_t chosen_target_actor_index = rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK;
+      // 230-04 (SCOR-02, R-B): the candidate block rl_target_select CAPTURED for THIS action's
+      // pick above -- READ via lookup_candidate_block(), never recomputed (D-12, same discipline
+      // chosen_target_actor_index's own lookup_pick() call already follows). Defaults to "no
+      // block" (nullptr features, sentinel slot) when the rules path was active, this was not a
+      // targeted action, or nothing was captured this decision -- record_decision() itself then
+      // writes the all-zero/sentinel candidate fields.
+      const float*  candidate_block_features    = nullptr;
+      std::uint16_t candidate_block_mask        = 0;
+      std::uint8_t  candidate_block_count       = 0;
+      std::uint8_t  candidate_block_chosen_slot = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
+      // 230-04 (SCOR-02, R-B): set true when the candidate dial (immediately below) actually
+      // fired -- OR'd into the row's own FLAG_EXPLORATORY bit alongside the action dial's
+      // `exploratory` above, since the bit means "a random draw fired here", not "which one".
+      bool candidate_exploratory = false;
       {
         const bool is_rl_actor = std::strcmp( p->name(), RL_ACTOR_NAME ) == 0 && !p->is_pet();
         if ( p->sim->target_select_enabled && is_rl_actor )
@@ -1035,11 +1057,67 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
             player_t* pick  = rl_target_select::lookup_pick( resolved_for_pick, &found );
             if ( found && pick != nullptr )
               chosen_target_actor_index = static_cast<std::uint16_t>( pick->actor_index );
+
+            bool                              block_found = false;
+            rl_target_select::candidate_block block =
+                rl_target_select::lookup_candidate_block( resolved_for_pick, &block_found );
+            if ( block_found && block.features != nullptr )
+            {
+              candidate_block_features    = block.features;
+              candidate_block_mask        = block.mask;
+              candidate_block_count       = block.count;
+              candidate_block_chosen_slot = block.chosen_slot;
+            }
+
+            // 230-04 (SCOR-02, R-B): the SECOND exploration dial, over CANDIDATES -- drawn on the
+            // SAME dedicated `sim->solver_explore_rng` stream the action dial above already used,
+            // applied ONLY here (after the action has been chosen -- this spell, never all eight
+            // read_action_gate_bits pre-computes gate bits for) and only when more than one
+            // candidate was legal. See the action dial's own top-of-function comment for which
+            // dial carries the schedule under which mode. On a hit, the pick is REPLACED by a
+            // uniform draw over the SAME legal-candidate set the block above describes --
+            // `build_candidate_facts` reuses `generic_filter`/`build_enemy_fact` VERBATIM (D-20:
+            // no third copy of the filter) against a game state that has not advanced since
+            // `select()` scored it moments earlier this same decision, so its order matches the
+            // block's own slot order exactly. `apply_candidate_exploration` overwrites the
+            // STAMPED pick (so accept_cast()'s own lookup_pick() call below sees the replacement)
+            // and the block's own chosen_slot (so the row records what happened, never what the
+            // score would have chosen).
+            if ( found && pick != nullptr && candidate_block_features != nullptr &&
+                 candidate_block_count > 1 && sim->solver_policy_weights &&
+                 sim->solver_policy_weights->has_scorer )
+            {
+              const float candidate_exploration = sim->solver_policy_weights->scorer.exploration;
+              if ( candidate_exploration > 0.0f &&
+                   sim->solver_explore_rng.real() < candidate_exploration )
+              {
+                std::vector<rl_target_select::enemy_fact> legal =
+                    rl_target_select::build_candidate_facts( resolved_for_pick, /*harmful=*/true );
+                if ( !legal.empty() )
+                {
+                  const int draw = static_cast<int>(
+                      sim->solver_explore_rng.range( 0.0, static_cast<double>( legal.size() ) ) );
+                  const std::uint8_t draw_slot = static_cast<std::uint8_t>( draw );
+                  if ( rl_target_select::apply_candidate_exploration( resolved_for_pick,
+                                                                       legal[ draw ].candidate,
+                                                                       draw_slot ) )
+                  {
+                    chosen_target_actor_index =
+                        static_cast<std::uint16_t>( legal[ draw ].actor_index );
+                    candidate_block_chosen_slot = draw_slot;
+                    candidate_exploratory       = true;
+                  }
+                }
+              }
+            }
           }
         }
       }
       rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, top_q,
-                                     chosen_target_actor_index, false, exploratory );
+                                     chosen_target_actor_index, false,
+                                     exploratory || candidate_exploratory,
+                                     candidate_block_features, candidate_block_mask,
+                                     candidate_block_count, candidate_block_chosen_slot );
       // 212-CR-FIX WR-06: accept_cast() can refuse a not-ready action via
       // protocol_abort() (a throw), which unwinds past combat_end()'s
       // record_close() hook entirely for this fight -- without this catch,
