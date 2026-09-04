@@ -1005,6 +1005,14 @@ struct sim_t : private sc_thread_t
   // turn block in accept_cast, no ladder -- this is what makes 226/227's receipts reproducible on
   // this binary again (228-REVIEW.md CR-06).
   bool target_select_enabled;
+  // Phase 230-02 (SCOR-01, D-02/R-K): forces the RULES path in rl_target_select::preference_for
+  // even when the loaded weights carry a scorer (has_scorer == true) -- default OFF, so stock
+  // behaviour (a scorer-bearing blob takes the scored path) is unchanged. Its ONLY purpose is to
+  // re-run the previous phase's rules-arm numbers on THIS binary for the byte-identity proof
+  // 230-SWAP-RECEIPT.md's Task 3 makes (R-E): with it on, a v4 blob's scorer section still loads
+  // and is still validated, but `select()` never dispatches to it. Registering a new option moves
+  // the simulator-options fingerprint the rig computes -- recorded in that same receipt.
+  bool target_scorer_force_rules;
   bool ignore_invulnerable_targets;
   bool enable_dps_healing;
   bool count_overheal_as_heal;

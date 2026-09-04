@@ -30,6 +30,12 @@ namespace
 // The eight targeted registry tokens this plan governs (228-02-PLAN.md's TARGETED constant,
 // re-derived from scripts/rl/specs/enhancement.json's specs.enhancement.actions[] at planning
 // time). SHAPED (crash_lightning, sundering) is plan 228-03's, deliberately absent here.
+//
+// 230-02 (CK1-1, owner ruling Q1): this is also the scorer's own one-hot registry --
+// preference_scorer (below) walks this SAME array for its aiming-spell one-hot, so the shaped
+// pair can never reach the scorer either. Settled once, not a run-time discovery: Crash Lightning
+// and Sundering cast in the current facing direction only, have no selector and never turn, so
+// they have no pick to score and no column to occupy.
 constexpr const char* TARGETED_TOKENS[] = {
   "stormstrike", "lightning_bolt", "chain_lightning", "tempest",
   "windstrike",  "lava_lash",      "voltaic_blaze",   "primordial_storm",

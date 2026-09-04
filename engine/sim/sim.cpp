@@ -1615,6 +1615,7 @@ sim_t::sim_t()
     facing_enabled( false ),
     facing_shapes( false ),
     target_select_enabled( false ),  // CR-06 (260902/cr4)
+    target_scorer_force_rules( false ),  // 230-02 (SCOR-01, D-02/R-K)
     ignore_invulnerable_targets( false ),
     enable_dps_healing( false ),
     count_overheal_as_heal( false ),
@@ -4206,6 +4207,7 @@ void sim_t::create_options()
   add_option( opt_bool( "facing_enabled", facing_enabled ) );
   add_option( opt_bool( "facing_shapes", facing_shapes ) );
   add_option( opt_bool( "target_select_enabled", target_select_enabled ) );  // CR-06 (260902/cr4)
+  add_option( opt_bool( "target_scorer_force_rules", target_scorer_force_rules ) );  // 230-02 (SCOR-01)
   add_option( opt_bool( "ignore_invulnerable_targets", ignore_invulnerable_targets ) );
   add_option( opt_bool( "enable_dps_healing", enable_dps_healing ) );
   add_option( opt_bool( "count_overheal_as_heal", count_overheal_as_heal ) );
