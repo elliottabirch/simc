@@ -395,6 +395,41 @@ struct rl_layer
   std::vector<float>  beta;    // [out], only when has_ln
 };
 
+// Phase 230-02 (SCOR-01, R-A): the RLW1 v4 trailing SCORER section -- a SECOND, independent
+// parameter set (never a `body` variant: `body` selects a layer-SPLIT convention over the ONE
+// rotation parameter set, the scorer is a wholly separate net). Always mlp-shaped (`_layer_split`
+// / `hidden_layer_count(rl_body_type::mlp, ...)`, reused verbatim -- never a second hidden
+// convention): n_layers >= 2, every layer's has_ln == false, first layer's in_features ==
+// `features + RLW1_V4_AIMING_SPELL_COUNT` (the eight targeted spells' one-hot, CK1-1), last
+// layer's out_features == 1 (one score per candidate). `context_width` is declared but PINNED to
+// 0 in this phase (R-C: the shared observation vector does not exist at the moment a pick is
+// computed) -- a non-zero value is refused by name at load. `slots` is the TRAINING side's own
+// declared candidate-slot bound (R-B) -- the engine's own overflow refusal (rl_target_select.cpp)
+// compares the generic filter's live candidate count against THIS value, never a hardcoded
+// engine constant, so a blob trained against a different slot count fails loudly rather than
+// silently.
+struct rl_scorer_t
+{
+  float          exploration    = 0.0f;  // the scorer's OWN epsilon dial over CANDIDATES -- mirrors
+                                          // rl_weights_t::exploration's own [0.0,1.0]-finite bound
+  std::uint32_t  slots          = 0;     // 1..64 -- the training side's declared candidate-slot count
+  std::uint32_t  features       = 0;     // 1..RLW1_MAX_FEATURES -- the per-candidate feature count
+  std::uint32_t  context_width  = 0;     // MUST be 0 in this phase (R-C) -- non-zero refused by name
+  std::string    feature_sha;            // "tgt-feat-v1:<64hex>" -- cross-checked against
+                                          // RL_TARGET_FEATURE_SHA (rl_policy_constants.h) at load
+  std::vector<rl_layer> layers;          // mlp-shaped, n_layers >= 2 (one hidden layer minimum + the
+                                          // single-output layer) -- expected_layer_count(mlp) == 2
+
+  // Load-time-sized scratch (same single-thread/no-per-decision-allocation reasoning as
+  // rl_weights_t::hidden_scratch above): hidden_scratch[i] holds scorer hidden layer i's
+  // post-ReLU activations; feature_scratch holds the per-candidate input vector
+  // (rl_target_select's scorer preference fills it: the declared feature list's order, then the
+  // eight-wide aiming-spell one-hot) -- `features + RLW1_V4_AIMING_SPELL_COUNT` wide, sized once
+  // at load, reused every scoring call, never reallocated per decision.
+  mutable std::vector<std::vector<float>> hidden_scratch;
+  mutable std::vector<float>              feature_scratch;
+};
+
 struct rl_weights_t
 {
   std::uint32_t format_version = 0;
@@ -405,6 +440,15 @@ struct rl_weights_t
   std::string   mask_rules_sha;          // bare 64 hex
   std::string   action_space_sha;        // bare 64 hex
   std::vector<rl_layer> layers;          // n_layers >= the body's own minimum (2 mlp / 3 dueling+)
+
+  // Phase 230-02 (SCOR-01, R-A/R-K): present only when format_version == 4 -- a rotation-only v3
+  // blob loads with has_scorer == false and `scorer` left default-constructed. The run-time
+  // switch this presence bit drives lives in rl_target_select.cpp's preference_for() (D-02): a
+  // scorer-bearing blob takes the scored path, UNLESS sim->target_scorer_force_rules (default
+  // off, sim.hpp/sim.cpp) forces the rules path so the previous phase's rules-arm numbers can be
+  // re-run byte-identically on this binary (230-SWAP-RECEIPT.md's Task 3 proof).
+  bool          has_scorer = false;
+  rl_scorer_t   scorer;
 
   // Phase 222 (NET-01, arm subsets): an optional input GATHER and a static
   // action ALLOW-LIST, both carried on the blob (RLW1 v3's trailing
@@ -464,4 +508,13 @@ rl_weights_t load_rlw1( const std::string& path );   // throws sc_runtime_error,
 void         forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ],
                        const std::uint8_t mask[ RL_ACTION_DIM ], float out_q[ RL_ACTION_DIM ] );
 int          masked_argmax( const float q[ RL_ACTION_DIM ], const std::uint8_t mask[ RL_ACTION_DIM ] );
+
+// Phase 230-02 (SCOR-01): the scorer's own forward pass -- one hidden-layer stack (ReLU, the SAME
+// activation forward()'s mlp branch uses -- no second activation formula) then a single 1-wide
+// linear output layer, no masking (a scorer forward pass scores exactly ONE candidate; `select()`
+// in rl_target_select.cpp calls this once per candidate and argmaxes the results itself, mirroring
+// every other preference_fn's own contract). `in` must point at `s.features +
+// RLW1_V4_AIMING_SPELL_COUNT` floats -- the caller (rl_target_select's scorer preference) fills
+// `s.feature_scratch` itself and passes `s.feature_scratch.data()`.
+float forward_scorer( const rl_scorer_t& s, const float* in );
 }

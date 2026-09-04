@@ -9,8 +9,11 @@
 #include "action/attack.hpp"
 #include "action/dot.hpp"
 #include "buff/buff.hpp"
+#include "fmt/format.h"
 #include "player/player.hpp"
+#include "sim/rl_policy.hpp"
 #include "sim/sim.hpp"
+#include "util/util.hpp"
 
 #include <cassert>
 #include <cmath>
@@ -258,6 +261,24 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
   if ( candidates.empty() )
     return nullptr;
 
+  // Phase 230-02 (SCOR-01, R-B): the scorer's overflow refusal -- REFUSE BY NAME the instant the
+  // generic filter's own live candidate count exceeds the LOADED blob's own declared
+  // `scorer.slots`, never truncate and never drop the tail. Checked before the single-candidate
+  // shortcut below so a slot count of 0 (already refused at load, T-230-01-01) can never reach
+  // this far, and before the scoring loop so a malformed blob is refused at the FIRST decision it
+  // would ever be consulted, not silently mid-loop.
+  if ( pref == preference_scorer )
+  {
+    const rl_policy::rl_weights_t& w = *a->player->sim->solver_policy_weights;
+    if ( candidates.size() > w.scorer.slots )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_target_select::select: {} candidates passed the generic filter for '{}', exceeding "
+          "the loaded scorer's declared slots={} -- refusing rather than truncating",
+          candidates.size(), a->name_str, w.scorer.slots ) );
+    }
+  }
+
   // TGT-02 edge: single -- that candidate is the pick regardless of preference; the sticky clause
   // cannot override it (there is nothing else to be sticky about). The general algorithm below
   // would reach the identical answer without this shortcut, but stating it explicitly matches the
@@ -280,13 +301,21 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
   double    best_score     = 0.0;
   for ( player_t* c : candidates )
   {
-    // WR-05 (260902/cr4): the SCORING loop drives exactly one of the eight preference functions --
-    // none of them read distance/in_reach/in_range/in_front/alive/immune/immunity_remaining/
-    // health_pct/is_boss (generic_filter already excluded anything those would have rejected), so
-    // this lite build skips them and skips the Flame Shock find_dot() lookup unless the dispatched
-    // preference is one of the two that read it. build_enemy_fact() itself is UNCHANGED -- it is
-    // what external readers (the observation writer, 228-04 onward) call, with every field filled.
-    enemy_fact fact  = build_enemy_fact_for_scoring( a, c, previous, pref );
+    // WR-05 (260902/cr4): the SCORING loop drives exactly one of the eight rule preference
+    // functions -- none of them read distance/in_reach/in_range/in_front/alive/immune/
+    // immunity_remaining/health_pct/is_boss (generic_filter already excluded anything those would
+    // have rejected), so this lite build skips them and skips the Flame Shock find_dot() lookup
+    // unless the dispatched preference is one of the two that read it. build_enemy_fact() itself
+    // is UNCHANGED -- it is what external readers (the observation writer, 228-04 onward) call,
+    // with every field filled.
+    //
+    // Phase 230-02 (SCOR-01): the NINTH preference (the learned scorer) is the one exception --
+    // its v1 scorecard (R-C) reads every field the struct carries, so it gets the FULL builder
+    // instead of the lite one. This costs more per candidate than the rules path, paid ONLY when
+    // a scorer is actually loaded and active (preference_for's own gate) -- the eight rule
+    // preferences' own performance is completely unaffected by this branch.
+    enemy_fact fact  = ( pref == preference_scorer ) ? build_enemy_fact( a, c, previous )
+                                                      : build_enemy_fact_for_scoring( a, c, previous, pref );
     double     score = pref( a, fact );
 
     if ( !best )
@@ -447,17 +476,34 @@ preference_fn preference_for( const action_t* resolved )
   if ( !resolved )
     return nullptr;
   const std::string& n = resolved->name_str;
+  preference_fn rule = nullptr;
   if ( n == "stormstrike" || n == "windstrike" || n == "primordial_storm" || n == "lightning_bolt" )
-    return preference_shortest_time_to_die;
-  if ( n == "lava_lash" )
-    return preference_lava_lash;
-  if ( n == "voltaic_blaze" )
-    return preference_voltaic_blaze;
-  if ( n == "chain_lightning" )
-    return preference_chain_lightning;
-  if ( n == "tempest" )
-    return preference_tempest;
-  return nullptr;
+    rule = preference_shortest_time_to_die;
+  else if ( n == "lava_lash" )
+    rule = preference_lava_lash;
+  else if ( n == "voltaic_blaze" )
+    rule = preference_voltaic_blaze;
+  else if ( n == "chain_lightning" )
+    rule = preference_chain_lightning;
+  else if ( n == "tempest" )
+    rule = preference_tempest;
+  else
+    return nullptr;
+
+  // Phase 230-02 (SCOR-01, D-01/D-02/R-K): the run-time switch is the PRESENCE of a scorer
+  // section in the loaded weights -- a rotation-only blob (has_scorer == false, v2/v3) always
+  // takes the rules path; a v4 blob with a scorer takes the scored path UNLESS
+  // sim->target_scorer_force_rules (default OFF, sim.hpp/sim.cpp -- 230-02 Task 2) forces the
+  // rules path so the PREVIOUS phase's rules-arm numbers can be re-run byte-identically on this
+  // binary (230-SWAP-RECEIPT.md's Task 3 proof). No other code path here changes -- the generic
+  // filter, the precedence ladder in select() (beyond the one `pref == preference_scorer` branch
+  // that widens the fact builder and the overflow check, both structurally inert for the rules
+  // path) and accept_cast's cast path are all unaware which of the nine preferences won.
+  const sim_t* sim = resolved->player->sim;
+  if ( sim->solver_policy_weights && sim->solver_policy_weights->has_scorer &&
+       !sim->target_scorer_force_rules )
+    return preference_scorer;
+  return rule;
 }
 
 double preference_shortest_time_to_die( const action_t* a, const enemy_fact& fact )
@@ -534,6 +580,72 @@ double preference_tempest( const action_t*, const enemy_fact& fact )
   // Same formula as chain_lightning's, applied to Tempest's own resolved radius (measured 8.0) --
   // the addon's 8-yard cluster-centre rule.
   return static_cast<double>( fact.neighbours_within_splash ) * 1.0e6 + fact.time_to_die;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Phase 230-02 (SCOR-01): the ninth preference, the learned scorer. preference_for() only ever
+// returns this pointer when the loaded weights actually carry a scorer (D-02/R-K) -- the
+// `has_scorer` assert below is a tripwire against a future call site bypassing that gate, never a
+// real "maybe" (a preference must always return SOME score, D-12).
+// ---------------------------------------------------------------------------------------------
+
+double preference_scorer( const action_t* a, const enemy_fact& fact )
+{
+  rl_policy::rl_weights_t& w = *a->player->sim->solver_policy_weights;
+  assert( w.has_scorer &&
+          "preference_scorer called with no scorer loaded -- preference_for's own gate should "
+          "have prevented this" );
+  rl_policy::rl_scorer_t& s = w.scorer;
+
+  // CK1-1: exactly eight targeted spells get a one-hot column -- this is the one place the wire
+  // format's own aiming-spell width (rl_policy_net.cpp's RLW1_V4_AIMING_SPELL_COUNT, 8) and this
+  // module's own TARGETED_TOKENS[] must agree; asserted here rather than merely relied upon.
+  const std::size_t n_tok = targeted_action_token_count();
+  assert( n_tok == 8 && "CK1-1: exactly eight targeted spells get a one-hot column" );
+
+  // s.feature_scratch is load-time-sized to features + n_tok (rl_policy_net.cpp's load_rlw1) --
+  // reused every call, never reallocated per decision (this plan's own no-allocation-in-the-
+  // per-decision-score-path prohibition).
+  float*      feats = s.feature_scratch.data();
+  std::size_t i     = 0;
+
+  // Order-locked to target_features.py's own derivation (struct enemy_fact's declaration order,
+  // EXCLUDING candidate/actor_index/actor_spawn_index -- an identity number as a feature would
+  // make the score depend on enumeration order) -- a reordering on either side of the RLW1 wire
+  // is caught by the feature fingerprint refusal at load (RL_TARGET_FEATURE_SHA), never a
+  // silently wrong score.
+  feats[ i++ ] = static_cast<float>( fact.distance );
+  feats[ i++ ] = fact.in_reach ? 1.0f : 0.0f;
+  feats[ i++ ] = fact.in_range ? 1.0f : 0.0f;
+  feats[ i++ ] = fact.in_front ? 1.0f : 0.0f;
+  feats[ i++ ] = fact.alive ? 1.0f : 0.0f;
+  feats[ i++ ] = fact.immune ? 1.0f : 0.0f;
+  feats[ i++ ] = static_cast<float>( fact.immunity_remaining );
+  feats[ i++ ] = static_cast<float>( fact.time_to_die );
+  feats[ i++ ] = static_cast<float>( fact.health_pct );
+  feats[ i++ ] = fact.is_boss ? 1.0f : 0.0f;
+  feats[ i++ ] = static_cast<float>( fact.flame_shock_remaining );
+  feats[ i++ ] = static_cast<float>( fact.neighbours_within_splash );
+  feats[ i++ ] = static_cast<float>( fact.neighbours_within_jump );
+  feats[ i++ ] = fact.is_current_target ? 1.0f : 0.0f;
+  feats[ i++ ] = fact.is_previous_pick ? 1.0f : 0.0f;
+  feats[ i++ ] = static_cast<float>( fact.burning_core_remaining );
+  feats[ i++ ] = static_cast<float>( fact.lightning_rod_stacks );
+  feats[ i++ ] = static_cast<float>( fact.lightning_rod_remaining );
+  feats[ i++ ] = static_cast<float>( fact.venomfang_remaining );
+  feats[ i++ ] = static_cast<float>( fact.venomfang_debuff_stacks );
+  feats[ i++ ] = static_cast<float>( fact.venomfang_debuff_remaining );
+  feats[ i++ ] = static_cast<float>( fact.rune_of_unleashed_fire_lingering_remaining );
+  assert( i == s.features &&
+          "preference_scorer's fill order does not match s.features's declared count" );
+
+  // The one-hot over the eight targeted spells, TARGETED_TOKENS[]'s own order (CK1-1) -- exactly
+  // one column set, matching the resolved action's own token.
+  const char* const* toks = targeted_action_tokens();
+  for ( std::size_t k = 0; k < n_tok; ++k )
+    feats[ i + k ] = ( a->name_str == toks[ k ] ) ? 1.0f : 0.0f;
+
+  return static_cast<double>( rl_policy::forward_scorer( s, feats ) );
 }
 
 // ---------------------------------------------------------------------------------------------

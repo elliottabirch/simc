@@ -239,6 +239,20 @@ double preference_chain_lightning( const action_t* a, const enemy_fact& fact );
 // this plan does not split the computation.
 double preference_tempest( const action_t* a, const enemy_fact& fact );
 
+// Phase 230-02 (SCOR-01, D-01/D-02): the learned scorer -- a NINTH preference, same
+// function-pointer signature as the eight above, registered through `preference_for`'s own
+// by-name dispatch rather than a separate call path. Reads the scorer out of
+// `a->player->sim->solver_policy_weights` (refuses by assertion if `has_scorer` is false --
+// `preference_for` only ever returns this pointer when the loaded weights actually carry one),
+// fills the SAME file-static feature buffer every call reuses
+// (`rl_policy::rl_scorer_t::feature_scratch`, sized at load) from `fact`'s fields in
+// `target_features.py`'s declared order (mirrored here field-for-field, `rl_target_select.cpp`'s
+// own comment states the order explicitly) plus the eight-wide aiming-spell one-hot
+// (`targeted_action_tokens()`'s own order, CK1-1), and returns `rl_policy::forward_scorer`'s one
+// number. Higher wins, matching every other preference's own contract -- `select()` never knows
+// this preference is anything but a ninth ordinary one.
+double preference_scorer( const action_t* a, const enemy_fact& fact );
+
 // ---------------------------------------------------------------------------------------------
 // Mid-cast re-resolution counters (D-14, TGT-03). action_execute_event_t::execute() (action.cpp)
 // records which arm of the fallback ladder fired for every targeted action's execute event, under

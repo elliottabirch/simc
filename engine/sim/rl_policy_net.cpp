@@ -104,11 +104,28 @@ constexpr std::size_t RLW1_SHA_FIELD_BYTES = 80;
 // equality on 3 instead would refuse every committed v2 fixture by name
 // (222-RESEARCH.md Pitfall 15).
 constexpr std::uint32_t RLW1_MIN_SUPPORTED_FORMAT_VERSION = 2;
-constexpr std::uint32_t RLW1_MAX_SUPPORTED_FORMAT_VERSION = 3;
+// Phase 230-02 (SCOR-01, R-A): 3 -> 4 -- widening the accepted SET (never narrowing it), exactly
+// as the 2->3 widening did at Phase 222 (Pitfall 15's own lesson) -- every existing v2/v3 blob
+// keeps loading unchanged; a v4 blob additionally carries the mandatory trailing scorer section
+// below.
+constexpr std::uint32_t RLW1_MAX_SUPPORTED_FORMAT_VERSION = 4;
 constexpr std::uint32_t RLW1_MAX_LAYERS = 16;
 constexpr std::uint32_t RLW1_MIN_FEATURES = 1;
 constexpr std::uint32_t RLW1_MAX_FEATURES = 4096;
 constexpr float RL_LAYER_NORM_EPS = 1e-5f;  // torch's own nn.LayerNorm default, pinned explicitly
+
+// Phase 230-02 (SCOR-01, R-A) -- v4 scorer section bounds, mirroring scripts/rl/rlw1.py's own
+// constants of the same name byte-for-byte (that module's own comment: "a format-level constant,
+// not derived from a live registry" -- CK1-1's eight targeted spells are a property of the WIRE
+// FORMAT, not of any one build's registry, so this is hardcoded here exactly as it is hardcoded
+// there, never derived from RL_ACTION_DIM or any generated constant).
+constexpr std::uint32_t RLW1_V4_AIMING_SPELL_COUNT = 8;
+constexpr std::uint32_t RLW1_MIN_SCORER_LAYERS = 1;
+constexpr std::uint32_t RLW1_MAX_SCORER_LAYERS = RLW1_MAX_LAYERS;
+constexpr std::uint32_t RLW1_MIN_SCORER_SLOTS = 1;
+constexpr std::uint32_t RLW1_MAX_SCORER_SLOTS = 64;
+constexpr std::uint32_t RLW1_MIN_SCORER_FEATURES = 1;
+constexpr std::uint32_t RLW1_MAX_SCORER_FEATURES = RLW1_MAX_FEATURES;
 
 std::string decode_fingerprint( const unsigned char* p )
 {
@@ -144,6 +161,87 @@ rl_body_type decode_body_type( std::uint32_t raw, const std::string& path )
 std::size_t expected_layer_count( rl_body_type body )
 {
   return body == rl_body_type::mlp ? 2 : 3;
+}
+
+// Phase 230-02 (SCOR-01, T-230-01-01): the v4 scorer section's own per-layer parse -- the SAME
+// per-layer wire encoding the main layer loop in load_rlw1 below uses (uint32 in_features,
+// uint32 out_features, uint32 has_ln, then weight/bias[, gamma/beta]), factored out here so the
+// scorer's layer list is read by ONE parser rather than a second hand-typed copy that could drift
+// from the main loop's own discipline (positive length check FIRST, then the read -- T-210-04).
+// `label` (e.g. "scorer layer 0") is used only in the thrown messages, mirroring rlw1.py's own
+// `_unpack_one_layer(..., label=...)`.
+rl_layer parse_one_layer( const std::vector<unsigned char>& data, std::size_t& offset,
+                           const std::string& path, const std::string& label )
+{
+  if ( offset + 12 > data.size() )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' truncated -- {}'s dimensions header needs 12 bytes at "
+        "offset {}, only {} remain",
+        path, label, offset, data.size() - offset ) );
+  }
+
+  std::uint32_t in_features = 0, out_features = 0, has_ln_raw = 0;
+  std::memcpy( &in_features, data.data() + offset, 4 );
+  std::memcpy( &out_features, data.data() + offset + 4, 4 );
+  std::memcpy( &has_ln_raw, data.data() + offset + 8, 4 );
+
+  if ( in_features < RLW1_MIN_FEATURES || in_features > RLW1_MAX_FEATURES )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' {} declares in_features={}, must be {}..{}",
+        path, label, in_features, RLW1_MIN_FEATURES, RLW1_MAX_FEATURES ) );
+  }
+  if ( out_features < RLW1_MIN_FEATURES || out_features > RLW1_MAX_FEATURES )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' {} declares out_features={}, must be {}..{}",
+        path, label, out_features, RLW1_MIN_FEATURES, RLW1_MAX_FEATURES ) );
+  }
+  if ( has_ln_raw != 0 && has_ln_raw != 1 )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' {} declares has_ln={}, must be 0 or 1",
+        path, label, has_ln_raw ) );
+  }
+  const bool has_ln = has_ln_raw != 0;
+  offset += 12;
+
+  const std::uint64_t weight_count =
+      static_cast<std::uint64_t>( out_features ) * static_cast<std::uint64_t>( in_features );
+  const std::uint64_t weight_bytes = weight_count * 4;
+  const std::uint64_t bias_bytes = static_cast<std::uint64_t>( out_features ) * 4;
+  const std::uint64_t ln_bytes = has_ln ? bias_bytes * 2 : 0;
+  const std::uint64_t needed = weight_bytes + bias_bytes + ln_bytes;
+
+  if ( offset + needed > data.size() )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' truncated mid-layer -- {} ({}x{}, has_ln={}) needs {} "
+        "bytes of payload at offset {}, but the file is short by {} bytes",
+        path, label, in_features, out_features, has_ln, needed, offset, ( offset + needed ) - data.size() ) );
+  }
+
+  rl_layer layer;
+  layer.in_features = in_features;
+  layer.out_features = out_features;
+  layer.has_ln = has_ln;
+  layer.weight.resize( weight_count );
+  std::memcpy( layer.weight.data(), data.data() + offset, static_cast<std::size_t>( weight_bytes ) );
+  offset += static_cast<std::size_t>( weight_bytes );
+  layer.bias.resize( out_features );
+  std::memcpy( layer.bias.data(), data.data() + offset, static_cast<std::size_t>( bias_bytes ) );
+  offset += static_cast<std::size_t>( bias_bytes );
+  if ( has_ln )
+  {
+    layer.gamma.resize( out_features );
+    std::memcpy( layer.gamma.data(), data.data() + offset, static_cast<std::size_t>( bias_bytes ) );
+    offset += static_cast<std::size_t>( bias_bytes );
+    layer.beta.resize( out_features );
+    std::memcpy( layer.beta.data(), data.data() + offset, static_cast<std::size_t>( bias_bytes ) );
+    offset += static_cast<std::size_t>( bias_bytes );
+  }
+  return layer;
 }
 } // anonymous namespace
 
@@ -348,6 +446,169 @@ rl_weights_t load_rlw1( const std::string& path )
     std::memcpy( &w.allowed_actions, data.data() + offset, 4 );
     offset += 4;
   }
+
+  // Phase 230-02 (SCOR-01, R-A): the v4 trailing SCORER section -- mandatory at v4, forbidden
+  // below it (there is no byte layout for it at v2/v3). T-230-01-01: a positive length check for
+  // the fixed-size scalar header + the fingerprint field, BEFORE any read for this section --
+  // mirrors scripts/rl/rlw1.py's own read_rlw1 ordering exactly (that module is this loader's
+  // normative counterpart for this format).
+  if ( format_version >= 4 )
+  {
+    constexpr std::size_t SCORER_HEADER_BYTES = 20;  // n_scorer_layers, scorer_exploration,
+                                                       // scorer_slots, scorer_features,
+                                                       // scorer_context_width -- 5 x uint32/float32
+    if ( offset + SCORER_HEADER_BYTES > data.size() )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' truncated -- v4 scorer section header needs {} bytes "
+          "at offset {}, only {} remain",
+          path, SCORER_HEADER_BYTES, offset, data.size() - offset ) );
+    }
+    std::uint32_t n_scorer_layers = 0;
+    float         scorer_exploration = 0.0f;
+    std::uint32_t scorer_slots = 0, scorer_features = 0, scorer_context_width = 0;
+    std::memcpy( &n_scorer_layers, data.data() + offset, 4 );
+    std::memcpy( &scorer_exploration, data.data() + offset + 4, 4 );
+    std::memcpy( &scorer_slots, data.data() + offset + 8, 4 );
+    std::memcpy( &scorer_features, data.data() + offset + 12, 4 );
+    std::memcpy( &scorer_context_width, data.data() + offset + 16, 4 );
+    offset += SCORER_HEADER_BYTES;
+
+    if ( offset + RLW1_SHA_FIELD_BYTES > data.size() )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' truncated -- v4 scorer_feature_sha needs {} bytes at "
+          "offset {}, only {} remain",
+          path, RLW1_SHA_FIELD_BYTES, offset, data.size() - offset ) );
+    }
+    const std::string scorer_feature_sha = decode_fingerprint( data.data() + offset );
+    offset += RLW1_SHA_FIELD_BYTES;
+
+    if ( n_scorer_layers < RLW1_MIN_SCORER_LAYERS || n_scorer_layers > RLW1_MAX_SCORER_LAYERS )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' declares n_scorer_layers={}, must be {}..{} (0 is "
+          "refused by name)",
+          path, n_scorer_layers, RLW1_MIN_SCORER_LAYERS, RLW1_MAX_SCORER_LAYERS ) );
+    }
+    if ( !std::isfinite( scorer_exploration ) || scorer_exploration < 0.0f || scorer_exploration > 1.0f )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' declares scorer_exploration={}, which must be finite "
+          "and within [0.0, 1.0]",
+          path, scorer_exploration ) );
+    }
+    if ( scorer_slots < RLW1_MIN_SCORER_SLOTS || scorer_slots > RLW1_MAX_SCORER_SLOTS )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' declares scorer_slots={}, must be {}..{}",
+          path, scorer_slots, RLW1_MIN_SCORER_SLOTS, RLW1_MAX_SCORER_SLOTS ) );
+    }
+    if ( scorer_features < RLW1_MIN_SCORER_FEATURES || scorer_features > RLW1_MAX_SCORER_FEATURES )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' declares scorer_features={}, must be {}..{}",
+          path, scorer_features, RLW1_MIN_SCORER_FEATURES, RLW1_MAX_SCORER_FEATURES ) );
+    }
+    if ( scorer_context_width != 0 )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' declares scorer_context_width={}, must be 0 in this "
+          "phase -- the observation vector does not exist at the moment the picks are computed "
+          "(R-C)",
+          path, scorer_context_width ) );
+    }
+
+    std::vector<rl_layer> scorer_layers;
+    scorer_layers.reserve( n_scorer_layers );
+    for ( std::uint32_t si = 0; si < n_scorer_layers; ++si )
+      scorer_layers.push_back( parse_one_layer( data, offset, path, fmt::format( "scorer layer {}", si ) ) );
+
+    // Scorer layers are always mlp-shaped (R-A: never a second hidden convention) -- reuses
+    // expected_layer_count(mlp)==2 and hidden_layer_count(mlp, n)==n-1 verbatim, the SAME derived
+    // rule the main net's own mlp branch uses.
+    if ( scorer_layers.size() < expected_layer_count( rl_body_type::mlp ) )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' scorer requires at least {} layers, but declares only "
+          "{}",
+          path, expected_layer_count( rl_body_type::mlp ), scorer_layers.size() ) );
+    }
+    for ( std::size_t si = 0; si < scorer_layers.size(); ++si )
+    {
+      if ( scorer_layers[ si ].has_ln )
+      {
+        throw sc_runtime_error( fmt::format(
+            "rl_policy::load_rlw1: file '{}' scorer layer {} has_ln=true, must be false -- the "
+            "scorer is always mlp-shaped",
+            path, si ) );
+      }
+    }
+    for ( std::size_t si = 1; si < scorer_layers.size(); ++si )
+    {
+      if ( scorer_layers[ si ].in_features != scorer_layers[ si - 1 ].out_features )
+      {
+        throw sc_runtime_error( fmt::format(
+            "rl_policy::load_rlw1: file '{}' scorer layer {} in_features={} does not match scorer "
+            "layer {} out_features={}",
+            path, si, scorer_layers[ si ].in_features, si - 1, scorer_layers[ si - 1 ].out_features ) );
+      }
+    }
+    const std::uint32_t expected_scorer_in = scorer_features + RLW1_V4_AIMING_SPELL_COUNT;
+    if ( scorer_layers.front().in_features != expected_scorer_in )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' scorer first layer in_features={} does not match "
+          "scorer_features({}) + {} aiming spells (CK1-1)",
+          path, scorer_layers.front().in_features, scorer_features, RLW1_V4_AIMING_SPELL_COUNT ) );
+    }
+    if ( scorer_layers.back().out_features != 1 )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' scorer last layer out_features={}, must be 1 (one "
+          "score per candidate)",
+          path, scorer_layers.back().out_features ) );
+    }
+
+    // Refusal: the scorer's own feature count/fingerprint against the GENERATED constants (this
+    // build's live RL_TARGET_FEATURES/RL_TARGET_FEATURE_SHA, rl_policy_constants.h) -- unconditional
+    // here (never opt-in the way rlw1.py's expect_scorer_features/expect_scorer_feature_sha are,
+    // since the engine always has its own live generated header to compare against). A mismatch
+    // means this blob was trained against a different declared feature list than this binary was
+    // built against -- refused by name rather than silently scoring against the wrong columns.
+    if ( scorer_features != RL_TARGET_FEATURES )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' declares scorer_features={}, does not match this "
+          "build's RL_TARGET_FEATURES={}",
+          path, scorer_features, RL_TARGET_FEATURES ) );
+    }
+    if ( scorer_feature_sha != RL_TARGET_FEATURE_SHA )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' declares scorer_feature_sha='{}', does not match this "
+          "build's RL_TARGET_FEATURE_SHA='{}' -- the declared feature list disagrees (possibly "
+          "reordered)",
+          path, scorer_feature_sha, RL_TARGET_FEATURE_SHA ) );
+    }
+
+    w.has_scorer = true;
+    w.scorer.exploration    = scorer_exploration;
+    w.scorer.slots          = scorer_slots;
+    w.scorer.features       = scorer_features;
+    w.scorer.context_width  = scorer_context_width;
+    w.scorer.feature_sha    = scorer_feature_sha;
+    w.scorer.layers         = std::move( scorer_layers );
+
+    // Load-time scratch sizing (never per decision) -- one hidden_scratch entry per scorer hidden
+    // layer, and the feature buffer rl_target_select's scorer preference fills every call.
+    const std::size_t n_scorer_hidden = hidden_layer_count( rl_body_type::mlp, w.scorer.layers.size() );
+    w.scorer.hidden_scratch.resize( n_scorer_hidden );
+    for ( std::size_t si = 0; si < n_scorer_hidden; ++si )
+      w.scorer.hidden_scratch[ si ].resize( w.scorer.layers[ si ].out_features );
+    w.scorer.feature_scratch.resize( scorer_features + RLW1_V4_AIMING_SPELL_COUNT );
+  }
+
   // Pitfall 14: read_rlw1 (and this loader, pre-222) never compared `offset`
   // to `data.size()` after the layer/section walk -- trailing bytes were
   // silently ignored. Strengthens v2 parsing too: closes it for every
@@ -799,5 +1060,45 @@ int masked_argmax( const float q[ RL_ACTION_DIM ], const std::uint8_t mask[ RL_A
     }
   }
   return best;
+}
+
+// ---------------------------------------------------------------------------
+// forward_scorer -- Phase 230-02 (SCOR-01). One hidden-layer stack (ReLU, the SAME activation
+// forward()'s mlp branch above uses -- no second activation formula) then a single 1-wide linear
+// output layer, no masking (this scores exactly ONE candidate; rl_target_select::select() calls
+// it once per candidate and argmaxes the results itself, mirroring every other preference_fn's
+// own contract). Scorer layers are always mlp-shaped (validated at load: has_ln==false on every
+// layer), so this reuses hidden_layer_count(rl_body_type::mlp, ...) verbatim -- the SAME derived
+// rule forward()'s own mlp branch uses, never a second hidden convention.
+// ---------------------------------------------------------------------------
+
+float forward_scorer( const rl_scorer_t& s, const float* in )
+{
+  const std::size_t n_hidden = hidden_layer_count( rl_body_type::mlp, s.layers.size() );
+  const float* layer_in = in;
+  for ( std::size_t li = 0; li < n_hidden; ++li )
+  {
+    const rl_layer& l = s.layers[ li ];
+    std::vector<float>& h = s.hidden_scratch[ li ];
+    for ( std::uint32_t o = 0; o < l.out_features; ++o )
+    {
+      float acc = l.bias[ o ];
+      for ( std::uint32_t i = 0; i < l.in_features; ++i )
+        acc += l.weight[ o * l.in_features + i ] * layer_in[ i ];
+      h[ o ] = acc;
+    }
+    // Scorer layers carry has_ln==false unconditionally (validated at load) -- ReLU only, no
+    // LayerNorm branch needed here (unlike forward()'s own hidden loop, which must still read a
+    // per-layer flag since the main net's ln-dueling body CAN carry one).
+    for ( std::uint32_t o = 0; o < l.out_features; ++o )
+      h[ o ] = std::max( h[ o ], 0.0f );
+    layer_in = h.data();
+  }
+
+  const rl_layer& out_layer = s.layers[ n_hidden ];  // the single 1-wide output layer
+  float acc = out_layer.bias[ 0 ];
+  for ( std::uint32_t i = 0; i < out_layer.in_features; ++i )
+    acc += out_layer.weight[ i ] * layer_in[ i ];
+  return acc;
 }
 } // namespace rl_policy

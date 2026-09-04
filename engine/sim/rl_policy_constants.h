@@ -1313,3 +1313,34 @@ inline constexpr rl_talent_gate RL_TALENT_GATES[] = {
 };
 inline constexpr std::size_t RL_TALENT_GATE_COUNT = 10;
 
+// ---- Target scorer feature list (Phase 230-02, SCOR-01) ----
+
+inline constexpr std::size_t RL_TARGET_SLOTS = 8;
+inline constexpr std::size_t RL_TARGET_FEATURES = 22;
+inline constexpr const char* RL_TARGET_FEATURE_SHA = "tgt-feat-v1:fb60bc2403b62588f1f092cbda5364ad2c47cfcd9af13349eebad4e11ac2cdb6";
+
+inline constexpr const char* RL_TARGET_FEATURE_NAMES[RL_TARGET_FEATURES] = {
+  "distance",
+  "in_reach",
+  "in_range",
+  "in_front",
+  "alive",
+  "immune",
+  "immunity_remaining",
+  "time_to_die",
+  "health_pct",
+  "is_boss",
+  "flame_shock_remaining",
+  "neighbours_within_splash",
+  "neighbours_within_jump",
+  "is_current_target",
+  "is_previous_pick",
+  "burning_core_remaining",
+  "lightning_rod_stacks",
+  "lightning_rod_remaining",
+  "venomfang_remaining",
+  "venomfang_debuff_stacks",
+  "venomfang_debuff_remaining",
+  "rune_of_unleashed_fire_lingering_remaining",
+};
+
