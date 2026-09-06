@@ -888,7 +888,7 @@ enum class action_leaf_kind
 enum class target_fact_leaf_kind
 {
   found, distance, in_front, in_reach, alive, immune, time_to_die, health_pct,
-  is_boss, flame_shock_remaining, is_current_target, is_previous_pick,
+  is_boss, flame_shock_remaining, is_current_target,
   actor_index, actor_spawn_index,
   // 228-11 (D-16 full inventory, TGT-04/TGT-06): the leaves D-16 names beyond what 228-09 wired
   // in -- every one already a field on enemy_fact (228-02/228-10), read the same way every
@@ -896,7 +896,10 @@ enum class target_fact_leaf_kind
   in_range, immunity_remaining, burning_core_remaining, lightning_rod_stacks,
   lightning_rod_remaining, venomfang_remaining, venomfang_debuff_stacks,
   venomfang_debuff_remaining, rune_of_unleashed_fire_lingering_remaining,
-  neighbours_within_splash, neighbours_within_jump
+  // OBS-01 (232-02): the previous-pick boolean leaf is REMOVED (the tie-break that consumed it
+  // is gone from select()). OBS-03 (232-02) collapsed the always-equal neighbour pair to one
+  // leaf, renamed to name the rule it encodes.
+  neighbours_within_radius
 };
 
 // ---------------------------------------------------------------------------
@@ -1827,7 +1830,6 @@ slot_binding resolve_target_fact_leaf( player_t* p, const std::string& engine_to
   else if ( leaf_name == "is_boss" )                  fk = target_fact_leaf_kind::is_boss;
   else if ( leaf_name == "flame_shock_remaining" )    fk = target_fact_leaf_kind::flame_shock_remaining;
   else if ( leaf_name == "is_current_target" )        fk = target_fact_leaf_kind::is_current_target;
-  else if ( leaf_name == "is_previous_pick" )         fk = target_fact_leaf_kind::is_previous_pick;
   else if ( leaf_name == "actor_index" )              fk = target_fact_leaf_kind::actor_index;
   else if ( leaf_name == "actor_spawn_index" )        fk = target_fact_leaf_kind::actor_spawn_index;
   // 228-11 (D-16 full inventory): every leaf below is already a field on enemy_fact
@@ -1841,8 +1843,7 @@ slot_binding resolve_target_fact_leaf( player_t* p, const std::string& engine_to
   else if ( leaf_name == "venomfang_debuff_stacks" )                      fk = target_fact_leaf_kind::venomfang_debuff_stacks;
   else if ( leaf_name == "venomfang_debuff_remaining" )                   fk = target_fact_leaf_kind::venomfang_debuff_remaining;
   else if ( leaf_name == "rune_of_unleashed_fire_lingering_remaining" )   fk = target_fact_leaf_kind::rune_of_unleashed_fire_lingering_remaining;
-  else if ( leaf_name == "neighbours_within_splash" )                     fk = target_fact_leaf_kind::neighbours_within_splash;
-  else if ( leaf_name == "neighbours_within_jump" )                       fk = target_fact_leaf_kind::neighbours_within_jump;
+  else if ( leaf_name == "neighbours_within_radius" )                     fk = target_fact_leaf_kind::neighbours_within_radius;
   else
   {
     b.kind = slot_binding_kind::unresolved;   // artifact/generator mismatch, not a runtime fact
@@ -2296,14 +2297,15 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
       // cap) stopgap is DELETED (P226_45_FALLBACK_GONE) -- replaced by the SAME deterministic
       // per-target geometry the new target_fact/shape_fact leaves already compute (228-02/
       // 228-10), never a new computation. For a TARGETED multi-target action (chain_lightning,
-      // tempest, voltaic_blaze) the count is the current pick's own neighbours_within_splash
-      // (== neighbours_within_jump, both `a->radius`-parameterised, R-D); for the two SHAPED
-      // actions (crash_lightning, sundering) it is that action's own shape fact's enemies_hit.
-      // Both come from lookup_pick()/build_enemy_fact() and compute_crash_lightning_shape()/
-      // compute_sundering_shape() -- never select(), never target_list() (RNG-free either way).
-      // An unrecognised multi-target action (none exist in this registry today) or a targeted
-      // action with no stamped pick this decision falls back to the live enemy count alone,
-      // honestly labelled here as the one remaining imperfect case rather than silently guessed.
+      // tempest, voltaic_blaze) the count is the current pick's own neighbours_within_radius
+      // (OBS-03, 232-02: the always-equal splash/jump pair is now one `a->radius`-parameterised
+      // field); for the two SHAPED actions (crash_lightning, sundering) it is that action's own
+      // shape fact's enemies_hit. Both come from lookup_pick()/build_enemy_fact() and
+      // compute_crash_lightning_shape()/compute_sundering_shape() -- never select(), never
+      // target_list() (RNG-free either way). An unrecognised multi-target action (none exist in
+      // this registry today) or a targeted action with no stamped pick this decision falls back
+      // to the live enemy count alone, honestly labelled here as the one remaining imperfect case
+      // rather than silently guessed.
       const int live_enemies = s.has_active_enemies
                                     ? static_cast<int>( s.active_enemies )
                                     : static_cast<int>( p->sim->active_enemies );
@@ -2315,7 +2317,7 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
         player_t* pick       = rl_target_select::lookup_pick( a, &pick_found );
         if ( pick_found && pick != nullptr )
         {
-          geometry_count = rl_target_select::build_enemy_fact( a, pick, a->target ).neighbours_within_splash;
+          geometry_count = rl_target_select::build_enemy_fact( a, pick ).neighbours_within_radius;
         }
       }
       else if ( an == "crash_lightning" )
@@ -2858,7 +2860,7 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
             break;
           }
           const rl_target_select::enemy_fact fact =
-              rl_target_select::build_enemy_fact( b.bound_action, pick, b.bound_action->target );
+              rl_target_select::build_enemy_fact( b.bound_action, pick );
           bool matched = true;
           switch ( b.target_fact_leaf )
           {
@@ -2872,7 +2874,6 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
             case target_fact_leaf_kind::is_boss:                raw = fact.is_boss ? 1.0 : 0.0; break;
             case target_fact_leaf_kind::flame_shock_remaining:  raw = fact.flame_shock_remaining; break;
             case target_fact_leaf_kind::is_current_target:      raw = fact.is_current_target ? 1.0 : 0.0; break;
-            case target_fact_leaf_kind::is_previous_pick:       raw = fact.is_previous_pick ? 1.0 : 0.0; break;
             case target_fact_leaf_kind::actor_index:            raw = static_cast<double>( fact.actor_index ); break;
             case target_fact_leaf_kind::actor_spawn_index:      raw = static_cast<double>( fact.actor_spawn_index ); break;
             // 228-11 (D-16 full inventory): every value below already exists on enemy_fact
@@ -2887,8 +2888,7 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
             case target_fact_leaf_kind::venomfang_debuff_stacks:             raw = static_cast<double>( fact.venomfang_debuff_stacks ); break;
             case target_fact_leaf_kind::venomfang_debuff_remaining:          raw = fact.venomfang_debuff_remaining; break;
             case target_fact_leaf_kind::rune_of_unleashed_fire_lingering_remaining: raw = fact.rune_of_unleashed_fire_lingering_remaining; break;
-            case target_fact_leaf_kind::neighbours_within_splash:            raw = static_cast<double>( fact.neighbours_within_splash ); break;
-            case target_fact_leaf_kind::neighbours_within_jump:              raw = static_cast<double>( fact.neighbours_within_jump ); break;
+            case target_fact_leaf_kind::neighbours_within_radius:            raw = static_cast<double>( fact.neighbours_within_radius ); break;
             default:
               matched = false;
               break;

@@ -53,10 +53,8 @@ struct enemy_fact
   double    health_pct              = 0.0;
   bool      is_boss                 = false;
   double    flame_shock_remaining   = 0.0;    // candidate->get_dot("flame_shock", a->player)->remains() -- works on ANY enemy, not only the current target (P-5's fix point)
-  int       neighbours_within_splash = 0;     // alive enemies within THIS action's own radius of the candidate (R-D: deterministic geometry, never a target-cache read)
-  int       neighbours_within_jump   = 0;     // same formula, Chain Lightning's own radius -- see preference_chain_lightning's comment for why the two fields share one computation in this plan
+  int       neighbours_within_radius = 0;     // OBS-03/R-U: live enemies within the CALLING action's own `a->radius` (+ `combat_reach`) of the candidate -- deterministic geometry, never a target-cache read. Replaces the always-equal splash/jump neighbour-count pair this struct used to carry (OBS-01/03 landed together, tstl-sylvanas 232-02).
   bool      is_current_target       = false;  // candidate == p->target
-  bool      is_previous_pick        = false;  // candidate == a->target (the action's own previous pick -- P-4: re-checked every decision, never assumed still valid)
   size_t    actor_index             = 0;
   int       actor_spawn_index       = 0;      // STICKY_KEY is the PAIR (R-C / P228-8), never actor_index alone
 
@@ -83,10 +81,11 @@ struct enemy_fact
 // not silently skip the immunity clause by construction (R-E's guard, mirrored here).
 bool generic_filter( const action_t* a, player_t* candidate, bool harmful );
 
-// Builds the fact record for one candidate against the given resolved action. `previous_pick` is
-// the action's own current target (a->target) at call time -- passed explicitly so callers that
-// already have it (select() below) do not pay a second lookup.
-enemy_fact build_enemy_fact( const action_t* a, player_t* candidate, player_t* previous_pick );
+// Builds the fact record for one candidate against the given resolved action. OBS-01/R5-5
+// (tstl-sylvanas 232-02) dropped the `previous_pick` parameter entirely -- the sticky tie-break
+// that consumed it is gone from select() (score -> current target -> stable identity), and no
+// other field on enemy_fact ever depended on the action's own prior pick.
+enemy_fact build_enemy_fact( const action_t* a, player_t* candidate );
 
 // 228-07 (TGT-07, D-21): builds the FULL candidate set for one targeted action -- every enemy
 // `generic_filter` would pass -- as complete `enemy_fact` records, in
@@ -271,8 +270,8 @@ double preference_chain_lightning( const action_t* a, const enemy_fact& fact );
 
 // tempest: the addon's 8-yard cluster-centre rule -- most neighbours within its own resolved
 // radius (measured 8.0), tie-broken on time to die. Same formula as chain_lightning's, applied to
-// a different action's own radius -- see enemy_fact::neighbours_within_splash's comment for why
-// this plan does not split the computation.
+// a different action's own radius -- see the neighbour-count field's own comment on enemy_fact
+// (above) for why this plan does not split the computation.
 double preference_tempest( const action_t* a, const enemy_fact& fact );
 
 // Phase 230-02 (SCOR-01, D-01/D-02): the learned scorer -- a NINTH preference, same

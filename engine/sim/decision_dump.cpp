@@ -908,7 +908,7 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
         out << "{\"found\":false}";
         continue;
       }
-      const rl_target_select::enemy_fact fact = rl_target_select::build_enemy_fact( a, pick, a->target );
+      const rl_target_select::enemy_fact fact = rl_target_select::build_enemy_fact( a, pick );
       out << "{\"found\":true"
           << ",\"actor_index\":" << fact.actor_index
           << ",\"actor_spawn_index\":" << fact.actor_spawn_index
@@ -934,10 +934,8 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
           << ",\"venomfang_debuff_stacks\":" << fact.venomfang_debuff_stacks
           << ",\"venomfang_debuff_remaining\":" << fact.venomfang_debuff_remaining
           << ",\"rune_of_unleashed_fire_lingering_remaining\":" << fact.rune_of_unleashed_fire_lingering_remaining
-          << ",\"neighbours_within_splash\":" << fact.neighbours_within_splash
-          << ",\"neighbours_within_jump\":" << fact.neighbours_within_jump
+          << ",\"neighbours_within_radius\":" << fact.neighbours_within_radius
           << ",\"is_current_target\":" << ( fact.is_current_target ? "true" : "false" )
-          << ",\"is_previous_pick\":" << ( fact.is_previous_pick ? "true" : "false" )
           << "}";
     }
     out << "}";
@@ -954,7 +952,7 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
       if ( found && pick != nullptr )
       {
         const rl_target_select::enemy_fact fact =
-            rl_target_select::build_enemy_fact( chosen, pick, chosen->target );
+            rl_target_select::build_enemy_fact( chosen, pick );
         out << ",\"chosen_pick\":{\"found\":true"
             << ",\"actor_index\":" << fact.actor_index
             << ",\"actor_spawn_index\":" << fact.actor_spawn_index
@@ -988,7 +986,7 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   // candidate's absolute world position (`x_position`/`y_position`) -- read here for the first
   // time on this row because only a per-candidate record (not the single-pick summary above) has
   // a use for two candidates' positions relative to each other (chain_lightning/tempest's own
-  // neighbour count already exists as `neighbours_within_splash`/`neighbours_within_jump` below;
+  // neighbour count already exists as `neighbours_within_radius` below (OBS-03, 232-02);
   // `x`/`y` let an external reimplementation cross-check that count independently, matching the
   // hand-written fixture corpus's own planar-position schema, spec/fixtures/selector-parity/).
   if ( p->sim->threads == 1 && p->sim->profileset_map.empty() )
@@ -1038,10 +1036,8 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
             << ",\"health_pct\":" << fact.health_pct
             << ",\"is_boss\":" << ( fact.is_boss ? "true" : "false" )
             << ",\"flame_shock_remaining\":" << fact.flame_shock_remaining
-            << ",\"neighbours_within_splash\":" << fact.neighbours_within_splash
-            << ",\"neighbours_within_jump\":" << fact.neighbours_within_jump
+            << ",\"neighbours_within_radius\":" << fact.neighbours_within_radius
             << ",\"is_current_target\":" << ( fact.is_current_target ? "true" : "false" )
-            << ",\"is_previous_pick\":" << ( fact.is_previous_pick ? "true" : "false" )
             // 230-04 (SCOR-02, Task 2): the seven 228-10 gap-fill fields, previously present on
             // `targeted_picks` (the CHOSEN pick's own record, above) but missing here on the FULL
             // candidate list -- scorer_block_equivalence.py needs every one of the 22 declared

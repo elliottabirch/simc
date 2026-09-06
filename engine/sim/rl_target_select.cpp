@@ -121,7 +121,7 @@ bool generic_filter( const action_t* a, player_t* candidate, bool harmful )
   return true;
 }
 
-enemy_fact build_enemy_fact( const action_t* a, player_t* candidate, player_t* previous_pick )
+enemy_fact build_enemy_fact( const action_t* a, player_t* candidate )
 {
   enemy_fact f;
   f.candidate    = candidate;
@@ -156,17 +156,13 @@ enemy_fact build_enemy_fact( const action_t* a, player_t* candidate, player_t* p
   dot_t* fs = candidate->find_dot( "flame_shock", a->player );
   f.flame_shock_remaining = fs ? fs->remains().total_seconds() : 0.0;
 
-  // R-D: deterministic geometry, never a target-cache read -- count of alive enemies within THIS
-  // action's OWN resolved radius of the candidate (a->radius: 10.0 for chain_lightning, 8.0 for
-  // tempest -- WHICHEVER action called build_enemy_fact -- never a hardcoded chain_lightning
-  // constant, WR-06 260902/cr4 correcting this comment's prior claim that one fixed 10.0 "serves
-  // both" fields regardless of caller). Both `neighbours_within_splash` and `neighbours_within_jump`
-  // are set from the SAME `neighbours` count on purpose -- they are equal by construction today
-  // because no action currently needs the splash count and the jump count to differ, not because
-  // the two concepts are the same; a future action that DOES need them to differ would compute two
-  // separate counts here and stop assigning one to both. Both field NAMES are kept (228-11-PLAN.md
-  // declares both as schema leaves) -- only this comment moves. A shaped spell's true splash
-  // geometry is plan 228-03's, not this plan's.
+  // OBS-03/R-U (tstl-sylvanas 232-02): deterministic geometry, never a target-cache read --
+  // count of alive enemies within THIS action's OWN resolved radius of the candidate (a->radius:
+  // 10.0 for chain_lightning, 8.0 for tempest -- WHICHEVER action called build_enemy_fact -- never
+  // a hardcoded chain_lightning constant, WR-06 260902/cr4). Was previously written into TWO
+  // always-equal fields (`neighbours_within_splash`/`neighbours_within_jump`); OBS-03 collapsed
+  // them to the one field below since no action ever needed the two counts to differ. A shaped
+  // spell's true splash geometry is plan 228-03's, not this plan's.
   int neighbours = 0;
   if ( a->radius > 0.0 )
   {
@@ -178,11 +174,9 @@ enemy_fact build_enemy_fact( const action_t* a, player_t* candidate, player_t* p
         ++neighbours;
     }
   }
-  f.neighbours_within_splash = neighbours;
-  f.neighbours_within_jump   = neighbours;
+  f.neighbours_within_radius = neighbours;
 
   f.is_current_target = ( candidate == a->player->target );
-  f.is_previous_pick  = ( candidate == previous_pick );
   f.actor_index        = candidate->actor_index;
   f.actor_spawn_index  = candidate->actor_spawn_index;
 
@@ -215,15 +209,14 @@ enemy_fact build_enemy_fact( const action_t* a, player_t* candidate, player_t* p
 // 228-07 (TGT-07, D-21): the FULL candidate set for one targeted action, as complete enemy_fact
 // records -- reuses generic_filter/build_enemy_fact VERBATIM (the exact functions select() itself
 // calls below), so this can never enumerate a different candidate set than the one the preference
-// actually scores. `previous_pick` mirrors select()'s own `a->target` read (P-4: re-checked every
-// call, never cached).
+// actually scores. OBS-01 (232-02) dropped build_enemy_fact's `previous_pick` parameter entirely,
+// so there is no local to thread through here any more.
 std::vector<enemy_fact> build_candidate_facts( const action_t* a, bool harmful )
 {
   std::vector<enemy_fact> out;
-  player_t* previous = a->target;
   for ( player_t* t : a->sim->target_non_sleeping_list )
     if ( t->is_enemy() && generic_filter( a, t, harmful ) )
-      out.push_back( build_enemy_fact( a, t, previous ) );
+      out.push_back( build_enemy_fact( a, t ) );
   return out;
 }
 
@@ -235,8 +228,7 @@ namespace
 // site's own comment. NOT exposed in the header: build_enemy_fact() (above) is the one and only
 // public fact-record builder every OTHER caller (the future observation writer, 228-04 onward)
 // uses, with every field filled exactly as before this task.
-enemy_fact build_enemy_fact_for_scoring( const action_t* a, player_t* candidate, player_t* previous_pick,
-                                          preference_fn pref )
+enemy_fact build_enemy_fact_for_scoring( const action_t* a, player_t* candidate, preference_fn pref )
 {
   enemy_fact f;
   f.candidate   = candidate;
@@ -258,12 +250,10 @@ enemy_fact build_enemy_fact_for_scoring( const action_t* a, player_t* candidate,
       if ( candidate->get_player_distance( *other ) <= a->radius + other->combat_reach )
         ++neighbours;
     }
-    f.neighbours_within_splash = neighbours;
-    f.neighbours_within_jump   = neighbours;
+    f.neighbours_within_radius = neighbours;
   }
 
   f.is_current_target = ( candidate == a->player->target );
-  f.is_previous_pick  = ( candidate == previous_pick );
   f.actor_index       = candidate->actor_index;
   f.actor_spawn_index = candidate->actor_spawn_index;
   return f;
@@ -343,15 +333,14 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
     return candidates.front();
 
   // CR-03 (260902/cr4, RULING (a) -- PREFERENCE FIRST): the sticky early-return that used to
-  // live here is GONE. `previous` (the action's own prior pick, still needed for build_enemy_fact
-  // /the tie-break below) is still read, but no longer decides the pick on its own -- it is now
-  // ONLY the FIRST tie-break among candidates the preference scores EQUALLY. (2) preference,
-  // highest score wins; (3) among EQUAL scores, the action's own previous pick (`a->target`,
-  // re-checked every decision -- P-4, unchanged from the sticky clause's own discipline); (4)
-  // among still-equal, the player's CURRENT target (p->target, which may differ from the action's
-  // own previous pick); (5) final tie-break on the stable (actor_index, actor_spawn_index)
-  // identity pair, ascending -- a total order, so a run is reproducible (TGT-02 edge: ordering).
-  player_t*   previous      = a->target;
+  // live here is GONE. OBS-01/R5-5 (232-02) then removed the sticky TIE-BREAK too -- the action's
+  // own previous pick (`a->target`) is no longer read anywhere in this function, so there is no
+  // `previous` local any more. Ladder: (1) preference, highest score wins; (2) among EQUAL scores,
+  // the player's CURRENT target (p->target); (3) final tie-break on the stable
+  // (actor_index, actor_spawn_index) identity pair, ascending -- a total order, so a run is
+  // reproducible (TGT-02 edge: ordering). Consequence: an exact tie between two candidates can now
+  // flip when p->target moves for an unrelated reason (the ordering stays a total order because
+  // the identity pair is the final rung, so runs remain reproducible).
   player_t*   current_target = a->player->target;
   player_t*   best           = nullptr;
   double      best_score     = 0.0;
@@ -372,8 +361,8 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
     // instead of the lite one. This costs more per candidate than the rules path, paid ONLY when
     // a scorer is actually loaded and active (preference_for's own gate) -- the eight rule
     // preferences' own performance is completely unaffected by this branch.
-    enemy_fact fact  = ( pref == preference_scorer ) ? build_enemy_fact( a, c, previous )
-                                                      : build_enemy_fact_for_scoring( a, c, previous, pref );
+    enemy_fact fact  = ( pref == preference_scorer ) ? build_enemy_fact( a, c )
+                                                      : build_enemy_fact_for_scoring( a, c, pref );
     double     score = pref( a, fact );
 
     // 230-04 (SCOR-02, R-B): CAPTURE, never recompute -- preference_scorer's own call just above
@@ -405,23 +394,18 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
     }
     else
     {
-      // CR-03 (260902/cr4): sticky is now a TIE-BREAK, checked first among equal scores.
-      bool c_is_prev    = ( c == previous );
-      bool best_is_prev = ( best == previous );
-      if ( c_is_prev != best_is_prev )
-      {
-        better = c_is_prev;
-      }
+      // OBS-01/R5-5 (232-02): the sticky `c_is_prev`/`best_is_prev` rung that used to sit here
+      // (CR-03, 260902/cr4) is REMOVED -- the current target is now the only tie-break before the
+      // stable identity pair. A tie can flip when p->target moves for an unrelated reason; the
+      // ordering stays a total order because the identity pair below is the final rung, so runs
+      // remain reproducible.
+      bool c_is_current    = ( c == current_target );
+      bool best_is_current = ( best == current_target );
+      if ( c_is_current != best_is_current )
+        better = c_is_current;
       else
-      {
-        bool c_is_current    = ( c == current_target );
-        bool best_is_current = ( best == current_target );
-        if ( c_is_current != best_is_current )
-          better = c_is_current;
-        else
-          better = std::tie( c->actor_index, c->actor_spawn_index ) <
-                   std::tie( best->actor_index, best->actor_spawn_index );
-      }
+        better = std::tie( c->actor_index, c->actor_spawn_index ) <
+                 std::tie( best->actor_index, best->actor_spawn_index );
     }
 
     if ( better )
@@ -706,14 +690,18 @@ double preference_chain_lightning( const action_t*, const enemy_fact& fact )
   // Most neighbours within its own resolved radius (the jump distance, R-A), tie-broken on time
   // to die. The neighbour count is a DETERMINISTIC approximation of the engine's randomised chain
   // walk (sc_shaman.cpp:982-1057) -- labelled as an approximation, never a prediction of it (R-D).
-  return static_cast<double>( fact.neighbours_within_jump ) * 1.0e6 + fact.time_to_die;
+  // OBS-03 (232-02) collapsed the always-equal splash/jump pair to `neighbours_within_radius`;
+  // this function and preference_tempest below now read the SAME field and are textually
+  // identical, but stay two distinct function pointers (R-U) so RULE-02 has a distinct CL slot
+  // to replace in preference_for()'s dispatch table.
+  return static_cast<double>( fact.neighbours_within_radius ) * 1.0e6 + fact.time_to_die;
 }
 
 double preference_tempest( const action_t*, const enemy_fact& fact )
 {
   // Same formula as chain_lightning's, applied to Tempest's own resolved radius (measured 8.0) --
   // the addon's 8-yard cluster-centre rule.
-  return static_cast<double>( fact.neighbours_within_splash ) * 1.0e6 + fact.time_to_die;
+  return static_cast<double>( fact.neighbours_within_radius ) * 1.0e6 + fact.time_to_die;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -759,10 +747,8 @@ double preference_scorer( const action_t* a, const enemy_fact& fact )
   feats[ i++ ] = static_cast<float>( fact.health_pct );
   feats[ i++ ] = fact.is_boss ? 1.0f : 0.0f;
   feats[ i++ ] = static_cast<float>( fact.flame_shock_remaining );
-  feats[ i++ ] = static_cast<float>( fact.neighbours_within_splash );
-  feats[ i++ ] = static_cast<float>( fact.neighbours_within_jump );
+  feats[ i++ ] = static_cast<float>( fact.neighbours_within_radius );
   feats[ i++ ] = fact.is_current_target ? 1.0f : 0.0f;
-  feats[ i++ ] = fact.is_previous_pick ? 1.0f : 0.0f;
   feats[ i++ ] = static_cast<float>( fact.burning_core_remaining );
   feats[ i++ ] = static_cast<float>( fact.lightning_rod_stacks );
   feats[ i++ ] = static_cast<float>( fact.lightning_rod_remaining );
