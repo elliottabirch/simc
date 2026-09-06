@@ -845,6 +845,12 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // per-decision state read, before any reply/accept_cast has run) -- see rl_policy.hpp's own
     // doc comment on read_state for why decision_dump.cpp's diagnostic call must pass false.
     const rl_policy::rl_state_t state = rl_policy::read_state( p, foreground, /*is_decision_boundary=*/true );
+    // OBS-05 (232-03): stamp the PRE-decision behind-enemy predicate onto `sim`, BEFORE any
+    // accept_* call below can mutate facing -- see sim.hpp's own doc comment on this pair for
+    // why decision_dump.cpp needs this snapshot rather than recomputing from its own (POST-
+    // decision) all_enemies/player_position block.
+    sim->solver_control_has_any_enemy_behind_player_at_decision = true;
+    sim->solver_control_any_enemy_behind_player_at_decision = state.any_enemy_behind_player;
     std::chrono::nanoseconds obs_timing_ns{ 0 };
     if ( obs_timing )
     {
@@ -1339,6 +1345,8 @@ void reset_iteration( sim_t* sim )
   sim->solver_control_has_pending_wait = false;
   sim->solver_control_pending_wait_s = 0.0;
   sim->solver_control_last_reply_type.clear();
+  sim->solver_control_has_any_enemy_behind_player_at_decision = false;
+  sim->solver_control_any_enemy_behind_player_at_decision = false;
   // solver_control_seq is DELIBERATELY NOT cleared -- see the header
   // comment. Stream handles are likewise untouched.
 

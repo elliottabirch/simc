@@ -1093,6 +1093,18 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
           << ",\"is_boss\":" << ( t->is_boss() ? "true" : "false" ) << "}";
     }
     out << "]";
+    // OBS-05 (232-03): the PRE-decision snapshot of the turn action's own legality predicate --
+    // see sim.hpp's own doc comment on solver_control_(has_)any_enemy_behind_player_at_decision
+    // for why this is needed ADDITIVELY alongside all_enemies/player_position above, which stay
+    // POST-decision (unchanged) for their existing consumers (shape facts, selector_parity.py).
+    // null when absent (the FIFO transport, which never calls read_state()) -- mask.py's turn
+    // arm and legality_census.py's OBS-05 census both prefer this stamped value when present,
+    // falling back to their own live re-derivation from all_enemies/player_position otherwise.
+    if ( p->sim->solver_control_has_any_enemy_behind_player_at_decision )
+      out << ",\"any_enemy_behind_player_at_decision\":"
+          << ( p->sim->solver_control_any_enemy_behind_player_at_decision ? "true" : "false" );
+    else
+      out << ",\"any_enemy_behind_player_at_decision\":null";
   }
 
   // 228-10 Task 1 Steps 3/4/5 (D-16/D-17/TGT-05/TGT-06) -- the identity-free aggregates, the
