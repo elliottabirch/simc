@@ -293,12 +293,23 @@ double preference_lava_lash( const action_t* a, const enemy_fact& fact );
 // exists).
 double preference_voltaic_blaze( const action_t* a, const enemy_fact& fact );
 
-// chain_lightning: most neighbours within its own resolved radius (the jump distance, measured
-// 10.0, read via action_t::radius -- NEVER re-declared as a literal, R-A), tie-broken on time to
-// die. The neighbour count is a DETERMINISTIC approximation of the engine's own randomised chain
-// walk (sc_shaman.cpp:982-1057 draws sim RNG) -- labelled as an approximation, never a prediction
-// of it (R-D).
+// chain_lightning (RULE-02, 232-06, R-Z): reads the greedy hop-count stash `select()` computes
+// once per decision (compute_chain_hop_counts, rl_target_select.cpp) BEFORE this function is ever
+// called -- the hop count is a REAL simulation of the engine's own chain walk over already-resolved
+// geometry (pure, deterministic -- never a call into sc_shaman.cpp's own randomised chain resolver,
+// FORK-03), tie-broken on time to die. Falls back to the retired neighbour-count approximation,
+// visibly (chain_hop_fallback_used(), below), only if the stash carries no entry for this exact
+// (action, candidate, decision) -- see this function's own body for when that can happen.
 double preference_chain_lightning( const action_t* a, const enemy_fact& fact );
+
+// RULE-02 (232-06, R-Z): true iff, for `resolved`'s CURRENT decision, preference_chain_lightning
+// (above) had to fall back to the plain neighbour-count expression because the hop-count stash
+// carried no entry for the candidate it was asked to score. Read by decision_dump.cpp (232-06 Task
+// 3) so a fallback is visible on the dump row, never silent -- a silent fallback would look like a
+// rule disagreement in the parity join (T-232-2x). False when no stash entry exists at all for
+// `resolved` this decision (the SAME has_stamp/stamp==current staleness guard lookup_pick and its
+// siblings already use).
+bool chain_hop_fallback_used( const action_t* resolved );
 
 // tempest: the addon's 8-yard cluster-centre rule -- most neighbours within its own resolved
 // radius (measured 8.0), tie-broken on time to die. Same formula as chain_lightning's, applied to

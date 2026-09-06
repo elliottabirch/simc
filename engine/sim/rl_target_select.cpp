@@ -20,6 +20,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
@@ -97,6 +98,23 @@ struct target_fact_snapshot_slot
   bool          has_stamp             = false;
 };
 std::unordered_map<const action_t*, target_fact_snapshot_slot> g_target_fact_snapshot_table;
+
+// RULE-02 (232-06, R-Z): the per-decision Chain Lightning hop-count stash. `select()` fills this
+// ONCE per decision, before the scoring loop calls `preference_chain_lightning` once per candidate
+// (preference_fn is one-candidate-at-a-time by design -- the geometry must be precomputed and
+// stashed here for that function to read). Keyed on the resolved action_t* like g_pick_table /
+// g_candidate_block_table / g_target_fact_snapshot_table above; `used_fallback` is reset to false
+// every time this action's slot is (re)computed and set true the instant
+// `preference_chain_lightning` cannot find an entry for the candidate it was asked to score -- read
+// back by `chain_hop_fallback_used()` so a fallback is visible on the dump row, never silent.
+struct chain_hop_slot
+{
+  std::unordered_map<const player_t*, int> hop_counts;
+  std::uint64_t stamp         = 0;
+  bool          has_stamp     = false;
+  bool          used_fallback = false;
+};
+std::unordered_map<const action_t*, chain_hop_slot> g_chain_hop_stash;
 
 // D-14's re-resolution ladder counters -- one fight's totals (WR-11, 260902/cr4: cleared every
 // iteration by reset( sim ) below, called from sim_t::reset()).
@@ -281,6 +299,66 @@ enemy_fact build_enemy_fact_for_scoring( const action_t* a, player_t* candidate,
   f.actor_spawn_index = candidate->actor_spawn_index;
   return f;
 }
+
+// RULE-02 (232-06, R-Z): the greedy Chain Lightning hop simulation, ported from the addon's
+// enhancementShamanTargeting.ts:933-969 hop loop as pure geometry. For EACH candidate in
+// `candidates` treated as the chain's START, greedily walks to the nearest not-yet-hit candidate --
+// from the SAME already-filtered `candidates` set select() just built (D-20 forbids a third filter
+// loop: this never re-scans target_non_sleeping_list, re-calls generic_filter, or calls
+// build_candidate_facts() a second time) -- within `a`'s own resolved jump radius
+// (`a->radius + other->combat_reach`, the SAME inequality convention build_enemy_fact's own
+// neighbours_within_radius above already uses), until `cap` (the action's own resolved `a->aoe`,
+// 228-11/Q19 -- never a hardcoded literal) candidates have been hit including the start, or no
+// further hop is available. Fills `out` keyed on each START candidate; `out` is a plain local the
+// caller stashes, never a module global itself.
+//
+// R-Z's algebra trap, named here rather than merely in this function's caller: the addon's
+// SEPARATE, uninvolved PRODUCTION hop walk (the one this ports is the addon's PURE RULES walk,
+// enhancementTargetRules.ts) uses `dist - br <= R`; this walk uses `dist <= R + other_reach` --
+// equal only when every actor shares the same reach/br value. 232-05's parity harness sidesteps the
+// difference with uniform-reach fixtures.
+//
+// NEVER calls the engine's own chain-resolution helper in sc_shaman.cpp -- that helper draws from
+// the sim's random number stream (FORK-03's own fix exists to keep a read-only selector path from
+// ever perturbing that stream); this walk reads only already-resolved positions and combat_reach,
+// so it is provably
+// deterministic geometry, not a prediction of the engine's own randomised chain resolution.
+void compute_chain_hop_counts( const action_t* a, const std::vector<player_t*>& candidates,
+                                std::unordered_map<const player_t*, int>& out )
+{
+  const int cap = a->aoe > 0 ? a->aoe : 1;
+  std::vector<bool> hit( candidates.size(), false );
+  for ( std::size_t start_index = 0; start_index < candidates.size(); ++start_index )
+  {
+    std::fill( hit.begin(), hit.end(), false );
+    hit[ start_index ]    = true;
+    player_t* current     = candidates[ start_index ];
+    int       hop_count   = 1;
+    while ( hop_count < cap )
+    {
+      int    nearest_index = -1;
+      double nearest_dist  = std::numeric_limits<double>::max();
+      for ( std::size_t candidate_index = 0; candidate_index < candidates.size(); ++candidate_index )
+      {
+        if ( hit[ candidate_index ] )
+          continue;
+        player_t* other = candidates[ candidate_index ];
+        double    dist  = current->get_player_distance( *other );
+        if ( dist <= a->radius + other->combat_reach && dist < nearest_dist )
+        {
+          nearest_dist  = dist;
+          nearest_index = static_cast<int>( candidate_index );
+        }
+      }
+      if ( nearest_index < 0 )
+        break;
+      hit[ static_cast<std::size_t>( nearest_index ) ] = true;
+      current   = candidates[ static_cast<std::size_t>( nearest_index ) ];
+      ++hop_count;
+    }
+    out[ candidates[ start_index ] ] = hop_count;
+  }
+}
 } // anonymous namespace
 
 player_t* select( action_t* a, bool harmful, preference_fn pref )
@@ -354,6 +432,21 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
   // block recorded, never silently skipped.
   if ( candidates.size() == 1 && pref != preference_scorer )
     return candidates.front();
+
+  // RULE-02 (232-06, R-Z): compute the Chain Lightning hop-count stash ONCE per decision, HERE --
+  // before the scoring loop below calls `pref()` once per candidate. `preference_chain_lightning`
+  // cannot see the other candidates itself (`preference_fn` is one-candidate-at-a-time by design),
+  // so the geometry must be precomputed and stashed for it to read. Reused, not re-derived: this
+  // walks the SAME `candidates` vector the generic-filter loop above already built (D-20).
+  if ( pref == preference_chain_lightning )
+  {
+    chain_hop_slot& hop_slot = g_chain_hop_stash[ a ];
+    hop_slot.hop_counts.clear();
+    compute_chain_hop_counts( a, candidates, hop_slot.hop_counts );
+    hop_slot.stamp         = current_decision_stamp( a->player );
+    hop_slot.has_stamp     = true;
+    hop_slot.used_fallback = false;
+  }
 
   // CR-03 (260902/cr4, RULING (a) -- PREFERENCE FIRST): the sticky early-return that used to
   // live here is GONE. OBS-01/R5-5 (232-02) then removed the sticky TIE-BREAK too -- the action's
@@ -643,15 +736,16 @@ void reset( sim_t* )
 {
   // WR-11 (260902/cr4): called from sim_t::reset() (sim.cpp), once per iteration -- clears every
   // module global (the original three, plus CR-04's deadlock counter added later the same task,
-  // plus 230-04's candidate block table, plus 232-04's target-fact snapshot table) so a stale
-  // pick, stamp or count from a PRIOR iteration can never leak into the next one. `sim` itself is
-  // unused (the tables are keyed on `player_t*`, not sim identity, per this module's own
-  // single-sim/single-thread precondition) but is taken by pointer to mirror
-  // raid_event_t::reset( sim )'s own signature at the call site.
+  // plus 230-04's candidate block table, plus 232-04's target-fact snapshot table, plus 232-06's
+  // Chain Lightning hop-count stash) so a stale pick, stamp or count from a PRIOR iteration can
+  // never leak into the next one. `sim` itself is unused (the tables are keyed on `player_t*`, not
+  // sim identity, per this module's own single-sim/single-thread precondition) but is taken by
+  // pointer to mirror raid_event_t::reset( sim )'s own signature at the call site.
   g_decision_stamp.clear();
   g_pick_table.clear();
   g_candidate_block_table.clear();  // 230-04
   g_target_fact_snapshot_table.clear();  // 232-04 (OBS-02, R-T)
+  g_chain_hop_stash.clear();  // 232-06 (RULE-02, R-Z)
   g_reresolution_counts = reresolution_counts{};
   g_every_targeted_action_illegal = 0;  // CR-04 (260902/cr4)
 }
@@ -773,16 +867,48 @@ double preference_voltaic_blaze( const action_t*, const enemy_fact& fact )
   return ( fact.flame_shock_remaining <= 0.0 ? 1.0e9 : 0.0 ) + fact.time_to_die;
 }
 
-double preference_chain_lightning( const action_t*, const enemy_fact& fact )
+double preference_chain_lightning( const action_t* a, const enemy_fact& fact )
 {
-  // Most neighbours within its own resolved radius (the jump distance, R-A), tie-broken on time
-  // to die. The neighbour count is a DETERMINISTIC approximation of the engine's randomised chain
-  // walk (sc_shaman.cpp:982-1057) -- labelled as an approximation, never a prediction of it (R-D).
-  // OBS-03 (232-02) collapsed the always-equal splash/jump pair to `neighbours_within_radius`;
-  // this function and preference_tempest below now read the SAME field and are textually
-  // identical, but stay two distinct function pointers (R-U) so RULE-02 has a distinct CL slot
-  // to replace in preference_for()'s dispatch table.
+  // RULE-02 (232-06, R-Z): reads the greedy hop-count stash `select()` computed just before the
+  // scoring loop that calls this function (compute_chain_hop_counts, above), keyed on `a` and this
+  // decision's stamp -- REPLACES the retired deterministic neighbour-count approximation this
+  // function used before this plan. `preference_tempest` below keeps that retired approximation
+  // (R5-20: the CL chain simulation is the FORK's own selector pick; the rules-module/tempest
+  // neighbour-count pick stays offline/parity-only for Tempest) -- the two stay two distinct
+  // function pointers (R-U) so this substitution touches exactly one dispatch slot.
+  auto slot_it = g_chain_hop_stash.find( a );
+  if ( slot_it != g_chain_hop_stash.end() && slot_it->second.has_stamp &&
+       slot_it->second.stamp == current_decision_stamp( a->player ) )
+  {
+    auto hop_it = slot_it->second.hop_counts.find( fact.candidate );
+    if ( hop_it != slot_it->second.hop_counts.end() )
+      return static_cast<double>( hop_it->second ) * 1.0e6 + fact.time_to_die;
+    // Defensive (should never occur when select() drove this call -- fact.candidate came from the
+    // SAME `candidates` vector compute_chain_hop_counts just walked): the stash exists and is
+    // current for `a`, but carries no entry for THIS candidate specifically. Flag the fallback
+    // visibly rather than silently reusing the retired approximation below.
+    slot_it->second.used_fallback = true;
+  }
+  // Fallback (visible on the dump row via chain_hop_fallback_used(), 232-06 Task 3): the
+  // deterministic neighbour-count approximation this function used before RULE-02 -- labelled per
+  // R-D, never a prediction of the engine's own randomised chain walk (sc_shaman.cpp:982-1057).
+  // Reached when no stash entry exists for `a` at all this decision -- e.g. a caller invoking this
+  // function directly rather than through select()'s own pref==preference_chain_lightning gate.
   return static_cast<double>( fact.neighbours_within_radius ) * 1.0e6 + fact.time_to_die;
+}
+
+// RULE-02 (232-06, R-Z): see this function's own declaration (rl_target_select.hpp) for the
+// staleness-guard contract -- mirrors lookup_pick's has_stamp/stamp==current discipline exactly.
+bool chain_hop_fallback_used( const action_t* resolved )
+{
+  auto it = g_chain_hop_stash.find( resolved );
+  if ( it == g_chain_hop_stash.end() || !it->second.has_stamp )
+    return false;
+  auto stamp_it = g_decision_stamp.find( resolved->player );
+  std::uint64_t current_stamp = ( stamp_it == g_decision_stamp.end() ) ? 0 : stamp_it->second;
+  if ( it->second.stamp != current_stamp )
+    return false;
+  return it->second.used_fallback;
 }
 
 double preference_tempest( const action_t*, const enemy_fact& fact )
