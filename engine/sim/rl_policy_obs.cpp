@@ -2892,7 +2892,19 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
           player_t* pick  = rl_target_select::lookup_pick( b.bound_action, &found );
           if ( b.target_fact_leaf == target_fact_leaf_kind::found )
           {
-            raw = found ? 1.0 : 0.0;
+            // 232-09 (MERGE-04/Q34, R-I): `lookup_pick`'s own `*out_found` means "this decision
+            // has a FRESH cache entry" -- true whenever `fill_pick()` ran this decision,
+            // REGARDLESS of whether `select()` actually found a candidate (a genuine no-candidate
+            // result still stores `pick_slot{nullptr, stamp, true}` -- `fill_pick`'s own comment,
+            // rl_target_select.cpp:573-591 -- `has_stamp` is unconditional). The dump-side
+            // `targeted_picks` block (decision_dump.cpp) already ANDs this with `pick != nullptr`;
+            // this leaf did not, so it read TRUE (a fresh, but null, pick) at every decision where
+            // a targeted action's own candidate set was genuinely empty -- measured as the
+            // 28-of-528 (this plan's re-measurement: 21-of-552) obs-vs-dump `found` disagreement,
+            // confined to short-range tokens inside an immunity window. Matching the dump side's
+            // own convention closes it: "found" means a VALID pick exists, not merely that a pick
+            // ATTEMPT was made this decision.
+            raw = ( found && pick != nullptr ) ? 1.0 : 0.0;
             status = lookup_status::present;
             break;
           }
