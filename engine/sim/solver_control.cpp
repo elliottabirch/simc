@@ -168,6 +168,29 @@ action_t* accept_cast( player_t* p, const std::string& action_name, std::uint64_
   return resolved;
 }
 
+// FORK-04, second half (owner ruling Q69, 232-07-PLAN.md Task 1): closes the 1ms-wide
+// fight-end-tie band WR-01 (260902/cr2) measured in accept_wait()'s CR-04 re-floor -- see that
+// function's own comment above the re-floor for the full derivation (at R=50ms remaining,
+// `0.050 - 0.001 = 0.049` re-floors to exactly `0.05`, landing the Player-Ready event back on the
+// tie the first shave removed). `accept_turn()` below has the SAME exposure through a different
+// route: it requests a FIXED `RL_WAIT_FLOOR_SECONDS` unconditionally, with no prior fight-end
+// clamp at all, so it can land exactly on the tie whenever the fight has close to that much time
+// left. One shared shave closes both: recompute the hard bound fresh (seconds remaining to
+// `expected_iteration_time`, minus the epsilon) and clamp `sec` down to it only when the bound is
+// POSITIVE and `sec` exceeds it. When the bound is zero or negative, leave `sec` alone -- the
+// wait/turn then deliberately lands PAST fight end, which is already correct behaviour (the
+// engine re-decides at the next boundary regardless, or the iteration simply ends) and must not
+// change; a seeded-defect twin (`scripts/rl/probes/fight_end_shave.py`) is red without this
+// function reddening the pre-fix tie and green with it.
+void reshave_fight_end_tie( sim_t* sim, double& sec )
+{
+  const double hard_bound =
+      ( sim->expected_iteration_time - sim->current_time() ).total_seconds() -
+      WAIT_END_OF_FIGHT_EPSILON_SECONDS;
+  if ( hard_bound > 0.0 && sec > hard_bound )
+    sec = hard_bound;
+}
+
 // Shared 'wait' epilogue (210-05R Task 1). The et != FOREGROUND refusal is
 // kept here -- not dropped as "redundant now that the in-process mask
 // already forbids a wait pick off-foreground" -- as defence-in-depth: a
@@ -234,11 +257,11 @@ void accept_wait( sim_t* sim, execute_type et, double sec, const std::string& co
   // NOT hold across every `sec` -- it holds everywhere except a 1ms-wide
   // band at R=50ms, where the outcome is the same harmless-in-practice
   // loss (one re-decision skipped in the fight's final 50ms) the pre-fix
-  // bug caused at every R, just far rarer. Re-shaving after the re-floor
-  // would close this exactly (carried as a todo:
-  // 2026-09-02-fork04-fight-end-reshave-after-floor.md) -- NOT done here;
-  // this is a comment-only correction, the code below this point is
-  // byte-identical to before it.
+  // bug caused at every R, just far rarer. FORK-04, second half (owner
+  // ruling Q69, 232-07-PLAN.md): re-shaving after the re-floor closes this
+  // exactly -- see `reshave_fight_end_tie()` above and its call site
+  // immediately after the re-floor below. Everything below this point up
+  // to that call is otherwise byte-identical to before this fix.
   const double fight_remaining = std::max(
       ( sim->expected_iteration_time - sim->current_time() ).total_seconds() -
           WAIT_END_OF_FIGHT_EPSILON_SECONDS,
@@ -268,6 +291,12 @@ void accept_wait( sim_t* sim, execute_type et, double sec, const std::string& co
   // is the one outcome the floor exists to forbid.
   if ( sec < RL_WAIT_FLOOR_SECONDS )
     sec = RL_WAIT_FLOOR_SECONDS;
+
+  // FORK-04, second half (Q69/232-07): the re-floor immediately above can put `sec` back
+  // exactly onto the fight-end tie the shave earlier in this function removed -- re-apply it
+  // now, after the floor, via the shared helper. See `reshave_fight_end_tie()`'s own doc
+  // comment for the full derivation and the non-positive-bound (deliberately unchanged) case.
+  reshave_fight_end_tie( sim, sec );
 
   sim->solver_control_pending_wait_s = sec;
   sim->solver_control_has_pending_wait = true;
@@ -342,7 +371,15 @@ void accept_turn( sim_t* sim, execute_type et, player_t* p, const std::string& c
   // SAME existing pending-wait pair `accept_wait` sets, at the SAME floor value -- never a
   // hidden one-shot-per-decision flag the Python mirror (`mask.py`) cannot see (Q232-6 is the
   // owner's route to a free-turn alternative; not taken here).
-  sim->solver_control_pending_wait_s = RL_WAIT_FLOOR_SECONDS;
+  //
+  // FORK-04, second half (Q69/232-07): unlike accept_wait(), this function never computes a
+  // fight-end bound at all before requesting the fixed RL_WAIT_FLOOR_SECONDS -- so it has the
+  // SAME event-ordering exposure accept_wait()'s re-floor does, through a different route: a
+  // turn requested when almost exactly RL_WAIT_FLOOR_SECONDS remains in the fight can land
+  // EXACTLY on the fight-end tie with `sim_end_event_t`. Apply the same shared shave.
+  double turn_sec = RL_WAIT_FLOOR_SECONDS;
+  reshave_fight_end_tie( sim, turn_sec );
+  sim->solver_control_pending_wait_s = turn_sec;
   sim->solver_control_has_pending_wait = true;
 }
 } // anonymous namespace
