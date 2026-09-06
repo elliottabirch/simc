@@ -310,30 +310,31 @@ chain_geometry resolve_thorims_branch_geometry( const action_t* resolved, prefer
   {
     geo.cap = source->aoe > 0 ? source->aoe : 1;
 
-    // ME-06/R-AK (232-13): the hop cap follows the ENGINE's own resolved `aoe`, MEASURED rather
-    // than assumed to move with the Chaining Storms talent. Receipt (232-13-SUMMARY.md): Chain
-    // Lightning's talent spell (id 188443) declares "Chain Targets: 3" in its own effect data
-    // (`spell_query=spell.id=188443`, this checkout); Chaining Storms (id 334308) declares a
-    // SEPARATE "Add Flat Modifier: Spell Chain Targets +2" effect naming Chain Lightning as an
-    // affected spell, but `sc_shaman.cpp` never merges it in -- the talent is referenced in
-    // exactly two places in that file (the `player_talent_t` declaration at :1758, the report
-    // name table at :11512), neither an `apply_affecting_effects`-style call touching
-    // `chain_lightning_t`'s own aoe/radius -- and `action_t::aoe` (action.cpp:948-951) is set
-    // ONCE, at construction, from the talent spell's own raw `chain_target()`. So this fork's
-    // Chain Lightning `aoe` is 3 REGARDLESS of whether Chaining Storms is talented. The addon's
-    // `hasTalentChainingStorms ? 5 : 3` (enhancementShamanContext.ts) is therefore a real
-    // divergence from the engine, not a reconciled pair -- recorded in the addon-parity todo
-    // (task 2); the engine is NOT changed here (R-AK: the engine is the truth the agent trains
-    // under). Asserted, not merely assumed: refuse loudly on any cap other than the measured 3,
-    // so a future spell-data or code change that DOES wire Chaining Storms in is caught here
-    // rather than silently drifting the addon further from the trained cap.
-    if ( geo.cap != 3 )
+    // ME-06/R-AK (232-13): the hop cap follows the ENGINE's own resolved `aoe`. MEASURED this
+    // session on the standard `mid2-stormbringer.simc` build (Chaining Storms talented, entryId
+    // 135254 present in `spec_talents`): `aoe` resolves to 5, matching the addon's talented cap
+    // (`hasTalentChainingStorms ? 5 : 3`, enhancementShamanContext.ts) -- NOT the 3 a static read
+    // of Chain Lightning's own talent spell (id 188443, "Chain Targets: 3") would suggest absent
+    // any generic effect-merge in `sc_shaman.cpp` (which references Chaining Storms, id 334308,
+    // in exactly two places -- neither an `apply_affecting_effects`-style call -- so the +2 must
+    // be applied by some OTHER, more generic DBC-level mechanism this session did not trace).
+    // Attempts to reproduce a WITHOUT-Chaining-Storms baseline by re-asserting a stripped
+    // `spec_talents=` line LATER in the same profile (including an entirely EMPTY one) did NOT
+    // change either this cap or the unrelated, independently-observable
+    // `has_talent_thorims_invocation` dump field -- i.e. that override methodology itself does
+    // not take effect for an `input=`-included profile in this build, so this session could NOT
+    // conclusively measure the WITHOUT-talent case. Given that, this refuses on anything OTHER
+    // than the two values either side of the addon's own ternary ({3, 5}) rather than asserting
+    // a single unconfirmed number -- protects against a genuinely wrong cap (e.g. a future
+    // spell-data change moving it to some third value) without overclaiming a with/without-talent
+    // causal link this session did not establish. See the addon-parity todo for the open
+    // question and how to close it properly (a real in-game or clean-profile measurement).
+    if ( geo.cap != 3 && geo.cap != 5 )
     {
       throw sc_runtime_error( fmt::format(
           "rl_target_select::resolve_thorims_branch_geometry: chain_lightning's resolved aoe cap "
-          "is {} -- expected the measured constant 3 (Chaining Storms is not wired into this "
-          "fork's Chain Lightning aoe, per the receipt in 232-13-SUMMARY.md); refusing rather "
-          "than silently training on an unmeasured cap",
+          "is {} -- expected 3 or 5 (the addon's own hasTalentChainingStorms ? 5 : 3 ternary); "
+          "refusing rather than silently training on an unmeasured cap",
           geo.cap ) );
     }
   }
