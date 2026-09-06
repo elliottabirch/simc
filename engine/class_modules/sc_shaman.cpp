@@ -34,6 +34,7 @@
 #include "sim/proc.hpp"
 #include "sim/proc_rng.hpp"
 #include "sim/rl_target_select.hpp"
+#include "sim/shaman_rl_facts.hpp"
 #include "util/string_view.hpp"
 
 #include <cassert>
@@ -15024,6 +15025,30 @@ shaman_t::pets_t::pets_t( shaman_t* s ) :
 }
 
 }  // namespace
+
+// 232-06 (RULE-01, R-AC/P232-29): the narrow accessor `engine/sim/shaman_rl_facts.hpp` declares --
+// see that header's own doc comment for why it must live here, define nothing beyond this one
+// function, and name no class or buff type. Mirrors `trigger_thorims_invocation`'s own
+// `ti_trigger` comparison (sc_shaman.cpp:12962-12988, above -- inside the anonymous namespace this
+// definition must sit OUTSIDE of, since a qualified `rl_target_select::` definition is only
+// well-formed at a scope that actually encloses that namespace) without re-deriving "armed" a
+// second way. Resolves the player to the shaman type only when it really is one -- a non-shaman
+// actor (an enemy, a pet, any other class) returns `none` rather than undefined behaviour from a
+// bad cast.
+rl_target_select::thorims_primed_kind rl_target_select::shaman_thorims_primed_kind( const player_t* p )
+{
+  if ( !p || p->type != SHAMAN )
+    return thorims_primed_kind::none;
+
+  const shaman_t* s = debug_cast<const shaman_t*>( p );
+  if ( !s->action.ti_trigger )
+    return thorims_primed_kind::none;
+  if ( s->action.ti_trigger == s->action.lightning_bolt_ti )
+    return thorims_primed_kind::lightning_bolt;
+  if ( s->action.ti_trigger == s->action.chain_lightning_ti )
+    return thorims_primed_kind::chain_lightning;
+  return thorims_primed_kind::none;
+}
 
 const module_t* module_t::shaman()
 {

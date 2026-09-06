@@ -156,6 +156,7 @@ sim/rl_policy.hpp
 sim/rl_policy_constants.h
 sim/rl_target_select.hpp
 sim/rl_translog.hpp
+sim/shaman_rl_facts.hpp
 sim/expressions.hpp
 sim/gain.hpp
 sim/iteration_data_entry.hpp
