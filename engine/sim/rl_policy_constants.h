@@ -99,12 +99,12 @@ struct rl_talent_gate
 inline constexpr const char* RL_REGISTRY_ID = "enhancement";
 inline constexpr const char* RL_ACTOR_NAME = "MID2_Shaman_Enhancement_Stormbringer";
 inline constexpr int RL_ENCODER_VERSION = 2;
-inline constexpr std::size_t RL_OBS_DIM = 340;
+inline constexpr std::size_t RL_OBS_DIM = 324;
 inline constexpr std::size_t RL_ACTION_DIM = 20;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
-inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v2:8516938a6d2796db7c84c6d44294612aa71ac5c8f458384cdf7cd4dc848a5878";
+inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v2:68464ddc41578a85e25d9c99a0a44424461897d693c60ca031dd7da2a7e54203";
 inline constexpr const char* RL_MASK_RULES_SHA = "3f930294d36b217dca01fc51600c0da9d0568e20152fb53c588b6e8ddccf7662";
 inline constexpr const char* RL_ACTION_SPACE_SHA = "b9c219883e8ea75c0e9e04d2ecb74c04bc8682756d2b90435f5c964e1732f89a";
 
@@ -185,10 +185,8 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "target_facts.chain_lightning.venomfang_debuff_stacks",
   "target_facts.chain_lightning.venomfang_debuff_remaining",
   "target_facts.chain_lightning.rune_of_unleashed_fire_lingering_remaining",
-  "target_facts.chain_lightning.neighbours_within_splash",
-  "target_facts.chain_lightning.neighbours_within_jump",
+  "target_facts.chain_lightning.neighbours_within_radius",
   "target_facts.chain_lightning.is_current_target",
-  "target_facts.chain_lightning.is_previous_pick",
   "target_facts.lava_lash.found",
   "target_facts.lava_lash.time_to_die",
   "target_facts.lava_lash.distance",
@@ -207,10 +205,8 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "target_facts.lava_lash.venomfang_debuff_stacks",
   "target_facts.lava_lash.venomfang_debuff_remaining",
   "target_facts.lava_lash.rune_of_unleashed_fire_lingering_remaining",
-  "target_facts.lava_lash.neighbours_within_splash",
-  "target_facts.lava_lash.neighbours_within_jump",
+  "target_facts.lava_lash.neighbours_within_radius",
   "target_facts.lava_lash.is_current_target",
-  "target_facts.lava_lash.is_previous_pick",
   "target_facts.lightning_bolt.found",
   "target_facts.lightning_bolt.time_to_die",
   "target_facts.lightning_bolt.distance",
@@ -229,10 +225,8 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "target_facts.lightning_bolt.venomfang_debuff_stacks",
   "target_facts.lightning_bolt.venomfang_debuff_remaining",
   "target_facts.lightning_bolt.rune_of_unleashed_fire_lingering_remaining",
-  "target_facts.lightning_bolt.neighbours_within_splash",
-  "target_facts.lightning_bolt.neighbours_within_jump",
+  "target_facts.lightning_bolt.neighbours_within_radius",
   "target_facts.lightning_bolt.is_current_target",
-  "target_facts.lightning_bolt.is_previous_pick",
   "target_facts.primordial_storm.found",
   "target_facts.primordial_storm.time_to_die",
   "target_facts.primordial_storm.distance",
@@ -251,10 +245,8 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "target_facts.primordial_storm.venomfang_debuff_stacks",
   "target_facts.primordial_storm.venomfang_debuff_remaining",
   "target_facts.primordial_storm.rune_of_unleashed_fire_lingering_remaining",
-  "target_facts.primordial_storm.neighbours_within_splash",
-  "target_facts.primordial_storm.neighbours_within_jump",
+  "target_facts.primordial_storm.neighbours_within_radius",
   "target_facts.primordial_storm.is_current_target",
-  "target_facts.primordial_storm.is_previous_pick",
   "target_facts.stormstrike.found",
   "target_facts.stormstrike.time_to_die",
   "target_facts.stormstrike.distance",
@@ -273,10 +265,8 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "target_facts.stormstrike.venomfang_debuff_stacks",
   "target_facts.stormstrike.venomfang_debuff_remaining",
   "target_facts.stormstrike.rune_of_unleashed_fire_lingering_remaining",
-  "target_facts.stormstrike.neighbours_within_splash",
-  "target_facts.stormstrike.neighbours_within_jump",
+  "target_facts.stormstrike.neighbours_within_radius",
   "target_facts.stormstrike.is_current_target",
-  "target_facts.stormstrike.is_previous_pick",
   "target_facts.tempest.found",
   "target_facts.tempest.time_to_die",
   "target_facts.tempest.distance",
@@ -295,10 +285,8 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "target_facts.tempest.venomfang_debuff_stacks",
   "target_facts.tempest.venomfang_debuff_remaining",
   "target_facts.tempest.rune_of_unleashed_fire_lingering_remaining",
-  "target_facts.tempest.neighbours_within_splash",
-  "target_facts.tempest.neighbours_within_jump",
+  "target_facts.tempest.neighbours_within_radius",
   "target_facts.tempest.is_current_target",
-  "target_facts.tempest.is_previous_pick",
   "target_facts.voltaic_blaze.found",
   "target_facts.voltaic_blaze.time_to_die",
   "target_facts.voltaic_blaze.distance",
@@ -317,10 +305,8 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "target_facts.voltaic_blaze.venomfang_debuff_stacks",
   "target_facts.voltaic_blaze.venomfang_debuff_remaining",
   "target_facts.voltaic_blaze.rune_of_unleashed_fire_lingering_remaining",
-  "target_facts.voltaic_blaze.neighbours_within_splash",
-  "target_facts.voltaic_blaze.neighbours_within_jump",
+  "target_facts.voltaic_blaze.neighbours_within_radius",
   "target_facts.voltaic_blaze.is_current_target",
-  "target_facts.voltaic_blaze.is_previous_pick",
   "target_facts.windstrike.found",
   "target_facts.windstrike.time_to_die",
   "target_facts.windstrike.distance",
@@ -339,10 +325,8 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "target_facts.windstrike.venomfang_debuff_stacks",
   "target_facts.windstrike.venomfang_debuff_remaining",
   "target_facts.windstrike.rune_of_unleashed_fire_lingering_remaining",
-  "target_facts.windstrike.neighbours_within_splash",
-  "target_facts.windstrike.neighbours_within_jump",
+  "target_facts.windstrike.neighbours_within_radius",
   "target_facts.windstrike.is_current_target",
-  "target_facts.windstrike.is_previous_pick",
   "shapes.crash_lightning.enemies_hit",
   "shapes.crash_lightning.summed_remaining_life",
   "shapes.crash_lightning.long_lived_count",
@@ -653,10 +637,8 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_0[] = {
     { "venomfang_debuff_stacks", rl_kind::k_int, 0.0, true, 8.0, false, 1.0, nullptr, 0, false },
     { "venomfang_debuff_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
     { "rune_of_unleashed_fire_lingering_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
-    { "neighbours_within_splash", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
-    { "neighbours_within_jump", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "is_previous_pick", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_1[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -677,10 +659,8 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_1[] = {
     { "venomfang_debuff_stacks", rl_kind::k_int, 0.0, true, 8.0, false, 1.0, nullptr, 0, false },
     { "venomfang_debuff_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
     { "rune_of_unleashed_fire_lingering_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
-    { "neighbours_within_splash", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
-    { "neighbours_within_jump", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "is_previous_pick", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_2[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -701,10 +681,8 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_2[] = {
     { "venomfang_debuff_stacks", rl_kind::k_int, 0.0, true, 8.0, false, 1.0, nullptr, 0, false },
     { "venomfang_debuff_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
     { "rune_of_unleashed_fire_lingering_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
-    { "neighbours_within_splash", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
-    { "neighbours_within_jump", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "is_previous_pick", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_3[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -725,10 +703,8 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_3[] = {
     { "venomfang_debuff_stacks", rl_kind::k_int, 0.0, true, 8.0, false, 1.0, nullptr, 0, false },
     { "venomfang_debuff_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
     { "rune_of_unleashed_fire_lingering_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
-    { "neighbours_within_splash", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
-    { "neighbours_within_jump", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "is_previous_pick", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_4[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -749,10 +725,8 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_4[] = {
     { "venomfang_debuff_stacks", rl_kind::k_int, 0.0, true, 8.0, false, 1.0, nullptr, 0, false },
     { "venomfang_debuff_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
     { "rune_of_unleashed_fire_lingering_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
-    { "neighbours_within_splash", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
-    { "neighbours_within_jump", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "is_previous_pick", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_5[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -773,10 +747,8 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_5[] = {
     { "venomfang_debuff_stacks", rl_kind::k_int, 0.0, true, 8.0, false, 1.0, nullptr, 0, false },
     { "venomfang_debuff_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
     { "rune_of_unleashed_fire_lingering_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
-    { "neighbours_within_splash", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
-    { "neighbours_within_jump", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "is_previous_pick", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_6[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -797,10 +769,8 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_6[] = {
     { "venomfang_debuff_stacks", rl_kind::k_int, 0.0, true, 8.0, false, 1.0, nullptr, 0, false },
     { "venomfang_debuff_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
     { "rune_of_unleashed_fire_lingering_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
-    { "neighbours_within_splash", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
-    { "neighbours_within_jump", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "is_previous_pick", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_7[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -821,20 +791,18 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_7[] = {
     { "venomfang_debuff_stacks", rl_kind::k_int, 0.0, true, 8.0, false, 1.0, nullptr, 0, false },
     { "venomfang_debuff_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
     { "rune_of_unleashed_fire_lingering_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
-    { "neighbours_within_splash", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
-    { "neighbours_within_jump", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "is_previous_pick", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_obs_member RL_OBS_FAMILY_TARGET_FACTS_MEMBERS[] = {
-  { "chain_lightning", "chain_lightning", RL_OBS_FAMILY_TARGET_FACTS_LEAVES_0, 22 },
-  { "lava_lash", "lava_lash", RL_OBS_FAMILY_TARGET_FACTS_LEAVES_1, 22 },
-  { "lightning_bolt", "lightning_bolt", RL_OBS_FAMILY_TARGET_FACTS_LEAVES_2, 22 },
-  { "primordial_storm", "primordial_storm", RL_OBS_FAMILY_TARGET_FACTS_LEAVES_3, 22 },
-  { "stormstrike", "stormstrike", RL_OBS_FAMILY_TARGET_FACTS_LEAVES_4, 22 },
-  { "tempest", "tempest", RL_OBS_FAMILY_TARGET_FACTS_LEAVES_5, 22 },
-  { "voltaic_blaze", "voltaic_blaze", RL_OBS_FAMILY_TARGET_FACTS_LEAVES_6, 22 },
-  { "windstrike", "windstrike", RL_OBS_FAMILY_TARGET_FACTS_LEAVES_7, 22 },
+  { "chain_lightning", "chain_lightning", RL_OBS_FAMILY_TARGET_FACTS_LEAVES_0, 20 },
+  { "lava_lash", "lava_lash", RL_OBS_FAMILY_TARGET_FACTS_LEAVES_1, 20 },
+  { "lightning_bolt", "lightning_bolt", RL_OBS_FAMILY_TARGET_FACTS_LEAVES_2, 20 },
+  { "primordial_storm", "primordial_storm", RL_OBS_FAMILY_TARGET_FACTS_LEAVES_3, 20 },
+  { "stormstrike", "stormstrike", RL_OBS_FAMILY_TARGET_FACTS_LEAVES_4, 20 },
+  { "tempest", "tempest", RL_OBS_FAMILY_TARGET_FACTS_LEAVES_5, 20 },
+  { "voltaic_blaze", "voltaic_blaze", RL_OBS_FAMILY_TARGET_FACTS_LEAVES_6, 20 },
+  { "windstrike", "windstrike", RL_OBS_FAMILY_TARGET_FACTS_LEAVES_7, 20 },
 };
 
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_SHAPES_LEAVES_0[] = {
@@ -1126,10 +1094,10 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_PROC_CHANCES_MEMBERS[] = {
   { "windfury", "windfury_proc_chance_current", RL_OBS_FAMILY_PROC_CHANCES_LEAVES_1, 1 },
 };
 
-inline constexpr double RL_BUCKETS_SLOT324[] = { 1.0, 2.0, 5.0 };
+inline constexpr double RL_BUCKETS_SLOT308[] = { 1.0, 2.0, 5.0 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "fight_remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, true },
-    { "active_enemies", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT324, 3, false },
+    { "active_enemies", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT308, 3, false },
     { "raid_event_next_in", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
     { "time_to_bloodlust", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
     { "dying_within_5s", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
@@ -1155,16 +1123,16 @@ inline constexpr std::size_t RL_OBS_FAMILY_COUNT = 12;
 inline constexpr rl_obs_family RL_OBS_FAMILIES[RL_OBS_FAMILY_COUNT] = {
   { rl_family::player_buffs, "player_buffs", rl_family_kind::buff, false, RL_OBS_FAMILY_PLAYER_BUFFS_MEMBERS, 31, 0, 45 },
   { rl_family::cooldowns, "cooldowns", rl_family_kind::cooldown, false, RL_OBS_FAMILY_COOLDOWNS_MEMBERS, 8, 45, 11 },
-  { rl_family::target_facts, "target_facts", rl_family_kind::target_fact, false, RL_OBS_FAMILY_TARGET_FACTS_MEMBERS, 8, 56, 176 },
-  { rl_family::shapes, "shapes", rl_family_kind::shape_fact, false, RL_OBS_FAMILY_SHAPES_MEMBERS, 2, 232, 6 },
-  { rl_family::action_leaves, "action_leaves", rl_family_kind::action_expression, false, RL_OBS_FAMILY_ACTION_LEAVES_MEMBERS, 11, 238, 32 },
-  { rl_family::deck, "deck", rl_family_kind::expression, false, RL_OBS_FAMILY_DECK_MEMBERS, 13, 270, 13 },
-  { rl_family::stats, "stats", rl_family_kind::direct, false, RL_OBS_FAMILY_STATS_MEMBERS, 4, 283, 4 },
-  { rl_family::swing_cast, "swing_cast", rl_family_kind::direct, false, RL_OBS_FAMILY_SWING_CAST_MEMBERS, 4, 287, 4 },
-  { rl_family::raid_events, "raid_events", rl_family_kind::expression, false, RL_OBS_FAMILY_RAID_EVENTS_MEMBERS, 2, 291, 10 },
-  { rl_family::legality, "legality", rl_family_kind::legality, false, RL_OBS_FAMILY_LEGALITY_MEMBERS, 20, 301, 20 },
-  { rl_family::proc_chances, "proc_chances", rl_family_kind::proc_chance, false, RL_OBS_FAMILY_PROC_CHANCES_MEMBERS, 2, 321, 2 },
-  { rl_family::scalars, "scalars", rl_family_kind::scalar, true, RL_OBS_FAMILY_SCALARS_MEMBERS, 1, 323, 17 },
+  { rl_family::target_facts, "target_facts", rl_family_kind::target_fact, false, RL_OBS_FAMILY_TARGET_FACTS_MEMBERS, 8, 56, 160 },
+  { rl_family::shapes, "shapes", rl_family_kind::shape_fact, false, RL_OBS_FAMILY_SHAPES_MEMBERS, 2, 216, 6 },
+  { rl_family::action_leaves, "action_leaves", rl_family_kind::action_expression, false, RL_OBS_FAMILY_ACTION_LEAVES_MEMBERS, 11, 222, 32 },
+  { rl_family::deck, "deck", rl_family_kind::expression, false, RL_OBS_FAMILY_DECK_MEMBERS, 13, 254, 13 },
+  { rl_family::stats, "stats", rl_family_kind::direct, false, RL_OBS_FAMILY_STATS_MEMBERS, 4, 267, 4 },
+  { rl_family::swing_cast, "swing_cast", rl_family_kind::direct, false, RL_OBS_FAMILY_SWING_CAST_MEMBERS, 4, 271, 4 },
+  { rl_family::raid_events, "raid_events", rl_family_kind::expression, false, RL_OBS_FAMILY_RAID_EVENTS_MEMBERS, 2, 275, 10 },
+  { rl_family::legality, "legality", rl_family_kind::legality, false, RL_OBS_FAMILY_LEGALITY_MEMBERS, 20, 285, 20 },
+  { rl_family::proc_chances, "proc_chances", rl_family_kind::proc_chance, false, RL_OBS_FAMILY_PROC_CHANCES_MEMBERS, 2, 305, 2 },
+  { rl_family::scalars, "scalars", rl_family_kind::scalar, true, RL_OBS_FAMILY_SCALARS_MEMBERS, 1, 307, 17 },
 };
 
 // ---- Action descriptors ----
@@ -1215,8 +1183,8 @@ inline constexpr std::size_t RL_TALENT_GATE_COUNT = 4;
 // ---- Target scorer feature list (Phase 230-02, SCOR-01) ----
 
 inline constexpr std::size_t RL_TARGET_SLOTS = 8;
-inline constexpr std::size_t RL_TARGET_FEATURES = 22;
-inline constexpr const char* RL_TARGET_FEATURE_SHA = "tgt-feat-v1:fb60bc2403b62588f1f092cbda5364ad2c47cfcd9af13349eebad4e11ac2cdb6";
+inline constexpr std::size_t RL_TARGET_FEATURES = 20;
+inline constexpr const char* RL_TARGET_FEATURE_SHA = "tgt-feat-v1:f6986134d64961cb602ec85a9bc5aa3a0d69f929815b0cee2c6fc502de38dd0c";
 
 inline constexpr const char* RL_TARGET_FEATURE_NAMES[RL_TARGET_FEATURES] = {
   "distance",
@@ -1230,10 +1198,8 @@ inline constexpr const char* RL_TARGET_FEATURE_NAMES[RL_TARGET_FEATURES] = {
   "health_pct",
   "is_boss",
   "flame_shock_remaining",
-  "neighbours_within_splash",
-  "neighbours_within_jump",
+  "neighbours_within_radius",
   "is_current_target",
-  "is_previous_pick",
   "burning_core_remaining",
   "lightning_rod_stacks",
   "lightning_rod_remaining",

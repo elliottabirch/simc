@@ -212,13 +212,16 @@ inline constexpr std::uint32_t FORMAT_VERSION = 7u;  // 230-04: candidate block 
 // mistyped literal cannot silently drift from the formula and still compile (tstl 220-03,
 // OBS-06; formula updated 260901-pb1 Task 3 for version 5, updated again 228-09 for version 6,
 // updated again 230-04 for version 7 -- see top-of-file comment).
-inline constexpr std::uint32_t RECORD_SIZE = 2120u;  // 232-01 (MERGE-01): roundup8(45 + 4*340 +
-                                                       // 4*8*22 + 4) = roundup8(2113) -- W=340
-                                                       // is the merged census sheet's emitted
-                                                       // width (`gen_obs_schema.py --spec
-                                                       // enhancement`, R-C/R-N -- never hand-set),
-                                                       // RL_TARGET_SLOTS=8/RL_TARGET_FEATURES=22
-                                                       // unchanged from the clone lineage. See
+inline constexpr std::uint32_t RECORD_SIZE = 1992u;  // 232-02 (OBS-01/OBS-03): roundup8(45 +
+                                                       // 4*324 + 4*8*20 + 4) = roundup8(1985) --
+                                                       // W=324 is the census sheet's emitted width
+                                                       // after this plan dropped is_previous_pick
+                                                       // and collapsed the neighbour pair
+                                                       // (`gen_obs_schema.py --spec enhancement`,
+                                                       // R-C/R-N -- never hand-set; -16 from plan
+                                                       // 232-01's 340), RL_TARGET_SLOTS=8 unchanged,
+                                                       // RL_TARGET_FEATURES=20 (22 -> 21 -> 20, this
+                                                       // plan's own OBS-01/OBS-03 landing). See
                                                        // top-of-file version-7 comment for the
                                                        // closed form.
 static_assert( RECORD_SIZE == ( ( 45u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) +
