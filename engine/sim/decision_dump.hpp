@@ -179,6 +179,19 @@ std::string boundary_name( execute_type et );
 // `et == execute_type::FOREGROUND`, converted once by the caller exactly
 // like solver_control.cpp's in-process transport already does.
 //
+// `target_fact_dump_time_compute` (232-04, OBS-02/R-T) -- the exact twin of
+// `action_gate_dump_time_compute` above, on the `targeted_picks`/
+// `candidate_facts` rows: `record()` is NEVER the decision boundary (this
+// file's own CR-02 comment, `write_state_fields`'s doc comment below), so a
+// targeted action's `is_current_target`/Tempest's `hit_damage`, recomputed
+// straight off `build_enemy_fact()` at dump time, would read POST-
+// `accept_cast`-retarget/turn state instead of the value the decision was
+// actually made from. Both JSON emit sites first consult
+// `rl_target_select::lookup_target_fact_snapshot()` -- the pre-cast
+// snapshot `build_obs()`'s own real-decision call stamped
+// (`rl_state_t::is_decision_boundary == true`) -- and fall back to a fresh
+// compute, flagged, only when nothing was stamped this decision.
+//
 // ACTOR SCOPE (post-landing fix, measured against a real HecticAddCleave
 // capture): additionally gated on `p->resources.is_active(
 // RESOURCE_MAELSTROM )`, the same predicate phase 165-01's own maelstrom-

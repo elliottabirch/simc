@@ -909,6 +909,21 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
         continue;
       }
       const rl_target_select::enemy_fact fact = rl_target_select::build_enemy_fact( a, pick );
+
+      // 232-04 (OBS-02, R-T): read the pre-cast snapshot instead of trusting `fact` (built just
+      // above, AFTER solver_control::choose() already retargeted/turned the player for this
+      // decision -- record() is NEVER the boundary, CR-02's own comment above). When the current
+      // decision stamped nothing for this action (a non-boundary dump run, or an action the mask
+      // pass never reached), compute fresh exactly as before AND flag the row honestly --
+      // `target_fact_dump_time_compute`, the exact twin of the analogous gate-bits flag emitted
+      // a few lines above (see its own doc comment) -- never silently guess (T-232-14).
+      bool snap_found = false;
+      const rl_target_select::target_fact_snapshot snap =
+          rl_target_select::lookup_target_fact_snapshot( a, &snap_found );
+      const bool is_current_target_value =
+          ( snap_found && snap.has_is_current_target ) ? snap.is_current_target : fact.is_current_target;
+      const bool row_used_dump_time_compute = !( snap_found && snap.has_is_current_target );
+
       out << "{\"found\":true"
           << ",\"actor_index\":" << fact.actor_index
           << ",\"actor_spawn_index\":" << fact.actor_spawn_index
@@ -935,8 +950,16 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
           << ",\"venomfang_debuff_remaining\":" << fact.venomfang_debuff_remaining
           << ",\"rune_of_unleashed_fire_lingering_remaining\":" << fact.rune_of_unleashed_fire_lingering_remaining
           << ",\"neighbours_within_radius\":" << fact.neighbours_within_radius
-          << ",\"is_current_target\":" << ( fact.is_current_target ? "true" : "false" )
-          << "}";
+          << ",\"is_current_target\":" << ( is_current_target_value ? "true" : "false" );
+      // 232-04 (OBS-02, R-T): Tempest is the only registry action whose schema requests a
+      // shared_hit_damage leaf -- emitted only when the snapshot actually carries one, additive
+      // (never a compatibility alias for a pre-existing key, plan 232-05 repoints
+      // selector_parity.py at these emitted keys directly).
+      if ( snap_found && snap.has_hit_damage )
+        out << ",\"hit_damage\":" << snap.hit_damage;
+      if ( row_used_dump_time_compute )
+        out << ",\"target_fact_dump_time_compute\":true";
+      out << "}";
     }
     out << "}";
 
@@ -1008,6 +1031,22 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
       }
       const std::vector<rl_target_select::enemy_fact> candidates =
           rl_target_select::build_candidate_facts( a, /*harmful=*/true );
+
+      // 232-04 (OBS-02, R-T): the SAME snapshot targeted_picks (above) reads -- the ONLY candidate
+      // this table ever covers is the actual per-decision pick (`lookup_pick`), so only THAT
+      // candidate's `is_current_target` in the loop below is substituted; every other candidate's
+      // own field is untouched (this table's per-decision fact record, unlike the pick's own,
+      // was never the thing OBS-02's pre-cast snapshot exists to fix -- see this file's own
+      // targeted_picks comment for the full mechanism). `row_used_dump_time_compute` covers the
+      // WHOLE action block (one flag, not one per candidate) since exactly one candidate in the
+      // list can ever be the pick.
+      bool      pick_found = false;
+      player_t* pick_for_token = rl_target_select::lookup_pick( a, &pick_found );
+      bool      snap_found = false;
+      const rl_target_select::target_fact_snapshot snap =
+          rl_target_select::lookup_target_fact_snapshot( a, &snap_found );
+      bool row_used_dump_time_compute = false;
+
       // `cast_time_ms` -- `a->execute_time()`, the SAME call
       // `preference_shortest_time_to_die`'s own outlives-the-cast dominance clause reads (D-15,
       // unchanged by OR-1). Per-token, not per-candidate (it does not depend on which candidate is
@@ -1021,6 +1060,16 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
         if ( ci > 0 )
           out << ",";
         const rl_target_select::enemy_fact& fact = candidates[ ci ];
+
+        bool is_current_target_value = fact.is_current_target;
+        if ( pick_found && fact.candidate == pick_for_token )
+        {
+          if ( snap_found && snap.has_is_current_target )
+            is_current_target_value = snap.is_current_target;
+          else
+            row_used_dump_time_compute = true;
+        }
+
         out << "{\"actor_index\":" << fact.actor_index
             << ",\"actor_spawn_index\":" << fact.actor_spawn_index
             << ",\"x\":" << ( fact.candidate ? fact.candidate->x_position : 0.0 )
@@ -1037,7 +1086,7 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
             << ",\"is_boss\":" << ( fact.is_boss ? "true" : "false" )
             << ",\"flame_shock_remaining\":" << fact.flame_shock_remaining
             << ",\"neighbours_within_radius\":" << fact.neighbours_within_radius
-            << ",\"is_current_target\":" << ( fact.is_current_target ? "true" : "false" )
+            << ",\"is_current_target\":" << ( is_current_target_value ? "true" : "false" )
             // 230-04 (SCOR-02, Task 2): the seven 228-10 gap-fill fields, previously present on
             // `targeted_picks` (the CHOSEN pick's own record, above) but missing here on the FULL
             // candidate list -- scorer_block_equivalence.py needs every one of the 22 declared
@@ -1054,7 +1103,13 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
             << fact.rune_of_unleashed_fire_lingering_remaining
             << "}";
       }
-      out << "]}";
+      if ( snap_found && snap.has_hit_damage )
+        out << "],\"hit_damage\":" << snap.hit_damage;
+      else
+        out << "]";
+      if ( row_used_dump_time_compute )
+        out << ",\"target_fact_dump_time_compute\":true";
+      out << "}";
     }
     out << "}";
   }
