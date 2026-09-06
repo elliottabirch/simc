@@ -122,6 +122,15 @@ struct rl_state_t
   double fight_remains        = 0.0;   bool has_fight_remains        = false;
   double raid_event_next_in   = 0.0;   bool has_raid_event_next_in   = false;
 
+  // OBS-05/R-W (232-03) -- the "turn to face" action's legality predicate, computed ONCE here
+  // (never inside build_mask -- that function stays PURE over this POD, no player_t*, unchanged
+  // contract). True iff at least one alive enemy fails the raw in-front test
+  // (`p->is_in_front(*t, 0.0)`), the SAME predicate `mask.py`'s Python mirror
+  // (`_any_enemy_behind_player`) computes from `all_enemies`/`player_position`. No has_* flag --
+  // this is always well-defined (a fight with zero enemies is simply `false`, not "absent"),
+  // matching `has_active_enemies`'s own unconditional-true convention for the same reason.
+  bool any_enemy_behind_player = false;
+
   // 228-10 (Q18, D-12 "read once, use twice") -- the SAME immunity-remaining value the dump's
   // aggregate `immunity_remaining` key reports, read here through the ONE shared
   // `compute_invulnerability_window()` function so build_wait's new unanchored-wait candidate

@@ -323,6 +323,27 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground, bool is_d
   s.has_fight_remains = true;
   s.has_raid_event_next_in = next_raid_event_in( sim, s.raid_event_next_in );
 
+  // OBS-05/R-W (232-03) -- the turn action's legality predicate, read ONCE here (the "one
+  // reader" rule this file's other POD fields already follow) so build_mask's turn-bit check
+  // below is a plain field read, not a second engine walk. Deliberately NOT gated on
+  // `sim->facing_enabled` -- `rl_target_select.cpp:141`'s own precedent (`f.in_front =
+  // a->player->is_in_front(*candidate, 0.0)`) says this is ground truth for the mask/dump, not
+  // an optional display feature.
+  {
+    bool any_behind = false;
+    for ( player_t* t : sim->target_non_sleeping_list )
+    {
+      if ( !t->is_enemy() )
+        continue;
+      if ( !p->is_in_front( *t, 0.0 ) )
+      {
+        any_behind = true;
+        break;
+      }
+    }
+    s.any_enemy_behind_player = any_behind;
+  }
+
   // 228-10 (Q18, D-12 "read once, use twice") -- the SAME compute_invulnerability_window() call
   // decision_dump.cpp's own immunity_remaining/immunity_in aggregate keys use. Only the ACTIVE
   // window's remaining time becomes a wait candidate (build_wait, below) -- "seconds to the next
@@ -3219,6 +3240,18 @@ void build_mask( const rl_state_t& s, std::uint8_t out_mask[ RL_ACTION_DIM ] )
       if ( legal_wait && s.has_raid_event_next_in && !( reading.raw < s.raid_event_next_in ) )
         legal_wait = false;
       out_mask[ i ] = legal_wait ? 1 : 0;
+      continue;
+    }
+
+    // OBS-05/R-W (232-03): a turn action is legal ONLY at a foreground boundary (same rule as
+    // wait -- a turn reply at any other boundary is equally out of place) AND iff
+    // `s.any_enemy_behind_player` (read ONCE in read_state(), the SAME raw in-front geometry
+    // `mask.py`'s Python mirror computes from `all_enemies`/`player_position`). Mirrors mask.py's
+    // legal() exactly: no engine action_ready/action_resolvable bit is consulted here -- a turn
+    // has no action_t, so R0's AND below is never reached for this kind.
+    if ( a.kind == rl_action_kind::turn )
+    {
+      out_mask[ i ] = ( s.boundary_is_foreground && s.any_enemy_behind_player ) ? 1 : 0;
       continue;
     }
 

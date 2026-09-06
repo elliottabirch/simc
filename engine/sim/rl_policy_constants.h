@@ -23,7 +23,7 @@
 enum class rl_family { player_buffs, cooldowns, target_facts, shapes, action_leaves, deck, stats, swing_cast, position, pets, items, raid_events, sim_auras, legality, proc_chances, scalars };
 enum class rl_family_kind { buff, cooldown, enemy_slot, action_expression, expression, direct, legality, proc_chance, target_fact, shape_fact, scalar };
 enum class rl_kind { k_int, k_float, k_seconds, k_bucket };
-enum class rl_action_kind { cast, wait };
+enum class rl_action_kind { cast, wait, turn };
 // 221-03 (ACT-05/ACT-06): the four declared anchor kinds a kind==wait action may carry; `none` reproduces today's next-event-minimum build_wait() behaviour byte-for-byte.
 enum class rl_wait_anchor_kind { none, cooldown, swing, maelstrom, gcd };
 enum class rl_swing_hand { none, mh, oh };
@@ -99,14 +99,14 @@ struct rl_talent_gate
 inline constexpr const char* RL_REGISTRY_ID = "enhancement";
 inline constexpr const char* RL_ACTOR_NAME = "MID2_Shaman_Enhancement_Stormbringer";
 inline constexpr int RL_ENCODER_VERSION = 2;
-inline constexpr std::size_t RL_OBS_DIM = 324;
-inline constexpr std::size_t RL_ACTION_DIM = 20;
+inline constexpr std::size_t RL_OBS_DIM = 325;
+inline constexpr std::size_t RL_ACTION_DIM = 21;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
-inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v2:68464ddc41578a85e25d9c99a0a44424461897d693c60ca031dd7da2a7e54203";
+inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v2:7471ff88bf5120dd803e69f4acd4d9b07e8f7e5b9f849d1f65f35a32bf92de72";
 inline constexpr const char* RL_MASK_RULES_SHA = "3f930294d36b217dca01fc51600c0da9d0568e20152fb53c588b6e8ddccf7662";
-inline constexpr const char* RL_ACTION_SPACE_SHA = "b9c219883e8ea75c0e9e04d2ecb74c04bc8682756d2b90435f5c964e1732f89a";
+inline constexpr const char* RL_ACTION_SPACE_SHA = "b7d16fa7eedf4fe48d4fadd6968b0e8662600a06b352d49f318ef9a527f94d92";
 
 // ---- Observation name list (the materialised ordering) ----
 
@@ -416,6 +416,7 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "legality.17.flag",
   "legality.18.flag",
   "legality.19.flag",
+  "legality.20.flag",
   "proc_chances.stormsurge.value",
   "proc_chances.windfury.value",
   "fight_remains",
@@ -1060,6 +1061,9 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_18[] = {
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_19[] = {
     { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
 };
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_20[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
 inline constexpr rl_obs_member RL_OBS_FAMILY_LEGALITY_MEMBERS[] = {
   { "00", "00", RL_OBS_FAMILY_LEGALITY_LEAVES_0, 1 },
   { "01", "01", RL_OBS_FAMILY_LEGALITY_LEAVES_1, 1 },
@@ -1081,6 +1085,7 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_LEGALITY_MEMBERS[] = {
   { "17", "17", RL_OBS_FAMILY_LEGALITY_LEAVES_17, 1 },
   { "18", "18", RL_OBS_FAMILY_LEGALITY_LEAVES_18, 1 },
   { "19", "19", RL_OBS_FAMILY_LEGALITY_LEAVES_19, 1 },
+  { "20", "20", RL_OBS_FAMILY_LEGALITY_LEAVES_20, 1 },
 };
 
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PROC_CHANCES_LEAVES_0[] = {
@@ -1094,10 +1099,10 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_PROC_CHANCES_MEMBERS[] = {
   { "windfury", "windfury_proc_chance_current", RL_OBS_FAMILY_PROC_CHANCES_LEAVES_1, 1 },
 };
 
-inline constexpr double RL_BUCKETS_SLOT308[] = { 1.0, 2.0, 5.0 };
+inline constexpr double RL_BUCKETS_SLOT309[] = { 1.0, 2.0, 5.0 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "fight_remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, true },
-    { "active_enemies", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT308, 3, false },
+    { "active_enemies", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT309, 3, false },
     { "raid_event_next_in", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
     { "time_to_bloodlust", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
     { "dying_within_5s", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
@@ -1130,9 +1135,9 @@ inline constexpr rl_obs_family RL_OBS_FAMILIES[RL_OBS_FAMILY_COUNT] = {
   { rl_family::stats, "stats", rl_family_kind::direct, false, RL_OBS_FAMILY_STATS_MEMBERS, 4, 267, 4 },
   { rl_family::swing_cast, "swing_cast", rl_family_kind::direct, false, RL_OBS_FAMILY_SWING_CAST_MEMBERS, 4, 271, 4 },
   { rl_family::raid_events, "raid_events", rl_family_kind::expression, false, RL_OBS_FAMILY_RAID_EVENTS_MEMBERS, 2, 275, 10 },
-  { rl_family::legality, "legality", rl_family_kind::legality, false, RL_OBS_FAMILY_LEGALITY_MEMBERS, 20, 285, 20 },
-  { rl_family::proc_chances, "proc_chances", rl_family_kind::proc_chance, false, RL_OBS_FAMILY_PROC_CHANCES_MEMBERS, 2, 305, 2 },
-  { rl_family::scalars, "scalars", rl_family_kind::scalar, true, RL_OBS_FAMILY_SCALARS_MEMBERS, 1, 307, 17 },
+  { rl_family::legality, "legality", rl_family_kind::legality, false, RL_OBS_FAMILY_LEGALITY_MEMBERS, 21, 285, 21 },
+  { rl_family::proc_chances, "proc_chances", rl_family_kind::proc_chance, false, RL_OBS_FAMILY_PROC_CHANCES_MEMBERS, 2, 306, 2 },
+  { rl_family::scalars, "scalars", rl_family_kind::scalar, true, RL_OBS_FAMILY_SCALARS_MEMBERS, 1, 308, 17 },
 };
 
 // ---- Action descriptors ----
@@ -1158,6 +1163,7 @@ inline constexpr rl_action_desc RL_ACTIONS[RL_ACTION_DIM] = {
   { 17, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_swing_oh", { rl_wait_anchor_kind::swing, nullptr, rl_swing_hand::oh } },
   { 18, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_maelstrom", { rl_wait_anchor_kind::maelstrom, nullptr, rl_swing_hand::none } },
   { 19, "potion", rl_action_kind::cast, "potion", nullptr, "potion", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
+  { 20, nullptr, rl_action_kind::turn, nullptr, nullptr, "turn_to_face", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
 };
 
 // ---- Buff-gate table ----

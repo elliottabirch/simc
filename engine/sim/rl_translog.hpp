@@ -212,18 +212,24 @@ inline constexpr std::uint32_t FORMAT_VERSION = 7u;  // 230-04: candidate block 
 // mistyped literal cannot silently drift from the formula and still compile (tstl 220-03,
 // OBS-06; formula updated 260901-pb1 Task 3 for version 5, updated again 228-09 for version 6,
 // updated again 230-04 for version 7 -- see top-of-file comment).
-inline constexpr std::uint32_t RECORD_SIZE = 1992u;  // 232-02 (OBS-01/OBS-03): roundup8(45 +
-                                                       // 4*324 + 4*8*20 + 4) = roundup8(1985) --
-                                                       // W=324 is the census sheet's emitted width
-                                                       // after this plan dropped is_previous_pick
-                                                       // and collapsed the neighbour pair
+inline constexpr std::uint32_t RECORD_SIZE = 1992u;  // 232-03 (OBS-05): STILL 1992 -- roundup8(45 +
+                                                       // 4*325 + 4*8*20 + 4) = roundup8(1989) = 1992,
+                                                       // the SAME multiple-of-8 boundary 324 landed
+                                                       // on (roundup8(1985) = 1992 too); the turn
+                                                       // action's own legality flag moved W 324 -> 325
                                                        // (`gen_obs_schema.py --spec enhancement`,
-                                                       // R-C/R-N -- never hand-set; -16 from plan
-                                                       // 232-01's 340), RL_TARGET_SLOTS=8 unchanged,
-                                                       // RL_TARGET_FEATURES=20 (22 -> 21 -> 20, this
-                                                       // plan's own OBS-01/OBS-03 landing). See
-                                                       // top-of-file version-7 comment for the
-                                                       // closed form.
+                                                       // never hand-set) without crossing an 8-byte
+                                                       // boundary. RL_TARGET_SLOTS=8/RL_TARGET_FEATURES=20
+                                                       // unchanged by this plan (only the observation
+                                                       // width moved, never the per-candidate target
+                                                       // feature count). Confirmed, not assumed, by the
+                                                       // static_assert immediately below, which
+                                                       // recomputes from the live RL_OBS_DIM/
+                                                       // RL_TARGET_SLOTS/RL_TARGET_FEATURES constants at
+                                                       // compile time. PREVIOUS comment (232-02,
+                                                       // OBS-01/OBS-03): roundup8(45 + 4*324 + 4*8*20 +
+                                                       // 4) = roundup8(1985) = 1992. See top-of-file
+                                                       // version-7 comment for the closed form.
 static_assert( RECORD_SIZE == ( ( 45u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) +
                                    4u * static_cast<std::uint32_t>( RL_TARGET_SLOTS ) *
                                        static_cast<std::uint32_t>( RL_TARGET_FEATURES ) + 4u + 7u ) / 8u ) * 8u,

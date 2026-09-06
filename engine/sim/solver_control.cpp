@@ -26,6 +26,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -256,8 +257,9 @@ void accept_wait( sim_t* sim, execute_type et, double sec, const std::string& co
   // `player_ready_event_t::execute()` (player.cpp) then schedules a fresh
   // Player-Ready event at `timespan_t::from_seconds(0.0)`, at the SAME
   // timestamp against the SAME state: a deterministic policy re-picks the
-  // (still legal, `anchor: null`) fixed wait and the loop repeats at zero
-  // elapsed time. This is exactly the spin `maskRules.waitZeroLengthForbidden`
+  // (still legal, `anchor: null`) fixed wait and the loop repeats at zero elapsed time (232-03's
+  // `accept_turn()` below quotes this paragraph verbatim -- the SAME hazard applies to a free
+  // turn). This is exactly the spin `maskRules.waitZeroLengthForbidden`
   // (enhancement.json) declares forbidden -- both `mask.py` and this
   // file's own `build_wait()` already floor at RL_WAIT_FLOOR_SECONDS
   // consistently; this was the ONE point that clamped without re-flooring.
@@ -268,6 +270,79 @@ void accept_wait( sim_t* sim, execute_type et, double sec, const std::string& co
     sec = RL_WAIT_FLOOR_SECONDS;
 
   sim->solver_control_pending_wait_s = sec;
+  sim->solver_control_has_pending_wait = true;
+}
+
+// OBS-05/R-W/R-V (tstl-sylvanas phase 232, plan 232-03): "turn to face" -- a THIRD registry
+// kind, promoted alongside cast/wait (never smuggled through the wait arm). Selects the NEAREST
+// live enemy for which the facing model's `is_in_front` test is false (R-W), ties broken on the
+// stable `(actor_index, actor_spawn_index)` identity pair ascending -- the SAME ordering
+// `select()`'s own final tie-break rung already trusts (`rl_target_select.cpp`, "final tie-break
+// on the stable (actor_index, actor_spawn_index) identity pair, ascending"). Faces the player at
+// it via `p->face( *chosen )` ONLY -- deliberately NOT `rl_target_select::retarget()`, which ALSO
+// mutates `a->set_target`/`p->target`/weapon targets: a turn has no `action_t` and must not touch
+// the player's current cast target, only its facing (WR-07: never a raw `a->target`/`p->target`
+// write either way). Foreground-only, mirroring `accept_wait`'s own `et` refusal above and
+// `mask.py`/`build_mask`'s shared foreground-only rule for this kind (R-W).
+void accept_turn( sim_t* sim, execute_type et, player_t* p, const std::string& context )
+{
+  if ( et != execute_type::FOREGROUND )
+    protocol_abort( "'turn' reply is illegal at a non-FOREGROUND boundary (boundary=" +
+                     decision_dump::boundary_name( et ) + "): " + context );
+
+  player_t* chosen = nullptr;
+  double chosen_distance = 0.0;
+  for ( player_t* t : sim->target_non_sleeping_list )
+  {
+    if ( !t->is_enemy() )
+      continue;
+    // R-W: a candidate is anyone FAILING the raw in-front test (`cos_half_angle = 0.0`) --
+    // the SAME predicate `mask.py`'s `_any_enemy_behind_player` and this file's own
+    // `build_mask` turn-bit computation use, deliberately NOT `facing_enabled`-gated
+    // (`rl_target_select.cpp:141`'s precedent: this is ground truth for the decision, not an
+    // optional display feature).
+    if ( p->is_in_front( *t, 0.0 ) )
+      continue;
+    const double dist = p->get_player_distance( *t );
+    bool better;
+    if ( chosen == nullptr )
+      better = true;
+    else if ( dist != chosen_distance )
+      better = dist < chosen_distance;
+    else
+      better = std::tie( t->actor_index, t->actor_spawn_index ) <
+               std::tie( chosen->actor_index, chosen->actor_spawn_index );
+    if ( better )
+    {
+      chosen = t;
+      chosen_distance = dist;
+    }
+  }
+
+  if ( chosen == nullptr )
+  {
+    // The mask (both mirrors) is legal for `turn` iff at least one live enemy fails `in_front`
+    // -- this branch should therefore be unreachable. A policy that reaches it anyway (a mask
+    // defect, a stale request, a hand-crafted FIFO reply) gets a loud, named FATAL, never a
+    // silent no-op that leaves the player facing nobody while still charging the wait -- the
+    // same "fail loud" discipline `accept_cast`'s own not-ready refusal above uses.
+    protocol_abort( "'turn' reply chosen but no live enemy fails the in-front test (mask should "
+                     "have made this illegal): " + context );
+  }
+
+  p->face( *chosen );
+
+  // R-V/P232-22 (this plan's whole cost model): a FREE turn spins at zero elapsed time, the SAME
+  // hazard `accept_wait`'s CR-04 comment above describes for a zero-length wait -- turning
+  // toward one enemy leaves another behind, the bit stays legal, and a
+  // deterministic policy would re-pick it FOREVER at the SAME sim time. This is exactly the
+  // spin `maskRules.waitZeroLengthForbidden` (enhancement.json) declares forbidden -- quoting
+  // `accept_wait`'s own CR-04 comment above verbatim, because the hazard is identical: "a
+  // zero-length wait is the one outcome the floor exists to forbid." The turn pays through the
+  // SAME existing pending-wait pair `accept_wait` sets, at the SAME floor value -- never a
+  // hidden one-shot-per-decision flag the Python mirror (`mask.py`) cannot see (Q232-6 is the
+  // owner's route to a free-turn alternative; not taken here).
+  sim->solver_control_pending_wait_s = RL_WAIT_FLOOR_SECONDS;
   sim->solver_control_has_pending_wait = true;
 }
 } // anonymous namespace
@@ -657,6 +732,18 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       sim->solver_control_has_requested_wait_sec = true;
       sim->solver_control_last_requested_wait_sec = doc["sec"].GetDouble();
       accept_wait( sim, et, doc["sec"].GetDouble(), "seq=" + std::to_string( seq ) + ": " + line );
+      return nullptr;
+    }
+
+    if ( type == "turn" )
+    {
+      // OBS-05/R-W/R-V (232-03): a 'turn' reply carries no 'action' token and no 'sec' -- its
+      // target is computed inside accept_turn() (nearest live enemy failing in_front) and its
+      // cost is the fixed RL_WAIT_FLOOR_SECONDS pending-wait pair, not a caller-supplied value.
+      // `solver_control_last_reply_type` is already set to "turn" by the generic assignment
+      // above (this arm's own `type` string, unlike the in-process arm below which has no wire
+      // string and must set it explicitly).
+      accept_turn( sim, et, p, "seq=" + std::to_string( seq ) + ": " + line );
       return nullptr;
     }
 
@@ -1134,6 +1221,52 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
         rl_translog::flush_pending( sim );
         throw;
       }
+    }
+
+    if ( action.kind == rl_action_kind::turn )
+    {
+      // OBS-05/R-W/R-V (232-03): unlike the FIFO arm, this transport has no wire string to read
+      // "turn" off of -- set it explicitly, the same way the cast branch above sets "cast" and
+      // the wait code below sets "wait", so decision_dump.cpp's solver_reply_type field is
+      // honest for this boundary.
+      sim->solver_control_last_reply_type = "turn";
+      // A turn has no candidate block and no picked target in the sense record_decision's
+      // trailing parameters describe (that machinery is `preference_scorer`'s per-CAST
+      // candidate accounting) -- CHOSEN_TARGET_SENTINEL_NO_PICK, same as the wait branch below.
+      // `floored=true`: the turn's cost is ALWAYS exactly RL_WAIT_FLOOR_SECONDS (R-V), never a
+      // real timer, so it is "floored" by construction on every occurrence, not merely when a
+      // real duration happened to clamp down to it.
+      rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, top_q,
+                                     rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK, /*floored=*/true,
+                                     exploratory );
+      // 212-CR-FIX WR-06: same reasoning as the cast branch above -- flush on an abort out of
+      // accept_turn() so the decision row already appended survives it.
+      try
+      {
+        accept_turn( sim, et, p, "in-process (seq=" + std::to_string( seq ) + ")" );
+      }
+      catch ( ... )
+      {
+        rl_translog::flush_pending( sim );
+        throw;
+      }
+      return nullptr;
+    }
+
+    if ( action.kind != rl_action_kind::wait )
+    {
+      // T-232-12 (threat register): a kind that reaches this dispatch and matches NEITHER cast
+      // NOR turn above must FATAL by name here, never silently fall through and be treated as a
+      // wait -- the wait code immediately below has no `if` guard of its own (it is the
+      // structural "otherwise" for this three-way kind, same discipline mask.py's own cast
+      // fallthrough uses), so a future FOURTH kind added to the registry without a matching
+      // branch here would otherwise be silently mis-dispatched as a wait instead of failing
+      // loud. `registry.selftest.py`'s cross-layer kind-subset invariant is the OTHER half of
+      // this defence (a fourth kind cannot even be declared without also updating mask.py and
+      // gen_rl_constants.py) -- this FATAL is the runtime backstop for the case both layers
+      // were somehow updated but this switch was not.
+      protocol_abort( "in-process reply dispatch: RL_ACTIONS[" + std::to_string( idx ) +
+                       "].kind is none of cast/turn/wait" );
     }
 
     // rl_action_kind::wait -- action.token is null for this entry (see
