@@ -6241,7 +6241,26 @@ struct crash_lightning_t : public shaman_attack_t
     // repeating event, the mid2_enh_4pc set-bonus snapshot) is a PLAYER-BUFF/cooldown effect that
     // reads no target state at all -- these fire regardless of whether the cast hit anyone, exactly
     // like the base engine's own zero-target path leaves every non-target-state side effect alone.
-    if ( execute_state && result_is_hit( execute_state->result ) )
+    //
+    // 232-15 (buff_t::_resolve_stacks assertion, MERGE-02's second symptom): `execute_state` is a
+    // PERSISTENT member -- action_t::schedule_travel() only ever OVERWRITES it when at least one
+    // target is actually hit this cast; it is never reset to null (or its `result` invalidated)
+    // between casts. So once one cast has ever landed a hit, `execute_state->result` stays truthy
+    // FOREVER, including on a LATER cast whose shaped-cone `target_list()` comes back empty --
+    // a case CR-01's own audit above did not cover, because the POINTER itself is never null there,
+    // only its CONTENTS are stale. Measured (gdb + an instrumented diagnostic build, three
+    // reproducing episodes across all three add shapes, byte-identical tuple every time): on the
+    // crashing cast, `execute_state->result` still read as a hit from the PRIOR successful cast
+    // while `target_list().size() == 0` and `num_targets_hit == 0` for THIS cast -- feeding
+    // `buff.converging_storms->trigger( num_targets_hit )` an explicit `0`, which
+    // `buff_t::_resolve_stacks(0)` correctly refuses via its "Stacks must be positive" assertion
+    // (buff.cpp:2092; the buff's OWN data -- `_initial_stack=1`, `_max_stack=6` -- is valid; the
+    // bug is entirely on this call's side). `num_targets_hit` is reset to 0 at the top of every
+    // `action_t::execute()` and incremented only inside `schedule_travel()` (the same function that
+    // (re)assigns `execute_state`), so it can never be stale the way `execute_state->result` can --
+    // it is the correct, cause-level signal for "did THIS cast hit at least one target", and using
+    // it here removes the dependency on `execute_state`'s staleness for this guard entirely.
+    if ( num_targets_hit > 0 )
     {
       p()->buff.crash_lightning->trigger();
 
