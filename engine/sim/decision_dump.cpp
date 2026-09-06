@@ -17,6 +17,7 @@
 #include "sim/gain.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_target_select.hpp"
+#include "sim/shaman_rl_facts.hpp"
 #include "sim/sim.hpp"
 #include "util/concurrency.hpp"
 #include "util/io.hpp"
@@ -865,6 +866,47 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
     out << ",\"action_ready\":null";
   }
 
+  // RULE-01 (232-06, R-AC/P232-29): the shared Thorim's-primed fact, EMITTED UNCONDITIONALLY --
+  // including when the gates below don't pass -- so the parity harness (232-05's
+  // selector_parity.py, T-232-18/R-J) can tell "the rule did not fire" from "the fact was
+  // missing"; that probe REFUSES BY NAME on a dump lacking `thorims_primed` rather than
+  // defaulting it, which is exactly the row a silent default would make agree by construction on.
+  // Spelled with the SAME three token strings the addon's own ThorimsPrimed fact type spells
+  // (enhancementTargetRules.ts, 232-05) so the join compares identical strings, never a near-miss.
+  // Player-state, not per-candidate/per-action -- read directly off `p` via the file's existing
+  // non-allocating idioms, safe regardless of the threads==1/profileset_map precondition the
+  // targeted_picks block below (rl_target_select's own per-decision module tables) requires.
+  {
+    const bool has_talent_thorims_invocation = p->find_action( "thorims_invocation" ) != nullptr;
+    buff_t*    maelstrom_weapon              = buff_t::find( p, "maelstrom_weapon" );
+    const int  maelstrom_weapon_stacks       = maelstrom_weapon ? maelstrom_weapon->check() : 0;
+    buff_t*    tempest_buff                  = buff_t::find( p, "tempest" );
+    const bool tempest_up                    = tempest_buff && tempest_buff->check();
+    buff_t*    doom_winds_buff               = buff_t::find( p, "doom_winds" );
+    const bool has_buff_doom_winds           = doom_winds_buff && doom_winds_buff->check();
+
+    const char* thorims_primed_str = "none";
+    switch ( rl_target_select::shaman_thorims_primed_kind( p ) )
+    {
+      case rl_target_select::thorims_primed_kind::lightning_bolt:
+        thorims_primed_str = "lightning_bolt";
+        break;
+      case rl_target_select::thorims_primed_kind::chain_lightning:
+        thorims_primed_str = "chain_lightning";
+        break;
+      case rl_target_select::thorims_primed_kind::none:
+      default:
+        thorims_primed_str = "none";
+        break;
+    }
+
+    out << ",\"has_talent_thorims_invocation\":" << ( has_talent_thorims_invocation ? "true" : "false" )
+        << ",\"maelstrom_weapon_stacks\":" << maelstrom_weapon_stacks
+        << ",\"tempest_up\":" << ( tempest_up ? "true" : "false" )
+        << ",\"has_buff_doom_winds\":" << ( has_buff_doom_winds ? "true" : "false" )
+        << ",\"thorims_primed\":\"" << thorims_primed_str << "\"";
+  }
+
   // 228-09 (D-23/TGT-08, dump half) -- per-decision picked-target recording. For each of the
   // eight TARGETED registry actions, and for the CHOSEN action's own pick, record the actor
   // index / spawn index PAIR (the STICKY_KEY, R-C/P228-8 -- never the actor index alone) plus
@@ -959,6 +1001,13 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
         out << ",\"hit_damage\":" << snap.hit_damage;
       if ( row_used_dump_time_compute )
         out << ",\"target_fact_dump_time_compute\":true";
+      // RULE-02 (232-06, R-Z): the Chain Lightning hop-count stash's own fallback flag, made
+      // visible on the dump row (rl_target_select.hpp's own chain_hop_fallback_used() doc
+      // comment) -- a silent fallback to the retired neighbour-count approximation would look
+      // like a rule disagreement in the parity join rather than the geometry simply not having
+      // run. Additive; emitted only when true, only for the one token the stash governs.
+      if ( token == std::string( "chain_lightning" ) && rl_target_select::chain_hop_fallback_used( a ) )
+        out << ",\"chain_hop_fallback\":true";
       out << "}";
     }
     out << "}";

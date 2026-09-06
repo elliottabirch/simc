@@ -13,6 +13,7 @@
 #include "player/player.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_translog.hpp"
+#include "sim/shaman_rl_facts.hpp"
 #include "sim/sim.hpp"
 #include "util/util.hpp"
 
@@ -771,13 +772,71 @@ const char* const* targeted_action_tokens()
   return TARGETED_TOKENS;
 }
 
+namespace
+{
+// RULE-01 (232-06, R-AC/P232-29): the Thorim's-aware strike SUBSTITUTION -- called once per
+// decision from preference_for() below, for the two strike tokens only (windstrike, stormstrike).
+// primordial_storm and lightning_bolt stay routed to preference_shortest_time_to_die directly by
+// preference_for() itself; this function is never consulted for them. Gates, all read through the
+// file's existing non-allocating idioms (buff_t::find / player_t::find_action -- never a fresh
+// allocation per decision): the talent via find_action("thorims_invocation") being non-null;
+// Maelstrom Weapon's stack count greater than zero; for Stormstrike ONLY, Doom Winds present via
+// check() (sc_shaman.cpp:2126's own convention -- never up()). When the gates pass: Tempest
+// present gives preference_tempest; otherwise the accessor reporting the chain-lightning kind
+// gives preference_chain_lightning; anything else (lightning-bolt-primed OR not-yet-primed) falls
+// through to preference_shortest_time_to_die.
+//
+// R-AC's real third branch: the engine's own trigger_thorims_invocation (sc_shaman.cpp:12962-12988)
+// has THREE outcomes, not two -- a Tempest override, a Chain-Lightning-primed cast, and a
+// Lightning-Bolt-primed-or-unprimed cast (that function's own "Default to Lightning Bolt" comment
+// is the un-primed case; the primed-lightning-bolt case is the SAME branch, since both read as
+// thorims_primed_kind::lightning_bolt or ::none from the accessor). A reader who only knows
+// R5-19's earlier two-branch text will expect this to collapse to {tempest, chain} -- it MUST NOT:
+// the lightning-bolt-primed case is a real, reachable production state (any strike cast while
+// Thorim's is armed with Lightning Bolt), not a theoretical corner, and it must fall through to
+// the base rule exactly like the "not yet primed" case does, matching the engine's own default.
+preference_fn preference_for_thorims_aware_strike( const action_t* resolved, bool is_stormstrike )
+{
+  player_t* p = resolved->player;
+
+  if ( !p->find_action( "thorims_invocation" ) )
+    return preference_shortest_time_to_die;
+
+  buff_t* maelstrom_weapon = buff_t::find( p, "maelstrom_weapon" );
+  if ( !maelstrom_weapon || maelstrom_weapon->check() == 0 )
+    return preference_shortest_time_to_die;
+
+  // Windstrike takes the Thorim's branch whenever the gates above pass; Stormstrike ADDITIONALLY
+  // requires Doom Winds -- it is triggered from Ascendance's own execute path and Ascendance IS an
+  // agent action (232-RESEARCH.md Addendum C4), so this branch is reachable in production, not
+  // dead code.
+  if ( is_stormstrike )
+  {
+    buff_t* doom_winds = buff_t::find( p, "doom_winds" );
+    if ( !doom_winds || !doom_winds->check() )
+      return preference_shortest_time_to_die;
+  }
+
+  buff_t* tempest = buff_t::find( p, "tempest" );
+  if ( tempest && tempest->check() )
+    return preference_tempest;
+
+  if ( shaman_thorims_primed_kind( p ) == thorims_primed_kind::chain_lightning )
+    return preference_chain_lightning;
+
+  return preference_shortest_time_to_die;
+}
+} // anonymous namespace
+
 preference_fn preference_for( const action_t* resolved )
 {
   if ( !resolved )
     return nullptr;
   const std::string& n = resolved->name_str;
   preference_fn rule = nullptr;
-  if ( n == "stormstrike" || n == "windstrike" || n == "primordial_storm" || n == "lightning_bolt" )
+  if ( n == "stormstrike" || n == "windstrike" )
+    rule = preference_for_thorims_aware_strike( resolved, n == "stormstrike" );
+  else if ( n == "primordial_storm" || n == "lightning_bolt" )
     rule = preference_shortest_time_to_die;
   else if ( n == "lava_lash" )
     rule = preference_lava_lash;
