@@ -108,6 +108,78 @@
 // fight-close, footer) and the `kind` byte sits at the same offset
 // (`41 + 4*W`, at `W = 246` that is `41 + 984 = 1025`) in every one of them
 // (D-02), so a reader can classify a row before it interprets it.
+//
+// Version 6 (tstl-sylvanas phase 228, plan 228-09, D-23/TGT-08 -- dump-half
+// counterpart): inserts one new `std::uint16_t chosen_target_actor_index`
+// field into `decision_record`, immediately after `iteration` -- the CHOSEN
+// action's own per-decision pick (`rl_target_select::lookup_pick()`, READ
+// never recomputed, D-12), as a candidate's `player_t::actor_index`
+// (declared `size_t` engine-side, but no realistic fight composition
+// approaches 65535 distinct actor_index values, so a 16-bit field is exact,
+// never a truncation -- this is why the field is a FULL sixteen bits and not
+// a spare byte, which WOULD truncate above 255 actors, exactly the failure
+// this version exists to avoid). `CHOSEN_TARGET_SENTINEL_NO_PICK` (0xFFFFu,
+// defined below) marks a wait, an untargeted cast, or a targeted cast with
+// no stamped pick (an all-illegal decision) -- it cannot collide with a real
+// actor_index for the same reason a 16-bit field is exact rather than
+// merely sufficient. `close_record`/`footer_record` gain a matching
+// zero-written `std::uint16_t` at the SAME relative offset (right after
+// their own `iteration` field) purely to keep `kind`/`reserved` landing at
+// the SAME offset across all three row shapes (D-02) -- neither row kind
+// gets a NAMED counterpart field, mirroring version 5's own
+// `final_damage_expected_total`-has-no-footer-counterpart precedent.
+// `RECORD_SIZE(W)` moves from `roundup8(43 + 4*W)` to `roundup8(45 + 4*W)`
+// (`1032` at both `43` and `45` when `W = 246`, since `43+984=1027` and
+// `45+984=1029` both round up to `1032` -- the two extra bytes fit inside
+// version 5's own trailing round-up slack, so the ON-DISK row size does not
+// change even though the logical field layout does). Version-5 files are
+// orphaned by design (the reader refuses on an exact version mismatch, same
+// rule as every prior bump) -- there is no `chosen_target_actor_index` to
+// backfill into an old row. This is the ONE transition-log layout bump for
+// Phase 228 (D-18) -- plan 228-11 moves only `RL_OBS_DIM` (and therefore the
+// derived `RECORD_SIZE`) inside THIS layout; it does not bump
+// `FORMAT_VERSION` again.
+//
+// Version 7 (tstl-sylvanas phase 230, plan 230-04, SCOR-02 -- R-B): the learner needs three
+// things per decision that no record carried through version 6 -- the facts the scorer looked at
+// for every candidate, which of those slots were real, and which one was taken (must_haves R-B).
+// Four new fields land on `decision_record`, grouped by size class the SAME way every prior
+// field on this struct already is (largest-alignment-first, so the whole struct still closes
+// under natural alignment with ZERO internal padding -- see this file's own "Row layouts"
+// section comment below):
+//   - `candidate_features[RL_TARGET_SLOTS * RL_TARGET_FEATURES]` (float array, grouped with
+//     `obs` -- inserted immediately after it, pushing every field from `q_margin` onward down by
+//     `4 * RL_TARGET_SLOTS * RL_TARGET_FEATURES` bytes): the per-slot feature block
+//     `rl_target_select::preference_scorer` actually scored this decision, CAPTURED at the
+//     moment it scored it (never recomputed after the action was chosen -- a recompute would
+//     silently disagree with the candidate exploration draw this same plan adds and with any
+//     state that moved between the fill and the write). Slot-major: slot 0's
+//     `RL_TARGET_FEATURE_NAMES` features first, in that array's own declared order.
+//   - `candidate_mask` (uint16, grouped with the other 2-byte fields, immediately after `mask`):
+//     one bit per slot, set for every slot this decision actually held a real candidate.
+//   - `candidate_count` / `chosen_candidate_slot` (two uint8 fields, grouped with the other
+//     1-byte fields, immediately before `kind`): the live candidate count for this decision, and
+//     the SLOT (an index into this row's own `candidate_features` block, NOT the chosen enemy's
+//     `player_t::actor_index` -- that is `chosen_target_actor_index` above, a different field
+//     answering a different question) the action actually took. `CHOSEN_CANDIDATE_SLOT_SENTINEL`
+//     (0xFFu, defined below) marks a wait, an untargeted cast, or any decision where the scorer
+//     did not score candidates this boundary -- it can never collide with a real slot because
+//     `RL_TARGET_SLOTS` (8) is far below 0xFF and the overflow refusal in
+//     `rl_target_select.cpp` already keeps the live candidate count at or below it.
+// `close_record`/`footer_record` gain matching zero-written fields at the SAME relative offsets
+// (mirroring version 5's `final_damage_expected_total`-has-no-footer-counterpart precedent and
+// version 6's `chosen_target_actor_index`-has-no-footer-counterpart precedent) so `kind`/
+// `reserved` keep landing at the SAME offset across all three row shapes (D-02) -- no row kind
+// gets a NAMED close/footer counterpart for any of the four new fields.
+// `RECORD_SIZE(W)` moves from `roundup8(45 + 4*W)` to
+// `roundup8(45 + 4*W + 4*RL_TARGET_SLOTS*RL_TARGET_FEATURES + 4)` -- the existing round-up rule
+// with the four new field sizes added (`4*RL_TARGET_SLOTS*RL_TARGET_FEATURES` for the feature
+// array, `2` for `candidate_mask`, `1` each for `candidate_count`/`chosen_candidate_slot`). At
+// `RL_OBS_DIM=372`, `RL_TARGET_SLOTS=8`, `RL_TARGET_FEATURES=22`: `roundup8(45 + 1488 + 704 + 4)
+// = roundup8(2241) = 2248`. Version-6 files are orphaned by design (the reader refuses on an
+// exact version mismatch, same rule as every prior bump) -- there is no candidate block to
+// backfill into an old row; `230-ROW-RECEIPT.md` enumerates every transition log in this tree
+// written at version 6 that this bump orphans.
 
 #pragma once
 
@@ -130,24 +202,43 @@ namespace rl_translog
 // trailing NUL is part of the magic itself.
 inline constexpr char MAGIC[ 4 ] = { 'R', 'L', 'T', 'L' };
 inline constexpr std::uint32_t ENDIAN_CANARY = 0x01020304u;
-inline constexpr std::uint32_t FORMAT_VERSION = 5u;
+inline constexpr std::uint32_t FORMAT_VERSION = 7u;  // 230-04: candidate block added, see top-of-file version-7 comment
 // RECORD_SIZE stays an integer LITERAL, not a computed expression --
 // scripts/rl/obs_transport_coupling.selftest.py parses this file's own
 // source text for an `ast.Constant`-shaped literal on both sides of the
 // language boundary, and a computed expression here would break that
 // parse. The static_assert immediately below is what keeps the literal
-// honest: RECORD_SIZE(W) = roundup8(43 + 4*W), so a mistyped literal
-// cannot silently drift from the formula and still compile (tstl 220-03,
-// OBS-06; formula updated 260901-pb1 Task 3, version 5 -- see top-of-file
-// comment).
-inline constexpr std::uint32_t RECORD_SIZE = 936u;  // 260902-context-scaling D: roundup8(43 + 4*223) -- W=223,
-                                                      // FORMAT_VERSION 5 (unchanged -- pure width move, no new
-                                                      // fields added to the row shape this time). Previous:
-                                                      // 1032u at W=246 (260901-pb1 Task 3).
-static_assert( RECORD_SIZE == ( ( 43u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) + 7u ) / 8u ) * 8u,
-               "RECORD_SIZE must be roundup8(43 + 4*RL_OBS_DIM)" );
+// honest: RECORD_SIZE(W) = roundup8(45 + 4*W + 4*RL_TARGET_SLOTS*RL_TARGET_FEATURES + 4), so a
+// mistyped literal cannot silently drift from the formula and still compile (tstl 220-03,
+// OBS-06; formula updated 260901-pb1 Task 3 for version 5, updated again 228-09 for version 6,
+// updated again 230-04 for version 7 -- see top-of-file comment).
+inline constexpr std::uint32_t RECORD_SIZE = 2248u;  // 230-04: roundup8(45 + 4*372 + 4*8*22 + 4)
+                                                       // = roundup8(2241) -- see top-of-file
+                                                       // version-7 comment.
+static_assert( RECORD_SIZE == ( ( 45u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) +
+                                   4u * static_cast<std::uint32_t>( RL_TARGET_SLOTS ) *
+                                       static_cast<std::uint32_t>( RL_TARGET_FEATURES ) + 4u + 7u ) / 8u ) * 8u,
+               "RECORD_SIZE must be roundup8(45 + 4*RL_OBS_DIM + 4*RL_TARGET_SLOTS*RL_TARGET_FEATURES + 4)" );
 static_assert( RL_OBS_DIM >= 2, "footer_record's zero40[RL_OBS_DIM-1] needs at least one element" );
 inline constexpr std::uint32_t HEADER_SIZE = 256u;
+
+// 228-09 (D-23/TGT-08): the chosen-target sentinel meaning "no pick" --
+// a wait decision, an untargeted cast, or a targeted cast whose pick was
+// not found (an all-illegal decision, CR-04's deadlock case). 0xFFFFu
+// cannot collide with a real `player_t::actor_index` (see this file's own
+// top-of-file version-6 comment for why a full 16 bits is exact, never
+// merely sufficient, for that field).
+inline constexpr std::uint16_t CHOSEN_TARGET_SENTINEL_NO_PICK = 0xFFFFu;
+
+// 230-04 (SCOR-02, R-B): the chosen-CANDIDATE-SLOT sentinel meaning "no candidate block scored
+// this decision" -- a wait, an untargeted cast, or a targeted cast the scorer did not score
+// (rules path active, or no scorer loaded). An INDEX into this row's own `candidate_features`
+// block, never an actor identity (that is `CHOSEN_TARGET_SENTINEL_NO_PICK` above -- a different
+// field answering a different question, stated explicitly so a later reader never reads one as a
+// copy of the other). 0xFFu cannot collide with a real slot: `RL_TARGET_SLOTS` (8) is far below
+// 0xFF, and `rl_target_select.cpp`'s own overflow refusal keeps the live candidate count at or
+// below `RL_TARGET_SLOTS` before a slot is ever assigned.
+inline constexpr std::uint8_t CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK = 0xFFu;
 
 // Row kind discriminator (offset 62 in every row struct below, D-02). Zero
 // is deliberately not a valid kind -- a zero-filled region left by a short
@@ -211,6 +302,8 @@ inline constexpr std::uint8_t FLAG_COLLECTED = 1u << 4;
 // with the W=9 value alongside it -- see this file's top-of-file comment
 // for the version-4 rationale.
 
+// 230-04 shorthand used only in this file's own @NN offset comments below: S = RL_TARGET_SLOTS
+// (8), F = RL_TARGET_FEATURES (22), SF = S*F (176 floats, 704 bytes).
 struct decision_record
 {
   double damage;              // @0  -- p->solver_damage_so_far at this boundary
@@ -225,17 +318,40 @@ struct decision_record
   float top_q;                 // @24+4W -- version 3: best LEGAL Q (the net's own
                                //         remaining-value estimate at this boundary), or quiet NaN
                                //         if no action was legal -- see top-of-file comment
-  std::uint32_t seq;          // @28+4W -- sim->solver_control_seq at this boundary
-  std::uint32_t mask;         // @32+4W -- version 4: one bit per legal action,
+  float candidate_features[ RL_TARGET_SLOTS * RL_TARGET_FEATURES ];  // @28+4W -- version 7
+                               //         (230-04, SCOR-02, R-B): the per-slot feature block
+                               //         rl_target_select::preference_scorer actually scored this
+                               //         decision, CAPTURED at the moment it scored it (never
+                               //         recomputed -- see top-of-file version-7 comment).
+                               //         Slot-major, RL_TARGET_FEATURE_NAMES's own order within
+                               //         each slot. Zero-filled for any slot candidate_mask does
+                               //         not mark real. Placed right after top_q (the point
+                               //         close_record's own zero12 array already ends at) so
+                               //         close_record only needs a NEW trailing zero-fill, not a
+                               //         split of its existing one.
+  std::uint32_t seq;          // @28+4W+4SF -- sim->solver_control_seq at this boundary
+  std::uint32_t mask;         // @32+4W+4SF -- version 4: one bit per legal action,
                                //         declaration order, now a full uint32 (was a uint8 in
                                //         versions <=3) -- widened to pre-pay Phase 221's 24-slot
                                //         action set (see top-of-file comment)
-  std::uint16_t iteration;    // @36+4W -- sim->current_iteration
-  std::uint8_t action;        // @38+4W -- chosen action index
-  std::uint8_t flags;         // @39+4W
-  std::uint8_t thread;        // @40+4W -- sim->thread_index
-  std::uint8_t kind;          // @41+4W -- KIND_DECISION
-  std::uint8_t reserved;      // @42+4W -- written zero
+  std::uint16_t candidate_mask;  // @36+4W+4SF -- version 7 (230-04): one bit per slot, set for
+                               //         every slot this decision actually held a real candidate.
+  std::uint16_t iteration;    // @38+4W+4SF -- sim->current_iteration
+  std::uint16_t chosen_target_actor_index;  // @40+4W+4SF -- version 6 (228-09, D-23/TGT-08): the
+                               //         CHOSEN action's own stamped pick (lookup_pick(), never
+                               //         recomputed), as a player_t::actor_index, or
+                               //         CHOSEN_TARGET_SENTINEL_NO_PICK -- see top-of-file comment
+  std::uint8_t action;        // @42+4W+4SF -- chosen action index
+  std::uint8_t flags;         // @43+4W+4SF
+  std::uint8_t thread;        // @44+4W+4SF -- sim->thread_index
+  std::uint8_t candidate_count;  // @45+4W+4SF -- version 7 (230-04): the live candidate count
+                               //         this decision (0..RL_TARGET_SLOTS).
+  std::uint8_t chosen_candidate_slot;  // @46+4W+4SF -- version 7 (230-04): an INDEX into this
+                               //         row's own candidate_features block (never an actor
+                               //         identity -- see chosen_target_actor_index above), or
+                               //         CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK.
+  std::uint8_t kind;          // @47+4W+4SF -- KIND_DECISION
+  std::uint8_t reserved;      // @48+4W+4SF -- written zero
 };
 
 struct close_record
@@ -250,18 +366,36 @@ struct close_record
                                           //         (version 4: sized as W+2 to keep decision_count
                                           //         aligned with decision_record's own shifted seq
                                           //         offset, see top-of-file comment)
-  std::uint32_t decision_count;          // @28+4W -- decision rows appended for this fight
-  std::uint32_t zero_mask;                // @32+4W -- version 4: widened to uint32 to sit at
+  float zero_candidate_features[ RL_TARGET_SLOTS * RL_TARGET_FEATURES ];  // @28+4W -- version 7
+                                          //         (230-04): written zero, sits immediately after
+                                          //         zero12 -- exactly where decision_record's own
+                                          //         candidate_features sits (right after top_q) --
+                                          //         no close-row counterpart is named, mirroring
+                                          //         version 5's own final_damage_expected_total
+                                          //         precedent
+  std::uint32_t decision_count;          // @28+4W+4SF -- decision rows appended for this fight
+  std::uint32_t zero_mask;                // @32+4W+4SF -- version 4: widened to uint32 to sit at
                                           //         decision_record's own mask offset; written zero.
                                           //         Collapses the old zero62/zero63 uint8 PAIR (the mask
                                           //         byte they straddled is now this single uint32)
-  std::uint16_t iteration;                // @36+4W
-  std::uint8_t zero_action;               // @38+4W -- written zero, sits at decision_record's
+  std::uint16_t zero_candidate_mask;      // @36+4W+4SF -- version 7 (230-04): written zero, sits
+                                          //         at decision_record's own candidate_mask offset
+  std::uint16_t iteration;                // @38+4W+4SF
+  std::uint16_t zero_chosen_target;       // @40+4W+4SF -- version 6 (228-09): written zero, sits at
+                                          //         decision_record's own chosen_target_actor_index
+                                          //         offset -- no close-row counterpart is named,
+                                          //         mirroring version 5's own
+                                          //         final_damage_expected_total precedent
+  std::uint8_t zero_action;               // @42+4W+4SF -- written zero, sits at decision_record's
                                           //         own action offset
-  std::uint8_t flags;                      // @39+4W -- FLAG_COLLECTED set per D-09; others zero this phase
-  std::uint8_t thread;                      // @40+4W
-  std::uint8_t kind;                         // @41+4W -- KIND_CLOSE
-  std::uint8_t reserved;                      // @42+4W -- written zero
+  std::uint8_t flags;                      // @43+4W+4SF -- FLAG_COLLECTED set per D-09; others zero this phase
+  std::uint8_t thread;                      // @44+4W+4SF
+  std::uint8_t zero_candidate_count;         // @45+4W+4SF -- version 7 (230-04): written zero,
+                                          //         sits at decision_record's own candidate_count offset
+  std::uint8_t zero_chosen_candidate_slot;   // @46+4W+4SF -- version 7 (230-04): written zero,
+                                          //         sits at decision_record's own chosen_candidate_slot offset
+  std::uint8_t kind;                         // @47+4W+4SF -- KIND_CLOSE
+  std::uint8_t reserved;                      // @48+4W+4SF -- written zero
 };
 
 // 212-CR-FIX BL-01: this footer carries two DIFFERENT populations of fight,
@@ -292,22 +426,30 @@ struct footer_record
   double summed_close_damage;          // @24 -- writer's own running sum of close-row damage; ALL fights, warm-up included
   std::uint32_t collected_fight_count; // @32 -- count of close rows with FLAG_COLLECTED set (excludes warm-up); was the unused `zero32` slot
   std::uint32_t zero36;                 // @36
-  std::uint32_t zero40[ RL_OBS_DIM - 1 ]; // @40..(35+4W) -- version 5 (260901-pb1 Task 3): grown
-                                          //         by 2 more elements (was W-3) purely to absorb
-                                          //         decision_record/close_record's shared +8-byte
-                                          //         shift -- footer_record gets NO new NAMED field
-                                          //         (see top-of-file comment); sized W-1 to keep the
-                                          //         following iteration field aligned with
-                                          //         decision_record's own shifted iteration offset
-                                          //         (36+4W)
-  std::uint16_t iteration;              // @36+4W -- written 0xFFFF, a sentinel: no fight owns the footer
-  std::uint8_t zero_action;              // @38+4W -- written zero, collapses the old
+  std::uint32_t zero40[ RL_OBS_DIM - 1 + RL_TARGET_SLOTS * RL_TARGET_FEATURES ]; // @40..(35+4W+4SF)
+                                          //         -- version 7 (230-04): grown by SF more elements
+                                          //         (was W-1) purely to absorb decision_record's new
+                                          //         candidate_features span -- footer_record gets NO
+                                          //         new NAMED field for it (see top-of-file comment);
+                                          //         sized W-1+SF to keep the following fields aligned
+                                          //         with decision_record's own shifted offsets
+  std::uint16_t zero_candidate_mask;     // @36+4W+4SF -- version 7 (230-04): written zero, sits at
+                                          //         decision_record's own candidate_mask offset
+  std::uint16_t iteration;              // @38+4W+4SF -- written 0xFFFF, a sentinel: no fight owns the footer
+  std::uint16_t zero_chosen_target;      // @40+4W+4SF -- version 6 (228-09): written zero, sits at
+                                          //         decision_record's own chosen_target_actor_index
+                                          //         offset -- see close_record's own comment
+  std::uint8_t zero_action;              // @42+4W+4SF -- written zero, collapses the old
                                           //         zero62/zero63 uint8 PAIR (see close_record's
                                           //         own zero_mask comment)
-  std::uint8_t flags;                    // @39+4W -- written zero
-  std::uint8_t thread;                   // @40+4W
-  std::uint8_t kind;                     // @41+4W -- KIND_FOOTER
-  std::uint8_t reserved;                 // @42+4W -- written zero
+  std::uint8_t flags;                    // @43+4W+4SF -- written zero
+  std::uint8_t thread;                   // @44+4W+4SF
+  std::uint8_t zero_candidate_count;     // @45+4W+4SF -- version 7 (230-04): written zero, sits at
+                                          //         decision_record's own candidate_count offset
+  std::uint8_t zero_chosen_candidate_slot; // @46+4W+4SF -- version 7 (230-04): written zero, sits
+                                          //         at decision_record's own chosen_candidate_slot offset
+  std::uint8_t kind;                     // @47+4W+4SF -- KIND_FOOTER
+  std::uint8_t reserved;                 // @48+4W+4SF -- written zero
 };
 
 // The header. The two fields at @20/@24 used to be pure alignment padding
@@ -378,41 +520,57 @@ static_assert( alignof( footer_record ) == 8, "footer_record must be 8-aligned" 
 static_assert( sizeof( file_header ) == HEADER_SIZE, "file_header must be exactly HEADER_SIZE bytes" );
 static_assert( alignof( file_header ) == 8, "file_header must be 8-aligned" );
 
-// decision_record field offsets -- version 4: every offset below `obs` is
-// stated as a function of RL_OBS_DIM (W) rather than a hand-typed constant
-// per field, per the closed form in this file's top-of-file comment. This
-// is what makes the NEXT width move (220-04) a one-number change: every
-// assertion below re-derives itself from RL_OBS_DIM.
+// 230-04: SF = RL_TARGET_SLOTS * RL_TARGET_FEATURES, the byte-count-in-floats the candidate
+// block adds -- named once here so every offsetof assertion below states the SAME expression
+// (never a hand-typed product) for the "+4SF" term this version's insertion shifts everything
+// after `top_q` by.
+inline constexpr std::uint32_t TARGET_BLOCK_FLOATS =
+    static_cast<std::uint32_t>( RL_TARGET_SLOTS ) * static_cast<std::uint32_t>( RL_TARGET_FEATURES );
+
+// decision_record field offsets -- version 4 restated every offset below `obs` as a function of
+// RL_OBS_DIM (W); version 7 (230-04) additionally restates every offset from `candidate_features`
+// onward as a function of TARGET_BLOCK_FLOATS (SF) too, so a future feature-list or slot-count
+// change is likewise a one-number change.
 static_assert( offsetof( decision_record, damage ) == 0 );
 static_assert( offsetof( decision_record, damage_expected ) == 8 );
 static_assert( offsetof( decision_record, t ) == 16 );
 static_assert( offsetof( decision_record, obs ) == 20 );
 static_assert( offsetof( decision_record, q_margin ) == 20u + 4u * RL_OBS_DIM );
 static_assert( offsetof( decision_record, top_q ) == 24u + 4u * RL_OBS_DIM );
-static_assert( offsetof( decision_record, seq ) == 28u + 4u * RL_OBS_DIM );
-static_assert( offsetof( decision_record, mask ) == 32u + 4u * RL_OBS_DIM );
-static_assert( offsetof( decision_record, iteration ) == 36u + 4u * RL_OBS_DIM );
-static_assert( offsetof( decision_record, action ) == 38u + 4u * RL_OBS_DIM );
-static_assert( offsetof( decision_record, flags ) == 39u + 4u * RL_OBS_DIM );
-static_assert( offsetof( decision_record, thread ) == 40u + 4u * RL_OBS_DIM );
-static_assert( offsetof( decision_record, kind ) == 41u + 4u * RL_OBS_DIM );
-static_assert( offsetof( decision_record, reserved ) == 42u + 4u * RL_OBS_DIM );
+static_assert( offsetof( decision_record, candidate_features ) == 28u + 4u * RL_OBS_DIM );
+static_assert( offsetof( decision_record, seq ) == 28u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( decision_record, mask ) == 32u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( decision_record, candidate_mask ) == 36u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( decision_record, iteration ) == 38u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( decision_record, chosen_target_actor_index ) == 40u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( decision_record, action ) == 42u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( decision_record, flags ) == 43u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( decision_record, thread ) == 44u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( decision_record, candidate_count ) == 45u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( decision_record, chosen_candidate_slot ) == 46u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( decision_record, kind ) == 47u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( decision_record, reserved ) == 48u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 
-// close_record field offsets -- version 5, same W-parametrised form.
+// close_record field offsets -- version 7, same W/SF-parametrised form.
 static_assert( offsetof( close_record, final_damage_total ) == 0 );
 static_assert( offsetof( close_record, final_damage_expected_total ) == 8 );
 static_assert( offsetof( close_record, fight_length ) == 16 );
 static_assert( offsetof( close_record, zero12 ) == 20 );
-static_assert( offsetof( close_record, decision_count ) == 28u + 4u * RL_OBS_DIM );
-static_assert( offsetof( close_record, zero_mask ) == 32u + 4u * RL_OBS_DIM );
-static_assert( offsetof( close_record, iteration ) == 36u + 4u * RL_OBS_DIM );
-static_assert( offsetof( close_record, zero_action ) == 38u + 4u * RL_OBS_DIM );
-static_assert( offsetof( close_record, flags ) == 39u + 4u * RL_OBS_DIM );
-static_assert( offsetof( close_record, thread ) == 40u + 4u * RL_OBS_DIM );
-static_assert( offsetof( close_record, kind ) == 41u + 4u * RL_OBS_DIM );
-static_assert( offsetof( close_record, reserved ) == 42u + 4u * RL_OBS_DIM );
+static_assert( offsetof( close_record, zero_candidate_features ) == 28u + 4u * RL_OBS_DIM );
+static_assert( offsetof( close_record, decision_count ) == 28u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( close_record, zero_mask ) == 32u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( close_record, zero_candidate_mask ) == 36u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( close_record, iteration ) == 38u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( close_record, zero_chosen_target ) == 40u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( close_record, zero_action ) == 42u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( close_record, flags ) == 43u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( close_record, thread ) == 44u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( close_record, zero_candidate_count ) == 45u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( close_record, zero_chosen_candidate_slot ) == 46u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( close_record, kind ) == 47u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( close_record, reserved ) == 48u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 
-// footer_record field offsets -- version 5, same W-parametrised form.
+// footer_record field offsets -- version 7, same W/SF-parametrised form.
 static_assert( offsetof( footer_record, engine_run_aggregate ) == 0 );
 static_assert( offsetof( footer_record, mean_collected_fight_length ) == 8 );
 static_assert( offsetof( footer_record, fight_count ) == 12 );
@@ -422,12 +580,16 @@ static_assert( offsetof( footer_record, summed_close_damage ) == 24 );
 static_assert( offsetof( footer_record, collected_fight_count ) == 32 );
 static_assert( offsetof( footer_record, zero36 ) == 36 );
 static_assert( offsetof( footer_record, zero40 ) == 40 );
-static_assert( offsetof( footer_record, iteration ) == 36u + 4u * RL_OBS_DIM );
-static_assert( offsetof( footer_record, zero_action ) == 38u + 4u * RL_OBS_DIM );
-static_assert( offsetof( footer_record, flags ) == 39u + 4u * RL_OBS_DIM );
-static_assert( offsetof( footer_record, thread ) == 40u + 4u * RL_OBS_DIM );
-static_assert( offsetof( footer_record, kind ) == 41u + 4u * RL_OBS_DIM );
-static_assert( offsetof( footer_record, reserved ) == 42u + 4u * RL_OBS_DIM );
+static_assert( offsetof( footer_record, zero_candidate_mask ) == 36u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( footer_record, iteration ) == 38u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( footer_record, zero_chosen_target ) == 40u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( footer_record, zero_action ) == 42u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( footer_record, flags ) == 43u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( footer_record, thread ) == 44u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( footer_record, zero_candidate_count ) == 45u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( footer_record, zero_chosen_candidate_slot ) == 46u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( footer_record, kind ) == 47u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( footer_record, reserved ) == 48u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 
 // file_header field offsets
 static_assert( offsetof( file_header, magic ) == 0 );
@@ -447,10 +609,23 @@ static_assert( offsetof( file_header, action_space_sha ) == 184 );
 // same offset in every row shape).
 static_assert( offsetof( decision_record, kind ) == offsetof( close_record, kind ) );
 static_assert( offsetof( close_record, kind ) == offsetof( footer_record, kind ) );
-static_assert( offsetof( decision_record, kind ) == 41u + 4u * RL_OBS_DIM );
+static_assert( offsetof( decision_record, kind ) == 47u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 static_assert( offsetof( decision_record, reserved ) == offsetof( close_record, reserved ) );
 static_assert( offsetof( close_record, reserved ) == offsetof( footer_record, reserved ) );
-static_assert( offsetof( decision_record, reserved ) == 42u + 4u * RL_OBS_DIM );
+static_assert( offsetof( decision_record, reserved ) == 48u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+// 228-09 (version 6): the new chosen-target field also lands at the same offset across all
+// three row shapes -- decision_record's own NAMED field, close/footer's zero-written twins.
+static_assert( offsetof( decision_record, chosen_target_actor_index ) == offsetof( close_record, zero_chosen_target ) );
+static_assert( offsetof( close_record, zero_chosen_target ) == offsetof( footer_record, zero_chosen_target ) );
+// 230-04 (version 7): the new candidate-block fields also land at the same offset across all
+// three row shapes -- decision_record's own NAMED fields, close/footer's zero-written twins.
+static_assert( offsetof( decision_record, candidate_features ) == offsetof( close_record, zero_candidate_features ) );
+static_assert( offsetof( decision_record, candidate_mask ) == offsetof( close_record, zero_candidate_mask ) );
+static_assert( offsetof( close_record, zero_candidate_mask ) == offsetof( footer_record, zero_candidate_mask ) );
+static_assert( offsetof( decision_record, candidate_count ) == offsetof( close_record, zero_candidate_count ) );
+static_assert( offsetof( close_record, zero_candidate_count ) == offsetof( footer_record, zero_candidate_count ) );
+static_assert( offsetof( decision_record, chosen_candidate_slot ) == offsetof( close_record, zero_chosen_candidate_slot ) );
+static_assert( offsetof( close_record, zero_chosen_candidate_slot ) == offsetof( footer_record, zero_chosen_candidate_slot ) );
 
 // Dimension guards.
 static_assert( RL_ACTION_DIM <= 32,
@@ -505,10 +680,33 @@ void open_and_write_header( sim_t* sim );
 // value, so the two fields can never silently disagree about what "best"
 // meant at this boundary. NaN when no action was legal (mirrors q_margin's
 // own NaN-on-insufficient-legal-actions convention).
+//
+// `chosen_target_actor_index` (version 6, 228-09, D-23/TGT-08): the CHOSEN
+// action's own per-decision pick, as a `player_t::actor_index` value --
+// caller-resolved via `rl_target_select::lookup_pick()` on the SAME
+// `action_index` this call already carries, never recomputed inside this
+// function (D-12: this file is a writer, not a decision-maker). The caller
+// passes `CHOSEN_TARGET_SENTINEL_NO_PICK` for a wait, an untargeted cast,
+// or a targeted cast whose pick was not found this decision.
+//
+// `candidate_features`/`candidate_mask`/`candidate_count`/`chosen_candidate_slot` (version 7,
+// 230-04, SCOR-02, R-B): the per-decision candidate block `rl_target_select` CAPTURED at the
+// moment its scorer preference actually scored it (never recomputed here -- D-12's "this file is
+// a writer, not a decision-maker" applies to this block exactly as it already does to
+// `chosen_target_actor_index`). `candidate_features` is caller-owned and
+// `RL_TARGET_SLOTS * RL_TARGET_FEATURES`-sized, slot-major; a nullptr means no candidate block
+// was captured this decision (a wait, an untargeted cast, or the rules path was active) -- this
+// function then writes an all-zero block, `candidate_mask=0`, `candidate_count=0` and
+// `chosen_candidate_slot=CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK` regardless of what the other
+// three parameters carry, so a caller does not need to zero them itself.
 void record_decision( sim_t* sim, const player_t* p, std::uint64_t seq,
                        const float obs[ RL_OBS_DIM ], const std::uint8_t mask[ RL_ACTION_DIM ],
-                       int action_index, float q_margin, float top_q, bool wait_floored,
-                       bool exploratory );
+                       int action_index, float q_margin, float top_q,
+                       std::uint16_t chosen_target_actor_index, bool wait_floored,
+                       bool exploratory,
+                       const float* candidate_features = nullptr, std::uint16_t candidate_mask = 0,
+                       std::uint8_t candidate_count = 0,
+                       std::uint8_t chosen_candidate_slot = CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK );
 
 // Called from sim_t::combat_end(), after datacollection_end(). Builds and
 // appends the close row, then flushes the buffered rows for this fight to

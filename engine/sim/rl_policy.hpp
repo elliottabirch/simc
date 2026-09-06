@@ -92,6 +92,21 @@ struct rl_state_t
   double swing_mh_remains    = 0.0;   bool has_swing_mh_remains   = false;
   double swing_oh_remains    = 0.0;   bool has_swing_oh_remains   = false;   // quick task 260826-38t, D-2R slot 8
   double active_enemies      = 0.0;   bool has_active_enemies     = false;
+
+  // FORK-04b (260902/226-07) -- the re-ask-period cap on the unanchored
+  // wait (build_wait's anchor.kind == none branch, rl_policy_obs.cpp).
+  // Same PLAYER-scoped formulas decision_dump.cpp's gcd_length/
+  // auto_attack_interval keys and the swing_cast_gcd_length/
+  // swing_cast_auto_attack_interval obs leaves use -- read ONCE here in
+  // read_state(), never re-derived at the obs-leaf switch or at the cap
+  // site (the "one reader" rule this file's swing/gcd obs-leaf comment
+  // already states). Both are unconditionally well-defined (0.0 is a
+  // real "no main-hand weapon" reading for auto_attack_interval, not an
+  // absence), so has_* is set true unconditionally in read_state() --
+  // kept as an explicit flag anyway for the same reason every other
+  // field on this POD carries one.
+  double gcd_length          = 0.0;   bool has_gcd_length         = false;
+  double auto_attack_interval = 0.0;  bool has_auto_attack_interval = false;
   bool   boundary_is_foreground = true;   // converted ONCE from execute_type by the caller
 
   // 221-03 (ACT-05/ACT-06) -- the two anchored-wait clamp inputs. Filled
@@ -106,6 +121,14 @@ struct rl_state_t
   // consumers deliberately differ.
   double fight_remains        = 0.0;   bool has_fight_remains        = false;
   double raid_event_next_in   = 0.0;   bool has_raid_event_next_in   = false;
+
+  // 228-10 (Q18, D-12 "read once, use twice") -- the SAME immunity-remaining value the dump's
+  // aggregate `immunity_remaining` key reports, read here through the ONE shared
+  // `compute_invulnerability_window()` function so build_wait's new unanchored-wait candidate
+  // and the observation-facing number can never independently drift. `has_immunity_remaining`
+  // is false whenever no invulnerability is currently active (the "nothing pending" case for
+  // THIS field -- distinct from raid_event_next_in's own nothing-pending case above).
+  double immunity_remaining   = 0.0;   bool has_immunity_remaining   = false;
 
   // 221-01 (ACT-02, Pattern 1), RECOMPOSED 260831-lg6 (D-1) -- the
   // engine-truth legality layer, action-id order, exactly RL_ACTION_DIM
@@ -139,8 +162,22 @@ struct rl_state_t
 // solver_control::resolve_action -- the SAME resolver accept_cast uses --
 // so the bits this function computes and the FATAL gate `accept_cast`
 // enforces can never disagree about which action_t* they mean.
+//
+// 260902/cr4 (CR-02): `is_decision_boundary` carries NO default value on this declaration --
+// every call site states true or false explicitly, by design. Three call sites exist: read_state
+// (this file's own caller, always the boundary), decision_dump::write_state_fields's FIFO
+// REQUEST-LINE call (solver_control.cpp, also the boundary -- built before the reply/accept_cast
+// have run), and decision_dump::record()'s own call (decision_dump.cpp, NEVER the boundary --
+// record() always runs AFTER solver_control::choose() has already retargeted and turned the
+// player for this decision). True bumps this player's decision stamp and fills a fresh pick for
+// every targeted action, then CACHES the two output arrays keyed on that stamp; false returns the
+// cached PRE-decision arrays instead of recomputing against state the cast already mutated -- or,
+// when no cache exists for the current stamp (a scripted actor with decision_dump= and no solver
+// arm never takes the boundary path), computes the plain gate bits without bumping the stamp and
+// without filling any pick, and reports that via `out_used_dump_time_compute` below.
 void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_ACTION_DIM ],
-                             std::uint8_t out_ready[ RL_ACTION_DIM ] );
+                             std::uint8_t out_ready[ RL_ACTION_DIM ], bool is_decision_boundary,
+                             bool* out_used_dump_time_compute = nullptr );
 
 // 221-03 (ACT-05/ACT-06) -- the ONE shared raid-event walk, called from
 // read_state() (this file), build_obs()'s raid_event_next_in leaf
@@ -161,6 +198,79 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
 // two deliberately-different policies).
 bool next_raid_event_in( const sim_t* sim, double& out_seconds );
 
+// ---------------------------------------------------------------------------------------------
+// 228-10 Task 1 Step 3/4 (D-16/D-17/TGT-05/TGT-06). Two new engine-wide computations, each ONE
+// function shared by every consumer (decision_dump.cpp's own aggregate keys AND, for the
+// immunity window, read_state()'s own new rl_state_t::immunity_remaining field -- D-12's "read
+// once, use twice").
+// ---------------------------------------------------------------------------------------------
+
+// The identity-free aggregates (D-16): fight-wide counts and timers over
+// `sim->target_non_sleeping_list`, computed ONCE per call. `has_*` flags mirror this file's own
+// convention -- "no enemies at all" is possible only in a degenerate/teardown state, but the
+// flag is kept rather than assumed away.
+struct fight_wide_aggregates_t
+{
+  int    enemies_total              = 0;
+  int    enemies_in_melee           = 0;
+  int    enemies_within_8yd         = 0;
+  int    enemies_within_40yd        = 0;
+  int    enemies_in_front           = 0;
+  int    flame_shock_carrier_count  = 0;   // NEW counter -- walks DOTS over non-sleeping enemies,
+                                            // never buff_list (the existing enemy_debuff_counts
+                                            // counter can never see a dot -- P-5).
+  bool   has_soonest_time_to_die    = false;
+  double soonest_time_to_die        = 0.0;
+  bool   has_longest_time_to_die    = false;
+  double longest_time_to_die        = 0.0;
+  int    dying_within_5s            = 0;   // time_to_die <= 5.0 (AT OR BELOW -- stated identically
+  int    dying_within_15s           = 0;   // to this counter's own 15s sibling, so the two can
+                                            // never disagree about the crossing point)
+  bool   has_nearest_enemy_distance = false;
+  double nearest_enemy_distance     = 0.0;
+};
+
+fight_wide_aggregates_t compute_fight_wide_aggregates( player_t* p );
+
+// TGT-06/D-17/Q18: the fight-wide invulnerability schedule, filtered from `sim->raid_events` by
+// `type == "invulnerable"` -- COPIES `next_raid_event_in`'s own loop/discard-the-sentinel
+// convention (never a second, independently-maintained walk), extended to also report the
+// ACTIVE window's own remaining time via the matching event's `up()`/`remains()` (valid only
+// while `up()`, per raid_event_t::remains()'s own precondition). `next_in`/`remaining` are 0.0
+// when nothing is pending/active respectively -- the "nothing pending" wire value this plan's
+// receipt records, matching every existing `*_remaining` field's own zero-is-absent convention
+// on this codebase (never a saturation sentinel, never null).
+struct invulnerability_window_t
+{
+  bool   has_next  = false;
+  double next_in   = 0.0;
+  bool   active    = false;
+  double remaining = 0.0;
+};
+
+invulnerability_window_t compute_invulnerability_window( const sim_t* sim );
+
+// 228-10 Task 1 Step 5 (D-16 shaped-spell block, TGT-04, OR-2): descriptive shape facts for the
+// two SHAPED actions, computed from the CURRENT facing ONLY (there is no hypothetical direction
+// to evaluate under OR-2). Both call the ONE shared geometry copy
+// (rl_target_select::crash_lightning_cone_contains / sundering_rect_contains) against every
+// live, non-sleeping enemy -- never a second copy, never a target-cache read (R-D). Lives here
+// (the observation writer's own file/namespace), not in rl_target_select, because computing a
+// descriptive fact about the CURRENT facing is this file's own concern -- the selector module
+// governs picks, and the shaped actions have none (OR-2). "Long-lived" reuses the SAME
+// threshold the identity-free aggregates' own dying-within-15s counter uses
+// (rl_target_select::DYING_WITHIN_LATER_SECONDS) -- an orchestrator default, since D-16 names
+// the field but not its numeric boundary; see the receipt/ledger for the row.
+struct shape_hit_result_t
+{
+  int    enemies_hit           = 0;
+  double summed_remaining_life = 0.0;
+  int    long_lived_count      = 0;
+};
+
+shape_hit_result_t compute_crash_lightning_shape( player_t* p );
+shape_hit_result_t compute_sundering_shape( player_t* p );
+
 // WR-05 fix (210-CR-FIX): `source` is a `std::string`, not a `const char*`
 // into shared storage. `wait_result` is part of the pinned POD interface --
 // a `const char*` here previously pointed into a function-local `static
@@ -177,7 +287,18 @@ bool next_raid_event_in( const sim_t* sim, double& out_seconds );
 struct wait_result { double seconds = 0.0; std::string source = "floor"; bool floored = false; };
 
 // ---- Stage 1: needs the engine. NOT exercised by the standalone test executable. ----
-rl_state_t read_state( const player_t* p, bool boundary_is_foreground );
+// `is_decision_boundary` (228-11 Task 2, closing a gap 228-09 disclosed but did not fix):
+// threaded straight to this function's own internal read_action_gate_bits() call, which used to
+// hardcode `true` unconditionally regardless of the caller's own context -- correct for
+// solver_control.cpp's real per-decision call (always the boundary, pass true) but WRONG for
+// decision_dump.cpp's diagnostic obs-vector block, which runs strictly AFTER the real decision
+// already cast (pass its own is_decision_boundary, always false there) -- passing `true`
+// unconditionally re-bumped the per-player decision stamp and re-selected every targeted
+// action's pick via a fresh select() call, so the dump's own `obs` field could disagree with the
+// translog's engine-built vector on any target_fact leaf sensitive to WHICH pick won (is_current_
+// target/is_previous_pick/etc.) -- measured via dump_obs_equivalence.py on a real capture before
+// this fix (38/176 target_facts slots + 4/49 action_leaves slots exceeding tolerance).
+rl_state_t read_state( const player_t* p, bool boundary_is_foreground, bool is_decision_boundary );
 
 // ---- Slot binding (phase 220, plan 220-04, OBS-02/OBS-07) ----
 // bind_slots resolves every RL_OBS_FAMILIES member to an engine handle
@@ -274,6 +395,41 @@ struct rl_layer
   std::vector<float>  beta;    // [out], only when has_ln
 };
 
+// Phase 230-02 (SCOR-01, R-A): the RLW1 v4 trailing SCORER section -- a SECOND, independent
+// parameter set (never a `body` variant: `body` selects a layer-SPLIT convention over the ONE
+// rotation parameter set, the scorer is a wholly separate net). Always mlp-shaped (`_layer_split`
+// / `hidden_layer_count(rl_body_type::mlp, ...)`, reused verbatim -- never a second hidden
+// convention): n_layers >= 2, every layer's has_ln == false, first layer's in_features ==
+// `features + RLW1_V4_AIMING_SPELL_COUNT` (the eight targeted spells' one-hot, CK1-1), last
+// layer's out_features == 1 (one score per candidate). `context_width` is declared but PINNED to
+// 0 in this phase (R-C: the shared observation vector does not exist at the moment a pick is
+// computed) -- a non-zero value is refused by name at load. `slots` is the TRAINING side's own
+// declared candidate-slot bound (R-B) -- the engine's own overflow refusal (rl_target_select.cpp)
+// compares the generic filter's live candidate count against THIS value, never a hardcoded
+// engine constant, so a blob trained against a different slot count fails loudly rather than
+// silently.
+struct rl_scorer_t
+{
+  float          exploration    = 0.0f;  // the scorer's OWN epsilon dial over CANDIDATES -- mirrors
+                                          // rl_weights_t::exploration's own [0.0,1.0]-finite bound
+  std::uint32_t  slots          = 0;     // 1..64 -- the training side's declared candidate-slot count
+  std::uint32_t  features       = 0;     // 1..RLW1_MAX_FEATURES -- the per-candidate feature count
+  std::uint32_t  context_width  = 0;     // MUST be 0 in this phase (R-C) -- non-zero refused by name
+  std::string    feature_sha;            // "tgt-feat-v1:<64hex>" -- cross-checked against
+                                          // RL_TARGET_FEATURE_SHA (rl_policy_constants.h) at load
+  std::vector<rl_layer> layers;          // mlp-shaped, n_layers >= 2 (one hidden layer minimum + the
+                                          // single-output layer) -- expected_layer_count(mlp) == 2
+
+  // Load-time-sized scratch (same single-thread/no-per-decision-allocation reasoning as
+  // rl_weights_t::hidden_scratch above): hidden_scratch[i] holds scorer hidden layer i's
+  // post-ReLU activations; feature_scratch holds the per-candidate input vector
+  // (rl_target_select's scorer preference fills it: the declared feature list's order, then the
+  // eight-wide aiming-spell one-hot) -- `features + RLW1_V4_AIMING_SPELL_COUNT` wide, sized once
+  // at load, reused every scoring call, never reallocated per decision.
+  mutable std::vector<std::vector<float>> hidden_scratch;
+  mutable std::vector<float>              feature_scratch;
+};
+
 struct rl_weights_t
 {
   std::uint32_t format_version = 0;
@@ -284,6 +440,15 @@ struct rl_weights_t
   std::string   mask_rules_sha;          // bare 64 hex
   std::string   action_space_sha;        // bare 64 hex
   std::vector<rl_layer> layers;          // n_layers >= the body's own minimum (2 mlp / 3 dueling+)
+
+  // Phase 230-02 (SCOR-01, R-A/R-K): present only when format_version == 4 -- a rotation-only v3
+  // blob loads with has_scorer == false and `scorer` left default-constructed. The run-time
+  // switch this presence bit drives lives in rl_target_select.cpp's preference_for() (D-02): a
+  // scorer-bearing blob takes the scored path, UNLESS sim->target_scorer_force_rules (default
+  // off, sim.hpp/sim.cpp) forces the rules path so the previous phase's rules-arm numbers can be
+  // re-run byte-identically on this binary (230-SWAP-RECEIPT.md's Task 3 proof).
+  bool          has_scorer = false;
+  rl_scorer_t   scorer;
 
   // Phase 222 (NET-01, arm subsets): an optional input GATHER and a static
   // action ALLOW-LIST, both carried on the blob (RLW1 v3's trailing
@@ -343,4 +508,13 @@ rl_weights_t load_rlw1( const std::string& path );   // throws sc_runtime_error,
 void         forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ],
                        const std::uint8_t mask[ RL_ACTION_DIM ], float out_q[ RL_ACTION_DIM ] );
 int          masked_argmax( const float q[ RL_ACTION_DIM ], const std::uint8_t mask[ RL_ACTION_DIM ] );
+
+// Phase 230-02 (SCOR-01): the scorer's own forward pass -- one hidden-layer stack (ReLU, the SAME
+// activation forward()'s mlp branch uses -- no second activation formula) then a single 1-wide
+// linear output layer, no masking (a scorer forward pass scores exactly ONE candidate; `select()`
+// in rl_target_select.cpp calls this once per candidate and argmaxes the results itself, mirroring
+// every other preference_fn's own contract). `in` must point at `s.features +
+// RLW1_V4_AIMING_SPELL_COUNT` floats -- the caller (rl_target_select's scorer preference) fills
+// `s.feature_scratch` itself and passes `s.feature_scratch.data()`.
+float forward_scorer( const rl_scorer_t& s, const float* in );
 }

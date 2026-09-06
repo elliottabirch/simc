@@ -752,6 +752,18 @@ struct sim_t : private sc_thread_t
   bool solver_control_has_requested_wait_sec = false;
   double solver_control_last_requested_wait_sec = 0.0;
   std::string solver_control_last_wait_anchor_label;
+  // 260902/cr2 (WR-08's fix, review CR-03): the wait_result's own `source`
+  // string ("cooldown:<row>" / "swing_mh" / "gcd" / "reask_cap" / "floor",
+  // or an anchored-wait source like "wait_next_event"'s siblings) -- NEVER
+  // re-derived, just carried from the SAME wait_result build_wait()
+  // already returns. Set/cleared beside solver_control_last_wait_anchor_label
+  // above, on the identical schedule: cleared at the top of EVERY reply's
+  // handling on both transports, set only on the in-process arm's "wait"
+  // branch (the FIFO arm's wire "wait" reply carries no source identity --
+  // PROTOCOL.md's `{"sec": float}` shape -- so this stays empty/null on
+  // that transport, same as the anchor label). Read by
+  // decision_dump::write_state_fields() to emit "wait_source".
+  std::string solver_control_last_wait_source;
   // In-process exploration draw (Phase 213, D-08, ruling 213-G17). A
   // DEDICATED stream, re-seeded once per fight from that fight's own seed
   // (solver_control::reset_iteration()) -- it must NEVER be the engine's
@@ -969,6 +981,38 @@ struct sim_t : private sc_thread_t
   bool maximize_reporting;
   std::string apikey, user_apitoken;
   bool distance_targeting_enabled;
+  // 228-01, D-06/R-F: ORIGINALLY the cast-target in-front test (action_t::target_ready's fourth
+  // guard, refusing a cast at a behind target). RE-POINTED by 260902/cr4 CR-04 RULING (a): that
+  // fourth guard is REMOVED, and this option now instead gates the TURN -- a targeted cast at an
+  // enemy behind the player turns the player to face it first, instantly (Q3), at the
+  // cast-target-set site (accept_cast/retarget() on the RL arm, action_t::schedule_execute() on
+  // the scripted arm). Off means the stock engine, no facing model at all -- 228-01's own D-24
+  // overlay pair (facing_enabled=0 vs =1) is still a real comparison, now of "does the player
+  // turn" rather than "is a behind cast refused". "In front" survives only inside the two SHAPED
+  // actions' own cone/rectangle geometry (facing_shapes) and the splash-exemption rule, both
+  // unaffected by this re-pointing.
+  bool facing_enabled;
+  // 228-01, R-F: the player-centred cone/rectangle target filter for shaped spells (Crash
+  // Lightning, Sundering). Registered here; stays INERT until plan 228-03 installs the filter
+  // that reads it -- not dead code, the consumer lands in a later plan.
+  bool facing_shapes;
+  // CR-06 (260902/cr4): the selector kill switch. Defaults OFF (like the two options above at
+  // their own introduction) so every pre-228-02 fixture and receipt keeps its old, selector-free
+  // path unless it opts in. Gates BOTH selector seams (rl_policy_obs.cpp's pick substitution,
+  // solver_control.cpp's accept_cast retarget/turn block) plus the action.cpp mid-cast
+  // re-resolution ladder. With it off, an RL run takes exactly the pre-228-02 path:
+  // `a->target`/`a->target_ready(a->target)` in the mask, no set_target/p->target/weapon-attack/
+  // turn block in accept_cast, no ladder -- this is what makes 226/227's receipts reproducible on
+  // this binary again (228-REVIEW.md CR-06).
+  bool target_select_enabled;
+  // Phase 230-02 (SCOR-01, D-02/R-K): forces the RULES path in rl_target_select::preference_for
+  // even when the loaded weights carry a scorer (has_scorer == true) -- default OFF, so stock
+  // behaviour (a scorer-bearing blob takes the scored path) is unchanged. Its ONLY purpose is to
+  // re-run the previous phase's rules-arm numbers on THIS binary for the byte-identity proof
+  // 230-SWAP-RECEIPT.md's Task 3 makes (R-E): with it on, a v4 blob's scorer section still loads
+  // and is still validated, but `select()` never dispatches to it. Registering a new option moves
+  // the simulator-options fingerprint the rig computes -- recorded in that same receipt.
+  bool target_scorer_force_rules;
   bool ignore_invulnerable_targets;
   bool enable_dps_healing;
   bool count_overheal_as_heal;

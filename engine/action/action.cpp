@@ -24,6 +24,7 @@
 #include "sim/event.hpp"
 #include "sim/expressions.hpp"
 #include "sim/proc.hpp"
+#include "sim/rl_target_select.hpp"
 #include "sim/sim.hpp"
 #include "util/generic.hpp"
 #include "util/io.hpp"
@@ -234,6 +235,70 @@ struct action_execute_event_t : public player_event_t
     }
 
     action->execute_event = nullptr;
+
+    // 228-02 (D-14, TGT-03): if the pick read_action_gate_bits/accept_cast resolved this action's
+    // target to (rl_target_select) died or went immune between the decision and THIS execute
+    // event firing, re-resolve HERE rather than silently dropping the cast (the prior behaviour:
+    // `can_execute` below would simply read false with no signal at all, no abort, no re-resolve
+    // -- 228-RESEARCH.md section 4). Ladder, every arm counted (rl_target_select::
+    // record_reresolution): (a) keep the current target if it is still target_ready -- the
+    // common case, no fallback needed; (b) else fall back to the player's OWN current target if
+    // THAT is target_ready; (c) else leave the existing no-op boundary unchanged (`can_execute`
+    // reads false below exactly as it always has). This is NOT the protocol-abort path -- that
+    // stays reserved for the impossible case (the agent chose an action the mask said was
+    // illegal).
+    //
+    // Scoped to an RL-controlled sim (`sim->solver_control_str`/`solver_policy_str` non-empty --
+    // the SAME sim-level gate solver_control.cpp's own choose() checks at its own :278/:1053)
+    // AND (260902/cr4, CR-05) to an action that WAS actually governed by the selector this
+    // decision -- `rl_target_select::lookup_pick( action, &found ) && found`, the
+    // this-action's-pick-was-governed-by-the-selector-this-decision predicate the comment already
+    // describes, replacing the prior `is_targeted_action( action )` NAME match. A name match alone
+    // cannot distinguish the RL player's own `chain_lightning` from `ancestor_t`'s pet action of
+    // the identical name -- `lookup_pick` cannot collide this way because only the RL-controlled,
+    // non-pet actor's actions are ever stamped (rl_policy_obs.cpp's read_action_gate_bits actor
+    // scope). The scripted (APL) arm never populates a pick for any action (accept_cast/set_target
+    // are never reached for it), so this whole block is INERT for it -- `target_ready(target)`
+    // below is never even evaluated for a scripted actor's cast, and every other action on an RL
+    // actor (self/ground/item, the two SHAPED actions plan 228-03 owns) is equally untouched. This
+    // is what makes `apl-full`'s numbers untouched by this plan (228-SELECTOR-RECEIPT.md's blast
+    // radius section states and, where cheap, verifies this).
+    // CR-06 (260902/cr4): the selector kill switch -- off means the ladder never fires, matching
+    // the pre-228-02 no-op-boundary-on-death behaviour (sim.hpp's own option comment).
+    bool has_governed_pick = false;
+    if ( sim().target_select_enabled )
+      rl_target_select::lookup_pick( action, &has_governed_pick );
+    if ( has_cast_time && target && !target->is_sleeping() &&
+         !( sim().solver_control_str.empty() && sim().solver_policy_str.empty() ) &&
+         sim().target_select_enabled && has_governed_pick )
+    {
+      if ( action->target_ready( target ) )
+      {
+        rl_target_select::record_reresolution( rl_target_select::reresolution_arm::kept_the_pick );
+      }
+      else
+      {
+        player_t* fallback = p()->target;
+        if ( fallback && fallback != target && action->target_ready( fallback ) )
+        {
+          target = fallback;
+          // WR-07 (260902/cr4): the ONE retarget function this ladder's fallback arm and
+          // accept_cast (solver_control.cpp) both call -- see rl_target_select.hpp's own doc
+          // comment. `pre_execute_state->target` (this event's own carried state, if any) is not
+          // re-pointed here: it was NOT found anywhere in this ladder's dependency chain --
+          // `target` is a plain local variable, never read back off `pre_execute_state` after this
+          // point in `execute()` -- so there is nothing to re-point or assert-unused.
+          rl_target_select::retarget( action, p(), fallback );
+          rl_target_select::record_reresolution(
+              rl_target_select::reresolution_arm::fell_back_to_player_target );
+        }
+        else
+        {
+          rl_target_select::record_reresolution(
+              rl_target_select::reresolution_arm::left_no_op_boundary );
+        }
+      }
+    }
 
     // Note, presumes that if the action is instant, it will still be ready, since it was ready on
     // the (near) previous event. Does check target sleepiness, since technically there can be
@@ -2298,6 +2363,24 @@ void action_t::schedule_execute( action_state_t* state )
     return;
   }
 
+  // CR-04 (260902/cr4, RULING (a)): a targeted cast at a target BEHIND the player turns the
+  // player to face it first, instantly, per Q3 -- the single site where a FOREGROUND action (RL
+  // OR scripted arm alike, since accept_cast's own p->face() call already ran earlier for the RL
+  // arm and this is a harmless idempotent re-face in that case) commits to its target. Scoped
+  // harmful && range >= 0, the SAME gate target_ready's now-removed fourth clause used, so a
+  // self/friendly/trinket action is never facing-gated. `!background` is REQUIRED (Rule 1 fix,
+  // found via shape_hitset_agreement.py's own regression on this exact change): without it, every
+  // secondary/proc/cleave hit (Windfury Attack, Static Charge, tier-set procs -- anything
+  // `background`, which can legitimately land on an enemy OTHER than the player's own current
+  // target) would ALSO turn the player, yanking the facing vector away from the primary target
+  // between two ordinary foreground casts and breaking the shaped spells' own cone/rectangle,
+  // which never turn (OR-2) but read whatever the CURRENT facing happens to be. The two SHAPED
+  // actions (crash_lightning, sundering) are ALSO excluded by name -- OR-2 says they never turn,
+  // they cast in the CURRENT facing.
+  if ( sim->facing_enabled && harmful && range >= 0 && !background && target &&
+       name_str != "crash_lightning" && name_str != "sundering" )
+    player->face( *target );
+
   sim->print_log( "{} schedules execute for {}", *player, *this );
 
   time_to_execute = execute_time();
@@ -2473,6 +2556,16 @@ bool action_t::target_ready( player_t* candidate_target )
        player->get_player_distance( *candidate_target ) > range + candidate_target->combat_reach )
     return false;
 
+  // Facing guard REMOVED (260902/cr4, CR-04 RULING (a)). 228-01's own fourth guard (the
+  // 180-degree half-plane refusal) is gone -- `facing_enabled`'s meaning changed from "a behind
+  // target is refused" to "the player turns to face what it casts at" (Q3: "the live engine has
+  // mechanics for this"). The turn happens at the cast-target-set site (accept_cast/retarget() on
+  // the RL arm, this file's own `schedule_execute()` on the scripted arm), BEFORE this function
+  // is next evaluated against the SAME candidate -- so refusing here would only ever block the
+  // FIRST decision toward a behind candidate, not protect anything a live turn does not already
+  // cover. "In front" now shapes ONLY the two SHAPED actions' own cone/rectangle hit sets
+  // (OR-2: neither ever turns) and leaves splash from a front target alone, unaffected by this
+  // removal -- check_distance_targeting, available_targets and target_list are still untouched.
   return true;
 }
 

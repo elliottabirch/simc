@@ -67,6 +67,7 @@
 #include "util/util.hpp"
 #include "class_modules/class_module.hpp"
 
+#include <cmath>
 #include <cctype>
 #include <cerrno>
 #include <limits>
@@ -1160,6 +1161,13 @@ player_t::player_t( sim_t* s, player_e t, util::string_view n, race_e r )
     y_position( 0.0 ),
     default_x_position( std::numeric_limits<double>::lowest() ),
     default_y_position( std::numeric_limits<double>::lowest() ),
+    // Facing (228-01, D-04): points toward the default target for free -- the player
+    // initialises at x=-base.distance,y=0 and the default target at the origin, measured
+    // this session (debug=1, mid2-stormbringer.simc): player x=-5.000,y=0.000 facing boss
+    // 'Fluffy_Pillow' at x=-0.000,y=0.000, so (1.0, 0.0) IS toward the default target.
+    facing_x( 1.0 ),
+    facing_y( 0.0 ),
+    facing_epoch( 0 ),  // WR-03 (260902/cr4)
     consumables(),
     buffs(),
     debuffs(),
@@ -6825,6 +6833,12 @@ void player_t::reset()
   assert( default_y_position != std::numeric_limits<decltype(default_y_position)>::lowest() );
   x_position = default_x_position;
   y_position = default_y_position;
+
+  // Facing (228-01, D-04): reset beside the position pair, back toward the default target
+  // (see the ctor initialiser's comment for the measured coordinates this represents).
+  facing_x = 1.0;
+  facing_y = 0.0;
+  facing_epoch = 0;  // WR-03 (260902/cr4): reset beside facing_x/y every iteration.
 
   callbacks.reset();
 
@@ -14906,6 +14920,10 @@ void player_t::acquire_target( retarget_source event, player_t* context )
     }
 
     target = candidate_target;
+    // Facing (228-01, D-05): this is the engine's own retargeting on death/immunity, the one
+    // path that changes the player's target behind the agent's back -- a facing vector left
+    // pointing at a corpse would make every later legality bit wrong (Pitfall P-4).
+    face( *target );
     range::for_each( action_list, [event, context, candidate_target]( action_t* action ) {
       action->acquire_target( event, context, candidate_target );
     } );
@@ -14923,6 +14941,8 @@ void player_t::acquire_target( retarget_source event, player_t* context )
     }
 
     target = first_invuln_target;
+    // Facing (228-01, D-05): the first_invuln_target fallback arm -- same reason as above.
+    face( *target );
     range::for_each( action_list, [event, context, first_invuln_target]( action_t* action ) {
       action->acquire_target( event, context, first_invuln_target );
     } );
@@ -15162,6 +15182,58 @@ double player_t::get_player_distance( const player_t& t ) const
     return get_position_distance( t.x_position, t.y_position );
   else
     return current.distance;
+}
+
+// Facing (228-01, D-04/D-05). Built in the shape of get_position_distance/get_player_distance
+// above: plain doubles, no allocation. `change_position` is a position_e enum setter and is
+// not facing -- rejected as a substitute for the same reason player.hpp's declaration states.
+void player_t::face( const player_t& t )
+{
+  double delta_x = t.x_position - x_position;
+  double delta_y = t.y_position - y_position;
+  // WR-01 (260902/cr4): exact std::sqrt -- `player.hpp`'s own claim that facing_x/y is a UNIT
+  // vector (and both shape predicates' unit-facing-vector assumption) is only actually true with
+  // an exact square root; `util::approx_sqrt` is a fast reciprocal-style approximation with
+  // measurable relative error. `is_in_front`'s own use of `approx_sqrt` is left alone -- its
+  // 180-degree (sign-only) test is provably safe under the approximation (228-REVIEW.md's own
+  // "Invariants verified" section).
+  double len = std::sqrt( delta_x * delta_x + delta_y * delta_y );
+  // Coincident positions: leave the facing vector unchanged rather than dividing by zero.
+  if ( len <= 0.0 )
+    return;
+  double new_facing_x = delta_x / len;
+  double new_facing_y = delta_y / len;
+  // WR-03 (260902/cr4): the epoch bumps ONLY when the vector's VALUE actually changes -- not
+  // merely whenever this function runs without hitting the coincident-position guard above. CR-04
+  // (260902/cr4) calls face() far more often than 228-01 ever did (every non-background foreground
+  // cast, not only a retarget event), so a same-value "bump" here would invalidate the two shaped
+  // actions' target cache on every single ordinary cast even when facing never moved -- exact
+  // equality is safe: both sides are the SAME computation (delta/len) whenever the source position
+  // pair repeats, never a numerically-drifting accumulation.
+  if ( new_facing_x != facing_x || new_facing_y != facing_y )
+    ++facing_epoch;
+  facing_x = new_facing_x;
+  facing_y = new_facing_y;
+  // CR-04 (260902/cr4): the ONE direct debug print of the facing vector itself -- every existing
+  // print in this codebase logs POSITIONS, never facing_x/y directly, so a probe proving "the
+  // player turned" had no log line to read before this. `facing_cast_target.py`'s
+  // `turned-then-cast` mode reads this line; it changes no behaviour, `debug=1`-gated like every
+  // other print in this function's neighbourhood.
+  if ( sim->debug )
+    sim->out_debug.printf( "%s faces %s: facing_x=%.6f, facing_y=%.6f, facing_epoch=%llu",
+        name(), t.name(), facing_x, facing_y, static_cast<unsigned long long>( facing_epoch ) );
+}
+
+bool player_t::is_in_front( const player_t& t, double cos_half_angle ) const
+{
+  double delta_x = t.x_position - x_position;
+  double delta_y = t.y_position - y_position;
+  double len = util::approx_sqrt( delta_x * delta_x + delta_y * delta_y );
+  // Coincident positions: a target standing exactly on the player is never "behind" them.
+  if ( len <= 0.0 )
+    return true;
+  double dot = ( facing_x * delta_x + facing_y * delta_y ) / len;
+  return dot >= cos_half_angle;
 }
 
 double player_t::get_ground_aoe_distance( const action_state_t& a ) const

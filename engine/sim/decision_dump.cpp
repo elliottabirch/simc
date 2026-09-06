@@ -16,14 +16,18 @@
 #include "sim/event.hpp"
 #include "sim/gain.hpp"
 #include "sim/rl_policy.hpp"
+#include "sim/rl_target_select.hpp"
 #include "sim/sim.hpp"
 #include "util/concurrency.hpp"
 #include "util/io.hpp"
 
+#include <cstring>
+#include <algorithm>
 #include <map>
 #include <stdexcept>
 
 #include <set>
+#include <vector>
 #include <sstream>
 
 namespace
@@ -346,7 +350,7 @@ void write_buff_remains( std::ostream& out, timespan_t remains )
 // `maelstrom.deficit`, `cooldown.lava_burst.charges_fractional`,
 // `dot.flame_shock.refreshable`, `lightning_rod` (via enemy_debuff_counts).
 void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool solver_reply_gated,
-                          bool boundary_is_foreground )
+                          bool boundary_is_foreground, bool is_decision_boundary )
 {
   sim_t* sim = p->sim;
 
@@ -659,6 +663,13 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
       << ( p->main_hand_attack ? ( p->main_hand_weapon.swing_time * p->cache.auto_attack_speed() ).total_seconds()
                                 : 0.0 );
 
+  // 228-10 Task 1 Step 6(b) (Q18): the immunity-remaining wire field mask.py's own mirror reads
+  // reaches this SAME wire (write_state_fields is shared by both the JSONL dump append and the
+  // FIFO request-line build, exactly like gcd_length/auto_attack_interval above) via the single
+  // top-level "immunity_remaining" key emitted later in this function, alongside "immunity_in"
+  // (the D-16 aggregate block) -- ONE key serves both the aggregate reader and Q18's wait mirror,
+  // never two independently-emitted copies of the same number under the same name.
+
   // Resolved action identity (116-02; solver-path gating added 2026-07-29 fix
   // bundle, defect (b)) - the SimC-internal name_str of the action actually
   // about to execute at this boundary, unwrapping a sequence/strict_sequence
@@ -770,6 +781,20 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
       out << ",\"wait_anchor\":\"" << json_escape( sim->solver_control_last_wait_anchor_label ) << "\"";
     else
       out << ",\"wait_anchor\":null";
+    // 260902/cr2 (CR-03/WR-08's fix): wait_source -- which clock produced
+    // this wait's seconds ("cooldown:<row>" / "swing_mh" / "gcd" /
+    // "reask_cap" / "floor", or an anchored-wait source), plumbed the
+    // EXACT same way wait_anchor immediately above is: gated on
+    // solver_reply_gated + reply_type=="wait", null otherwise, and null on
+    // the FIFO transport (the wire "wait" reply carries no source
+    // identity -- PROTOCOL.md's `{"sec": float}` shape -- so
+    // solver_control_last_wait_source stays empty there, same reason
+    // wait_anchor stays empty on that transport). Never re-derived --
+    // carried straight from the wait_result build_wait() returned.
+    if ( sim->solver_control_last_reply_type == "wait" && !sim->solver_control_last_wait_source.empty() )
+      out << ",\"wait_source\":\"" << json_escape( sim->solver_control_last_wait_source ) << "\"";
+    else
+      out << ",\"wait_source\":null";
   }
 
   // 221-01 (ACT-02, Pattern 3) -- the engine-truth legality layer, emitted
@@ -806,7 +831,17 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   {
     std::uint8_t action_resolvable[ RL_ACTION_DIM ];
     std::uint8_t action_ready[ RL_ACTION_DIM ];
-    rl_policy::read_action_gate_bits( p, action_resolvable, action_ready );
+    // 260902/cr4 (CR-02): threads the boundary distinction through -- see rl_policy.hpp's own doc
+    // comment on read_action_gate_bits for the full mechanism. `used_dump_time_compute` is true
+    // only on the non-boundary call when no cache existed (a scripted actor with decision_dump=
+    // and no solver arm never took the boundary path this decision, or ever) -- named on the dump
+    // line below so a reader can tell the arrays were computed AT DUMP TIME, off the action's
+    // current target, rather than cached from the decision that was actually made.
+    bool used_dump_time_compute = false;
+    rl_policy::read_action_gate_bits( p, action_resolvable, action_ready, is_decision_boundary,
+                                       &used_dump_time_compute );
+    if ( used_dump_time_compute )
+      out << ",\"action_gate_dump_time_compute\":true";
     out << ",\"action_resolvable\":[";
     for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
     {
@@ -828,6 +863,300 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   {
     out << ",\"action_resolvable\":null";
     out << ",\"action_ready\":null";
+  }
+
+  // 228-09 (D-23/TGT-08, dump half) -- per-decision picked-target recording. For each of the
+  // eight TARGETED registry actions, and for the CHOSEN action's own pick, record the actor
+  // index / spawn index PAIR (the STICKY_KEY, R-C/P228-8 -- never the actor index alone) plus
+  // the candidate's fact record. Every value is READ from
+  // `rl_target_select::lookup_pick()`/`build_enemy_fact()` -- no `select()` call anywhere in
+  // this block (D-12). Emitted HERE, immediately after this function's own
+  // `read_action_gate_bits` call above and BEFORE the obs block below -- this is the ONLY safe
+  // point in this function to read a pick: `read_state()`'s OWN internal call to
+  // `read_action_gate_bits` (rl_policy_obs.cpp) is unconditionally `is_decision_boundary=true`,
+  // independent of THIS function's own `is_decision_boundary` parameter, so the obs block a few
+  // lines below re-bumps the per-player decision stamp and re-fills every targeted action's pick
+  // via a FRESH `select()` call of its own -- a pre-existing behaviour of this shared function
+  // (260901-od1's obs-block addition, unchanged by 260902/cr4's is_decision_boundary widening,
+  // and out of THIS plan's scope to alter). Reading the pick here, before that nested call runs,
+  // is what keeps this block's own picks equal to the ones `accept_cast` actually cast on;
+  // reading after the obs block would read a re-computed pick from a hidden extra decision
+  // instead. Gated the SAME way action_resolvable/action_ready above are (WR-12
+  // single-sim/single-thread cache-safety precondition) -- `null` under threads>1/profileset,
+  // matching the existing fail-open convention.
+  if ( p->sim->threads == 1 && p->sim->profileset_map.empty() )
+  {
+    out << ",\"targeted_picks\":{";
+    const std::size_t n_targeted = rl_target_select::targeted_action_token_count();
+    const char* const* targeted_tokens = rl_target_select::targeted_action_tokens();
+    for ( std::size_t i = 0; i < n_targeted; ++i )
+    {
+      if ( i > 0 )
+        out << ",";
+      const char* token = targeted_tokens[ i ];
+      out << "\"" << token << "\":";
+      action_t* a = p->find_action( token );
+      if ( a == nullptr )
+      {
+        out << "null";
+        continue;
+      }
+      bool      found = false;
+      player_t* pick  = rl_target_select::lookup_pick( a, &found );
+      if ( !found || pick == nullptr )
+      {
+        out << "{\"found\":false}";
+        continue;
+      }
+      const rl_target_select::enemy_fact fact = rl_target_select::build_enemy_fact( a, pick, a->target );
+      out << "{\"found\":true"
+          << ",\"actor_index\":" << fact.actor_index
+          << ",\"actor_spawn_index\":" << fact.actor_spawn_index
+          << ",\"distance\":" << fact.distance
+          << ",\"in_front\":" << ( fact.in_front ? "true" : "false" )
+          << ",\"in_reach\":" << ( fact.in_reach ? "true" : "false" )
+          << ",\"in_range\":" << ( fact.in_range ? "true" : "false" )
+          << ",\"alive\":" << ( fact.alive ? "true" : "false" )
+          << ",\"immune\":" << ( fact.immune ? "true" : "false" )
+          << ",\"immunity_remaining\":" << fact.immunity_remaining
+          << ",\"time_to_die\":" << fact.time_to_die
+          << ",\"health_pct\":" << fact.health_pct
+          << ",\"is_boss\":" << ( fact.is_boss ? "true" : "false" )
+          << ",\"flame_shock_remaining\":" << fact.flame_shock_remaining
+          // 228-10 Task 1 Step 1 (D-03/D-16): the per-enemy facts new to this plan --
+          // Burning Core, Lightning Rod, the trinket (venomfang) and omnium
+          // (rune_of_unleashed_fire_lingering) debuffs already on the wire via the old
+          // enemy-slot family, now also on the per-targeted-action pick record.
+          << ",\"burning_core_remaining\":" << fact.burning_core_remaining
+          << ",\"lightning_rod_stacks\":" << fact.lightning_rod_stacks
+          << ",\"lightning_rod_remaining\":" << fact.lightning_rod_remaining
+          << ",\"venomfang_remaining\":" << fact.venomfang_remaining
+          << ",\"venomfang_debuff_stacks\":" << fact.venomfang_debuff_stacks
+          << ",\"venomfang_debuff_remaining\":" << fact.venomfang_debuff_remaining
+          << ",\"rune_of_unleashed_fire_lingering_remaining\":" << fact.rune_of_unleashed_fire_lingering_remaining
+          << ",\"neighbours_within_splash\":" << fact.neighbours_within_splash
+          << ",\"neighbours_within_jump\":" << fact.neighbours_within_jump
+          << ",\"is_current_target\":" << ( fact.is_current_target ? "true" : "false" )
+          << ",\"is_previous_pick\":" << ( fact.is_previous_pick ? "true" : "false" )
+          << "}";
+    }
+    out << "}";
+
+    // The CHOSEN action's own pick (D-23) -- named again at the top level (rather than making a
+    // reader cross-reference `chosen` against the map above by hand) so the equivalence probe
+    // and the translog round-trip (228-09 Task 2) can read one fixed key regardless of which
+    // token was cast this decision. `null` when the chosen action is untargeted, a wait, or a
+    // SHAPED action (Crash Lightning/Sundering never carry a pick -- OR-2, NO_SHAPED_PICK_ON_WIRE).
+    if ( chosen != nullptr && rl_target_select::is_targeted_action( chosen ) )
+    {
+      bool      found = false;
+      player_t* pick  = rl_target_select::lookup_pick( chosen, &found );
+      if ( found && pick != nullptr )
+      {
+        const rl_target_select::enemy_fact fact =
+            rl_target_select::build_enemy_fact( chosen, pick, chosen->target );
+        out << ",\"chosen_pick\":{\"found\":true"
+            << ",\"actor_index\":" << fact.actor_index
+            << ",\"actor_spawn_index\":" << fact.actor_spawn_index
+            << "}";
+      }
+      else
+      {
+        out << ",\"chosen_pick\":{\"found\":false}";
+      }
+    }
+    else
+    {
+      out << ",\"chosen_pick\":null";
+    }
+  }
+  else
+  {
+    out << ",\"targeted_picks\":null";
+    out << ",\"chosen_pick\":null";
+  }
+
+  // 228-07 (TGT-07, D-21) -- the parity harness's engine-sourced corpus. For each of the eight
+  // TARGETED registry actions, the FULL candidate set (every enemy `generic_filter` would pass,
+  // via `rl_target_select::build_candidate_facts` -- the SAME function select() itself consults,
+  // D-20: no re-derivation) as complete fact records, keyed by the stable
+  // (actor_index, actor_spawn_index) identity pair so an external reimplementation of the eight
+  // preferences (spec/helpers/enhancementTargetRulesReplay.ts) can be handed the SAME numbers the
+  // fork's own preference sees and asked to reproduce `targeted_picks[token]` above -- never a
+  // record rebuilt from any OTHER key on this row (T-228-07-02). Gated identically to
+  // targeted_picks/chosen_pick above (WR-12): `null` under threads>1/profileset. `x`/`y` are the
+  // candidate's absolute world position (`x_position`/`y_position`) -- read here for the first
+  // time on this row because only a per-candidate record (not the single-pick summary above) has
+  // a use for two candidates' positions relative to each other (chain_lightning/tempest's own
+  // neighbour count already exists as `neighbours_within_splash`/`neighbours_within_jump` below;
+  // `x`/`y` let an external reimplementation cross-check that count independently, matching the
+  // hand-written fixture corpus's own planar-position schema, spec/fixtures/selector-parity/).
+  if ( p->sim->threads == 1 && p->sim->profileset_map.empty() )
+  {
+    out << ",\"candidate_facts\":{";
+    const std::size_t n_targeted = rl_target_select::targeted_action_token_count();
+    const char* const* targeted_tokens = rl_target_select::targeted_action_tokens();
+    for ( std::size_t i = 0; i < n_targeted; ++i )
+    {
+      if ( i > 0 )
+        out << ",";
+      const char* token = targeted_tokens[ i ];
+      out << "\"" << token << "\":";
+      action_t* a = p->find_action( token );
+      if ( a == nullptr )
+      {
+        out << "null";
+        continue;
+      }
+      const std::vector<rl_target_select::enemy_fact> candidates =
+          rl_target_select::build_candidate_facts( a, /*harmful=*/true );
+      // `cast_time_ms` -- `a->execute_time()`, the SAME call
+      // `preference_shortest_time_to_die`'s own outlives-the-cast dominance clause reads (D-15,
+      // unchanged by OR-1). Per-token, not per-candidate (it does not depend on which candidate is
+      // scored) -- exported here so an external reimplementation of that clause is handed the
+      // EXACT cast time the fork's own preference used, never a guessed or hardcoded per-spell
+      // constant (T-228-07-02's "no re-derivation" reasoning, applied to this scalar too).
+      out << "{\"cast_time_ms\":" << ( a->execute_time().total_seconds() * 1000.0 )
+          << ",\"candidates\":[";
+      for ( std::size_t ci = 0; ci < candidates.size(); ++ci )
+      {
+        if ( ci > 0 )
+          out << ",";
+        const rl_target_select::enemy_fact& fact = candidates[ ci ];
+        out << "{\"actor_index\":" << fact.actor_index
+            << ",\"actor_spawn_index\":" << fact.actor_spawn_index
+            << ",\"x\":" << ( fact.candidate ? fact.candidate->x_position : 0.0 )
+            << ",\"y\":" << ( fact.candidate ? fact.candidate->y_position : 0.0 )
+            << ",\"distance\":" << fact.distance
+            << ",\"in_front\":" << ( fact.in_front ? "true" : "false" )
+            << ",\"in_reach\":" << ( fact.in_reach ? "true" : "false" )
+            << ",\"in_range\":" << ( fact.in_range ? "true" : "false" )
+            << ",\"alive\":" << ( fact.alive ? "true" : "false" )
+            << ",\"immune\":" << ( fact.immune ? "true" : "false" )
+            << ",\"immunity_remaining\":" << fact.immunity_remaining
+            << ",\"time_to_die\":" << fact.time_to_die
+            << ",\"health_pct\":" << fact.health_pct
+            << ",\"is_boss\":" << ( fact.is_boss ? "true" : "false" )
+            << ",\"flame_shock_remaining\":" << fact.flame_shock_remaining
+            << ",\"neighbours_within_splash\":" << fact.neighbours_within_splash
+            << ",\"neighbours_within_jump\":" << fact.neighbours_within_jump
+            << ",\"is_current_target\":" << ( fact.is_current_target ? "true" : "false" )
+            << ",\"is_previous_pick\":" << ( fact.is_previous_pick ? "true" : "false" )
+            // 230-04 (SCOR-02, Task 2): the seven 228-10 gap-fill fields, previously present on
+            // `targeted_picks` (the CHOSEN pick's own record, above) but missing here on the FULL
+            // candidate list -- scorer_block_equivalence.py needs every one of the 22 declared
+            // RL_TARGET_FEATURE_NAMES for EVERY candidate, not only the one that was picked, to
+            // re-derive the transition log's own candidate block and compare it against the
+            // engine's independent fact record (the probe's whole reason for existing).
+            << ",\"burning_core_remaining\":" << fact.burning_core_remaining
+            << ",\"lightning_rod_stacks\":" << fact.lightning_rod_stacks
+            << ",\"lightning_rod_remaining\":" << fact.lightning_rod_remaining
+            << ",\"venomfang_remaining\":" << fact.venomfang_remaining
+            << ",\"venomfang_debuff_stacks\":" << fact.venomfang_debuff_stacks
+            << ",\"venomfang_debuff_remaining\":" << fact.venomfang_debuff_remaining
+            << ",\"rune_of_unleashed_fire_lingering_remaining\":"
+            << fact.rune_of_unleashed_fire_lingering_remaining
+            << "}";
+      }
+      out << "]}";
+    }
+    out << "}";
+  }
+  else
+  {
+    out << ",\"candidate_facts\":null";
+  }
+
+  // 228-07 (TGT-07, D-21) -- the SHAPE half of the parity harness's engine-sourced corpus.
+  // `shape_facts` below (228-10/228-11) is the fork's own SUMMARY (enemies_hit,
+  // summed_remaining_life, long_lived_count); an external reimplementation needs the per-enemy
+  // geometry that summary was folded from, plus the player's own current position/facing, to
+  // recompute it independently and compare. Never gated on WR-12 (same reasoning as
+  // target_aggregates below: a stateless read of target_non_sleeping_list/x_position/y_position/
+  // facing_x/facing_y, safe under any threading configuration) -- and NOT restricted to any one
+  // action's own generic_filter (crash_lightning_cone_contains/sundering_rect_contains iterate
+  // every enemy on target_non_sleeping_list with no immunity/range/harmful filter at all, D-16 --
+  // reusing candidate_facts above would silently drop an immune or out-of-range enemy the shape
+  // math still counts).
+  {
+    out << ",\"player_position\":{\"x\":" << p->x_position << ",\"y\":" << p->y_position
+        << ",\"facing_x\":" << p->facing_x << ",\"facing_y\":" << p->facing_y << "}";
+    out << ",\"all_enemies\":[";
+    bool first_enemy = true;
+    for ( player_t* t : p->sim->target_non_sleeping_list )
+    {
+      if ( !t->is_enemy() )
+        continue;
+      if ( !first_enemy )
+        out << ",";
+      first_enemy = false;
+      const double ttd = std::min( t->time_to_percent( 0 ).total_seconds(), 600.0 );  // WR-10 clip
+      out << "{\"actor_index\":" << t->actor_index << ",\"actor_spawn_index\":" << t->actor_spawn_index
+          << ",\"x\":" << t->x_position << ",\"y\":" << t->y_position
+          << ",\"combat_reach\":" << t->combat_reach << ",\"time_to_die\":" << ttd
+          << ",\"is_boss\":" << ( t->is_boss() ? "true" : "false" ) << "}";
+    }
+    out << "]";
+  }
+
+  // 228-10 Task 1 Steps 3/4/5 (D-16/D-17/TGT-05/TGT-06) -- the identity-free aggregates, the
+  // fight-wide immunity timers and the two shaped-spell hit-set facts, every one an ADDITIVE
+  // key (no existing key's shape changes). None of these three computations touch
+  // rl_target_select's file-static pick/stamp tables, so unlike targeted_picks/chosen_pick above
+  // they are NOT gated on the WR-12 single-sim/single-thread precondition -- each is a plain,
+  // stateless read of live engine state (target_non_sleeping_list, sim->raid_events,
+  // player_t::facing_x/y), safe under any threading configuration.
+  {
+    const rl_policy::fight_wide_aggregates_t agg = rl_policy::compute_fight_wide_aggregates( p );
+    out << ",\"target_aggregates\":{";
+    out << "\"enemies_total\":" << agg.enemies_total;
+    out << ",\"enemies_in_melee\":" << agg.enemies_in_melee;
+    out << ",\"enemies_within_8yd\":" << agg.enemies_within_8yd;
+    out << ",\"enemies_within_40yd\":" << agg.enemies_within_40yd;
+    out << ",\"enemies_in_front\":" << agg.enemies_in_front;
+    out << ",\"flame_shock_carrier_count\":" << agg.flame_shock_carrier_count;
+    out << ",\"soonest_time_to_die\":";
+    if ( agg.has_soonest_time_to_die ) out << agg.soonest_time_to_die; else out << "null";
+    out << ",\"longest_time_to_die\":";
+    if ( agg.has_longest_time_to_die ) out << agg.longest_time_to_die; else out << "null";
+    out << ",\"dying_within_5s\":" << agg.dying_within_5s;
+    out << ",\"dying_within_15s\":" << agg.dying_within_15s;
+    out << ",\"nearest_enemy_distance\":";
+    if ( agg.has_nearest_enemy_distance ) out << agg.nearest_enemy_distance; else out << "null";
+    out << "}";
+  }
+
+  // TGT-06/D-17/Q18 -- the fight-wide immunity timers, both from the ONE
+  // compute_invulnerability_window() read (D-12: read once, use twice -- the SAME function
+  // read_state() calls to fill rl_state_t::immunity_remaining for Q18's wait candidate). Nothing
+  // pending/active encodes as 0.0 (never a saturation sentinel, never null) -- the value this
+  // plan's receipt records as the wire's "nothing pending" convention.
+  {
+    const rl_policy::invulnerability_window_t iw = rl_policy::compute_invulnerability_window( sim );
+    out << ",\"immunity_in\":" << ( iw.has_next ? iw.next_in : 0.0 );
+    out << ",\"immunity_remaining\":" << ( iw.active ? iw.remaining : 0.0 );
+  }
+
+  // D-16 shaped-spell block (TGT-04, OR-2) -- Crash Lightning and Sundering carry no pick (never
+  // in targeted_picks above), but the observation still needs "what would this shape hit from
+  // here" -- computed from the CURRENT facing only, through the ONE shared geometry copy
+  // (rl_target_select::crash_lightning_cone_contains / sundering_rect_contains).
+  {
+    const rl_policy::shape_hit_result_t cl = rl_policy::compute_crash_lightning_shape( p );
+    out << ",\"shape_facts\":{";
+    out << "\"crash_lightning\":{";
+    out << "\"enemies_hit\":" << cl.enemies_hit;
+    out << ",\"summed_remaining_life\":" << cl.summed_remaining_life;
+    out << ",\"long_lived_count\":" << cl.long_lived_count;
+    out << "}";
+
+    const rl_policy::shape_hit_result_t su = rl_policy::compute_sundering_shape( p );
+    out << ",\"sundering\":{";
+    out << "\"enemies_hit\":" << su.enemies_hit;
+    out << ",\"summed_remaining_life\":" << su.summed_remaining_life;
+    out << ",\"long_lived_count\":" << su.long_lived_count;
+    out << "}";
+    out << "}";
   }
 
   // 260901-od1 (kill-the-dual-encoder-seam) -- the engine-encoded
@@ -864,13 +1193,24 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   // -- `p->resources.is_active( RESOURCE_MAELSTROM )` is this codebase's
   // established "is this actor the shaman this schema targets" predicate,
   // deliberately NOT the player's own primary-resource accessor (shaman_t
-  // overrides that to report RESOURCE_MANA). Pets and enemies alike read
-  // false here (measured: the pet actor completed build_obs without
-  // crashing every time it was reached, but is excluded anyway since
-  // `demos.rows_from_dump`'s consumer -- `project_fight`'s actor_name
-  // filter -- never reads a pet's or an enemy's own dump rows), so this
-  // scoping has zero effect on the schema's actual target and removes the
-  // untested actor classes from ever reaching build_obs at all.
+  // overrides that to report RESOURCE_MANA). CORRECTED 260902/FORK-05
+  // (D-13 amended -- the sentence this replaced was wrong for pets, and a
+  // comment that contradicts itself in one sentence sent two prior readers
+  // to the wrong actor set): this resource predicate does NOT exclude the
+  // wolf pet -- `resources_t::active_resource` defaults to `true` for
+  // every `resource_e`, so a friendly `lightning_wolf` pet also reads
+  // `is_active(RESOURCE_MAELSTROM) == true` and reaches `build_obs`
+  // (measured: the pet actor completed `build_obs` without crashing every
+  // time it was reached). What actually excludes pets (and every
+  // raid-event add) from the dump today is the OUTER actor-identity gate
+  // at the top of `record()` (260902/FORK-03+FORK-05): its `p->is_pet()`
+  // conjunct is TRUE not only for the wolf (`PLAYER_PET`) but also for
+  // `ENEMY_ADD` and `ENEMY_ADD_BOSS` (`player.hpp:968`), so it strips every
+  // raid-event add's rows as well. `demos.rows_from_dump`'s consumer --
+  // `project_fight`'s actor_name filter -- never read a pet's or an
+  // enemy's own dump rows anyway, so this scoping has zero effect on the
+  // schema's actual target and removes the untested actor classes from
+  // ever reaching build_obs at all.
   // SECOND crash, found the same session (real gdb backtrace, RelWithDebInfo
   // build): the Maelstrom-active check ALONE did not exclude an enemy actor
   // (`resources_t::active_resource` defaults to `true` for every resource_e
@@ -888,7 +1228,15 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
        p->resources.is_active( RESOURCE_MAELSTROM ) )
   {
     const rl_policy::slot_table& table = rl_policy::bind_slots( p );
-    const rl_policy::rl_state_t state = rl_policy::read_state( p, boundary_is_foreground );
+    // 228-11 Task 2 (closing a gap 228-09 disclosed but did not fix, see the targeted_picks
+    // comment above): threads THIS function's own is_decision_boundary parameter (always false
+    // here -- record() is never the decision boundary, per this file's own comment at its call
+    // site) through to read_state(), instead of read_state() unconditionally assuming true. This
+    // makes read_state()'s own internal read_action_gate_bits call read the SAME cached,
+    // non-re-bumping pick/legality state this function's own adjacent call (above) already
+    // does -- the dump's obs field and the translog's engine-built vector can no longer disagree
+    // on which pick a target_fact leaf reads.
+    const rl_policy::rl_state_t state = rl_policy::read_state( p, boundary_is_foreground, is_decision_boundary );
     std::uint8_t obs_mask[ RL_ACTION_DIM ];
     rl_policy::build_mask( state, obs_mask );
     float obs[ RL_OBS_DIM ];
@@ -923,6 +1271,38 @@ void record( player_t* p, action_t* chosen, execute_type et )
 {
   sim_t* sim = p->sim;
   if ( sim->decision_dump_file_str.empty() )
+    return;
+
+  // 260902/FORK-03+FORK-05 -- this hook fires from player_t::execute_action()
+  // (player.cpp:207 and :7538) for EVERY actor in the sim, unconditionally --
+  // monsters, adds, pets, the registered agent, on every boundary. Below this
+  // point, write_state_fields() and the action_resolvable/action_ready and
+  // obs/obs_mask blocks all call into rl_policy::read_action_gate_bits /
+  // build_obs, and build_obs' shared-action-leaf lambda
+  // (rl_policy_obs.cpp:1925-1930) sets `a->target_cache.is_valid = false`
+  // and rebuilds `a->target_list()` for every multi-target action it
+  // touches -- a WRITE into engine state from what is supposed to be a
+  // read-only diagnostic. With one enemy the rebuilt list is trivially
+  // identical to the stale one (invisible); with several it perturbs the
+  // random stream downstream of it (measured: an add-bearing fight's DPS
+  // mean moved from 343514.6 to 349746.6 at the same seed with only a
+  // decision_dump= line added). Mirror solver_control.cpp:459's own
+  // actor-identity gate -- the same exact strcmp against RL_ACTOR_NAME,
+  // never a prefix match (a prefix over the actor's name also matches
+  // every one of its pet records). 260902/cr2 (WR-06's fix): corrected
+  // from a prior "mirror :421 exactly" citation -- :421 is the
+  // auto-attack re-arm block, not an actor gate, and the two gates are
+  // NOT identical predicates. Two deliberate deltas from :459: (a) this
+  // gate is unconditional, while :459's `sim->solver_control_str.empty()
+  // &&` conjunct applies only on the in-process transport (the FIFO arm
+  // filters which actor's rows it sees on the Python side instead); (b)
+  // `p->is_pet()` is added here as an explicit second conjunct
+  // (belt-and-braces, D-13 amended) even though the name gate alone
+  // already excludes the pet -- `is_pet()` is ALSO true for ENEMY_ADD and
+  // ENEMY_ADD_BOSS (player.hpp:968), so this makes "no pet rows, no
+  // raid-event-add rows" an explicit, named property of the gate rather
+  // than an accident of the actor-name check alone.
+  if ( std::strcmp( p->name(), RL_ACTOR_NAME ) != 0 || p->is_pet() )
     return;
 
   // The stream and its mutex live on the ROOT sim only (see sim.hpp) -- with
@@ -976,8 +1356,12 @@ void record( player_t* p, action_t* chosen, execute_type et )
   // own JSONL consumers, `mask.py`'s `request.get(key)`) tolerates an
   // unknown/absent key, so record()'s own byte-shape claim above is
   // unaffected -- only write_state_fields' output grows.
+  // 260902/cr4 (CR-02): record() is NEVER the decision boundary -- player.cpp's execute_action()
+  // calls solver_control::choose() (which has already retargeted/turned the player for this
+  // decision, via accept_cast) BEFORE calling decision_dump::record(). Recomputing the pick here
+  // would read the state the cast already mutated, not the state the decision was made from.
   write_state_fields( line, p, chosen, !sim->solver_control_str.empty() || !sim->solver_policy_str.empty(),
-                       et == execute_type::FOREGROUND );
+                       et == execute_type::FOREGROUND, /*is_decision_boundary=*/false );
 
   line << "}\n";
 

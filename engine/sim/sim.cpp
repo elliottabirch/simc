@@ -29,6 +29,7 @@
 #include "sim/option.hpp"
 #include "sim/profileset.hpp"
 #include "sim/rl_policy.hpp"
+#include "sim/rl_target_select.hpp"
 #include "sim/rl_translog.hpp"
 #include "sim/scale_factor_control.hpp"
 #include "sim/sim_control.hpp"
@@ -1611,6 +1612,10 @@ sim_t::sim_t()
     maximize_reporting( false ),
     apikey( get_api_key() ),
     distance_targeting_enabled( false ),
+    facing_enabled( false ),
+    facing_shapes( false ),
+    target_select_enabled( false ),  // CR-06 (260902/cr4)
+    target_scorer_force_rules( false ),  // 230-02 (SCOR-01, D-02/R-K)
     ignore_invulnerable_targets( false ),
     enable_dps_healing( false ),
     count_overheal_as_heal( false ),
@@ -1911,6 +1916,12 @@ void sim_t::reset()
   }
 
   raid_event_t::reset( this );
+
+  // WR-11 (260902/cr4): rl_target_select's three module globals (decision stamps, the per-decision
+  // pick table, the re-resolution counters) are cleared here, once per iteration -- mirrors
+  // raid_event_t::reset( this ) immediately above. A stale pick or stamp from a PRIOR iteration
+  // must never leak into the next one.
+  rl_target_select::reset( this );
 }
 
 /// Start combat.
@@ -4193,6 +4204,10 @@ void sim_t::create_options()
   add_option( opt_string( "apikey", apikey ) );
   add_option( opt_string( "apitoken", user_apitoken ) );
   add_option( opt_bool( "distance_targeting_enabled", distance_targeting_enabled ) );
+  add_option( opt_bool( "facing_enabled", facing_enabled ) );
+  add_option( opt_bool( "facing_shapes", facing_shapes ) );
+  add_option( opt_bool( "target_select_enabled", target_select_enabled ) );  // CR-06 (260902/cr4)
+  add_option( opt_bool( "target_scorer_force_rules", target_scorer_force_rules ) );  // 230-02 (SCOR-01)
   add_option( opt_bool( "ignore_invulnerable_targets", ignore_invulnerable_targets ) );
   add_option( opt_bool( "enable_dps_healing", enable_dps_healing ) );
   add_option( opt_bool( "count_overheal_as_heal", count_overheal_as_heal ) );
@@ -4860,6 +4875,30 @@ void sim_t::setup( sim_control_t* c )
           "calculate_direct_amount(), which draws from the sim RNG when average_range=0, making the "
           "observation path no longer read-only." );
     }
+  }
+
+  // 260902/FORK-03 (D-11 post-research ruling, Research Open Question 3):
+  // the SAME defect class as the solver_policy= refusal just above, but on
+  // the BARE decision_dump= path -- decision_dump::record() has called the
+  // observation build's hit_damage leaves (rl_policy_obs.cpp's
+  // get_shared_action_leaves) since the observation columns were added to
+  // the dump (260901-od1), and those leaves end in
+  // action_t::calculate_direct_amount(), which draws from the sim RNG when
+  // average_range=0 -- independent of, and not fixed by, this same task's
+  // target-cache read-only fix (that fix stops the leaves from FORCING a
+  // target-list resolve; it does not touch calculate_direct_amount's own
+  // average_range branch). A run combining a dump line with
+  // average_range=0 would silently make even a bare, solver_policy=-less
+  // dump non-read-only. Refuse loudly rather than depend on the default,
+  // exactly as the solver_policy= case above does -- this check is
+  // independent of that one so it also fires when decision_dump= is used
+  // WITHOUT solver_policy=.
+  if ( !decision_dump_file_str.empty() && !average_range )
+  {
+    throw sc_runtime_error(
+        "decision_dump= requires average_range=1: the RL observation's hit_damage leaves call "
+        "calculate_direct_amount(), which draws from the sim RNG when average_range=0, making the "
+        "dump's observation columns no longer read-only." );
   }
 
   // Flight recorder clamp (phase 212, plan 212-01, TLOG-01/02/03). Same

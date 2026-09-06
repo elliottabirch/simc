@@ -11,6 +11,7 @@
 #include "player/player.hpp"
 #include "sim/event.hpp"
 #include "sim/rl_policy.hpp"
+#include "sim/rl_target_select.hpp"
 #include "sim/rl_translog.hpp"
 #include "sim/sim.hpp"
 #include "util/io.hpp"
@@ -39,6 +40,14 @@ namespace
 // backward-compatible one. Both sides of the wire (this constant and
 // episode-driver.py's PROTOCOL_VERSION) must move in lockstep.
 constexpr int SOLVER_CONTROL_PROTOCOL_VERSION = 2;
+
+// 260902/FORK-04 (226-05-PLAN.md Task 1): a hand-authored, LOCAL constant --
+// deliberately NOT added to the registry-generated rl_policy_constants.h
+// (this phase's own prohibition: "No maskRules entry, no regeneration or
+// hand-edit of rl_policy_constants.h"). Used only by accept_wait()'s
+// fight-end clamp below to keep a clamped wait strictly before
+// `sim->expected_iteration_time`; see that call site for the full mechanism.
+constexpr double WAIT_END_OF_FIGHT_EPSILON_SECONDS = 0.001;
 
 [[noreturn]] void protocol_abort( const std::string& msg )
 {
@@ -117,6 +126,44 @@ action_t* accept_cast( player_t* p, const std::string& action_name, std::uint64_
   if ( !resolved->ready() )
     protocol_abort( "'cast' reply named a not-ready action '" + action_name + "' (seq=" +
                      std::to_string( seq ) + ")" );
+
+  // 228-02 (D-13, TGT-02): for exactly the eight targeted registry actions, apply the SAME pick
+  // read_action_gate_bits already computed for this decision (rl_policy_obs.cpp's fill_pick) --
+  // READ, never recomputed (D-12). A pick not stamped for THIS decision is a mask/cast
+  // disagreement (T-228-02-02) and refuses by name here, in this file's own protocol_abort idiom,
+  // rather than silently recomputing a possibly-different answer.
+  //
+  // CR-05 (260902/cr4): `is_targeted_action` is a pure NAME match; additionally scoped here to the
+  // RL-controlled actor (exact strcmp against RL_ACTOR_NAME, never a prefix -- mirrors choose()'s
+  // own gate at this file's :514), non-pet -- belt-and-braces alongside rl_policy_obs.cpp's own
+  // actor scope, since accept_cast is reached only via the FIFO/in-process "cast" reply the driver
+  // sends for the RL actor it controls, never structurally guaranteed by this file alone.
+  // CR-06 (260902/cr4): the selector kill switch -- off means accept_cast never retargets/turns
+  // for a registry action, matching the pre-228-02 cast path.
+  const bool is_rl_actor = std::strcmp( p->name(), RL_ACTOR_NAME ) == 0 && !p->is_pet();
+  if ( p->sim->target_select_enabled && is_rl_actor && rl_target_select::is_targeted_action( resolved ) )
+  {
+    bool      found = false;
+    player_t* pick  = rl_target_select::lookup_pick( resolved, &found );
+    if ( !found || !pick )
+      protocol_abort( "'cast' reply named targeted action '" + action_name +
+                       "' (seq=" + std::to_string( seq ) +
+                       ") with no pick stamped for this decision -- refusing rather than "
+                       "recomputing (228-02, D-12)" );
+
+    // WR-07 (260902/cr4): the ONE retarget function this call site and the mid-cast re-resolution
+    // ladder's fallback arm (action.cpp) both call -- see rl_target_select.hpp's own doc comment.
+    // Casting on a unit IS targeting it in game (D-13, ledger R11): the player's own target and
+    // BOTH weapon swings follow the pick, so white damage (Windfury/Flametongue procs) lands on
+    // the enemy the agent is actually fighting, not a stale prior target. `solver_control.cpp`'s
+    // own FOREGROUND re-arm (below, :395-401 in this file) guarantees both swing objects are live
+    // by the time any cast reaches this function.
+    // CR-04 (260902/cr4): the turn (D-05's second call site) is now folded INTO retarget() itself
+    // -- see that function's own doc comment (rl_target_select.cpp) -- so it is no longer a
+    // separate call at this site.
+    rl_target_select::retarget( resolved, p, pick );
+  }
+
   return resolved;
 }
 
@@ -146,8 +193,55 @@ void accept_wait( sim_t* sim, execute_type et, double sec, const std::string& co
   // definitions read_state() uses -- never a third independent walk of
   // sim->raid_events. No raid event pending (next_raid_event_in() returns
   // false) means no clamp from that source, per read_state()'s own policy.
-  const double fight_remaining =
-      std::max( ( sim->expected_iteration_time - sim->current_time() ).total_seconds(), 0.0 );
+  //
+  // 260902/FORK-04 (226-05-PLAN.md Task 1, `226-STALL-RECEIPT.md` Section 9):
+  // the fight-end bound is shaved by WAIT_END_OF_FIGHT_EPSILON_SECONDS so the
+  // resulting Player-Ready event lands STRICTLY before `expected_iteration_time`,
+  // never exactly on it. Without this, a wait clamped to exactly
+  // `fight_remaining` schedules `player_ready_event_t` at the SAME timestamp
+  // as `sim_end_event_t` (sim.cpp:2026, `make_event<sim_end_event_t>(*this,
+  // *this, expected_iteration_time)`). `sim_end_event_t` is inserted once,
+  // near iteration start (`sim.cpp:2026`), so it always carries a lower
+  // insertion id than any mid-fight-scheduled ready event; same-timestamp
+  // ties in `event_manager_t::add_event` resolve by ascending insertion id,
+  // so `sim_end_event_t::execute()` (`sim.cpp:1017-1020`, `cancel_iteration()`)
+  // always runs FIRST and tears the iteration down before the tied
+  // Player-Ready event's callback is ever reached -- silently discarding
+  // the actor's own re-decision. This directly contradicts this function's
+  // own documented invariant two paragraphs below ("Waiting a hair past a
+  // raid event or past fight end is harmless (the engine re-decides at the
+  // next boundary either way)") for the one case that invariant did not
+  // anticipate: fight-end EXACTLY, not "a hair past" it. Measured
+  // (226-05-PLAN.md Task 2's twenty-seed sweep, `pairB.simc`-derived, seeds
+  // 5 and 31337): the actor's decision stream silently and permanently
+  // stopped at t=573.916 and t=392.000 respectively, in both cases because
+  // the immediately-prior wait request (28.86s / 233.024s) was clamped to
+  // land at EXACTLY `expected_iteration_time` (600.000s). Fixed at the
+  // clamp's own source, per-decision, as a bound adjustment only -- never a
+  // process external to this function that notices the actor went quiet and
+  // pokes it back to life.
+  //
+  // WR-01 (260902/cr2 code review, measured, NOT an absolute invariant as
+  // previously claimed here): the CR-04 re-floor below (`sec <
+  // RL_WAIT_FLOOR_SECONDS -> RL_WAIT_FLOOR_SECONDS`) runs AFTER this shave
+  // and CAN put `sec` back exactly on the tie. Walking `timespan_t`'s
+  // integer-millisecond arithmetic (`from_seconds` truncates): at R = 50ms
+  // remaining, `fight_remaining` = 0.050 - 0.001 = 0.049, then
+  // `0.049 < 0.05` re-floors to 0.05 -- `from_seconds(0.05)` = 50 ticks,
+  // landing the Player-Ready event at EXACTLY `expected_iteration_time`
+  // again, tying with `sim_end_event_t` a second time. So the shave does
+  // NOT hold across every `sec` -- it holds everywhere except a 1ms-wide
+  // band at R=50ms, where the outcome is the same harmless-in-practice
+  // loss (one re-decision skipped in the fight's final 50ms) the pre-fix
+  // bug caused at every R, just far rarer. Re-shaving after the re-floor
+  // would close this exactly (carried as a todo:
+  // 2026-09-02-fork04-fight-end-reshave-after-floor.md) -- NOT done here;
+  // this is a comment-only correction, the code below this point is
+  // byte-identical to before it.
+  const double fight_remaining = std::max(
+      ( sim->expected_iteration_time - sim->current_time() ).total_seconds() -
+          WAIT_END_OF_FIGHT_EPSILON_SECONDS,
+      0.0 );
   if ( fight_remaining < sec )
     sec = fight_remaining;
   double raid_event_bound = 0.0;
@@ -488,7 +582,11 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // request's own `resolved_action` stays pre-reply/`apl_choice`-based,
     // exactly as PROTOCOL.md documents (the reply hasn't been read yet); only
     // decision_dump::record()'s own call opts into reply-gating (defect (b)).
-    decision_dump::write_state_fields( req, p, apl_choice, false, et == execute_type::FOREGROUND );
+    // 260902/cr4 (CR-02): this FIFO request-line build IS the decision boundary -- it runs before
+    // the reply has been read and before accept_cast has retargeted/turned the player, so this is
+    // the state the decision is actually made from.
+    decision_dump::write_state_fields( req, p, apl_choice, false, et == execute_type::FOREGROUND,
+                                        /*is_decision_boundary=*/true );
     req << "}\n";
     req.flush();
 
@@ -525,6 +623,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     sim->solver_control_has_requested_wait_sec = false;
     sim->solver_control_last_requested_wait_sec = 0.0;
     sim->solver_control_last_wait_anchor_label.clear();
+    sim->solver_control_last_wait_source.clear();
 
     if ( type == "cast" )
     {
@@ -655,7 +754,10 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
 
     const chrono::wall_clock::time_point read_state_t0 =
         obs_timing ? chrono::wall_clock::now() : chrono::wall_clock::time_point{};
-    const rl_policy::rl_state_t state = rl_policy::read_state( p, foreground );
+    // 228-11 Task 2: this call is ALWAYS the real decision boundary (the in-process arm's own
+    // per-decision state read, before any reply/accept_cast has run) -- see rl_policy.hpp's own
+    // doc comment on read_state for why decision_dump.cpp's diagnostic call must pass false.
+    const rl_policy::rl_state_t state = rl_policy::read_state( p, foreground, /*is_decision_boundary=*/true );
     std::chrono::nanoseconds obs_timing_ns{ 0 };
     if ( obs_timing )
     {
@@ -793,6 +895,14 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     int idx = greedy_idx;
     bool exploratory = false;
 
+    // 230-04 (SCOR-02, R-B): a SECOND dial, over CANDIDATES, draws from this SAME dedicated
+    // `sim->solver_explore_rng` stream further below (after the action itself has been chosen
+    // and only when that action is targeted) -- see this file's own candidate-dial block for the
+    // full contract. With the rotation frozen (this phase) the ACTION dial below is pinned at
+    // zero and the CANDIDATE dial carries the schedule; in a future alternation (the rotation
+    // retrained with the scorer frozen) it is the other way round -- a reader of either dial
+    // should find this comment pointing at the other one.
+    //
     // Phase 213 D-08: the random-action dial. Tested against zero BEFORE
     // touching the generator -- at a dial of exactly zero the engine takes
     // ZERO draws, which is what keeps every scoring run and every pre-213
@@ -849,6 +959,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     sim->solver_control_has_requested_wait_sec = false;
     sim->solver_control_last_requested_wait_sec = 0.0;
     sim->solver_control_last_wait_anchor_label.clear();
+    sim->solver_control_last_wait_source.clear();
 
     // Confidence gap (Phase 212, plan 212-01, TLOG-02): the largest legal Q
     // minus the second largest, considering only entries whose mask byte is
@@ -913,7 +1024,100 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       // channel is being built (rulings 210-G21/212-G5); this comment
       // exists so the next reader does not go looking for a field that
       // was never there.
-      rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, top_q, false, exploratory );
+      //
+      // 228-09 (D-23/TGT-08): resolve THIS action's own stamped pick for the transition-log's
+      // chosen-target field, READ via lookup_pick() -- never a fresh select() (D-12). Written
+      // BEFORE accept_cast() below, same reasoning as the decision row itself (a decision that
+      // gets refused should still show what it named). `resolve_action` is a pure name lookup
+      // (the SAME one accept_cast() makes internally, solver_control.cpp:121) -- not a second
+      // selector computation.
+      std::uint16_t chosen_target_actor_index = rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK;
+      // 230-04 (SCOR-02, R-B): the candidate block rl_target_select CAPTURED for THIS action's
+      // pick above -- READ via lookup_candidate_block(), never recomputed (D-12, same discipline
+      // chosen_target_actor_index's own lookup_pick() call already follows). Defaults to "no
+      // block" (nullptr features, sentinel slot) when the rules path was active, this was not a
+      // targeted action, or nothing was captured this decision -- record_decision() itself then
+      // writes the all-zero/sentinel candidate fields.
+      const float*  candidate_block_features    = nullptr;
+      std::uint16_t candidate_block_mask        = 0;
+      std::uint8_t  candidate_block_count       = 0;
+      std::uint8_t  candidate_block_chosen_slot = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
+      // 230-04 (SCOR-02, R-B): set true when the candidate dial (immediately below) actually
+      // fired -- OR'd into the row's own FLAG_EXPLORATORY bit alongside the action dial's
+      // `exploratory` above, since the bit means "a random draw fired here", not "which one".
+      bool candidate_exploratory = false;
+      {
+        const bool is_rl_actor = std::strcmp( p->name(), RL_ACTOR_NAME ) == 0 && !p->is_pet();
+        if ( p->sim->target_select_enabled && is_rl_actor )
+        {
+          action_t* resolved_for_pick = solver_control::resolve_action( p, action.token );
+          if ( resolved_for_pick != nullptr && rl_target_select::is_targeted_action( resolved_for_pick ) )
+          {
+            bool      found = false;
+            player_t* pick  = rl_target_select::lookup_pick( resolved_for_pick, &found );
+            if ( found && pick != nullptr )
+              chosen_target_actor_index = static_cast<std::uint16_t>( pick->actor_index );
+
+            bool                              block_found = false;
+            rl_target_select::candidate_block block =
+                rl_target_select::lookup_candidate_block( resolved_for_pick, &block_found );
+            if ( block_found && block.features != nullptr )
+            {
+              candidate_block_features    = block.features;
+              candidate_block_mask        = block.mask;
+              candidate_block_count       = block.count;
+              candidate_block_chosen_slot = block.chosen_slot;
+            }
+
+            // 230-04 (SCOR-02, R-B): the SECOND exploration dial, over CANDIDATES -- drawn on the
+            // SAME dedicated `sim->solver_explore_rng` stream the action dial above already used,
+            // applied ONLY here (after the action has been chosen -- this spell, never all eight
+            // read_action_gate_bits pre-computes gate bits for) and only when more than one
+            // candidate was legal. See the action dial's own top-of-function comment for which
+            // dial carries the schedule under which mode. On a hit, the pick is REPLACED by a
+            // uniform draw over the SAME legal-candidate set the block above describes --
+            // `build_candidate_facts` reuses `generic_filter`/`build_enemy_fact` VERBATIM (D-20:
+            // no third copy of the filter) against a game state that has not advanced since
+            // `select()` scored it moments earlier this same decision, so its order matches the
+            // block's own slot order exactly. `apply_candidate_exploration` overwrites the
+            // STAMPED pick (so accept_cast()'s own lookup_pick() call below sees the replacement)
+            // and the block's own chosen_slot (so the row records what happened, never what the
+            // score would have chosen).
+            if ( found && pick != nullptr && candidate_block_features != nullptr &&
+                 candidate_block_count > 1 && sim->solver_policy_weights &&
+                 sim->solver_policy_weights->has_scorer )
+            {
+              const float candidate_exploration = sim->solver_policy_weights->scorer.exploration;
+              if ( candidate_exploration > 0.0f &&
+                   sim->solver_explore_rng.real() < candidate_exploration )
+              {
+                std::vector<rl_target_select::enemy_fact> legal =
+                    rl_target_select::build_candidate_facts( resolved_for_pick, /*harmful=*/true );
+                if ( !legal.empty() )
+                {
+                  const int draw = static_cast<int>(
+                      sim->solver_explore_rng.range( 0.0, static_cast<double>( legal.size() ) ) );
+                  const std::uint8_t draw_slot = static_cast<std::uint8_t>( draw );
+                  if ( rl_target_select::apply_candidate_exploration( resolved_for_pick,
+                                                                       legal[ draw ].candidate,
+                                                                       draw_slot ) )
+                  {
+                    chosen_target_actor_index =
+                        static_cast<std::uint16_t>( legal[ draw ].actor_index );
+                    candidate_block_chosen_slot = draw_slot;
+                    candidate_exploratory       = true;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, top_q,
+                                     chosen_target_actor_index, false,
+                                     exploratory || candidate_exploratory,
+                                     candidate_block_features, candidate_block_mask,
+                                     candidate_block_count, candidate_block_chosen_slot );
       // 212-CR-FIX WR-06: accept_cast() can refuse a not-ready action via
       // protocol_abort() (a throw), which unwinds past combat_end()'s
       // record_close() hook entirely for this fight -- without this catch,
@@ -946,11 +1150,17 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     sim->solver_control_has_requested_wait_sec = true;
     sim->solver_control_last_requested_wait_sec = wr.seconds;
     sim->solver_control_last_wait_anchor_label = action.label ? action.label : "";
+    // 260902/cr2 (CR-03/WR-08's fix): carry the SAME wait_result::source
+    // build_wait() already computed -- never re-derived. Empty on the
+    // FIFO arm by construction (never reaches this in-process branch).
+    sim->solver_control_last_wait_source = wr.source;
     // Flight recorder decision row, wait branch. wr.floored is the fifth
     // flag bit's only source -- it says the wait length came from the
     // floor rather than from a real timer. No-op when rl_translog= is
-    // unset.
-    rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, top_q, wr.floored, exploratory );
+    // unset. 228-09 (D-23/TGT-08): a wait has no action to pick a target
+    // for -- always the sentinel.
+    rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, top_q,
+                                   rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK, wr.floored, exploratory );
     // 212-CR-FIX WR-06: same reasoning as the cast branch above -- flush on
     // an abort out of accept_wait() so the decision row already appended
     // survives it.

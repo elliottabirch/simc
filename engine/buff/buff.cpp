@@ -272,7 +272,21 @@ struct expiration_t : public buff_event_t
       }
     }
 
-    buff->expiration.erase( buff->expiration.begin() );
+    // v2.11 (Phase 229): GUARDED. `erase( begin() )` on an EMPTY vector is undefined behaviour --
+    // libstdc++ decrements `_M_finish` to one BELOW `_M_start`, so the container's size becomes -1
+    // and the NEXT `push_back` (buff.cpp:2497, `expiration.push_back( make_event<expiration_t>… )`)
+    // computes its write address as `_M_start + (-1)` and writes 8 bytes BEFORE the buffer. That is
+    // exactly the fault AddressSanitizer reported: "heap-buffer-overflow ... WRITE of size 8 ...
+    // located 8 bytes before [a] 64-byte region" whose allocation stack is that same push_back.
+    // This file already guards every other `expiration.erase( expiration.begin() )` the same way
+    // (`if ( !expiration.empty() )` at :2561, `while ( !expiration.empty() )` at :2901) -- this one
+    // site was missing the check, so this restores an invariant the rest of the file maintains
+    // rather than inventing a new rule. An expiration event can reach here with an already-empty
+    // vector when the buff's expiration bookkeeping was cleared between the event being scheduled
+    // and firing; Phase 228's per-spell target selection makes that ordering reachable (it changes
+    // how often Crash Lightning re-triggers, sc_shaman.cpp:6249, the observed caller).
+    if ( !buff->expiration.empty() )
+      buff->expiration.erase( buff->expiration.begin() );
 
     if ( buff->stack_behavior == buff_stack_behavior::ASYNCHRONOUS )
     {
