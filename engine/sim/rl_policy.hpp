@@ -109,6 +109,16 @@ struct rl_state_t
   double auto_attack_interval = 0.0;  bool has_auto_attack_interval = false;
   bool   boundary_is_foreground = true;   // converted ONCE from execute_type by the caller
 
+  // 232-04 (OBS-02, R-T, deviation Rule 3 -- see 232-04-SUMMARY.md): threaded straight from
+  // read_state()'s own `is_decision_boundary` parameter (already required for every caller, see
+  // that function's doc comment) so build_obs() can tell its own REAL-decision call
+  // (solver_control.cpp, always true) apart from decision_dump.cpp's later diagnostic build_obs()
+  // call for the SAME decision (always false, that file's own CR-02 comment) WITHOUT a second
+  // parameter on build_obs() itself. This is what gates the pre-cast target-fact snapshot's
+  // stamp-vs-read-back split in rl_policy_obs.cpp -- see target_fact_snapshot's own doc comment
+  // (rl_target_select.hpp).
+  bool   is_decision_boundary  = false;
+
   // 221-03 (ACT-05/ACT-06) -- the two anchored-wait clamp inputs. Filled
   // in read_state() from the engine's own definitions (fight_remains =
   // expected_iteration_time - current_time(); raid_event_next_in = the

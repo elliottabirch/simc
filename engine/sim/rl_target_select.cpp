@@ -75,6 +75,29 @@ struct candidate_block_slot
 };
 std::unordered_map<const action_t*, candidate_block_slot> g_candidate_block_table;
 
+// 232-04 (OBS-02, R-T): the pre-cast snapshot table -- captures, per targeted action's CURRENT
+// decision, the is_current_target / Tempest hit_damage values `build_obs()`'s own REAL-decision
+// call (solver_control.cpp, `rl_state_t::is_decision_boundary == true`) computed BEFORE
+// `accept_cast`'s retarget/turn can mutate `p->target`/facing. `decision_dump.cpp`'s own later
+// diagnostic `build_obs()` call for the SAME decision (`is_decision_boundary == false`, that
+// file's own CR-02 comment: `record()` always runs strictly after `choose()`) reads this snapshot
+// back instead of recomputing against state the cast already mutated -- the
+// `action_gate_dump_time_compute` precedent, applied to per-target facts. Keyed on the resolved
+// `action_t*` exactly like `g_pick_table`/`g_candidate_block_table` above, same `has_stamp`/
+// `stamp` read-back discipline (T-232-15). `has_is_current_target`/`has_hit_damage` are
+// independent -- most targeted actions only ever get the first (only Tempest's schema requests a
+// `shared_hit_damage` leaf).
+struct target_fact_snapshot_slot
+{
+  bool          has_is_current_target = false;
+  bool          is_current_target     = false;
+  bool          has_hit_damage        = false;
+  double        hit_damage            = 0.0;
+  std::uint64_t stamp                 = 0;
+  bool          has_stamp             = false;
+};
+std::unordered_map<const action_t*, target_fact_snapshot_slot> g_target_fact_snapshot_table;
+
 // D-14's re-resolution ladder counters -- one fight's totals (WR-11, 260902/cr4: cleared every
 // iteration by reset( sim ) below, called from sim_t::reset()).
 reresolution_counts g_reresolution_counts;
@@ -529,6 +552,69 @@ candidate_block lookup_candidate_block( const action_t* resolved, bool* out_foun
   return block;
 }
 
+// 232-04 (OBS-02, R-T): stamps `resolved`'s pre-cast is_current_target for the CURRENT decision.
+// Called ONLY from build_obs()'s real-decision path (rl_policy_obs.cpp, gated on
+// `rl_state_t::is_decision_boundary`) -- never from decision_dump.cpp's own diagnostic build_obs()
+// call, so a dump-time recompute (post accept_cast retarget) can never overwrite the real
+// decision's capture. A no-op when `resolved` is null (mirrors fill_pick's own guard).
+void stamp_target_fact_is_current_target( const action_t* resolved, bool is_current_target )
+{
+  if ( !resolved )
+    return;
+  auto& slot = g_target_fact_snapshot_table[ resolved ];
+  slot.is_current_target     = is_current_target;
+  slot.has_is_current_target = true;
+  slot.stamp                  = current_decision_stamp( resolved->player );
+  slot.has_stamp               = true;
+}
+
+// Same contract as stamp_target_fact_is_current_target, for Tempest's own hit_damage leaf
+// (`action_leaf_kind::shared_hit_damage`, the only registry action whose schema requests it).
+void stamp_target_fact_hit_damage( const action_t* resolved, double hit_damage )
+{
+  if ( !resolved )
+    return;
+  auto& slot = g_target_fact_snapshot_table[ resolved ];
+  slot.hit_damage     = hit_damage;
+  slot.has_hit_damage = true;
+  slot.stamp           = current_decision_stamp( resolved->player );
+  slot.has_stamp        = true;
+}
+
+// Reads the snapshot stamped for `resolved` at the CURRENT decision. `*out_found` is false when
+// the stamp is stale or absent (the SAME has_stamp/stamp==current guard lookup_pick/
+// lookup_candidate_block already use, T-232-15) -- the caller (decision_dump.cpp) MUST then
+// compute fresh and flag the row (target_fact_dump_time_compute), never fabricate a value
+// (T-232-14). `has_is_current_target`/`has_hit_damage` on the returned struct are independent of
+// `*out_found` -- a found-but-partial slot (e.g. is_current_target stamped, hit_damage never
+// requested for this action) reports each half honestly.
+target_fact_snapshot lookup_target_fact_snapshot( const action_t* resolved, bool* out_found )
+{
+  auto it = g_target_fact_snapshot_table.find( resolved );
+  if ( it == g_target_fact_snapshot_table.end() || !it->second.has_stamp )
+  {
+    if ( out_found )
+      *out_found = false;
+    return target_fact_snapshot{};
+  }
+  auto stamp_it = g_decision_stamp.find( resolved->player );
+  std::uint64_t current_stamp = ( stamp_it == g_decision_stamp.end() ) ? 0 : stamp_it->second;
+  if ( it->second.stamp != current_stamp )
+  {
+    if ( out_found )
+      *out_found = false;
+    return target_fact_snapshot{};
+  }
+  if ( out_found )
+    *out_found = true;
+  target_fact_snapshot out;
+  out.has_is_current_target = it->second.has_is_current_target;
+  out.is_current_target      = it->second.is_current_target;
+  out.has_hit_damage         = it->second.has_hit_damage;
+  out.hit_damage             = it->second.hit_damage;
+  return out;
+}
+
 bool apply_candidate_exploration( const action_t* resolved, player_t* replacement,
                                    std::uint8_t replacement_slot )
 {
@@ -557,13 +643,15 @@ void reset( sim_t* )
 {
   // WR-11 (260902/cr4): called from sim_t::reset() (sim.cpp), once per iteration -- clears every
   // module global (the original three, plus CR-04's deadlock counter added later the same task,
-  // plus 230-04's candidate block table) so a stale pick, stamp or count from a PRIOR iteration
-  // can never leak into the next one. `sim` itself is unused (the tables are keyed on
-  // `player_t*`, not sim identity, per this module's own single-sim/single-thread precondition)
-  // but is taken by pointer to mirror raid_event_t::reset( sim )'s own signature at the call site.
+  // plus 230-04's candidate block table, plus 232-04's target-fact snapshot table) so a stale
+  // pick, stamp or count from a PRIOR iteration can never leak into the next one. `sim` itself is
+  // unused (the tables are keyed on `player_t*`, not sim identity, per this module's own
+  // single-sim/single-thread precondition) but is taken by pointer to mirror
+  // raid_event_t::reset( sim )'s own signature at the call site.
   g_decision_stamp.clear();
   g_pick_table.clear();
   g_candidate_block_table.clear();  // 230-04
+  g_target_fact_snapshot_table.clear();  // 232-04 (OBS-02, R-T)
   g_reresolution_counts = reresolution_counts{};
   g_every_targeted_action_illegal = 0;  // CR-04 (260902/cr4)
 }

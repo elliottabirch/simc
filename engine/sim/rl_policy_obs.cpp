@@ -312,6 +312,9 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground, bool is_d
 
   s.t = sim->current_time().total_seconds();
   s.boundary_is_foreground = boundary_is_foreground;
+  // 232-04 (OBS-02, R-T): threaded straight from this function's own parameter -- see
+  // rl_policy.hpp's own doc comment on rl_state_t::is_decision_boundary for the full mechanism.
+  s.is_decision_boundary = is_decision_boundary;
 
   // 221-03 (ACT-05/ACT-06) -- the two anchored-wait clamp inputs. Engine's
   // own fight_remains definition (sim.cpp's expected_combat_length/
@@ -2366,6 +2369,24 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
       state->target->target_mitigation( a->get_school(), result_amount_type::DMG_DIRECT, state );
     hit_damage = state->result_amount;
 
+    // 232-04 (OBS-02, R-T): the pre-cast hit_damage snapshot -- same stamp-vs-read-back split as
+    // the is_current_target snapshot above, gated on the SAME `s.is_decision_boundary` (captured
+    // by this lambda via `[&]`). Tempest is the only registry action whose schema requests a
+    // shared_hit_damage leaf today, but this is not Tempest-specific: any future action requesting
+    // the same leaf gets identical pre-cast fidelity for free.
+    if ( s.is_decision_boundary )
+    {
+      rl_target_select::stamp_target_fact_hit_damage( a, hit_damage );
+    }
+    else
+    {
+      bool snap_found = false;
+      const rl_target_select::target_fact_snapshot snap =
+          rl_target_select::lookup_target_fact_snapshot( a, &snap_found );
+      if ( snap_found && snap.has_hit_damage )
+        hit_damage = snap.hit_damage;
+    }
+
     const double crit_pct_current = std::min( 100.0, state->composite_crit_chance() * 100.0 );
     const double persistent_multiplier = a->composite_persistent_multiplier( state );
     const double da_multiplier = a->composite_da_multiplier( state );
@@ -2882,6 +2903,27 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
           }
           const rl_target_select::enemy_fact fact =
               rl_target_select::build_enemy_fact( b.bound_action, pick );
+
+          // 232-04 (OBS-02, R-T): the pre-cast is_current_target snapshot. On the REAL decision
+          // (is_decision_boundary == true), stamp what was just computed above -- BEFORE
+          // accept_cast's retarget/turn can run. On decision_dump.cpp's own later diagnostic
+          // build_obs() call for the SAME decision (is_decision_boundary == false), read that
+          // snapshot back instead of trusting `fact.is_current_target`, which by then reflects
+          // POST-retarget state -- the action_gate_dump_time_compute precedent, applied here.
+          bool effective_is_current_target = fact.is_current_target;
+          if ( s.is_decision_boundary )
+          {
+            rl_target_select::stamp_target_fact_is_current_target( b.bound_action, fact.is_current_target );
+          }
+          else
+          {
+            bool snap_found = false;
+            const rl_target_select::target_fact_snapshot snap =
+                rl_target_select::lookup_target_fact_snapshot( b.bound_action, &snap_found );
+            if ( snap_found && snap.has_is_current_target )
+              effective_is_current_target = snap.is_current_target;
+          }
+
           bool matched = true;
           switch ( b.target_fact_leaf )
           {
@@ -2894,7 +2936,7 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
             case target_fact_leaf_kind::health_pct:             raw = fact.health_pct; break;
             case target_fact_leaf_kind::is_boss:                raw = fact.is_boss ? 1.0 : 0.0; break;
             case target_fact_leaf_kind::flame_shock_remaining:  raw = fact.flame_shock_remaining; break;
-            case target_fact_leaf_kind::is_current_target:      raw = fact.is_current_target ? 1.0 : 0.0; break;
+            case target_fact_leaf_kind::is_current_target:      raw = effective_is_current_target ? 1.0 : 0.0; break;
             case target_fact_leaf_kind::actor_index:            raw = static_cast<double>( fact.actor_index ); break;
             case target_fact_leaf_kind::actor_spawn_index:      raw = static_cast<double>( fact.actor_spawn_index ); break;
             // 228-11 (D-16 full inventory): every value below already exists on enemy_fact
