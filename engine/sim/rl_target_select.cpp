@@ -348,7 +348,8 @@ chain_geometry resolve_thorims_branch_geometry( const action_t* resolved, prefer
 // builder) is DELIBERATELY untouched by BL-01's fix below -- the strike blocks' own
 // `neighbours_within_radius` obs leaf stays the strike's own (zero) geometry; a schema-semantic
 // change there is Phase 233's census (R5-1), not this plan's.
-enemy_fact build_enemy_fact_for_scoring( const action_t* a, player_t* candidate, preference_fn pref )
+enemy_fact build_enemy_fact_for_scoring( const action_t* a, player_t* candidate, preference_fn pref,
+                                          const chain_geometry* geo )
 {
   enemy_fact f;
   f.candidate   = candidate;
@@ -360,18 +361,31 @@ enemy_fact build_enemy_fact_for_scoring( const action_t* a, player_t* candidate,
     f.flame_shock_remaining = fs ? fs->remains().total_seconds() : 0.0;
   }
 
-  // BL-01 (232-13): the neighbour count is computed at the MODELLED spell's own resolved radius --
-  // Tempest's or Chain Lightning's, resolved by name via resolve_thorims_branch_geometry -- never
-  // the caller's (`a`'s) own radius, which is 0 for the two Thorim's-aware melee strikes.
+  // BL-01 (232-13) / ME-4 (232-15b): the neighbour count is computed at the MODELLED spell's own
+  // resolved radius -- Tempest's or Chain Lightning's -- never the caller's (`a`'s) own radius,
+  // which is 0 for the two Thorim's-aware melee strikes. ME-4 moved the actual
+  // resolve_thorims_branch_geometry() call (a player_t::find_action() name walk) OUT of this
+  // per-CANDIDATE function and into select()'s once-per-DECISION precompute -- select() is this
+  // function's only caller, and it now passes the already-resolved geometry down through `geo`
+  // rather than asking this function to re-resolve it once per candidate. The loud refusal on a
+  // null-or-zero-radius source still lives at resolve_thorims_branch_geometry's own single call
+  // site (select()); this function refuses separately only if it is somehow invoked for a
+  // pref that needs geometry without one having been supplied, which would itself be a caller bug.
   if ( pref == preference_tempest || pref == preference_chain_lightning )
   {
-    const chain_geometry geo = resolve_thorims_branch_geometry( a, pref );
+    if ( !geo )
+    {
+      throw sc_runtime_error(
+          "rl_target_select::build_enemy_fact_for_scoring: pref requires a precomputed Thorim's "
+          "branch geometry but none was supplied -- select() must resolve it once per decision "
+          "before calling this function (ME-4)" );
+    }
     int neighbours = 0;
     for ( player_t* other : a->sim->target_non_sleeping_list )
     {
       if ( other == candidate || !other->is_enemy() )
         continue;
-      if ( candidate->get_player_distance( *other ) <= geo.radius + other->combat_reach )
+      if ( candidate->get_player_distance( *other ) <= geo->radius + other->combat_reach )
         ++neighbours;
     }
     f.neighbours_within_radius = neighbours;
@@ -531,6 +545,23 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
   if ( candidates.size() == 1 && pref != preference_scorer )
     return candidates.front();
 
+  // BL-01 (232-13) / ME-4 (232-15b): resolve the Thorim's-branch geometry ONCE per decision, HERE
+  // -- before the per-candidate scoring loop below. `resolve_thorims_branch_geometry` calls
+  // `player_t::find_action()`, a name-walk over the action list; calling it once per CANDIDATE (as
+  // `build_enemy_fact_for_scoring` used to do directly) repeats that walk N times per decision for
+  // the identical `(a, pref)` pair, in the training hot loop -- exactly the extra per-candidate
+  // work R-S refused elsewhere. Resolved for BOTH branches that need it (tempest and
+  // chain_lightning), not merely chain_lightning's own hop-stash consumer below, so
+  // `build_enemy_fact_for_scoring`'s tempest branch gets the SAME once-per-decision value instead
+  // of re-resolving it itself.
+  chain_geometry precomputed_geo;
+  bool           has_precomputed_geo = false;
+  if ( pref == preference_tempest || pref == preference_chain_lightning )
+  {
+    precomputed_geo     = resolve_thorims_branch_geometry( a, pref );
+    has_precomputed_geo = true;
+  }
+
   // RULE-02 (232-06, R-Z): compute the Chain Lightning hop-count stash ONCE per decision, HERE --
   // before the scoring loop below calls `pref()` once per candidate. `preference_chain_lightning`
   // cannot see the other candidates itself (`preference_fn` is one-candidate-at-a-time by design),
@@ -540,10 +571,9 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
   {
     chain_hop_slot& hop_slot = g_chain_hop_stash[ a ];
     hop_slot.hop_counts.clear();
-    // BL-01 (232-13): geometry resolved by name (Chain Lightning's own radius/cap), never read
-    // off `a` -- see resolve_thorims_branch_geometry's own doc comment above.
-    const chain_geometry geo = resolve_thorims_branch_geometry( a, pref );
-    compute_chain_hop_counts( geo.radius, geo.cap, candidates, hop_slot.hop_counts );
+    // ME-4 (232-15b): reuses `precomputed_geo` (resolved once, just above) rather than calling
+    // resolve_thorims_branch_geometry() a SECOND time for the same decision.
+    compute_chain_hop_counts( precomputed_geo.radius, precomputed_geo.cap, candidates, hop_slot.hop_counts );
     hop_slot.stamp         = current_decision_stamp( a->player );
     hop_slot.has_stamp     = true;
     hop_slot.used_fallback = false;
@@ -578,8 +608,10 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
     // instead of the lite one. This costs more per candidate than the rules path, paid ONLY when
     // a scorer is actually loaded and active (preference_for's own gate) -- the eight rule
     // preferences' own performance is completely unaffected by this branch.
-    enemy_fact fact  = ( pref == preference_scorer ) ? build_enemy_fact( a, c )
-                                                      : build_enemy_fact_for_scoring( a, c, pref );
+    enemy_fact fact  = ( pref == preference_scorer )
+                           ? build_enemy_fact( a, c )
+                           : build_enemy_fact_for_scoring(
+                                 a, c, pref, has_precomputed_geo ? &precomputed_geo : nullptr );
     double     score = pref( a, fact );
 
     // 230-04 (SCOR-02, R-B): CAPTURE, never recompute -- preference_scorer's own call just above
