@@ -294,11 +294,16 @@ double preference_lava_lash( const action_t* a, const enemy_fact& fact );
 // exists).
 double preference_voltaic_blaze( const action_t* a, const enemy_fact& fact );
 
-// chain_lightning (RULE-02, 232-06, R-Z): reads the greedy hop-count stash `select()` computes
-// once per decision (compute_chain_hop_counts, rl_target_select.cpp) BEFORE this function is ever
-// called -- the hop count is a REAL simulation of the engine's own chain walk over already-resolved
-// geometry (pure, deterministic -- never a call into sc_shaman.cpp's own randomised chain resolver,
-// FORK-03), tie-broken on time to die. Falls back to the retired neighbour-count approximation,
+// chain_lightning (RULE-02, 232-06, R-Z; geometry parameterised 232-13/BL-01): reads the greedy
+// hop-count stash `select()` computes once per decision (compute_chain_hop_counts,
+// rl_target_select.cpp) BEFORE this function is ever called, now at the MODELLED spell's own
+// resolved radius/cap (never the caller's) -- LO-05/R-D: this is a DETERMINISTIC APPROXIMATION of
+// the engine's own randomised chain walk over already-resolved geometry (pure, deterministic --
+// never a call into sc_shaman.cpp's own randomised chain resolver, FORK-03), labelled as an
+// approximation, never a prediction of it (the engine's own walk draws from sim->rng(); this one
+// never does, so it can only claim to model which targets a deterministic nearest-neighbour walk
+// over the SAME geometry would hit, not which targets the engine's randomised resolver actually
+// hits), tie-broken on time to die. Falls back to the retired neighbour-count approximation,
 // visibly (chain_hop_fallback_used(), below), only if the stash carries no entry for this exact
 // (action, candidate, decision) -- see this function's own body for when that can happen.
 double preference_chain_lightning( const action_t* a, const enemy_fact& fact );

@@ -189,6 +189,39 @@ void reshave_fight_end_tie( sim_t* sim, double& sec )
       WAIT_END_OF_FIGHT_EPSILON_SECONDS;
   if ( hard_bound > 0.0 && sec > hard_bound )
     sec = hard_bound;
+
+  // R-AI (232-13, chain-B1 review HI-02 parts 2-3): the band this reshave actually re-clamps,
+  // stated explicitly rather than only in the surrounding narrative comments above. Every final
+  // wait/turn with fight-remaining R in
+  // (WAIT_END_OF_FIGHT_EPSILON_SECONDS, RL_WAIT_FLOOR_SECONDS + WAIT_END_OF_FIGHT_EPSILON_SECONDS]
+  // -- concretely (1 ms, 51 ms] -- lands at `R - 1 ms` (one extra agent decision one millisecond
+  // before fight end), where the pre-FORK-04-second-half code let the wait overshoot past fight
+  // end harmlessly for every R in that band. KEPT deliberately, not narrowed to the exact
+  // R == FLOOR tie: the first shave already produced this same final decision for every
+  // R >= RL_WAIT_FLOOR_SECONDS + WAIT_END_OF_FIGHT_EPSILON_SECONDS, so this reshave makes the
+  // behaviour UNIFORM ("every fight's last wait lands one millisecond before the end") rather than
+  // reintroducing a ~49 ms discontinuity at exactly R == FLOOR -- the uniform semantic is better
+  // training data. Legality is unaffected either way (R-AI); only the realised final-wait DURATION
+  // in that band differs between the tie-only and uniform readings. The `sec > 0` invariant this
+  // leaves in force: `timespan_t`'s integer-millisecond quantisation keeps `hard_bound` (an
+  // integer number of ms minus 1 ms) strictly positive whenever `hard_bound > 0.0` fires above, so
+  // this can never schedule a zero-length wait/turn -- asserted below, never merely assumed.
+  //
+  // R-AI (232-13): `scripts/rl/mask.py`'s own `anchored_wait_seconds` mirror clamps its
+  // pre-floor value to `request["fight_remains"]` (when present) THEN floors at
+  // `WAIT_FLOOR_SECONDS` -- it does NOT re-apply this second, POST-floor reshave. That mirror is
+  // engine-side documented as non-authoritative already (its own docstring: "the AUTHORITATIVE
+  // clamp is the engine's accept_wait"), so this gap is a legality/duration MODEL gap only: the
+  // wait/turn stays LEGAL on both sides in this band, and only the mirror's own predicted
+  // `seconds` value (never consulted for legality, only for the FIFO transport's own emitted
+  // duration) can differ from what this function actually schedules.
+  if ( sec <= 0.0 )
+  {
+    protocol_abort( "reshave_fight_end_tie produced a non-positive wait/turn duration (sec=" +
+                     std::to_string( sec ) +
+                     ") -- the RL_WAIT_FLOOR_SECONDS/epsilon invariant this function depends on "
+                     "has broken" );
+  }
 }
 
 // Shared 'wait' epilogue (210-05R Task 1). The et != FOREGROUND refusal is

@@ -268,10 +268,85 @@ std::vector<enemy_fact> build_candidate_facts( const action_t* a, bool harmful )
 
 namespace
 {
+
+// BL-01 (232-13): resolves the MODELLED spell's geometry (radius, hop cap) -- never the CALLER's
+// own action_t*. Both preference_tempest and preference_chain_lightning are dispatched for the two
+// Thorim's-aware melee strikes (windstrike/stormstrike, RULE-01) as well as for the tempest/
+// chain_lightning tokens themselves; a melee strike's own action_t* carries neither a radius nor an
+// aoe (`stormstrike_base_t`'s ctor sets neither -- `action_t::radius`/`aoe` come only from
+// `spelleffect_data.radius_max()`/`max_targets()`, action.cpp:901/921/986, :796-797/:948-950, both
+// 0 for a melee weapon strike), so reading `a->radius`/`a->aoe` off the resolved (caller) action
+// silently degenerated both branches to "0 neighbours"/"hop cap 1" -- BL-01's whole defect. Named
+// by literal string (never a variable holding the spell name) so `find_action("chain_lightning")`/
+// `find_action("tempest")` are grep-able, single-source citations, matching
+// `preference_for_thorims_aware_strike`'s own `find_action("thorims_invocation")` idiom below.
+// Refuses (throws, never silently falls back to the caller's own zero geometry) when the resolved
+// source is null or its radius is <= 0.0 -- a structural invariant: a Thorim's-primed decision with
+// no Tempest/Chain-Lightning action registered on this player is a configuration error.
+struct chain_geometry
+{
+  double radius = 0.0;
+  int    cap    = 1;
+};
+
+chain_geometry resolve_thorims_branch_geometry( const action_t* resolved, preference_fn pref )
+{
+  const bool      is_chain_lightning = ( pref == preference_chain_lightning );
+  const action_t* source             = is_chain_lightning
+                                            ? resolved->player->find_action( "chain_lightning" )
+                                            : resolved->player->find_action( "tempest" );
+  if ( !source || source->radius <= 0.0 )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_target_select::resolve_thorims_branch_geometry: the Thorim's-aware branch for '{}' "
+        "resolved a null or zero-radius geometry source ('{}') -- refusing rather than silently "
+        "falling back to the caller's own (zero) radius/aoe (BL-01)",
+        resolved->name_str, is_chain_lightning ? "chain_lightning" : "tempest" ) );
+  }
+
+  chain_geometry geo;
+  geo.radius = source->radius;
+  if ( is_chain_lightning )
+  {
+    geo.cap = source->aoe > 0 ? source->aoe : 1;
+
+    // ME-06/R-AK (232-13): the hop cap follows the ENGINE's own resolved `aoe`, MEASURED rather
+    // than assumed to move with the Chaining Storms talent. Receipt (232-13-SUMMARY.md): Chain
+    // Lightning's talent spell (id 188443) declares "Chain Targets: 3" in its own effect data
+    // (`spell_query=spell.id=188443`, this checkout); Chaining Storms (id 334308) declares a
+    // SEPARATE "Add Flat Modifier: Spell Chain Targets +2" effect naming Chain Lightning as an
+    // affected spell, but `sc_shaman.cpp` never merges it in -- the talent is referenced in
+    // exactly two places in that file (the `player_talent_t` declaration at :1758, the report
+    // name table at :11512), neither an `apply_affecting_effects`-style call touching
+    // `chain_lightning_t`'s own aoe/radius -- and `action_t::aoe` (action.cpp:948-951) is set
+    // ONCE, at construction, from the talent spell's own raw `chain_target()`. So this fork's
+    // Chain Lightning `aoe` is 3 REGARDLESS of whether Chaining Storms is talented. The addon's
+    // `hasTalentChainingStorms ? 5 : 3` (enhancementShamanContext.ts) is therefore a real
+    // divergence from the engine, not a reconciled pair -- recorded in the addon-parity todo
+    // (task 2); the engine is NOT changed here (R-AK: the engine is the truth the agent trains
+    // under). Asserted, not merely assumed: refuse loudly on any cap other than the measured 3,
+    // so a future spell-data or code change that DOES wire Chaining Storms in is caught here
+    // rather than silently drifting the addon further from the trained cap.
+    if ( geo.cap != 3 )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_target_select::resolve_thorims_branch_geometry: chain_lightning's resolved aoe cap "
+          "is {} -- expected the measured constant 3 (Chaining Storms is not wired into this "
+          "fork's Chain Lightning aoe, per the receipt in 232-13-SUMMARY.md); refusing rather "
+          "than silently training on an unmeasured cap",
+          geo.cap ) );
+    }
+  }
+  return geo;
+}
+
 // WR-05 (260902/cr4): the cheap half of select()'s scoring-loop fact build -- see that call
 // site's own comment. NOT exposed in the header: build_enemy_fact() (above) is the one and only
 // public fact-record builder every OTHER caller (the future observation writer, 228-04 onward)
-// uses, with every field filled exactly as before this task.
+// uses, with every field filled exactly as before this task. `build_enemy_fact` (the OBSERVATION
+// builder) is DELIBERATELY untouched by BL-01's fix below -- the strike blocks' own
+// `neighbours_within_radius` obs leaf stays the strike's own (zero) geometry; a schema-semantic
+// change there is Phase 233's census (R5-1), not this plan's.
 enemy_fact build_enemy_fact_for_scoring( const action_t* a, player_t* candidate, preference_fn pref )
 {
   enemy_fact f;
@@ -284,8 +359,27 @@ enemy_fact build_enemy_fact_for_scoring( const action_t* a, player_t* candidate,
     f.flame_shock_remaining = fs ? fs->remains().total_seconds() : 0.0;
   }
 
-  if ( a->radius > 0.0 )
+  // BL-01 (232-13): the neighbour count is computed at the MODELLED spell's own resolved radius --
+  // Tempest's or Chain Lightning's, resolved by name via resolve_thorims_branch_geometry -- never
+  // the caller's (`a`'s) own radius, which is 0 for the two Thorim's-aware melee strikes.
+  if ( pref == preference_tempest || pref == preference_chain_lightning )
   {
+    const chain_geometry geo = resolve_thorims_branch_geometry( a, pref );
+    int neighbours = 0;
+    for ( player_t* other : a->sim->target_non_sleeping_list )
+    {
+      if ( other == candidate || !other->is_enemy() )
+        continue;
+      if ( candidate->get_player_distance( *other ) <= geo.radius + other->combat_reach )
+        ++neighbours;
+    }
+    f.neighbours_within_radius = neighbours;
+  }
+  else if ( a->radius > 0.0 )
+  {
+    // Defensive generality only -- no token in TARGETED_TOKENS reaches this branch today (every
+    // OTHER registry preference is single-target, so `a->radius` stays 0); kept so a future
+    // radius-bearing registry action does not silently skip the neighbour count.
     int neighbours = 0;
     for ( player_t* other : a->sim->target_non_sleeping_list )
     {
@@ -303,17 +397,18 @@ enemy_fact build_enemy_fact_for_scoring( const action_t* a, player_t* candidate,
   return f;
 }
 
-// RULE-02 (232-06, R-Z): the greedy Chain Lightning hop simulation, ported from the addon's
-// enhancementShamanTargeting.ts:933-969 hop loop as pure geometry. For EACH candidate in
-// `candidates` treated as the chain's START, greedily walks to the nearest not-yet-hit candidate --
-// from the SAME already-filtered `candidates` set select() just built (D-20 forbids a third filter
-// loop: this never re-scans target_non_sleeping_list, re-calls generic_filter, or calls
-// build_candidate_facts() a second time) -- within `a`'s own resolved jump radius
-// (`a->radius + other->combat_reach`, the SAME inequality convention build_enemy_fact's own
-// neighbours_within_radius above already uses), until `cap` (the action's own resolved `a->aoe`,
-// 228-11/Q19 -- never a hardcoded literal) candidates have been hit including the start, or no
-// further hop is available. Fills `out` keyed on each START candidate; `out` is a plain local the
-// caller stashes, never a module global itself.
+// RULE-02 (232-06, R-Z; geometry parameterised 232-13/BL-01): the greedy Chain Lightning hop
+// simulation, ported from the addon's enhancementShamanTargeting.ts:933-969 hop loop as pure
+// geometry. For EACH candidate in `candidates` treated as the chain's START, greedily walks to the
+// nearest not-yet-hit candidate -- from the SAME already-filtered `candidates` set select() just
+// built (D-20 forbids a third filter loop: this never re-scans target_non_sleeping_list, re-calls
+// generic_filter, or calls build_candidate_facts() a second time) -- within the explicit `radius`
+// parameter (`radius + other->combat_reach`, the SAME inequality convention build_enemy_fact's own
+// neighbours_within_radius above already uses), until `cap` candidates have been hit including the
+// start, or no further hop is available. BOTH `radius` and `cap` are the MODELLED spell's own
+// (resolve_thorims_branch_geometry's caller resolves them by name, never a hardcoded literal, never
+// read off the calling action `a` -- BL-01's fix). Fills `out` keyed on each START candidate; `out`
+// is a plain local the caller stashes, never a module global itself.
 //
 // R-Z's algebra trap, named here rather than merely in this function's caller: the addon's
 // SEPARATE, uninvolved PRODUCTION hop walk (the one this ports is the addon's PURE RULES walk,
@@ -324,12 +419,11 @@ enemy_fact build_enemy_fact_for_scoring( const action_t* a, player_t* candidate,
 // NEVER calls the engine's own chain-resolution helper in sc_shaman.cpp -- that helper draws from
 // the sim's random number stream (FORK-03's own fix exists to keep a read-only selector path from
 // ever perturbing that stream); this walk reads only already-resolved positions and combat_reach,
-// so it is provably
-// deterministic geometry, not a prediction of the engine's own randomised chain resolution.
-void compute_chain_hop_counts( const action_t* a, const std::vector<player_t*>& candidates,
+// so it is provably deterministic geometry -- a DETERMINISTIC APPROXIMATION of the engine's own
+// randomised chain resolution, never a prediction of it (LO-05/R-D).
+void compute_chain_hop_counts( double radius, int cap, const std::vector<player_t*>& candidates,
                                 std::unordered_map<const player_t*, int>& out )
 {
-  const int cap = a->aoe > 0 ? a->aoe : 1;
   std::vector<bool> hit( candidates.size(), false );
   for ( std::size_t start_index = 0; start_index < candidates.size(); ++start_index )
   {
@@ -347,7 +441,7 @@ void compute_chain_hop_counts( const action_t* a, const std::vector<player_t*>& 
           continue;
         player_t* other = candidates[ candidate_index ];
         double    dist  = current->get_player_distance( *other );
-        if ( dist <= a->radius + other->combat_reach && dist < nearest_dist )
+        if ( dist <= radius + other->combat_reach && dist < nearest_dist )
         {
           nearest_dist  = dist;
           nearest_index = static_cast<int>( candidate_index );
@@ -445,7 +539,10 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
   {
     chain_hop_slot& hop_slot = g_chain_hop_stash[ a ];
     hop_slot.hop_counts.clear();
-    compute_chain_hop_counts( a, candidates, hop_slot.hop_counts );
+    // BL-01 (232-13): geometry resolved by name (Chain Lightning's own radius/cap), never read
+    // off `a` -- see resolve_thorims_branch_geometry's own doc comment above.
+    const chain_geometry geo = resolve_thorims_branch_geometry( a, pref );
+    compute_chain_hop_counts( geo.radius, geo.cap, candidates, hop_slot.hop_counts );
     hop_slot.stamp         = current_decision_stamp( a->player );
     hop_slot.has_stamp     = true;
     hop_slot.used_fallback = false;
@@ -798,6 +895,14 @@ namespace
 // the lightning-bolt-primed case is a real, reachable production state (any strike cast while
 // Thorim's is armed with Lightning Bolt), not a theoretical corner, and it must fall through to
 // the base rule exactly like the "not yet primed" case does, matching the engine's own default.
+//
+// LO-04 (232-13): a shared modelling divergence, not merely a fork one -- these gates are read at
+// DECISION time (this function runs before the cast resolves), while the engine evaluates the
+// SAME gates at IMPACT time (`trigger_thorims_invocation`, called from `stormstrike_t::impact`/
+// `windstrike_t::impact`, sc_shaman.cpp:12965-12973). Maelstrom Weapon's stack count or the
+// Tempest buff can change between the two, so this function is a close model of
+// `trigger_thorims_invocation`, never an exact one -- the addon's own strike-aim rule shares this
+// exact divergence (enhancementTargetRules.ts).
 preference_fn preference_for_thorims_aware_strike( const action_t* resolved, bool is_stormstrike )
 {
   player_t* p = resolved->player;
@@ -945,17 +1050,30 @@ double preference_chain_lightning( const action_t* a, const enemy_fact& fact )
     auto hop_it = slot_it->second.hop_counts.find( fact.candidate );
     if ( hop_it != slot_it->second.hop_counts.end() )
       return static_cast<double>( hop_it->second ) * 1.0e6 + fact.time_to_die;
-    // Defensive (should never occur when select() drove this call -- fact.candidate came from the
-    // SAME `candidates` vector compute_chain_hop_counts just walked): the stash exists and is
+    // Defensive (should be unreachable when select() drove this call -- fact.candidate came from
+    // the SAME `candidates` vector compute_chain_hop_counts just walked): the stash exists and is
     // current for `a`, but carries no entry for THIS candidate specifically. Flag the fallback
-    // visibly rather than silently reusing the retired approximation below.
+    // visibly on the ALREADY-stamped entry rather than silently reusing the retired approximation
+    // below.
     slot_it->second.used_fallback = true;
+    return static_cast<double>( fact.neighbours_within_radius ) * 1.0e6 + fact.time_to_die;
   }
-  // Fallback (visible on the dump row via chain_hop_fallback_used(), 232-06 Task 3): the
-  // deterministic neighbour-count approximation this function used before RULE-02 -- labelled per
-  // R-D, never a prediction of the engine's own randomised chain walk (sc_shaman.cpp:982-1057).
-  // Reached when no stash entry exists for `a` at all this decision -- e.g. a caller invoking this
-  // function directly rather than through select()'s own pref==preference_chain_lightning gate.
+  // HI-04 (232-13): reached when no stash entry exists for `a` at all this decision -- e.g. a
+  // caller invoking this function directly rather than through select()'s own
+  // pref==preference_chain_lightning gate (the only path today that fills the stash). Previously
+  // this fell straight through to the neighbour-count expression with NO record of the fallback,
+  // so chain_hop_fallback_used() could never report the one case its own doc comment names as
+  // reachable -- the getter and this setter now agree. Stamp a fresh entry (empty hop_counts,
+  // used_fallback=true) so the getter has something CURRENT to read, mirroring g_pick_table's own
+  // "stamp before any early return" discipline (select()'s scorer branch, above). The fallback
+  // value returned below is the retired neighbour-count approximation this function used before
+  // RULE-02 -- labelled per R-D, never a prediction of the engine's own randomised chain walk
+  // (sc_shaman.cpp:982-1057).
+  chain_hop_slot& fresh = g_chain_hop_stash[ a ];
+  fresh.hop_counts.clear();
+  fresh.stamp         = current_decision_stamp( a->player );
+  fresh.has_stamp     = true;
+  fresh.used_fallback = true;
   return static_cast<double>( fact.neighbours_within_radius ) * 1.0e6 + fact.time_to_die;
 }
 
@@ -975,8 +1093,12 @@ bool chain_hop_fallback_used( const action_t* resolved )
 
 double preference_tempest( const action_t*, const enemy_fact& fact )
 {
-  // Same formula as chain_lightning's, applied to Tempest's own resolved radius (measured 8.0) --
-  // the addon's 8-yard cluster-centre rule.
+  // BL-01 (232-13): fact.neighbours_within_radius is now always computed at the GEOMETRY SOURCE's
+  // own resolved radius (Tempest's, measured 8.0), resolved by name via
+  // resolve_thorims_branch_geometry regardless of whether the caller was Tempest itself or a
+  // Thorim's-primed melee strike (RULE-01) -- never the caller's own (possibly zero) radius. Same
+  // formula as chain_lightning's, applied to Tempest's own resolved radius -- the addon's 8-yard
+  // cluster-centre rule.
   return static_cast<double>( fact.neighbours_within_radius ) * 1.0e6 + fact.time_to_die;
 }
 

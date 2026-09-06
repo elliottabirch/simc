@@ -1001,12 +1001,20 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
         out << ",\"hit_damage\":" << snap.hit_damage;
       if ( row_used_dump_time_compute )
         out << ",\"target_fact_dump_time_compute\":true";
-      // RULE-02 (232-06, R-Z): the Chain Lightning hop-count stash's own fallback flag, made
-      // visible on the dump row (rl_target_select.hpp's own chain_hop_fallback_used() doc
-      // comment) -- a silent fallback to the retired neighbour-count approximation would look
-      // like a rule disagreement in the parity join rather than the geometry simply not having
-      // run. Additive; emitted only when true, only for the one token the stash governs.
-      if ( token == std::string( "chain_lightning" ) && rl_target_select::chain_hop_fallback_used( a ) )
+      // RULE-02 (232-06, R-Z) / HI-04 (232-13): the Chain Lightning hop-count stash's own
+      // fallback flag, made visible on the dump row (rl_target_select.hpp's own
+      // chain_hop_fallback_used() doc comment) -- a silent fallback to the retired
+      // neighbour-count approximation would look like a rule disagreement in the parity join
+      // rather than the geometry simply not having run. Emitted for every token the stash CAN be
+      // keyed on: `chain_lightning` itself AND the two Thorim's-aware strikes RULE-01
+      // substitutes into the SAME preference (`windstrike`/`stormstrike`) -- under RULE-01 the
+      // stash is keyed on the STRIKE's own action_t*, so the pre-232-13 literal-token gate never
+      // emitted the flag for a fallback on a strike decision at all. `std::strcmp`, not a
+      // `std::string` temporary (LO-02, this file's own convention elsewhere).
+      if ( ( std::strcmp( token, "chain_lightning" ) == 0 ||
+             std::strcmp( token, "windstrike" ) == 0 ||
+             std::strcmp( token, "stormstrike" ) == 0 ) &&
+           rl_target_select::chain_hop_fallback_used( a ) )
         out << ",\"chain_hop_fallback\":true";
       out << "}";
     }
