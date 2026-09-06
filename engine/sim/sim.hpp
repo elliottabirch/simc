@@ -781,6 +781,20 @@ struct sim_t : private sc_thread_t
   // precedent). Absent (has_=false) on the FIFO transport, which never calls read_state() at all.
   bool solver_control_has_any_enemy_behind_player_at_decision = false;
   bool solver_control_any_enemy_behind_player_at_decision = false;
+  // 232-12 (ME-03): the per-decision GUARD every other stamped value in this file already has
+  // (`g_target_fact_snapshot_table`'s `has_stamp`+`stamp` pair, 232-04) but this pair never got.
+  // Without it, `solver_control_has_any_enemy_behind_player_at_decision` stays true from the first
+  // in-process decision of an iteration until `reset_iteration()` clears it -- so EVERY later
+  // `decision_dump::record()` call in that iteration emits the stale boolean unconditionally,
+  // whether or not `read_state()` actually ran for THAT row (an ungated snapshot row, or a
+  // non-`solver_reply_type` row). Today's consumers happen to filter those rows before reading the
+  // key, so nothing is misread in practice -- but the field is a stale-read waiting for the first
+  // consumer that does not filter (232-12's own HI-01 fix makes legality_census.py judge MORE
+  // rows, exactly such a consumer). Set to `rl_target_select::current_decision_stamp(p)`
+  // immediately alongside the boolean above; decision_dump.cpp emits the key only when this equals
+  // the CURRENT decision's own stamp, else `null` (the Python side already falls back to live
+  // geometry on a missing/null key -- mask.py's `_turn_behind_enemy_predicate`).
+  std::uint64_t solver_control_any_enemy_behind_player_at_decision_stamp = 0;
   // In-process exploration draw (Phase 213, D-08, ruling 213-G17). A
   // DEDICATED stream, re-seeded once per fight from that fight's own seed
   // (solver_control::reset_iteration()) -- it must NEVER be the engine's

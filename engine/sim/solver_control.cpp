@@ -888,6 +888,10 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // decision) all_enemies/player_position block.
     sim->solver_control_has_any_enemy_behind_player_at_decision = true;
     sim->solver_control_any_enemy_behind_player_at_decision = state.any_enemy_behind_player;
+    // 232-12 (ME-03): the per-decision guard -- `read_state()` above already called
+    // `rl_target_select::begin_decision( p )` internally, so this is the CURRENT decision's own
+    // stamp, not a stale read of a prior one.
+    sim->solver_control_any_enemy_behind_player_at_decision_stamp = rl_target_select::current_decision_stamp( p );
     std::chrono::nanoseconds obs_timing_ns{ 0 };
     if ( obs_timing )
     {
@@ -1384,6 +1388,7 @@ void reset_iteration( sim_t* sim )
   sim->solver_control_last_reply_type.clear();
   sim->solver_control_has_any_enemy_behind_player_at_decision = false;
   sim->solver_control_any_enemy_behind_player_at_decision = false;
+  sim->solver_control_any_enemy_behind_player_at_decision_stamp = 0;
   // solver_control_seq is DELIBERATELY NOT cleared -- see the header
   // comment. Stream handles are likewise untouched.
 

@@ -87,8 +87,10 @@ std::unordered_map<const action_t*, candidate_block_slot> g_candidate_block_tabl
 // `action_gate_dump_time_compute` precedent, applied to per-target facts. Keyed on the resolved
 // `action_t*` exactly like `g_pick_table`/`g_candidate_block_table` above, same `has_stamp`/
 // `stamp` read-back discipline (T-232-15). `has_is_current_target`/`has_hit_damage` are
-// independent -- most targeted actions only ever get the first (only Tempest's schema requests a
-// `shared_hit_damage` leaf).
+// independent -- most targeted actions only ever get the first (232-12, ME-07: every registry
+// action declaring a `hit_damage` leaf -- eight today, `action_leaves.{chain_lightning,
+// crash_lightning, lava_lash, lightning_bolt, stormstrike, tempest, voltaic_blaze,
+// windstrike}.hit_damage` -- gets `has_hit_damage` too, not only Tempest).
 struct target_fact_snapshot_slot
 {
   bool          has_is_current_target = false;
@@ -202,9 +204,9 @@ enemy_fact build_enemy_fact( const action_t* a, player_t* candidate )
   // count of alive enemies within THIS action's OWN resolved radius of the candidate (a->radius:
   // 10.0 for chain_lightning, 8.0 for tempest -- WHICHEVER action called build_enemy_fact -- never
   // a hardcoded chain_lightning constant, WR-06 260902/cr4). Was previously written into TWO
-  // always-equal fields (`neighbours_within_splash`/`neighbours_within_jump`); OBS-03 collapsed
-  // them to the one field below since no action ever needed the two counts to differ. A shaped
-  // spell's true splash geometry is plan 228-03's, not this plan's.
+  // always-equal fields (232-12, LO-01: the pre-232-02 splash-radius and jump-radius neighbour
+  // counts); OBS-03 collapsed them to the one field below since no action ever needed the two
+  // counts to differ. A shaped spell's true splash geometry is plan 228-03's, not this plan's.
   int neighbours = 0;
   if ( a->radius > 0.0 )
   {
@@ -662,8 +664,9 @@ void stamp_target_fact_is_current_target( const action_t* resolved, bool is_curr
   slot.has_stamp               = true;
 }
 
-// Same contract as stamp_target_fact_is_current_target, for Tempest's own hit_damage leaf
-// (`action_leaf_kind::shared_hit_damage`, the only registry action whose schema requests it).
+// Same contract as stamp_target_fact_is_current_target, for the `hit_damage` leaf
+// (`action_leaf_kind::shared_hit_damage`) -- 232-12 (ME-07): NOT Tempest-specific; every registry
+// action declaring a `hit_damage` leaf gets stamped through this same function (eight today).
 void stamp_target_fact_hit_damage( const action_t* resolved, double hit_damage )
 {
   if ( !resolved )

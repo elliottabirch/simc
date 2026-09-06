@@ -893,7 +893,8 @@ enum class action_leaf_kind
   shared_hit_damage, shared_crit_pct_current, shared_persistent_multiplier, shared_da_multiplier,
   dot_molten_weapon_ticking, dot_molten_weapon_remains
   // 228-11 (Q19, D-A/R-D): spell_targets_count REMOVED -- the deterministic geometry leaf
-  // (target_fact.chain_lightning.neighbours_within_jump) replaces the spell_targets leaf outright.
+  // (232-12, LO-01: target_fact.chain_lightning.neighbours_within_radius, the single column
+  // 232-02's OBS-01/OBS-03 collapse produced) replaces the spell_targets leaf outright.
 };
 
 // ---------------------------------------------------------------------------
@@ -1804,10 +1805,11 @@ slot_binding resolve_action_leaf( player_t* p, const std::string& engine_token, 
 
   // 228-11 (Q19, D-A/R-D): the "spell_targets" special case formerly here (FORK-03
   // Candidate 1) is REMOVED -- the census artifact no longer declares a `spell_targets` leaf
-  // (the deterministic geometry leaf, target_fact.chain_lightning.neighbours_within_jump,
+  // (232-12, LO-01: the deterministic geometry leaf, target_fact.chain_lightning
+  // .neighbours_within_radius, the single column 232-02's OBS-01/OBS-03 collapse produced,
   // replaces it outright), so this bind-time special case is unreachable dead code beside a
-  // retired leaf. Its own reasoning (avoiding create_expression's forced target_list() RNG
-  // draw for "spell_targets") no longer applies to anything this schema declares.
+  // retired leaf. Its own reasoning (avoiding create_expression's forced target_list() RNG draw
+  // for "spell_targets") no longer applies to anything this schema declares.
 
   // Everything else this census declares (ready, travel_time, and any of
   // cast_time/execute_time/cost/usable_in/available_targets/the charge
@@ -2371,9 +2373,10 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
 
     // 232-04 (OBS-02, R-T): the pre-cast hit_damage snapshot -- same stamp-vs-read-back split as
     // the is_current_target snapshot above, gated on the SAME `s.is_decision_boundary` (captured
-    // by this lambda via `[&]`). Tempest is the only registry action whose schema requests a
-    // shared_hit_damage leaf today, but this is not Tempest-specific: any future action requesting
-    // the same leaf gets identical pre-cast fidelity for free.
+    // by this lambda via `[&]`). 232-12 (ME-07): NOT Tempest-specific -- every registry action
+    // declaring a `hit_damage` leaf (eight today: chain_lightning, crash_lightning, lava_lash,
+    // lightning_bolt, stormstrike, tempest, voltaic_blaze, windstrike) gets identical pre-cast
+    // fidelity through this same path, keyed per `action_t*`.
     if ( s.is_decision_boundary )
     {
       rl_target_select::stamp_target_fact_hit_damage( a, hit_damage );
@@ -2832,7 +2835,8 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
             // 228-11 (Q19, D-A/R-D, P226_45_FALLBACK_GONE): action_leaf_kind::spell_targets_count
             // and its P226-45 min(live enemy count, this action's own n_targets() cap) fallback
             // were REMOVED here -- action_leaves.chain_lightning.spell_targets is no longer a
-            // declared leaf; target_fact.chain_lightning.neighbours_within_jump replaces it.
+            // declared leaf; target_fact.chain_lightning.neighbours_within_radius (232-12, LO-01:
+            // the single column 232-02's OBS-01/OBS-03 collapse produced) replaces it.
             case action_leaf_kind::dot_molten_weapon_ticking:
             case action_leaf_kind::dot_molten_weapon_remains:
             {

@@ -201,8 +201,9 @@ struct target_fact_snapshot
 // own doc comment above for why a non-boundary call must never reach this function.
 void stamp_target_fact_is_current_target( const action_t* resolved, bool is_current_target );
 
-// Same contract as stamp_target_fact_is_current_target, for Tempest's own hit_damage leaf (the
-// only registry action whose schema requests a shared_hit_damage leaf today).
+// Same contract as stamp_target_fact_is_current_target, for the `hit_damage` leaf -- 232-12
+// (ME-07): NOT Tempest-specific; every registry action declaring a `hit_damage` leaf (eight
+// today) shares this same stamping function.
 void stamp_target_fact_hit_damage( const action_t* resolved, double hit_damage );
 
 // Reads the snapshot stamped for `resolved` at the CURRENT decision. `*out_found` is false when

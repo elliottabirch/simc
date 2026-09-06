@@ -993,10 +993,10 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
           << ",\"rune_of_unleashed_fire_lingering_remaining\":" << fact.rune_of_unleashed_fire_lingering_remaining
           << ",\"neighbours_within_radius\":" << fact.neighbours_within_radius
           << ",\"is_current_target\":" << ( is_current_target_value ? "true" : "false" );
-      // 232-04 (OBS-02, R-T): Tempest is the only registry action whose schema requests a
-      // shared_hit_damage leaf -- emitted only when the snapshot actually carries one, additive
-      // (never a compatibility alias for a pre-existing key, plan 232-05 repoints
-      // selector_parity.py at these emitted keys directly).
+      // 232-04 (OBS-02, R-T): 232-12 (ME-07) -- NOT Tempest-specific; every registry action
+      // declaring a `hit_damage` leaf (eight today) can carry this key -- emitted only when the
+      // snapshot actually carries one, additive (never a compatibility alias for a pre-existing
+      // key, plan 232-05 repoints selector_parity.py at these emitted keys directly).
       if ( snap_found && snap.has_hit_damage )
         out << ",\"hit_damage\":" << snap.hit_damage;
       if ( row_used_dump_time_compute )
@@ -1094,7 +1094,16 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
       bool      snap_found = false;
       const rl_target_select::target_fact_snapshot snap =
           rl_target_select::lookup_target_fact_snapshot( a, &snap_found );
-      bool row_used_dump_time_compute = false;
+      // 232-12 (ME-02): initialised from whether a USABLE snapshot exists for THIS decision --
+      // exactly what `targeted_picks` above does (`row_used_dump_time_compute = !( snap_found &&
+      // snap.has_is_current_target )`) -- rather than defaulting to `false` and only ever being
+      // flipped `true` inside the loop below when a matching candidate is found. Before this fix,
+      // a decision where NOTHING was stamped at all (`pick_found == false` -- no `select()` call
+      // ever ran for this token this decision) never entered that inner branch, so the flag stayed
+      // `false` even though every candidate's `is_current_target` below is necessarily a fresh
+      // dump-time recompute (`fact.is_current_target`, never substituted). The two emit sites now
+      // agree on what the flag means.
+      bool row_used_dump_time_compute = !( snap_found && snap.has_is_current_target );
 
       // `cast_time_ms` -- `a->execute_time()`, the SAME call
       // `preference_shortest_time_to_die`'s own outlives-the-cast dominance clause reads (D-15,
@@ -1111,12 +1120,9 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
         const rl_target_select::enemy_fact& fact = candidates[ ci ];
 
         bool is_current_target_value = fact.is_current_target;
-        if ( pick_found && fact.candidate == pick_for_token )
+        if ( pick_found && fact.candidate == pick_for_token && snap_found && snap.has_is_current_target )
         {
-          if ( snap_found && snap.has_is_current_target )
-            is_current_target_value = snap.is_current_target;
-          else
-            row_used_dump_time_compute = true;
+          is_current_target_value = snap.is_current_target;
         }
 
         out << "{\"actor_index\":" << fact.actor_index
@@ -1138,10 +1144,11 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
             << ",\"is_current_target\":" << ( is_current_target_value ? "true" : "false" )
             // 230-04 (SCOR-02, Task 2): the seven 228-10 gap-fill fields, previously present on
             // `targeted_picks` (the CHOSEN pick's own record, above) but missing here on the FULL
-            // candidate list -- scorer_block_equivalence.py needs every one of the 22 declared
-            // RL_TARGET_FEATURE_NAMES for EVERY candidate, not only the one that was picked, to
-            // re-derive the transition log's own candidate block and compare it against the
-            // engine's independent fact record (the probe's whole reason for existing).
+            // candidate list -- scorer_block_equivalence.py needs every one of the 20 declared
+            // RL_TARGET_FEATURE_NAMES (232-12, LO-02: was 22 before 232-02's OBS-01/OBS-03
+            // collapse) for EVERY candidate, not only the one that was picked, to re-derive the
+            // transition log's own candidate block and compare it against the engine's independent
+            // fact record (the probe's whole reason for existing).
             << ",\"burning_core_remaining\":" << fact.burning_core_remaining
             << ",\"lightning_rod_stacks\":" << fact.lightning_rod_stacks
             << ",\"lightning_rod_remaining\":" << fact.lightning_rod_remaining
@@ -1204,7 +1211,14 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
     // null when absent (the FIFO transport, which never calls read_state()) -- mask.py's turn
     // arm and legality_census.py's OBS-05 census both prefer this stamped value when present,
     // falling back to their own live re-derivation from all_enemies/player_position otherwise.
-    if ( p->sim->solver_control_has_any_enemy_behind_player_at_decision )
+    // 232-12 (ME-03): ALSO null unless the stored stamp equals THIS decision's own stamp -- the
+    // per-decision guard sim.hpp's own field doc names (every other stamped value in this codebase
+    // already has one; this pair did not, until now). Today's callers of write_state_fields all
+    // already filter to `solver_reply_type`-carrying rows before reading this key, so nothing was
+    // misread in practice -- but an ungated/non-boundary row would otherwise echo a stale value
+    // from an EARLIER decision in this same iteration.
+    if ( p->sim->solver_control_has_any_enemy_behind_player_at_decision &&
+         p->sim->solver_control_any_enemy_behind_player_at_decision_stamp == rl_target_select::current_decision_stamp( p ) )
       out << ",\"any_enemy_behind_player_at_decision\":"
           << ( p->sim->solver_control_any_enemy_behind_player_at_decision ? "true" : "false" );
     else
