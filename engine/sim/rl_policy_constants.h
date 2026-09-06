@@ -98,22 +98,21 @@ struct rl_talent_gate
 
 inline constexpr const char* RL_REGISTRY_ID = "enhancement";
 inline constexpr const char* RL_ACTOR_NAME = "MID2_Shaman_Enhancement_Stormbringer";
-inline constexpr int RL_ENCODER_VERSION = 4;
-inline constexpr std::size_t RL_OBS_DIM = 372;
-inline constexpr std::size_t RL_ACTION_DIM = 26;
+inline constexpr int RL_ENCODER_VERSION = 2;
+inline constexpr std::size_t RL_OBS_DIM = 340;
+inline constexpr std::size_t RL_ACTION_DIM = 20;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
-inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v4:84139e800861eb0e1b755585280a7098f11bc06bb27d945ba6a77028fbc9f597";
-inline constexpr const char* RL_MASK_RULES_SHA = "e7b395d2886a54529bf3a86581492ebe69eec56aa1e4abfce670d68c808cb7be";
-inline constexpr const char* RL_ACTION_SPACE_SHA = "1fadf4ed553b45e704d773719ab238e618eee4e35df9cd6a9a993636ff008665";
+inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v2:8516938a6d2796db7c84c6d44294612aa71ac5c8f458384cdf7cd4dc848a5878";
+inline constexpr const char* RL_MASK_RULES_SHA = "3f930294d36b217dca01fc51600c0da9d0568e20152fb53c588b6e8ddccf7662";
+inline constexpr const char* RL_ACTION_SPACE_SHA = "b9c219883e8ea75c0e9e04d2ecb74c04bc8682756d2b90435f5c964e1732f89a";
 
 // ---- Observation name list (the materialised ordering) ----
 
 inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "player_buffs.arc_discharge.stacks",
   "player_buffs.arc_discharge.remains",
-  "player_buffs.arcanoweave_insight.stacks",
   "player_buffs.arcanoweave_insight.remains",
   "player_buffs.ascendance.remains",
   "player_buffs.berserking.remains",
@@ -124,45 +123,38 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "player_buffs.crackling_surge.remains",
   "player_buffs.crash_lightning.stacks",
   "player_buffs.crash_lightning.remains",
-  "player_buffs.critical_ritual.stacks",
   "player_buffs.critical_ritual.remains",
   "player_buffs.devoured_strength.stacks",
   "player_buffs.devoured_strength.remains",
-  "player_buffs.doom_winds.stacks",
   "player_buffs.doom_winds.remains",
+  "player_buffs.exhaustion.remains",
   "player_buffs.flurry.stacks",
   "player_buffs.flurry.remains",
-  "player_buffs.frenzied_focus.stacks",
   "player_buffs.frenzied_focus.remains",
-  "player_buffs.genius_insight.stacks",
   "player_buffs.genius_insight.remains",
-  "player_buffs.hasty_ritual.stacks",
   "player_buffs.hasty_ritual.remains",
   "player_buffs.lightning_strikes.stacks",
   "player_buffs.lightning_strikes.remains",
   "player_buffs.maelstrom_weapon.stacks",
   "player_buffs.maelstrom_weapon.remains",
-  "player_buffs.masterful_ritual.stacks",
   "player_buffs.masterful_ritual.remains",
+  "player_buffs.mid2_enh_4pc.stacks",
+  "player_buffs.mid2_enh_4pc.remains",
+  "player_buffs.potion.remains",
   "player_buffs.rune_of_burning_haste.stacks",
   "player_buffs.rune_of_burning_haste.remains",
-  "player_buffs.storm_swell.stacks",
   "player_buffs.storm_swell.remains",
   "player_buffs.storm_unleashed.stacks",
   "player_buffs.storm_unleashed.remains",
   "player_buffs.stormblast.stacks",
   "player_buffs.stormblast.remains",
-  "player_buffs.stormsurge.stacks",
   "player_buffs.stormsurge.remains",
   "player_buffs.tempest.stacks",
   "player_buffs.tempest.remains",
   "player_buffs.unlimited_power.stacks",
   "player_buffs.unlimited_power.remains",
-  "player_buffs.venomcursed_ascendance.stacks",
   "player_buffs.venomcursed_ascendance.remains",
-  "player_buffs.venomcursed_mastery.stacks",
   "player_buffs.venomcursed_mastery.remains",
-  "player_buffs.versatile_ritual.stacks",
   "player_buffs.versatile_ritual.remains",
   "cooldowns.ascendance.remains",
   "cooldowns.berserking.remains",
@@ -365,47 +357,30 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "action_leaves.crash_lightning.hit_damage",
   "action_leaves.crash_lightning.crit_pct_current",
   "action_leaves.crash_lightning.multiplier",
-  "action_leaves.crash_lightning.persistent_multiplier",
-  "action_leaves.doom_winds.ready",
   "action_leaves.lava_lash.ready",
   "action_leaves.lava_lash.hit_damage",
   "action_leaves.lava_lash.crit_pct_current",
   "action_leaves.lava_lash.multiplier",
-  "action_leaves.lava_lash.persistent_multiplier",
-  "action_leaves.lava_lash.molten_weapon_ticking",
-  "action_leaves.lava_lash.molten_weapon_remains",
   "action_leaves.lightning_bolt.ready",
   "action_leaves.lightning_bolt.hit_damage",
   "action_leaves.lightning_bolt.crit_pct_current",
   "action_leaves.lightning_bolt.in_flight",
-  "action_leaves.lightning_bolt.in_flight_count",
   "action_leaves.lightning_bolt.in_flight_remains",
-  "action_leaves.primordial_storm.ready",
   "action_leaves.stormstrike.ready",
   "action_leaves.stormstrike.hit_damage",
   "action_leaves.stormstrike.crit_pct_current",
-  "action_leaves.sundering.ready",
-  "action_leaves.sundering.hit_damage",
-  "action_leaves.sundering.crit_pct_current",
-  "action_leaves.sundering.multiplier",
-  "action_leaves.sundering.persistent_multiplier",
-  "action_leaves.surging_totem.ready",
-  "action_leaves.surging_totem.pet_surging_totem_active",
-  "action_leaves.surging_totem.pet_surging_totem_remains",
+  "action_leaves.stormstrike.multiplier",
   "action_leaves.tempest.ready",
   "action_leaves.tempest.hit_damage",
   "action_leaves.tempest.crit_pct_current",
   "action_leaves.use_item_voracious_heart_of_ulatek.ready",
   "action_leaves.voltaic_blaze.ready",
   "action_leaves.voltaic_blaze.hit_damage",
-  "action_leaves.voltaic_blaze.crit_pct_current",
   "action_leaves.voltaic_blaze.multiplier",
-  "action_leaves.voltaic_blaze.persistent_multiplier",
   "action_leaves.windstrike.ready",
   "action_leaves.windstrike.hit_damage",
   "action_leaves.windstrike.crit_pct_current",
   "action_leaves.windstrike.multiplier",
-  "action_leaves.windstrike.persistent_multiplier",
   "deck.asc_dw_draws_left.value",
   "deck.asc_dw_fail_left.value",
   "deck.asc_dw_proc_left.value",
@@ -457,32 +432,25 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "legality.17.flag",
   "legality.18.flag",
   "legality.19.flag",
-  "legality.20.flag",
-  "legality.21.flag",
-  "legality.22.flag",
-  "legality.23.flag",
-  "legality.24.flag",
-  "legality.25.flag",
-  "proc_chances.maelstrom_weapon.value",
   "proc_chances.stormsurge.value",
   "proc_chances.windfury.value",
   "fight_remains",
   "active_enemies",
   "raid_event_next_in",
   "time_to_bloodlust",
-  "enemies_total",
-  "enemies_in_melee",
-  "enemies_within_8yd",
-  "enemies_within_40yd",
-  "enemies_in_front",
-  "flame_shock_carrier_count",
-  "soonest_time_to_die",
-  "longest_time_to_die",
   "dying_within_5s",
   "dying_within_15s",
-  "nearest_enemy_distance",
+  "enemies_in_front",
+  "enemies_in_melee",
+  "enemies_total",
+  "enemies_within_8yd",
+  "enemies_within_40yd",
+  "flame_shock_carrier_count",
   "immunity_in",
   "immunity_remaining",
+  "longest_time_to_die",
+  "nearest_enemy_distance",
+  "soonest_time_to_die",
 };
 
 // ---- Per-family observation tables ----
@@ -492,7 +460,6 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_0[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_1[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_2[] = {
@@ -517,114 +484,116 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_7[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 12.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_8[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_9[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "stacks", rl_kind::k_int, 0.0, true, 20.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_10[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 8.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_11[] = {
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 600.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_12[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 3.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
 };
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_12[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
-};
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_13[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_14[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_15[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 3.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_16[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 10.0, false, 1.0, nullptr, 0, false },
+    { "stacks", rl_kind::k_int, 0.0, true, 3.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_17[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "stacks", rl_kind::k_int, 0.0, true, 10.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_18[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 8.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_19[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
+    { "stacks", rl_kind::k_int, 0.0, true, 5.0, false, 1.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_20[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_21[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 12.0, nullptr, 0, false },
+    { "stacks", rl_kind::k_int, 0.0, true, 20.0, false, 1.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_22[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 12.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_23[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_24[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 15.0, false, 1.0, nullptr, 0, false },
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
+    { "stacks", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 12.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_25[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 12.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_26[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "stacks", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_27[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "stacks", rl_kind::k_int, 0.0, true, 15.0, false, 1.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_28[] = {
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_29[] = {
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_30[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_obs_member RL_OBS_FAMILY_PLAYER_BUFFS_MEMBERS[] = {
   { "arc_discharge", "arc_discharge", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_0, 2 },
-  { "arcanoweave_insight", "arcanoweave_insight", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_1, 2 },
+  { "arcanoweave_insight", "arcanoweave_insight", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_1, 1 },
   { "ascendance", "ascendance", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_2, 1 },
   { "berserking", "berserking", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_3, 1 },
   { "bloodlust", "bloodlust", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_4, 1 },
   { "converging_storms", "converging_storms", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_5, 2 },
   { "crackling_surge", "crackling_surge", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_6, 2 },
   { "crash_lightning", "crash_lightning", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_7, 2 },
-  { "critical_ritual", "critical_ritual", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_8, 2 },
+  { "critical_ritual", "critical_ritual", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_8, 1 },
   { "devoured_strength", "devoured_strength", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_9, 2 },
-  { "doom_winds", "doom_winds", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_10, 2 },
-  { "flurry", "flurry", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_11, 2 },
-  { "frenzied_focus", "frenzied_focus", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_12, 2 },
-  { "genius_insight", "genius_insight", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_13, 2 },
-  { "hasty_ritual", "hasty_ritual", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_14, 2 },
-  { "lightning_strikes", "lightning_strikes", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_15, 2 },
-  { "maelstrom_weapon", "maelstrom_weapon", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_16, 2 },
-  { "masterful_ritual", "masterful_ritual", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_17, 2 },
-  { "rune_of_burning_haste", "rune_of_burning_haste", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_18, 2 },
-  { "storm_swell", "storm_swell", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_19, 2 },
-  { "storm_unleashed", "storm_unleashed", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_20, 2 },
-  { "stormblast", "stormblast", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_21, 2 },
-  { "stormsurge", "stormsurge", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_22, 2 },
-  { "tempest", "tempest", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_23, 2 },
-  { "unlimited_power", "unlimited_power", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_24, 2 },
-  { "venomcursed_ascendance", "venomcursed_ascendance", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_25, 2 },
-  { "venomcursed_mastery", "venomcursed_mastery", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_26, 2 },
-  { "versatile_ritual", "versatile_ritual", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_27, 2 },
+  { "doom_winds", "doom_winds", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_10, 1 },
+  { "exhaustion", "exhaustion", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_11, 1 },
+  { "flurry", "flurry", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_12, 2 },
+  { "frenzied_focus", "frenzied_focus", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_13, 1 },
+  { "genius_insight", "genius_insight", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_14, 1 },
+  { "hasty_ritual", "hasty_ritual", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_15, 1 },
+  { "lightning_strikes", "lightning_strikes", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_16, 2 },
+  { "maelstrom_weapon", "maelstrom_weapon", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_17, 2 },
+  { "masterful_ritual", "masterful_ritual", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_18, 1 },
+  { "mid2_enh_4pc", "mid2_enh_4pc", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_19, 2 },
+  { "potion", "potion", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_20, 1 },
+  { "rune_of_burning_haste", "rune_of_burning_haste", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_21, 2 },
+  { "storm_swell", "storm_swell", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_22, 1 },
+  { "storm_unleashed", "storm_unleashed", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_23, 2 },
+  { "stormblast", "stormblast", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_24, 2 },
+  { "stormsurge", "stormsurge", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_25, 1 },
+  { "tempest", "tempest", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_26, 2 },
+  { "unlimited_power", "unlimited_power", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_27, 2 },
+  { "venomcursed_ascendance", "venomcursed_ascendance", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_28, 1 },
+  { "venomcursed_mastery", "venomcursed_mastery", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_29, 1 },
+  { "versatile_ritual", "versatile_ritual", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_30, 1 },
 };
 
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_0[] = {
@@ -890,94 +859,65 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_1[] = {
     { "ready", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_2[] = {
-    { "hit_damage", rl_kind::k_float, 0.0, true, 1000000.0, false, 1.0, nullptr, 0, false },
+    { "hit_damage", rl_kind::k_float, 0.0, true, 300000.0, false, 1.0, nullptr, 0, false },
     { "crit_pct_current", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_3[] = {
     { "ready", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "hit_damage", rl_kind::k_float, 0.0, true, 1000000.0, false, 1.0, nullptr, 0, false },
+    { "hit_damage", rl_kind::k_float, 0.0, true, 300000.0, false, 1.0, nullptr, 0, false },
     { "crit_pct_current", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
     { "multiplier", rl_kind::k_float, 0.0, true, 5.0, false, 1.0, nullptr, 0, false },
-    { "persistent_multiplier", rl_kind::k_float, 0.0, true, 5.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_4[] = {
     { "ready", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "hit_damage", rl_kind::k_float, 0.0, true, 300000.0, false, 1.0, nullptr, 0, false },
+    { "crit_pct_current", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
+    { "multiplier", rl_kind::k_float, 0.0, true, 5.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_5[] = {
     { "ready", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "hit_damage", rl_kind::k_float, 0.0, true, 1000000.0, false, 1.0, nullptr, 0, false },
+    { "hit_damage", rl_kind::k_float, 0.0, true, 300000.0, false, 1.0, nullptr, 0, false },
     { "crit_pct_current", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
-    { "multiplier", rl_kind::k_float, 0.0, true, 5.0, false, 1.0, nullptr, 0, false },
-    { "persistent_multiplier", rl_kind::k_float, 0.0, true, 5.0, false, 1.0, nullptr, 0, false },
-    { "molten_weapon_ticking", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "molten_weapon_remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 4.0, nullptr, 0, false },
+    { "in_flight", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "in_flight_remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 2.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_6[] = {
     { "ready", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "hit_damage", rl_kind::k_float, 0.0, true, 1000000.0, false, 1.0, nullptr, 0, false },
+    { "hit_damage", rl_kind::k_float, 0.0, true, 300000.0, false, 1.0, nullptr, 0, false },
     { "crit_pct_current", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
-    { "in_flight", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "in_flight_count", rl_kind::k_int, 0.0, true, 5.0, false, 1.0, nullptr, 0, false },
-    { "in_flight_remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 2.0, nullptr, 0, false },
+    { "multiplier", rl_kind::k_float, 0.0, true, 5.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_7[] = {
     { "ready", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "hit_damage", rl_kind::k_float, 0.0, true, 300000.0, false, 1.0, nullptr, 0, false },
+    { "crit_pct_current", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_8[] = {
     { "ready", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "hit_damage", rl_kind::k_float, 0.0, true, 1000000.0, false, 1.0, nullptr, 0, false },
-    { "crit_pct_current", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_9[] = {
     { "ready", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "hit_damage", rl_kind::k_float, 0.0, true, 1000000.0, false, 1.0, nullptr, 0, false },
-    { "crit_pct_current", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
+    { "hit_damage", rl_kind::k_float, 0.0, true, 300000.0, false, 1.0, nullptr, 0, false },
     { "multiplier", rl_kind::k_float, 0.0, true, 5.0, false, 1.0, nullptr, 0, false },
-    { "persistent_multiplier", rl_kind::k_float, 0.0, true, 5.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_10[] = {
     { "ready", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "pet_surging_totem_active", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "pet_surging_totem_remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 24.0, nullptr, 0, false },
-};
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_11[] = {
-    { "ready", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "hit_damage", rl_kind::k_float, 0.0, true, 1000000.0, false, 1.0, nullptr, 0, false },
-    { "crit_pct_current", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
-};
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_12[] = {
-    { "ready", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-};
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_13[] = {
-    { "ready", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "hit_damage", rl_kind::k_float, 0.0, true, 1000000.0, false, 1.0, nullptr, 0, false },
+    { "hit_damage", rl_kind::k_float, 0.0, true, 300000.0, false, 1.0, nullptr, 0, false },
     { "crit_pct_current", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
     { "multiplier", rl_kind::k_float, 0.0, true, 5.0, false, 1.0, nullptr, 0, false },
-    { "persistent_multiplier", rl_kind::k_float, 0.0, true, 5.0, false, 1.0, nullptr, 0, false },
-};
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_14[] = {
-    { "ready", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "hit_damage", rl_kind::k_float, 0.0, true, 1000000.0, false, 1.0, nullptr, 0, false },
-    { "crit_pct_current", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
-    { "multiplier", rl_kind::k_float, 0.0, true, 5.0, false, 1.0, nullptr, 0, false },
-    { "persistent_multiplier", rl_kind::k_float, 0.0, true, 5.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_obs_member RL_OBS_FAMILY_ACTION_LEAVES_MEMBERS[] = {
   { "ascendance", "ascendance", RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_0, 1 },
   { "berserking", "berserking", RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_1, 1 },
   { "chain_lightning", "chain_lightning", RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_2, 2 },
-  { "crash_lightning", "crash_lightning", RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_3, 5 },
-  { "doom_winds", "doom_winds", RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_4, 1 },
-  { "lava_lash", "lava_lash", RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_5, 7 },
-  { "lightning_bolt", "lightning_bolt", RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_6, 6 },
-  { "primordial_storm", "primordial_storm", RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_7, 1 },
-  { "stormstrike", "stormstrike", RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_8, 3 },
-  { "sundering", "sundering", RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_9, 5 },
-  { "surging_totem", "surging_totem", RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_10, 3 },
-  { "tempest", "tempest", RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_11, 3 },
-  { "use_item_voracious_heart_of_ulatek", "use_item_voracious_heart_of_ulatek", RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_12, 1 },
-  { "voltaic_blaze", "voltaic_blaze", RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_13, 5 },
-  { "windstrike", "windstrike", RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_14, 5 },
+  { "crash_lightning", "crash_lightning", RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_3, 4 },
+  { "lava_lash", "lava_lash", RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_4, 4 },
+  { "lightning_bolt", "lightning_bolt", RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_5, 5 },
+  { "stormstrike", "stormstrike", RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_6, 4 },
+  { "tempest", "tempest", RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_7, 3 },
+  { "use_item_voracious_heart_of_ulatek", "use_item_voracious_heart_of_ulatek", RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_8, 1 },
+  { "voltaic_blaze", "voltaic_blaze", RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_9, 3 },
+  { "windstrike", "windstrike", RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_10, 4 },
 };
 
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_DECK_LEAVES_0[] = {
@@ -1152,24 +1092,6 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_18[] = {
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_19[] = {
     { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
 };
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_20[] = {
-    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
-};
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_21[] = {
-    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
-};
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_22[] = {
-    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
-};
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_23[] = {
-    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
-};
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_24[] = {
-    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
-};
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_25[] = {
-    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
-};
 inline constexpr rl_obs_member RL_OBS_FAMILY_LEGALITY_MEMBERS[] = {
   { "00", "00", RL_OBS_FAMILY_LEGALITY_LEAVES_0, 1 },
   { "01", "01", RL_OBS_FAMILY_LEGALITY_LEAVES_1, 1 },
@@ -1191,12 +1113,6 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_LEGALITY_MEMBERS[] = {
   { "17", "17", RL_OBS_FAMILY_LEGALITY_LEAVES_17, 1 },
   { "18", "18", RL_OBS_FAMILY_LEGALITY_LEAVES_18, 1 },
   { "19", "19", RL_OBS_FAMILY_LEGALITY_LEAVES_19, 1 },
-  { "20", "20", RL_OBS_FAMILY_LEGALITY_LEAVES_20, 1 },
-  { "21", "21", RL_OBS_FAMILY_LEGALITY_LEAVES_21, 1 },
-  { "22", "22", RL_OBS_FAMILY_LEGALITY_LEAVES_22, 1 },
-  { "23", "23", RL_OBS_FAMILY_LEGALITY_LEAVES_23, 1 },
-  { "24", "24", RL_OBS_FAMILY_LEGALITY_LEAVES_24, 1 },
-  { "25", "25", RL_OBS_FAMILY_LEGALITY_LEAVES_25, 1 },
 };
 
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PROC_CHANCES_LEAVES_0[] = {
@@ -1205,33 +1121,30 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PROC_CHANCES_LEAVES_0[] = {
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PROC_CHANCES_LEAVES_1[] = {
     { "value", rl_kind::k_float, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
 };
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_PROC_CHANCES_LEAVES_2[] = {
-    { "value", rl_kind::k_float, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-};
 inline constexpr rl_obs_member RL_OBS_FAMILY_PROC_CHANCES_MEMBERS[] = {
-  { "maelstrom_weapon", "maelstrom_weapon_proc_chance_current", RL_OBS_FAMILY_PROC_CHANCES_LEAVES_0, 1 },
-  { "stormsurge", "stormsurge_proc_chance_current", RL_OBS_FAMILY_PROC_CHANCES_LEAVES_1, 1 },
-  { "windfury", "windfury_proc_chance_current", RL_OBS_FAMILY_PROC_CHANCES_LEAVES_2, 1 },
+  { "stormsurge", "stormsurge_proc_chance_current", RL_OBS_FAMILY_PROC_CHANCES_LEAVES_0, 1 },
+  { "windfury", "windfury_proc_chance_current", RL_OBS_FAMILY_PROC_CHANCES_LEAVES_1, 1 },
 };
 
+inline constexpr double RL_BUCKETS_SLOT324[] = { 1.0, 2.0, 5.0 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "fight_remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, true },
-    { "active_enemies", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "active_enemies", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT324, 3, false },
     { "raid_event_next_in", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
     { "time_to_bloodlust", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
-    { "enemies_total", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
-    { "enemies_in_melee", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
-    { "enemies_within_8yd", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
-    { "enemies_within_40yd", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
-    { "enemies_in_front", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
-    { "flame_shock_carrier_count", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
-    { "soonest_time_to_die", rl_kind::k_seconds, 0.0, false, 1.0, true, 600.0, nullptr, 0, false },
-    { "longest_time_to_die", rl_kind::k_seconds, 0.0, false, 1.0, true, 600.0, nullptr, 0, false },
     { "dying_within_5s", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
     { "dying_within_15s", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
-    { "nearest_enemy_distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "enemies_in_front", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "enemies_in_melee", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "enemies_total", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "enemies_within_8yd", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "enemies_within_40yd", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "flame_shock_carrier_count", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
     { "immunity_in", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
     { "immunity_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
+    { "longest_time_to_die", rl_kind::k_seconds, 0.0, false, 1.0, true, 600.0, nullptr, 0, false },
+    { "nearest_enemy_distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "soonest_time_to_die", rl_kind::k_seconds, 0.0, false, 1.0, true, 600.0, nullptr, 0, false },
 };
 inline constexpr rl_obs_member RL_OBS_FAMILY_SCALARS_MEMBERS[] = {
   { "", "", RL_OBS_FAMILY_SCALARS_LEAVES_0, 17 },
@@ -1240,18 +1153,18 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_SCALARS_MEMBERS[] = {
 inline constexpr std::size_t RL_OBS_FAMILY_COUNT = 12;
 
 inline constexpr rl_obs_family RL_OBS_FAMILIES[RL_OBS_FAMILY_COUNT] = {
-  { rl_family::player_buffs, "player_buffs", rl_family_kind::buff, false, RL_OBS_FAMILY_PLAYER_BUFFS_MEMBERS, 28, 0, 53 },
-  { rl_family::cooldowns, "cooldowns", rl_family_kind::cooldown, false, RL_OBS_FAMILY_COOLDOWNS_MEMBERS, 8, 53, 11 },
-  { rl_family::target_facts, "target_facts", rl_family_kind::target_fact, false, RL_OBS_FAMILY_TARGET_FACTS_MEMBERS, 8, 64, 176 },
-  { rl_family::shapes, "shapes", rl_family_kind::shape_fact, false, RL_OBS_FAMILY_SHAPES_MEMBERS, 2, 240, 6 },
-  { rl_family::action_leaves, "action_leaves", rl_family_kind::action_expression, false, RL_OBS_FAMILY_ACTION_LEAVES_MEMBERS, 15, 246, 49 },
-  { rl_family::deck, "deck", rl_family_kind::expression, false, RL_OBS_FAMILY_DECK_MEMBERS, 13, 295, 13 },
-  { rl_family::stats, "stats", rl_family_kind::direct, false, RL_OBS_FAMILY_STATS_MEMBERS, 4, 308, 4 },
-  { rl_family::swing_cast, "swing_cast", rl_family_kind::direct, false, RL_OBS_FAMILY_SWING_CAST_MEMBERS, 4, 312, 4 },
-  { rl_family::raid_events, "raid_events", rl_family_kind::expression, false, RL_OBS_FAMILY_RAID_EVENTS_MEMBERS, 2, 316, 10 },
-  { rl_family::legality, "legality", rl_family_kind::legality, false, RL_OBS_FAMILY_LEGALITY_MEMBERS, 26, 326, 26 },
-  { rl_family::proc_chances, "proc_chances", rl_family_kind::proc_chance, false, RL_OBS_FAMILY_PROC_CHANCES_MEMBERS, 3, 352, 3 },
-  { rl_family::scalars, "scalars", rl_family_kind::scalar, true, RL_OBS_FAMILY_SCALARS_MEMBERS, 1, 355, 17 },
+  { rl_family::player_buffs, "player_buffs", rl_family_kind::buff, false, RL_OBS_FAMILY_PLAYER_BUFFS_MEMBERS, 31, 0, 45 },
+  { rl_family::cooldowns, "cooldowns", rl_family_kind::cooldown, false, RL_OBS_FAMILY_COOLDOWNS_MEMBERS, 8, 45, 11 },
+  { rl_family::target_facts, "target_facts", rl_family_kind::target_fact, false, RL_OBS_FAMILY_TARGET_FACTS_MEMBERS, 8, 56, 176 },
+  { rl_family::shapes, "shapes", rl_family_kind::shape_fact, false, RL_OBS_FAMILY_SHAPES_MEMBERS, 2, 232, 6 },
+  { rl_family::action_leaves, "action_leaves", rl_family_kind::action_expression, false, RL_OBS_FAMILY_ACTION_LEAVES_MEMBERS, 11, 238, 32 },
+  { rl_family::deck, "deck", rl_family_kind::expression, false, RL_OBS_FAMILY_DECK_MEMBERS, 13, 270, 13 },
+  { rl_family::stats, "stats", rl_family_kind::direct, false, RL_OBS_FAMILY_STATS_MEMBERS, 4, 283, 4 },
+  { rl_family::swing_cast, "swing_cast", rl_family_kind::direct, false, RL_OBS_FAMILY_SWING_CAST_MEMBERS, 4, 287, 4 },
+  { rl_family::raid_events, "raid_events", rl_family_kind::expression, false, RL_OBS_FAMILY_RAID_EVENTS_MEMBERS, 2, 291, 10 },
+  { rl_family::legality, "legality", rl_family_kind::legality, false, RL_OBS_FAMILY_LEGALITY_MEMBERS, 20, 301, 20 },
+  { rl_family::proc_chances, "proc_chances", rl_family_kind::proc_chance, false, RL_OBS_FAMILY_PROC_CHANCES_MEMBERS, 2, 321, 2 },
+  { rl_family::scalars, "scalars", rl_family_kind::scalar, true, RL_OBS_FAMILY_SCALARS_MEMBERS, 1, 323, 17 },
 };
 
 // ---- Action descriptors ----
@@ -1266,23 +1179,17 @@ inline constexpr rl_action_desc RL_ACTIONS[RL_ACTION_DIM] = {
   { 6, "crash_lightning", rl_action_kind::cast, "crash_lightning", nullptr, "crash_lightning", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
   { 7, "lava_lash", rl_action_kind::cast, "lava_lash", nullptr, "lava_lash", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
   { 8, "voltaic_blaze", rl_action_kind::cast, "voltaic_blaze", nullptr, "voltaic_blaze", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
-  { 9, "sundering", rl_action_kind::cast, "sundering", nullptr, "sundering", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
-  { 10, "ascendance", rl_action_kind::cast, "ascendance", nullptr, "ascendance", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
-  { 11, "doom_winds", rl_action_kind::cast, "doom_winds", nullptr, "doom_winds", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
-  { 12, "primordial_storm", rl_action_kind::cast, nullptr, nullptr, "primordial_storm", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
-  { 13, "surging_totem", rl_action_kind::cast, "surging_totem", nullptr, "surging_totem", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
-  { 14, "use_item_voracious_heart_of_ulatek", rl_action_kind::cast, "voracious_heart_of_ulatek_1297761", "item_cd_1141", "use_item_voracious_heart_of_ulatek", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
-  { 15, "berserking", rl_action_kind::cast, "berserking", nullptr, "berserking", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
-  { 16, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_cd_strike", { rl_wait_anchor_kind::cooldown, "strike", rl_swing_hand::none } },
-  { 17, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_cd_lava_lash", { rl_wait_anchor_kind::cooldown, "lava_lash", rl_swing_hand::none } },
-  { 18, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_cd_crash_lightning", { rl_wait_anchor_kind::cooldown, "crash_lightning", rl_swing_hand::none } },
-  { 19, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_cd_voltaic_blaze", { rl_wait_anchor_kind::cooldown, "voltaic_blaze", rl_swing_hand::none } },
-  { 20, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_swing_mh", { rl_wait_anchor_kind::swing, nullptr, rl_swing_hand::mh } },
-  { 21, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_swing_oh", { rl_wait_anchor_kind::swing, nullptr, rl_swing_hand::oh } },
-  { 22, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_maelstrom", { rl_wait_anchor_kind::maelstrom, nullptr, rl_swing_hand::none } },
-  { 23, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_gcd", { rl_wait_anchor_kind::gcd, nullptr, rl_swing_hand::none } },
-  { 24, "potion", rl_action_kind::cast, "potion", nullptr, "potion", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
-  { 25, "use_item_zuljins_guillotine_technique", rl_action_kind::cast, nullptr, nullptr, "use_item_zuljins_guillotine_technique", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
+  { 9, "ascendance", rl_action_kind::cast, "ascendance", nullptr, "ascendance", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
+  { 10, "use_item_voracious_heart_of_ulatek", rl_action_kind::cast, "voracious_heart_of_ulatek_1297761", "item_cd_1141", "use_item_voracious_heart_of_ulatek", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
+  { 11, "berserking", rl_action_kind::cast, "berserking", nullptr, "berserking", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
+  { 12, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_cd_strike", { rl_wait_anchor_kind::cooldown, "strike", rl_swing_hand::none } },
+  { 13, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_cd_lava_lash", { rl_wait_anchor_kind::cooldown, "lava_lash", rl_swing_hand::none } },
+  { 14, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_cd_crash_lightning", { rl_wait_anchor_kind::cooldown, "crash_lightning", rl_swing_hand::none } },
+  { 15, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_cd_voltaic_blaze", { rl_wait_anchor_kind::cooldown, "voltaic_blaze", rl_swing_hand::none } },
+  { 16, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_swing_mh", { rl_wait_anchor_kind::swing, nullptr, rl_swing_hand::mh } },
+  { 17, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_swing_oh", { rl_wait_anchor_kind::swing, nullptr, rl_swing_hand::oh } },
+  { 18, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_maelstrom", { rl_wait_anchor_kind::maelstrom, nullptr, rl_swing_hand::none } },
+  { 19, "potion", rl_action_kind::cast, "potion", nullptr, "potion", { rl_wait_anchor_kind::none, nullptr, rl_swing_hand::none } },
 };
 
 // ---- Buff-gate table ----
@@ -1292,10 +1199,8 @@ inline constexpr rl_buff_gate RL_BUFF_GATES[] = {
   { "tempest", "tempest", false },
   { "stormstrike", "ascendance", true },
   { "windstrike", "ascendance", false },
-  { "sundering", "primordial_storm", true },
-  { "primordial_storm", "primordial_storm", false },
 };
-inline constexpr std::size_t RL_BUFF_GATE_COUNT = 6;
+inline constexpr std::size_t RL_BUFF_GATE_COUNT = 4;
 
 // ---- Talent-gate table ----
 
@@ -1303,15 +1208,9 @@ inline constexpr rl_talent_gate RL_TALENT_GATES[] = {
   { "windstrike", "ascendance", false },
   { "crash_lightning", "crash_lightning", false },
   { "lava_lash", "lava_lash", false },
-  { "sundering", "sundering", false },
   { "ascendance", "ascendance", false },
-  { "doom_winds", "doom_winds", false },
-  { "doom_winds", "ascendance", true },
-  { "doom_winds", "deeply_rooted_elements", true },
-  { "primordial_storm", "primordial_storm", false },
-  { "surging_totem", "surging_totem", false },
 };
-inline constexpr std::size_t RL_TALENT_GATE_COUNT = 10;
+inline constexpr std::size_t RL_TALENT_GATE_COUNT = 4;
 
 // ---- Target scorer feature list (Phase 230-02, SCOR-01) ----
 

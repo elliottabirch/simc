@@ -212,9 +212,15 @@ inline constexpr std::uint32_t FORMAT_VERSION = 7u;  // 230-04: candidate block 
 // mistyped literal cannot silently drift from the formula and still compile (tstl 220-03,
 // OBS-06; formula updated 260901-pb1 Task 3 for version 5, updated again 228-09 for version 6,
 // updated again 230-04 for version 7 -- see top-of-file comment).
-inline constexpr std::uint32_t RECORD_SIZE = 2248u;  // 230-04: roundup8(45 + 4*372 + 4*8*22 + 4)
-                                                       // = roundup8(2241) -- see top-of-file
-                                                       // version-7 comment.
+inline constexpr std::uint32_t RECORD_SIZE = 2120u;  // 232-01 (MERGE-01): roundup8(45 + 4*340 +
+                                                       // 4*8*22 + 4) = roundup8(2113) -- W=340
+                                                       // is the merged census sheet's emitted
+                                                       // width (`gen_obs_schema.py --spec
+                                                       // enhancement`, R-C/R-N -- never hand-set),
+                                                       // RL_TARGET_SLOTS=8/RL_TARGET_FEATURES=22
+                                                       // unchanged from the clone lineage. See
+                                                       // top-of-file version-7 comment for the
+                                                       // closed form.
 static_assert( RECORD_SIZE == ( ( 45u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) +
                                    4u * static_cast<std::uint32_t>( RL_TARGET_SLOTS ) *
                                        static_cast<std::uint32_t>( RL_TARGET_FEATURES ) + 4u + 7u ) / 8u ) * 8u,
