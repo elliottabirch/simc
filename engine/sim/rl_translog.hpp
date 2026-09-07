@@ -212,23 +212,34 @@ inline constexpr std::uint32_t FORMAT_VERSION = 7u;  // 230-04: candidate block 
 // mistyped literal cannot silently drift from the formula and still compile (tstl 220-03,
 // OBS-06; formula updated 260901-pb1 Task 3 for version 5, updated again 228-09 for version 6,
 // updated again 230-04 for version 7 -- see top-of-file comment).
-inline constexpr std::uint32_t RECORD_SIZE = 1992u;  // 232-03 (OBS-05): STILL 1992 -- roundup8(45 +
-                                                       // 4*325 + 4*8*20 + 4) = roundup8(1989) = 1992,
-                                                       // the SAME multiple-of-8 boundary 324 landed
-                                                       // on (roundup8(1985) = 1992 too); the turn
-                                                       // action's own legality flag moved W 324 -> 325
-                                                       // (`gen_obs_schema.py --spec enhancement`,
-                                                       // never hand-set) without crossing an 8-byte
-                                                       // boundary. RL_TARGET_SLOTS=8/RL_TARGET_FEATURES=20
-                                                       // unchanged by this plan (only the observation
-                                                       // width moved, never the per-candidate target
-                                                       // feature count). Confirmed, not assumed, by the
+inline constexpr std::uint32_t RECORD_SIZE = 1824u;  // 233-05 (RIG-01, R5-1): 1992 -> 1824 --
+                                                       // roundup8(45 + 4*283 + 4*8*20 + 4) =
+                                                       // roundup8(1821) = 1824. The merged production
+                                                       // census (233-03) pruned 21 columns and R-G
+                                                       // retired the two orphan blocks
+                                                       // (target_facts.primordial_storm,
+                                                       // shapes.sundering, 23 leaves), while 233-02's
+                                                       // R-F reserved scalars (+2) and R-H
+                                                       // active_enemies encoder-kind change
+                                                       // (width-neutral) both rode the same
+                                                       // regeneration: 325 - 20 - 3 + 2 - 21 = 283,
+                                                       // matching `gen_obs_schema.py`'s own
+                                                       // re-emitted width and `translog.py`'s own
+                                                       // 233-03 re-bless of this SAME value
+                                                       // (translog.py moved its Python-side literal
+                                                       // in 233-03; this C++ literal moves here in
+                                                       // 233-05, since RIG-01 assigns C++ literal
+                                                       // moves to this plan, R-K/R-X).
+                                                       // RL_TARGET_SLOTS=8/RL_TARGET_FEATURES=20
+                                                       // unchanged (only the observation width moved,
+                                                       // never the per-candidate target feature
+                                                       // count). Confirmed, not assumed, by the
                                                        // static_assert immediately below, which
                                                        // recomputes from the live RL_OBS_DIM/
-                                                       // RL_TARGET_SLOTS/RL_TARGET_FEATURES constants at
-                                                       // compile time. PREVIOUS comment (232-02,
-                                                       // OBS-01/OBS-03): roundup8(45 + 4*324 + 4*8*20 +
-                                                       // 4) = roundup8(1985) = 1992. See top-of-file
+                                                       // RL_TARGET_SLOTS/RL_TARGET_FEATURES constants
+                                                       // at compile time. PREVIOUS comment (232-03,
+                                                       // OBS-05): roundup8(45 + 4*325 + 4*8*20 + 4) =
+                                                       // roundup8(1989) = 1992. See top-of-file
                                                        // version-7 comment for the closed form.
 static_assert( RECORD_SIZE == ( ( 45u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) +
                                    4u * static_cast<std::uint32_t>( RL_TARGET_SLOTS ) *
