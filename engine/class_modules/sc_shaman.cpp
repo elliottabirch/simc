@@ -3028,7 +3028,12 @@ public:
       trigger_maelstrom_gain( ab::execute_state );
     }
 
-    if ( this->execute_state && p()->talent.flurry.ok() && this->execute_state->result == RESULT_CRIT )
+    // R-AN/BL-1 (232-19): guarded on `this->hit_any_target` rather than a bare non-null
+    // `execute_state` check -- the pointer itself is never null once any earlier cast landed a hit
+    // (action.cpp:4605 only assigns it, never clears it), so a non-null test cannot tell THIS cast
+    // apart from a stale one. `hit_any_target` is reset at action.cpp:1902 and set at :4616 on the
+    // identical schedule as `execute_state`'s own refresh, so it is the fresh, cause-level signal.
+    if ( this->hit_any_target && p()->talent.flurry.ok() && this->execute_state->result == RESULT_CRIT )
     {
       p()->buff.flurry->trigger( p()->buff.flurry->max_stack() );
     }
@@ -3045,7 +3050,9 @@ public:
 
     // consume_maelstrom_weapon( state, stacks ) itself dereferences `state->action` unconditionally
     // (sc_shaman.cpp) -- guarded at this, its ONLY call site with a possibly-null execute_state.
-    if ( this->execute_state )
+    // R-AN/BL-1 (232-19): the guard is `this->hit_any_target`, not a bare non-null check -- see the
+    // Flurry guard above for why a non-null `execute_state` cannot discriminate a stale cast.
+    if ( this->hit_any_target )
       this->p()->consume_maelstrom_weapon( this->execute_state, mw_consumed_stacks );
   }
 
@@ -5870,13 +5877,18 @@ struct sundering_t : public shaman_attack_t
     // the hit set (action.cpp:1974's own "execute_state can be nullptr if there are not valid
     // targets to hit on" -- the base class's OWN guard for the same reason). Enumerated: this
     // struct's two execute_state derefs are `trigger_earthsurge( execute_state )` and (below)
-    // `trigger_tww3_totemic_enh_2pc( execute_state )` -- both eventually read `state->target`, both
-    // guarded. Everything else this override does (surging_elements/generate_maelstrom_weapon,
-    // primordial_storm, feral_spirit, whirling_earth/searing_totem) is a PLAYER-BUFF/cooldown
-    // effect that reads no target state at all -- these fire regardless of whether the cast hit
-    // anyone, exactly like the base engine's own zero-target path leaves every non-target-state
-    // side effect alone.
-    if ( execute_state )
+    // `trigger_tww3_totemic_enh_2pc( execute_state )`, each of which dereferences `state->target`.
+    // R-AN/BL-1 (232-19): a bare non-null check on `execute_state` cannot discriminate a stale cast
+    // from a fresh one -- once any earlier cast has landed a hit, the pointer itself is never null
+    // again (action.cpp:4605 only overwrites it, never clears it). Both sites below are guarded on
+    // `num_targets_hit > 0` instead, the cause-level signal reset at the top of every
+    // `action_t::execute()` and incremented only inside `schedule_travel()` on the same schedule as
+    // `execute_state`'s own refresh. Everything else this override does
+    // (surging_elements/generate_maelstrom_weapon, primordial_storm, feral_spirit,
+    // whirling_earth/searing_totem) is a PLAYER-BUFF/cooldown effect that reads no target state at
+    // all -- these fire regardless of whether the cast hit anyone, exactly like the base engine's
+    // own zero-target path leaves every non-target-state side effect alone.
+    if ( num_targets_hit > 0 )
       p()->trigger_earthsurge( execute_state );
 
     if ( p()->buff.surging_elements->trigger() )
@@ -5897,7 +5909,7 @@ struct sundering_t : public shaman_attack_t
     if ( p()->buff.whirling_earth->consume( this ) )
     {
       p()->pet.searing_totem.spawn( timespan_t::from_seconds( 8.0 + rng().range( 0.85 ) ) );
-      if ( execute_state )
+      if ( num_targets_hit > 0 )
         p()->trigger_tww3_totemic_enh_2pc( execute_state );
     }
   }
@@ -6235,19 +6247,29 @@ struct crash_lightning_t : public shaman_attack_t
     // CR-01 (260902/cr4): `execute_state` can be nullptr when the shaped cone filter emptied the
     // hit set (action.cpp:1974's own "execute_state can be nullptr if there are not valid targets
     // to hit on" -- the base class's OWN guard for the same reason). Enumerated: this struct's two
-    // execute_state derefs are `result_is_hit( execute_state->result )` (direct) and (below)
-    // `trigger_thorims_invocation( execute_state )` -> `state->target` -- both guarded. Everything
-    // else this override does (tww2_enh_4pc pair, storm_unleashed->consume, the Storm Unleashed 3
-    // repeating event, the mid2_enh_4pc set-bonus snapshot) is a PLAYER-BUFF/cooldown effect that
-    // reads no target state at all -- these fire regardless of whether the cast hit anyone, exactly
-    // like the base engine's own zero-target path leaves every non-target-state side effect alone.
+    // execute_state derefs are `result_is_hit( execute_state->result )` (direct, below, now
+    // `num_targets_hit > 0`) and `trigger_thorims_invocation( execute_state )` -> `state->target`
+    // (below). R-AN/BL-1 (232-19): the SECOND deref was guarded only on `execute_state` being
+    // non-null, the exact test this comment's own staleness paragraph below calls worthless -- a
+    // zero-hit cast during Doom Winds/Ascendance fired a free Thorim's Invocation cast at the
+    // PREVIOUS cast's target. Both derefs are now guarded on `num_targets_hit > 0`, the same
+    // cause-level signal. Everything else this override does (tww2_enh_4pc pair,
+    // storm_unleashed->consume, the Storm Unleashed 3 repeating event, the mid2_enh_4pc set-bonus
+    // snapshot) is a PLAYER-BUFF/cooldown effect that reads no target state at all -- these fire
+    // regardless of whether the cast hit anyone, exactly like the base engine's own zero-target
+    // path leaves every non-target-state side effect alone.
     //
     // 232-15 (buff_t::_resolve_stacks assertion, MERGE-02's second symptom): `execute_state` is a
-    // PERSISTENT member -- action_t::schedule_travel() only ever OVERWRITES it when at least one
-    // target is actually hit this cast; it is never reset to null (or its `result` invalidated)
-    // between casts. So once one cast has ever landed a hit, `execute_state->result` stays truthy
-    // FOREVER, including on a LATER cast whose shaped-cone `target_list()` comes back empty --
-    // a case CR-01's own audit above did not cover, because the POINTER itself is never null there,
+    // PERSISTENT member. ME-1 (232-19) corrects the mechanism above: action_t::schedule_travel()
+    // copies into it (action.cpp:4605, `execute_state->copy_state( s )`) for EVERY SCHEDULED
+    // target, hit or miss -- that copy runs BEFORE the `result_is_hit( s->result )` hit test at
+    // action.cpp:4614 -- so `execute_state` is refreshed whenever the target list was non-empty,
+    // and is stale exactly when the target list was EMPTY this cast, not (as this comment used to
+    // say) merely when this cast missed everything. It is never reset to null (or its `result`
+    // invalidated) between casts. So once one cast has ever landed a hit, `execute_state->result`
+    // stays truthy FOREVER, including on a LATER cast whose shaped-cone `target_list()` comes back
+    // empty -- a case CR-01's own audit above did not cover, because the POINTER itself is never
+    // null there,
     // only its CONTENTS are stale. Measured (gdb + an instrumented diagnostic build, three
     // reproducing episodes across all three add shapes, byte-identical tuple every time): on the
     // crashing cast, `execute_state->result` still read as a hit from the PRIOR successful cast
@@ -6277,7 +6299,7 @@ struct crash_lightning_t : public shaman_attack_t
       p()->buff.tww2_enh_4pc_damage->trigger( p()->buff.tww2_enh_4pc->check() );
     }
 
-    if ( execute_state && ( p()->buff.doom_winds->up() || p()->buff.ascendance->up() ) )
+    if ( num_targets_hit > 0 && ( p()->buff.doom_winds->up() || p()->buff.ascendance->up() ) )
     {
       p()->trigger_thorims_invocation( execute_state );
     }
