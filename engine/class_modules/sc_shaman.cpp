@@ -3050,9 +3050,18 @@ public:
 
     // consume_maelstrom_weapon( state, stacks ) itself dereferences `state->action` unconditionally
     // (sc_shaman.cpp) -- guarded at this, its ONLY call site with a possibly-null execute_state.
-    // R-AN/BL-1 (232-19): the guard is `this->hit_any_target`, not a bare non-null check -- see the
-    // Flurry guard above for why a non-null `execute_state` cannot discriminate a stale cast.
-    if ( this->hit_any_target )
+    // 233-REVIEW-prebuild BL-1 (2026-09-07): this site is NOT hit-conditioned. 232-19 had moved it to
+    // `this->hit_any_target` alongside the four target-state trigger sites, but Maelstrom Weapon is
+    // spent by the CAST (upstream calls consume_maelstrom_weapon unconditionally here) -- a spender
+    // whose every scheduled target missed/dodged/parried must still decrement its stacks, feed
+    // Tempest, roll the set bonuses and take Elemental Tempo's CDR. `hit_any_target` is false on that
+    // fresh all-miss path, so it would have refunded the stacks. The bare non-null test is the right
+    // guard HERE because every MW spender is a targeted spell whose target list is never empty
+    // (`execute_state` is refreshed for every SCHEDULED target, hit or miss -- action.cpp:4605), so it
+    // is fresh whenever `mw_consumed_stacks > 0`; on a zero-stack cast the call is bookkeeping only
+    // (`mw_spend_list`) and reads nothing target-dependent. The four sibling sites keep their
+    // `num_targets_hit > 0` guards: they fire target-state triggers, not resource consumption.
+    if ( this->execute_state )
       this->p()->consume_maelstrom_weapon( this->execute_state, mw_consumed_stacks );
   }
 
