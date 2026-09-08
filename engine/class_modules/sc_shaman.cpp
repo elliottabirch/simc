@@ -1321,6 +1321,13 @@ public:
     action_t* chain_lightning_ll_rtl;
     action_t* chain_lightning_ss_rtl;
     action_t* chain_lightning_ws_rtl;
+    // 233.1-02 Task 2 note: `ti_trigger` no longer DRIVES trigger_thorims_invocation()'s decision
+    // (Task 1 re-points that at thorims_can_chain()) -- it is kept written-but-unread through
+    // Task 1 only because rl_target_select.cpp's preference_for_thorims_aware_strike and
+    // decision_dump.cpp's thorims_primed emission still read it via shaman_thorims_primed_kind()
+    // in this same commit's tree; Task 2 removes all four together (member, setters, reset,
+    // accessor) since none of them have a remaining purpose once the primed-kind machinery is
+    // gone.
     action_t* ti_trigger;
     action_t* flame_shock_asc;
     action_t* flame_shock_vb;
@@ -2168,6 +2175,10 @@ public:
   // Midnight Triggers
   void trigger_ride_the_lightning( const action_state_t* state, action_t* trigger );
   void trigger_thorims_invocation( const action_state_t* state );
+  // R6-15 (owner, 2026-09-07), 233.1-02 Task 1: deterministic, RNG-free "can Chain Lightning
+  // chain from `primary` right now" predicate -- see the out-of-line definition beside
+  // trigger_thorims_invocation() for the full derivation and the prohibitions it observes.
+  bool thorims_can_chain( player_t* primary ) const;
   void trigger_crash_lightning_proc( const action_state_t* state, strike_variant t );
 
   // Legendary
@@ -6874,7 +6885,10 @@ struct chain_lightning_t : public chained_base_t
       p()->buff.wind_gust->trigger();
     }
 
-    // Track last cast for LB / CL because of Thorim's Invocation
+    // 233.1-02 Task 1: this bookkeeping no longer DRIVES trigger_thorims_invocation()'s decision
+    // (that now reads thorims_can_chain() fresh, at the strike's own impact -- R6-15). Kept only
+    // because shaman_thorims_primed_kind() (rl_target_select.cpp / decision_dump.cpp) still reads
+    // it in this same commit's tree; Task 2 removes this write together with that accessor.
     if ( p()->talent.thorims_invocation.ok() && ( is_variant( spell_variant::NORMAL ) || is_variant( spell_variant::PRIMORDIAL_STORM ) ) )
     {
       p()->action.ti_trigger = p()->action.chain_lightning_ti;
@@ -7647,7 +7661,9 @@ struct lightning_bolt_t : public shaman_spell_t
       }
     }
 
-    // Track last cast for LB / CL because of Thorim's Invocation
+    // 233.1-02 Task 1: see the Chain Lightning execute()'s matching comment above -- kept only
+    // because shaman_thorims_primed_kind() still reads it in this same commit's tree; Task 2
+    // removes this write together with that accessor.
     if ( p()->talent.thorims_invocation.ok() && ( is_variant( spell_variant::NORMAL ) || is_variant( spell_variant::PRIMORDIAL_STORM ) ) )
     {
       p()->action.ti_trigger = p()->action.lightning_bolt_ti;
@@ -10218,17 +10234,12 @@ struct tempest_t : public shaman_spell_t
       }
     }
 
-    if ( p()->talent.thorims_invocation.ok() && is_variant( spell_variant::NORMAL ) )
-    {
-      if ( execute_state->n_targets == 1 )
-      {
-        p()->action.ti_trigger = p()->action.lightning_bolt_ti;
-      }
-      else if ( execute_state->n_targets > 1 )
-      {
-        p()->action.ti_trigger = p()->action.chain_lightning_ti;
-      }
-    }
+    // R6-40 Hole 1 (todo 2026-09-07-thorims-priming-unguarded-execute-state-deref-and-early-
+    // return-hole.md), retired outright by 233.1-02 Task 1: this Tempest-cast priming block used
+    // to read `execute_state->n_targets` (unguarded) to arm `action.ti_trigger` for a LATER strike
+    // to consume. Under R6-15's new rule `trigger_thorims_invocation` no longer reads a last-cast
+    // primer at all -- it asks `thorims_can_chain()` fresh, at the strike's own impact -- so this
+    // block has no remaining purpose and is deleted rather than guarded.
 
     p()->buff.storms_eye->decrement();
   }
@@ -10858,18 +10869,24 @@ std::unique_ptr<expr_t> shaman_t::create_expression( util::string_view name )
     }
   }
 
+  // [orchestrator default -- P233.1-2]: both expressions are derived from the SAME
+  // thorims_can_chain() predicate `trigger_thorims_invocation` now uses, so the scripted
+  // `apl-full-smart-target` bar and the agent see one truth about what a strike will fire. The
+  // Tempest disjunct on the LB side preserves this pair's own pre-existing OR (Tempest also
+  // reads as "not chain lightning" for these two expressions), so the scripted `ascendance,if=
+  // ti_*` lines do not silently change meaning beyond the intended one. Outside Tempest the two
+  // are exact complements of thorims_can_chain(target).
   if ( util::str_compare_ci( splits[ 0 ], "ti_lightning_bolt" ) )
   {
     return make_fn_expr( name, [ this ]() {
-        return !action.ti_trigger || action.ti_trigger == action.lightning_bolt_ti ||
-               action.ti_trigger == action.tempest_ti;
+        return buff.tempest->check() || !thorims_can_chain( target );
     } );
   }
 
   if ( util::str_compare_ci( splits[ 0 ], "ti_chain_lightning" ) )
   {
     return make_fn_expr( name, [ this ]() {
-        return action.ti_trigger == action.chain_lightning_ti;
+        return thorims_can_chain( target );
     } );
   }
 
@@ -13018,6 +13035,42 @@ void shaman_t::trigger_ride_the_lightning( const action_state_t* state, action_t
   }
 }
 
+// R6-15 (owner, 2026-09-07): DIVERGENCE FROM UPSTREAM, on the owner's in-game evidence.
+// Spell 384444's text ("whichever you most recently used") is treated as STALE; the owner has
+// observed the live game flip to Chain Lightning whenever it can chain. A deliberate first-hop
+// GEOMETRY scan, never chain_lightning_ti->target_list(): __check_distance_targeting() is an
+// RNG-consuming randomised walk (sc_shaman.cpp:984), so using it as a predicate would both
+// perturb the RNG stream on decisions that then fire Lightning Bolt and return a
+// nondeterministic answer. target_list().size() > 1 holds exactly when SOME live enemy is within
+// the FIRST hop of the primary -- which is what this scans for, deterministically.
+bool shaman_t::thorims_can_chain( player_t* primary ) const
+{
+  action_t* cl = action.chain_lightning_ti;
+  if ( cl == nullptr || primary == nullptr || cl->n_targets() <= 1 )
+    return false;
+  if ( !sim->distance_targeting_enabled )
+  {
+    // No geometry: available_targets() is every live enemy, capped by n_targets().
+    std::size_t live = 0;
+    for ( player_t* t : sim->target_non_sleeping_list )
+      if ( t->is_enemy() && ++live > 1 )
+        return true;
+    return false;
+  }
+  const double radius = cl->radius;                       // 10.0, chained_base_t ctor
+  for ( player_t* t : sim->target_non_sleeping_list )
+  {
+    if ( t == primary || !t->is_enemy() )
+      continue;
+    // Mirrors __check_distance_targeting's own hop comparison verbatim (sc_shaman.cpp:1035) --
+    // do not re-derive it. FLAGGED ASSUMPTION (TURN-03): the boundary (exactly at
+    // radius + combat_reach) is IN, by that comparison's own `<=` convention.
+    if ( primary->get_player_distance( *t ) <= radius + t->combat_reach )
+      return true;
+  }
+  return false;
+}
+
 void shaman_t::trigger_thorims_invocation( const action_state_t* state )
 {
   if ( !talent.thorims_invocation.ok() )
@@ -13030,14 +13083,16 @@ void shaman_t::trigger_thorims_invocation( const action_state_t* state )
     return;
   }
 
-  // On 11.2, Tempest overrides the TI primer completely
+  // On 11.2, Tempest overrides the TI primer completely ("tempest is ti independent" -- R6-15).
   if ( buff.tempest->check() )
   {
     action.tempest_ti->execute_on_target( state->target );
   }
-  else if ( action.ti_trigger )
+  // R6-15: fire Chain Lightning whenever it can chain from this target, regardless of the last
+  // lightning spell cast -- the last-cast primer (`ti_trigger`) is gone.
+  else if ( thorims_can_chain( state->target ) )
   {
-    action.ti_trigger->execute_on_target( state->target );
+    action.chain_lightning_ti->execute_on_target( state->target );
   }
   // Default to Lightning Bolt
   else
@@ -14333,6 +14388,8 @@ void shaman_t::reset()
   lava_surge_attempts_normalized = 0.0;
   tempest_spends_since_proc      = 0U;
   tempest_procs_this_deck        = 0U;
+  // 233.1-02 Task 1: kept only because shaman_thorims_primed_kind() still reads ti_trigger in
+  // this same commit's tree; Task 2 removes this reset together with that accessor.
   action.ti_trigger = nullptr;
 
   pet.all_wolves.clear();
