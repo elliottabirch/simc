@@ -17,7 +17,6 @@
 #include "sim/gain.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_target_select.hpp"
-#include "sim/shaman_rl_facts.hpp"
 #include "sim/sim.hpp"
 #include "util/concurrency.hpp"
 #include "util/io.hpp"
@@ -866,16 +865,14 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
     out << ",\"action_ready\":null";
   }
 
-  // RULE-01 (232-06, R-AC/P232-29): the shared Thorim's-primed fact, EMITTED UNCONDITIONALLY --
-  // including when the gates below don't pass -- so the parity harness (232-05's
-  // selector_parity.py, T-232-18/R-J) can tell "the rule did not fire" from "the fact was
-  // missing"; that probe REFUSES BY NAME on a dump lacking `thorims_primed` rather than
-  // defaulting it, which is exactly the row a silent default would make agree by construction on.
-  // Spelled with the SAME three token strings the addon's own ThorimsPrimed fact type spells
-  // (enhancementTargetRules.ts, 232-05) so the join compares identical strings, never a near-miss.
-  // Player-state, not per-candidate/per-action -- read directly off `p` via the file's existing
-  // non-allocating idioms, safe regardless of the threads==1/profileset_map precondition the
-  // targeted_picks block below (rl_target_select's own per-decision module tables) requires.
+  // 233.1-02 Task 2 (R6-15, R6-20): the `thorims_primed` fact and the `shaman_thorims_primed_kind`
+  // accessor it read (232-06, R-AC/P232-29) are REMOVED TOGETHER with the enum
+  // (`rl_target_select::thorims_primed_kind`, formerly `engine/sim/shaman_rl_facts.hpp`) and the
+  // aiming rule's own primed-kind consumption (`rl_target_select.cpp`'s
+  // `preference_for_thorims_aware_strike`, this same commit) -- a partial removal would break
+  // `selector_parity.py`'s `_require_thorims_primed`, which REFUSES BY NAME on a dump lacking the
+  // key. That probe's own removal is handed to plan `233.1-05` (this plan's SUMMARY names the
+  // exact key/symbols removed here). The other player-state facts below are untouched.
   {
     const bool has_talent_thorims_invocation = p->find_action( "thorims_invocation" ) != nullptr;
     buff_t*    maelstrom_weapon              = buff_t::find( p, "maelstrom_weapon" );
@@ -885,26 +882,10 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
     buff_t*    doom_winds_buff               = buff_t::find( p, "doom_winds" );
     const bool has_buff_doom_winds           = doom_winds_buff && doom_winds_buff->check();
 
-    const char* thorims_primed_str = "none";
-    switch ( rl_target_select::shaman_thorims_primed_kind( p ) )
-    {
-      case rl_target_select::thorims_primed_kind::lightning_bolt:
-        thorims_primed_str = "lightning_bolt";
-        break;
-      case rl_target_select::thorims_primed_kind::chain_lightning:
-        thorims_primed_str = "chain_lightning";
-        break;
-      case rl_target_select::thorims_primed_kind::none:
-      default:
-        thorims_primed_str = "none";
-        break;
-    }
-
     out << ",\"has_talent_thorims_invocation\":" << ( has_talent_thorims_invocation ? "true" : "false" )
         << ",\"maelstrom_weapon_stacks\":" << maelstrom_weapon_stacks
         << ",\"tempest_up\":" << ( tempest_up ? "true" : "false" )
-        << ",\"has_buff_doom_winds\":" << ( has_buff_doom_winds ? "true" : "false" )
-        << ",\"thorims_primed\":\"" << thorims_primed_str << "\"";
+        << ",\"has_buff_doom_winds\":" << ( has_buff_doom_winds ? "true" : "false" );
   }
 
   // 228-09 (D-23/TGT-08, dump half) -- per-decision picked-target recording. For each of the

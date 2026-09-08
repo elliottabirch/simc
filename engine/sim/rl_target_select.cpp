@@ -13,7 +13,6 @@
 #include "player/player.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_translog.hpp"
-#include "sim/shaman_rl_facts.hpp"
 #include "sim/sim.hpp"
 #include "util/util.hpp"
 
@@ -909,35 +908,31 @@ const char* const* targeted_action_tokens()
 
 namespace
 {
-// RULE-01 (232-06, R-AC/P232-29): the Thorim's-aware strike SUBSTITUTION -- called once per
+// 233.1-02 Task 2 (R6-15, R6-20): the Thorim's-aware strike SUBSTITUTION -- called once per
 // decision from preference_for() below, for the two strike tokens only (windstrike, stormstrike).
 // primordial_storm and lightning_bolt stay routed to preference_shortest_time_to_die directly by
 // preference_for() itself; this function is never consulted for them. Gates, all read through the
 // file's existing non-allocating idioms (buff_t::find / player_t::find_action -- never a fresh
 // allocation per decision): the talent via find_action("thorims_invocation") being non-null;
 // Maelstrom Weapon's stack count greater than zero; for Stormstrike ONLY, Doom Winds present via
-// check() (sc_shaman.cpp:2126's own convention -- never up()). When the gates pass: Tempest
-// present gives preference_tempest; otherwise the accessor reporting the chain-lightning kind
-// gives preference_chain_lightning; anything else (lightning-bolt-primed OR not-yet-primed) falls
-// through to preference_shortest_time_to_die.
+// check() (sc_shaman.cpp:2126's own convention -- never up()).
 //
-// R-AC's real third branch: the engine's own trigger_thorims_invocation (sc_shaman.cpp:12962-12988)
-// has THREE outcomes, not two -- a Tempest override, a Chain-Lightning-primed cast, and a
-// Lightning-Bolt-primed-or-unprimed cast (that function's own "Default to Lightning Bolt" comment
-// is the un-primed case; the primed-lightning-bolt case is the SAME branch, since both read as
-// thorims_primed_kind::lightning_bolt or ::none from the accessor). A reader who only knows
-// R5-19's earlier two-branch text will expect this to collapse to {tempest, chain} -- it MUST NOT:
-// the lightning-bolt-primed case is a real, reachable production state (any strike cast while
-// Thorim's is armed with Lightning Bolt), not a theoretical corner, and it must fall through to
-// the base rule exactly like the "not yet primed" case does, matching the engine's own default.
+// TWO branches once the gates pass, not three (R6-15/R6-20, this task): Tempest up -> best
+// splash target (preference_tempest); otherwise -> best Chain Lightning chain start
+// (preference_chain_lightning), treating every enemy as a chainable candidate. The former THIRD
+// branch (232-05 RULE-01 / P232-29: a "lightning-bolt-primed-or-unprimed" case falling through to
+// the base rule, driven by the removed `shaman_thorims_primed_kind` accessor's last-cast primer)
+// is GONE -- the engine no longer reads a last-cast primer at all (233.1-02 Task 1:
+// `shaman_t::thorims_can_chain` replaces it), so there is no "primed with Lightning Bolt" state
+// left to model. With one enemy the chain start IS that enemy, so single-target aiming is
+// unchanged.
 //
 // LO-04 (232-13): a shared modelling divergence, not merely a fork one -- these gates are read at
 // DECISION time (this function runs before the cast resolves), while the engine evaluates the
 // SAME gates at IMPACT time (`trigger_thorims_invocation`, called from `stormstrike_t::impact`/
-// `windstrike_t::impact`, sc_shaman.cpp:12965-12973). Maelstrom Weapon's stack count or the
-// Tempest buff can change between the two, so this function is a close model of
-// `trigger_thorims_invocation`, never an exact one -- the addon's own strike-aim rule shares this
-// exact divergence (enhancementTargetRules.ts).
+// `windstrike_t::impact`). Maelstrom Weapon's stack count or the Tempest buff can change between
+// the two, so this function is a close model of `trigger_thorims_invocation`, never an exact one
+// -- the addon's own strike-aim rule shares this exact divergence (enhancementTargetRules.ts).
 preference_fn preference_for_thorims_aware_strike( const action_t* resolved, bool is_stormstrike )
 {
   player_t* p = resolved->player;
@@ -964,10 +959,7 @@ preference_fn preference_for_thorims_aware_strike( const action_t* resolved, boo
   if ( tempest && tempest->check() )
     return preference_tempest;
 
-  if ( shaman_thorims_primed_kind( p ) == thorims_primed_kind::chain_lightning )
-    return preference_chain_lightning;
-
-  return preference_shortest_time_to_die;
+  return preference_chain_lightning;
 }
 } // anonymous namespace
 

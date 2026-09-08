@@ -34,7 +34,6 @@
 #include "sim/proc.hpp"
 #include "sim/proc_rng.hpp"
 #include "sim/rl_target_select.hpp"
-#include "sim/shaman_rl_facts.hpp"
 #include "util/string_view.hpp"
 
 #include <cassert>
@@ -1321,14 +1320,6 @@ public:
     action_t* chain_lightning_ll_rtl;
     action_t* chain_lightning_ss_rtl;
     action_t* chain_lightning_ws_rtl;
-    // 233.1-02 Task 2 note: `ti_trigger` no longer DRIVES trigger_thorims_invocation()'s decision
-    // (Task 1 re-points that at thorims_can_chain()) -- it is kept written-but-unread through
-    // Task 1 only because rl_target_select.cpp's preference_for_thorims_aware_strike and
-    // decision_dump.cpp's thorims_primed emission still read it via shaman_thorims_primed_kind()
-    // in this same commit's tree; Task 2 removes all four together (member, setters, reset,
-    // accessor) since none of them have a remaining purpose once the primed-kind machinery is
-    // gone.
-    action_t* ti_trigger;
     action_t* flame_shock_asc;
     action_t* flame_shock_vb;
     action_t* flame_shock;
@@ -6885,15 +6876,6 @@ struct chain_lightning_t : public chained_base_t
       p()->buff.wind_gust->trigger();
     }
 
-    // 233.1-02 Task 1: this bookkeeping no longer DRIVES trigger_thorims_invocation()'s decision
-    // (that now reads thorims_can_chain() fresh, at the strike's own impact -- R6-15). Kept only
-    // because shaman_thorims_primed_kind() (rl_target_select.cpp / decision_dump.cpp) still reads
-    // it in this same commit's tree; Task 2 removes this write together with that accessor.
-    if ( p()->talent.thorims_invocation.ok() && ( is_variant( spell_variant::NORMAL ) || is_variant( spell_variant::PRIMORDIAL_STORM ) ) )
-    {
-      p()->action.ti_trigger = p()->action.chain_lightning_ti;
-    }
-
     if ( ( is_variant( spell_variant::NORMAL ) || is_variant( spell_variant::THORIMS_INVOCATION ) ) &&
          p()->specialization() == SHAMAN_ENHANCEMENT &&
          rng().roll( p()->talent.supercharge->effectN( 2 ).percent() ) )
@@ -7659,14 +7641,6 @@ struct lightning_bolt_t : public shaman_spell_t
       {
         p()->buff.power_of_the_maelstrom->trigger();
       }
-    }
-
-    // 233.1-02 Task 1: see the Chain Lightning execute()'s matching comment above -- kept only
-    // because shaman_thorims_primed_kind() still reads it in this same commit's tree; Task 2
-    // removes this write together with that accessor.
-    if ( p()->talent.thorims_invocation.ok() && ( is_variant( spell_variant::NORMAL ) || is_variant( spell_variant::PRIMORDIAL_STORM ) ) )
-    {
-      p()->action.ti_trigger = p()->action.lightning_bolt_ti;
     }
 
     if ( ( is_variant( spell_variant::NORMAL ) || is_variant( spell_variant::THORIMS_INVOCATION ) )
@@ -14388,9 +14362,6 @@ void shaman_t::reset()
   lava_surge_attempts_normalized = 0.0;
   tempest_spends_since_proc      = 0U;
   tempest_procs_this_deck        = 0U;
-  // 233.1-02 Task 1: kept only because shaman_thorims_primed_kind() still reads ti_trigger in
-  // this same commit's tree; Task 2 removes this reset together with that accessor.
-  action.ti_trigger = nullptr;
 
   pet.all_wolves.clear();
 
@@ -15141,29 +15112,12 @@ shaman_t::pets_t::pets_t( shaman_t* s ) :
 
 }  // namespace
 
-// 232-06 (RULE-01, R-AC/P232-29): the narrow accessor `engine/sim/shaman_rl_facts.hpp` declares --
-// see that header's own doc comment for why it must live here, define nothing beyond this one
-// function, and name no class or buff type. Mirrors `trigger_thorims_invocation`'s own
-// `ti_trigger` comparison (sc_shaman.cpp:12962-12988, above -- inside the anonymous namespace this
-// definition must sit OUTSIDE of, since a qualified `rl_target_select::` definition is only
-// well-formed at a scope that actually encloses that namespace) without re-deriving "armed" a
-// second way. Resolves the player to the shaman type only when it really is one -- a non-shaman
-// actor (an enemy, a pet, any other class) returns `none` rather than undefined behaviour from a
-// bad cast.
-rl_target_select::thorims_primed_kind rl_target_select::shaman_thorims_primed_kind( const player_t* p )
-{
-  if ( !p || p->type != SHAMAN )
-    return thorims_primed_kind::none;
-
-  const shaman_t* s = debug_cast<const shaman_t*>( p );
-  if ( !s->action.ti_trigger )
-    return thorims_primed_kind::none;
-  if ( s->action.ti_trigger == s->action.lightning_bolt_ti )
-    return thorims_primed_kind::lightning_bolt;
-  if ( s->action.ti_trigger == s->action.chain_lightning_ti )
-    return thorims_primed_kind::chain_lightning;
-  return thorims_primed_kind::none;
-}
+// 233.1-02 Task 2 (R6-15, R6-20): `rl_target_select::shaman_thorims_primed_kind` and its enum
+// (`engine/sim/shaman_rl_facts.hpp`, 232-06 RULE-01/R-AC/P232-29) are DELETED -- both of its
+// consumers (`rl_target_select.cpp`'s `preference_for_thorims_aware_strike`, this same commit;
+// `decision_dump.cpp`'s `thorims_primed` emission, this same commit) are removed together with
+// it, per RESEARCH Pitfall 4. `ti_trigger`, the last-cast primer member this accessor read, is
+// deleted below in the same commit -- nothing reads it anymore.
 
 const module_t* module_t::shaman()
 {
