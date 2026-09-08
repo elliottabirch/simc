@@ -172,8 +172,8 @@ action_t* accept_cast( player_t* p, const std::string& action_name, std::uint64_
 // fight-end-tie band WR-01 (260902/cr2) measured in accept_wait()'s CR-04 re-floor -- see that
 // function's own comment above the re-floor for the full derivation (at R=50ms remaining,
 // `0.050 - 0.001 = 0.049` re-floors to exactly `0.05`, landing the Player-Ready event back on the
-// tie the first shave removed). `accept_turn()` below has the SAME exposure through a different
-// route: it requests a FIXED `RL_WAIT_FLOOR_SECONDS` unconditionally, with no prior fight-end
+// tie the first shave removed). The removed turn reply arm (R6-27, 233.1-01) had the SAME
+// exposure through a different route: it requested a FIXED `RL_WAIT_FLOOR_SECONDS` unconditionally, with no prior fight-end
 // clamp at all, so it can land exactly on the tie whenever the fight has close to that much time
 // left. One shared shave closes both: recompute the hard bound fresh (seconds remaining to
 // `expected_iteration_time`, minus the epsilon) and clamp `sec` down to it only when the bound is
@@ -313,9 +313,9 @@ void accept_wait( sim_t* sim, execute_type et, double sec, const std::string& co
   // `player_ready_event_t::execute()` (player.cpp) then schedules a fresh
   // Player-Ready event at `timespan_t::from_seconds(0.0)`, at the SAME
   // timestamp against the SAME state: a deterministic policy re-picks the
-  // (still legal, `anchor: null`) fixed wait and the loop repeats at zero elapsed time (232-03's
-  // `accept_turn()` below quotes this paragraph verbatim -- the SAME hazard applies to a free
-  // turn). This is exactly the spin `maskRules.waitZeroLengthForbidden`
+  // (still legal, `anchor: null`) fixed wait and the loop repeats at zero elapsed time (the
+  // removed turn reply arm, R6-27/233.1-01, quoted this paragraph verbatim -- the SAME hazard
+  // applied to a free turn before it was deleted). This is exactly the spin `maskRules.waitZeroLengthForbidden`
   // (enhancement.json) declares forbidden -- both `mask.py` and this
   // file's own `build_wait()` already floor at RL_WAIT_FLOOR_SECONDS
   // consistently; this was the ONE point that clamped without re-flooring.
@@ -335,86 +335,8 @@ void accept_wait( sim_t* sim, execute_type et, double sec, const std::string& co
   sim->solver_control_has_pending_wait = true;
 }
 
-// OBS-05/R-W/R-V (tstl-sylvanas phase 232, plan 232-03): "turn to face" -- a THIRD registry
-// kind, promoted alongside cast/wait (never smuggled through the wait arm). Selects the NEAREST
-// live enemy for which the facing model's `is_in_front` test is false (R-W), ties broken on the
-// stable `(actor_index, actor_spawn_index)` identity pair ascending -- the SAME ordering
-// `select()`'s own final tie-break rung already trusts (`rl_target_select.cpp`, "final tie-break
-// on the stable (actor_index, actor_spawn_index) identity pair, ascending"). Faces the player at
-// it via `p->face( *chosen )` ONLY -- deliberately NOT `rl_target_select::retarget()`, which ALSO
-// mutates `a->set_target`/`p->target`/weapon targets: a turn has no `action_t` and must not touch
-// the player's current cast target, only its facing (WR-07: never a raw `a->target`/`p->target`
-// write either way). Foreground-only, mirroring `accept_wait`'s own `et` refusal above and
-// `mask.py`/`build_mask`'s shared foreground-only rule for this kind (R-W).
-void accept_turn( sim_t* sim, execute_type et, player_t* p, const std::string& context )
-{
-  if ( et != execute_type::FOREGROUND )
-    protocol_abort( "'turn' reply is illegal at a non-FOREGROUND boundary (boundary=" +
-                     decision_dump::boundary_name( et ) + "): " + context );
-
-  player_t* chosen = nullptr;
-  double chosen_distance = 0.0;
-  for ( player_t* t : sim->target_non_sleeping_list )
-  {
-    if ( !t->is_enemy() )
-      continue;
-    // R-W: a candidate is anyone FAILING the raw in-front test (`cos_half_angle = 0.0`) --
-    // the SAME predicate `mask.py`'s `_any_enemy_behind_player` and this file's own
-    // `build_mask` turn-bit computation use, deliberately NOT `facing_enabled`-gated
-    // (`rl_target_select.cpp:141`'s precedent: this is ground truth for the decision, not an
-    // optional display feature).
-    if ( p->is_in_front( *t, 0.0 ) )
-      continue;
-    const double dist = p->get_player_distance( *t );
-    bool better;
-    if ( chosen == nullptr )
-      better = true;
-    else if ( dist != chosen_distance )
-      better = dist < chosen_distance;
-    else
-      better = std::tie( t->actor_index, t->actor_spawn_index ) <
-               std::tie( chosen->actor_index, chosen->actor_spawn_index );
-    if ( better )
-    {
-      chosen = t;
-      chosen_distance = dist;
-    }
-  }
-
-  if ( chosen == nullptr )
-  {
-    // The mask (both mirrors) is legal for `turn` iff at least one live enemy fails `in_front`
-    // -- this branch should therefore be unreachable. A policy that reaches it anyway (a mask
-    // defect, a stale request, a hand-crafted FIFO reply) gets a loud, named FATAL, never a
-    // silent no-op that leaves the player facing nobody while still charging the wait -- the
-    // same "fail loud" discipline `accept_cast`'s own not-ready refusal above uses.
-    protocol_abort( "'turn' reply chosen but no live enemy fails the in-front test (mask should "
-                     "have made this illegal): " + context );
-  }
-
-  p->face( *chosen );
-
-  // R-V/P232-22 (this plan's whole cost model): a FREE turn spins at zero elapsed time, the SAME
-  // hazard `accept_wait`'s CR-04 comment above describes for a zero-length wait -- turning
-  // toward one enemy leaves another behind, the bit stays legal, and a
-  // deterministic policy would re-pick it FOREVER at the SAME sim time. This is exactly the
-  // spin `maskRules.waitZeroLengthForbidden` (enhancement.json) declares forbidden -- quoting
-  // `accept_wait`'s own CR-04 comment above verbatim, because the hazard is identical: "a
-  // zero-length wait is the one outcome the floor exists to forbid." The turn pays through the
-  // SAME existing pending-wait pair `accept_wait` sets, at the SAME floor value -- never a
-  // hidden one-shot-per-decision flag the Python mirror (`mask.py`) cannot see (Q232-6 is the
-  // owner's route to a free-turn alternative; not taken here).
-  //
-  // FORK-04, second half (Q69/232-07): unlike accept_wait(), this function never computes a
-  // fight-end bound at all before requesting the fixed RL_WAIT_FLOOR_SECONDS -- so it has the
-  // SAME event-ordering exposure accept_wait()'s re-floor does, through a different route: a
-  // turn requested when almost exactly RL_WAIT_FLOOR_SECONDS remains in the fight can land
-  // EXACTLY on the fight-end tie with `sim_end_event_t`. Apply the same shared shave.
-  double turn_sec = RL_WAIT_FLOOR_SECONDS;
-  reshave_fight_end_tie( sim, turn_sec );
-  sim->solver_control_pending_wait_s = turn_sec;
-  sim->solver_control_has_pending_wait = true;
-}
+// The removed turn reply arm's own function (R6-27) was here; deleted along with
+// every layer of the turn action (233.1-01 Task 3).
 } // anonymous namespace
 
 namespace solver_control
@@ -805,17 +727,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       return nullptr;
     }
 
-    if ( type == "turn" )
-    {
-      // OBS-05/R-W/R-V (232-03): a 'turn' reply carries no 'action' token and no 'sec' -- its
-      // target is computed inside accept_turn() (nearest live enemy failing in_front) and its
-      // cost is the fixed RL_WAIT_FLOOR_SECONDS pending-wait pair, not a caller-supplied value.
-      // `solver_control_last_reply_type` is already set to "turn" by the generic assignment
-      // above (this arm's own `type` string, unlike the in-process arm below which has no wire
-      // string and must set it explicitly).
-      accept_turn( sim, et, p, "seq=" + std::to_string( seq ) + ": " + line );
-      return nullptr;
-    }
+    // The removed turn reply arm (R6-27, 233.1-01) was here -- deleted with the whole action.
 
     if ( type == "noop" )
     {
@@ -915,16 +827,8 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // per-decision state read, before any reply/accept_cast has run) -- see rl_policy.hpp's own
     // doc comment on read_state for why decision_dump.cpp's diagnostic call must pass false.
     const rl_policy::rl_state_t state = rl_policy::read_state( p, foreground, /*is_decision_boundary=*/true );
-    // OBS-05 (232-03): stamp the PRE-decision behind-enemy predicate onto `sim`, BEFORE any
-    // accept_* call below can mutate facing -- see sim.hpp's own doc comment on this pair for
-    // why decision_dump.cpp needs this snapshot rather than recomputing from its own (POST-
-    // decision) all_enemies/player_position block.
-    sim->solver_control_has_any_enemy_behind_player_at_decision = true;
-    sim->solver_control_any_enemy_behind_player_at_decision = state.any_enemy_behind_player;
-    // 232-12 (ME-03): the per-decision guard -- `read_state()` above already called
-    // `rl_target_select::begin_decision( p )` internally, so this is the CURRENT decision's own
-    // stamp, not a stale read of a prior one.
-    sim->solver_control_any_enemy_behind_player_at_decision_stamp = rl_target_select::current_decision_stamp( p );
+    // The removed pre-decision behind-enemy stamp (R6-27, 233.1-01) was here -- deleted with
+    // the whole turn action; nothing downstream reads it anymore.
     std::chrono::nanoseconds obs_timing_ns{ 0 };
     if ( obs_timing )
     {
@@ -1303,35 +1207,11 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       }
     }
 
-    if ( action.kind == rl_action_kind::turn )
-    {
-      // OBS-05/R-W/R-V (232-03): unlike the FIFO arm, this transport has no wire string to read
-      // "turn" off of -- set it explicitly, the same way the cast branch above sets "cast" and
-      // the wait code below sets "wait", so decision_dump.cpp's solver_reply_type field is
-      // honest for this boundary.
-      sim->solver_control_last_reply_type = "turn";
-      // A turn has no candidate block and no picked target in the sense record_decision's
-      // trailing parameters describe (that machinery is `preference_scorer`'s per-CAST
-      // candidate accounting) -- CHOSEN_TARGET_SENTINEL_NO_PICK, same as the wait branch below.
-      // `floored=true`: the turn's cost is ALWAYS exactly RL_WAIT_FLOOR_SECONDS (R-V), never a
-      // real timer, so it is "floored" by construction on every occurrence, not merely when a
-      // real duration happened to clamp down to it.
-      rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, top_q,
-                                     rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK, /*floored=*/true,
-                                     exploratory );
-      // 212-CR-FIX WR-06: same reasoning as the cast branch above -- flush on an abort out of
-      // accept_turn() so the decision row already appended survives it.
-      try
-      {
-        accept_turn( sim, et, p, "in-process (seq=" + std::to_string( seq ) + ")" );
-      }
-      catch ( ... )
-      {
-        rl_translog::flush_pending( sim );
-        throw;
-      }
-      return nullptr;
-    }
+    // The removed in-process turn dispatch arm (R6-27, 233.1-01) was here -- deleted with the
+    // whole action. A policy that somehow still selects `rl_action_kind::turn` (the enum member
+    // itself is not regenerated out of the header until 233.1-07, per this task's own decision
+    // rule) now falls through to the unknown-kind FATAL immediately below, matching 233-05c
+    // CR-01's fail-closed discipline rather than silently mis-dispatching as a wait.
 
     if ( action.kind != rl_action_kind::wait )
     {
@@ -1419,9 +1299,6 @@ void reset_iteration( sim_t* sim )
   sim->solver_control_has_pending_wait = false;
   sim->solver_control_pending_wait_s = 0.0;
   sim->solver_control_last_reply_type.clear();
-  sim->solver_control_has_any_enemy_behind_player_at_decision = false;
-  sim->solver_control_any_enemy_behind_player_at_decision = false;
-  sim->solver_control_any_enemy_behind_player_at_decision_stamp = 0;
   // solver_control_seq is DELIBERATELY NOT cleared -- see the header
   // comment. Stream handles are likewise untouched.
 

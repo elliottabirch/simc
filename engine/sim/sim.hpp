@@ -764,37 +764,8 @@ struct sim_t : private sc_thread_t
   // that transport, same as the anchor label). Read by
   // decision_dump::write_state_fields() to emit "wait_source".
   std::string solver_control_last_wait_source;
-  // OBS-05/R-W (232-03), a NARROW instance of the general pre-cast-snapshot problem R-T (plan
-  // 232-04) is chartered to solve broadly (is_current_target, Tempest hit_damage): decision_dump's
-  // own `player_position`/`all_enemies` block is written AFTER choose() returns, so for the ONE
-  // boundary where the agent CHOSE `turn`, that block already reflects the POST-turn facing
-  // (accept_turn's own p->face() mutation happened during choose(), before decision_dump::record()
-  // runs) -- a Python-side re-derivation of "any enemy behind" from that block therefore
-  // disagrees with build_mask's own PRE-decision verdict specifically on turn-chosen boundaries
-  // (measured: 2/88 decisions in a real corpus, mask_parity.py's own join). Set ONCE per
-  // in-process decision boundary, from `rl_state_t::any_enemy_behind_player` (read_state(),
-  // BEFORE any accept_* call), and read by decision_dump.cpp to emit an ADDITIVE
-  // "any_enemy_behind_player_at_decision" key alongside the existing (unchanged,
-  // still-post-decision) all_enemies/player_position fields -- mask.py's turn arm and
-  // legality_census.py's OBS-05 census both PREFER this stamped value when present, falling
-  // back to the live geometry recomputation otherwise (the `action_gate_dump_time_compute`
-  // precedent). Absent (has_=false) on the FIFO transport, which never calls read_state() at all.
-  bool solver_control_has_any_enemy_behind_player_at_decision = false;
-  bool solver_control_any_enemy_behind_player_at_decision = false;
-  // 232-12 (ME-03): the per-decision GUARD every other stamped value in this file already has
-  // (`g_target_fact_snapshot_table`'s `has_stamp`+`stamp` pair, 232-04) but this pair never got.
-  // Without it, `solver_control_has_any_enemy_behind_player_at_decision` stays true from the first
-  // in-process decision of an iteration until `reset_iteration()` clears it -- so EVERY later
-  // `decision_dump::record()` call in that iteration emits the stale boolean unconditionally,
-  // whether or not `read_state()` actually ran for THAT row (an ungated snapshot row, or a
-  // non-`solver_reply_type` row). Today's consumers happen to filter those rows before reading the
-  // key, so nothing is misread in practice -- but the field is a stale-read waiting for the first
-  // consumer that does not filter (232-12's own HI-01 fix makes legality_census.py judge MORE
-  // rows, exactly such a consumer). Set to `rl_target_select::current_decision_stamp(p)`
-  // immediately alongside the boolean above; decision_dump.cpp emits the key only when this equals
-  // the CURRENT decision's own stamp, else `null` (the Python side already falls back to live
-  // geometry on a missing/null key -- mask.py's `_turn_behind_enemy_predicate`).
-  std::uint64_t solver_control_any_enemy_behind_player_at_decision_stamp = 0;
+  // The removed pre-decision behind-enemy stamp fields (R6-27, 233.1-01) were here -- deleted
+  // with the whole turn action; decision_dump.cpp's own key for them is gone too.
   // In-process exploration draw (Phase 213, D-08, ruling 213-G17). A
   // DEDICATED stream, re-seeded once per fight from that fight's own seed
   // (solver_control::reset_iteration()) -- it must NEVER be the engine's
