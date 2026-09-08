@@ -168,8 +168,14 @@ bool generic_filter( const action_t* a, player_t* candidate, bool harmful )
   // later turn that would have made it legal by cast time. "In front" is otherwise still also
   // available as the RAW, non-gating `enemy_fact::in_front` field below (observation ground
   // truth, D-16) and inside the two SHAPED actions' own cone/rectangle geometry (OR-2, unaffected
-  // -- they never turned).
-  if ( !a->player->is_in_front( *candidate, 0.0 ) )
+  // -- they never turned). 233.1 pre-rebuild review ME-2 (orchestrator, 2026-09-08): the gate is
+  // the pre-cr4 predicate LITERALLY -- `sim->facing_enabled && harmful && range >= 0` -- so this
+  // clause and action_t::target_ready's fourth clause never disagree about what counts as
+  // reachable (rl_target_select.hpp's own invariant, T-228-02-01), and facing_enabled=0 still
+  // means "the stock engine, no facing model" on BOTH arms (sim.hpp's doc, D-24 overlay pair).
+  // The rig sets facing_enabled=1 on every episode and every bar, so this changes no measurement.
+  if ( a->sim->facing_enabled && harmful && a->range >= 0 &&
+       !a->player->is_in_front( *candidate, 0.0 ) )
     return false;
 
   return true;

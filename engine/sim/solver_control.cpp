@@ -1226,7 +1226,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       // gen_rl_constants.py) -- this FATAL is the runtime backstop for the case both layers
       // were somehow updated but this switch was not.
       protocol_abort( "in-process reply dispatch: RL_ACTIONS[" + std::to_string( idx ) +
-                       "].kind is none of cast/turn/wait" );
+                       "].kind is none of cast/wait" );
     }
 
     // rl_action_kind::wait -- action.token is null for this entry (see
