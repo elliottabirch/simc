@@ -5863,6 +5863,10 @@ struct sundering_t : public shaman_attack_t
 
   void invalidate_shaped_target_cache() const
   {
+    // 233.1-01 (R6-8): with every player_t::face() caller deleted, facing_epoch never bumps
+    // again -- this comparison is now permanently false after the per-iteration init, so the
+    // cache never invalidates. That is CORRECT: the player's facing never moves for the whole
+    // fight, so there is nothing for this cache to go stale against.
     if ( !sim->facing_shapes )
       return;
     if ( player->facing_epoch != last_seen_facing_epoch )
@@ -6234,6 +6238,10 @@ struct crash_lightning_t : public shaman_attack_t
 
   void invalidate_shaped_target_cache() const
   {
+    // 233.1-01 (R6-8): with every player_t::face() caller deleted, facing_epoch never bumps
+    // again -- this comparison is now permanently false after the per-iteration init, so the
+    // cache never invalidates. That is CORRECT: the player's facing never moves for the whole
+    // fight, so there is nothing for this cache to go stale against.
     if ( !sim->facing_shapes )
       return;
     if ( player->facing_epoch != last_seen_facing_epoch )

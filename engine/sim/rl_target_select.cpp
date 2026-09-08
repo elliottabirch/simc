@@ -1253,14 +1253,10 @@ void retarget( action_t* a, player_t* p, player_t* pick )
     p->main_hand_attack->set_target( pick );
   if ( p->off_hand_attack )
     p->off_hand_attack->set_target( pick );
-  // CR-04 (260902/cr4, RULING (a)): the turn folds into this shared function too -- both callers
-  // (accept_cast, the mid-cast re-resolution ladder's fallback arm) are retargeting an RL-actor's
-  // OWN registry action (never a SHAPED one -- crash_lightning/sundering are never in the
-  // registry `is_targeted_action` governs, so they never reach `retarget()` at all; OR-2 is
-  // structurally preserved here with no extra exclusion needed). Gated on `facing_enabled` so the
-  // option keeps a real meaning when off.
-  if ( p->sim->facing_enabled )
-    p->face( *pick );
+  // The turn (T2) formerly here -- both callers (accept_cast, the mid-cast re-resolution
+  // ladder's fallback arm) turning the player toward `pick` -- is DELETED (R6-8, owner,
+  // 2026-09-07). `pick` never reaches this function unless it already passed
+  // generic_filter's G4, so there is nothing left to turn toward.
 }
 
 void record_reresolution( reresolution_arm arm )

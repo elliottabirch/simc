@@ -14920,10 +14920,12 @@ void player_t::acquire_target( retarget_source event, player_t* context )
     }
 
     target = candidate_target;
-    // Facing (228-01, D-05): this is the engine's own retargeting on death/immunity, the one
-    // path that changes the player's target behind the agent's back -- a facing vector left
-    // pointing at a corpse would make every later legality bit wrong (Pitfall P-4).
-    face( *target );
+    // The turn (T4) formerly here -- this is the engine's own retargeting on death/immunity,
+    // the one path that changes the player's target behind the agent's back -- is DELETED
+    // (R6-8, owner, 2026-09-07). The player's facing never moves; this retarget no longer
+    // re-aims it. 233.1-RESEARCH.md contradiction C1: this site (and T5 below) were missed
+    // by the brief's own `grep -rn '[>.]face( '` pattern, which cannot match an unqualified
+    // member call.
     range::for_each( action_list, [event, context, candidate_target]( action_t* action ) {
       action->acquire_target( event, context, candidate_target );
     } );
@@ -14941,8 +14943,8 @@ void player_t::acquire_target( retarget_source event, player_t* context )
     }
 
     target = first_invuln_target;
-    // Facing (228-01, D-05): the first_invuln_target fallback arm -- same reason as above.
-    face( *target );
+    // The turn (T5) formerly here -- the first_invuln_target fallback arm, same reason as
+    // T4 above -- is DELETED (R6-8, owner, 2026-09-07).
     range::for_each( action_list, [event, context, first_invuln_target]( action_t* action ) {
       action->acquire_target( event, context, first_invuln_target );
     } );
@@ -15187,41 +15189,20 @@ double player_t::get_player_distance( const player_t& t ) const
 // Facing (228-01, D-04/D-05). Built in the shape of get_position_distance/get_player_distance
 // above: plain doubles, no allocation. `change_position` is a position_e enum setter and is
 // not facing -- rejected as a substitute for the same reason player.hpp's declaration states.
-void player_t::face( const player_t& t )
+void player_t::face( const player_t& /* t */ )
 {
-  double delta_x = t.x_position - x_position;
-  double delta_y = t.y_position - y_position;
-  // WR-01 (260902/cr4): exact std::sqrt -- `player.hpp`'s own claim that facing_x/y is a UNIT
-  // vector (and both shape predicates' unit-facing-vector assumption) is only actually true with
-  // an exact square root; `util::approx_sqrt` is a fast reciprocal-style approximation with
-  // measurable relative error. `is_in_front`'s own use of `approx_sqrt` is left alone -- its
-  // 180-degree (sign-only) test is provably safe under the approximation (228-REVIEW.md's own
-  // "Invariants verified" section).
-  double len = std::sqrt( delta_x * delta_x + delta_y * delta_y );
-  // Coincident positions: leave the facing vector unchanged rather than dividing by zero.
-  if ( len <= 0.0 )
-    return;
-  double new_facing_x = delta_x / len;
-  double new_facing_y = delta_y / len;
-  // WR-03 (260902/cr4): the epoch bumps ONLY when the vector's VALUE actually changes -- not
-  // merely whenever this function runs without hitting the coincident-position guard above. CR-04
-  // (260902/cr4) calls face() far more often than 228-01 ever did (every non-background foreground
-  // cast, not only a retarget event), so a same-value "bump" here would invalidate the two shaped
-  // actions' target cache on every single ordinary cast even when facing never moved -- exact
-  // equality is safe: both sides are the SAME computation (delta/len) whenever the source position
-  // pair repeats, never a numerically-drifting accumulation.
-  if ( new_facing_x != facing_x || new_facing_y != facing_y )
-    ++facing_epoch;
-  facing_x = new_facing_x;
-  facing_y = new_facing_y;
-  // CR-04 (260902/cr4): the ONE direct debug print of the facing vector itself -- every existing
-  // print in this codebase logs POSITIONS, never facing_x/y directly, so a probe proving "the
-  // player turned" had no log line to read before this. `facing_cast_target.py`'s
-  // `turned-then-cast` mode reads this line; it changes no behaviour, `debug=1`-gated like every
-  // other print in this function's neighbourhood.
-  if ( sim->debug )
-    sim->out_debug.printf( "%s faces %s: facing_x=%.6f, facing_y=%.6f, facing_epoch=%llu",
-        name(), t.name(), facing_x, facing_y, static_cast<unsigned long long>( facing_epoch ) );
+  // ASSERT-UNREACHABLE (R6-8, owner, 2026-09-07; P233.1-1, orchestrator ledger row;
+  // 233.1-RESEARCH.md Pitfall 6): "no turning allowed ... the target picker will ever only
+  // suggest targets that are in front and in range." Every caller of this function (T1-T5, the
+  // player's own retarget-on-death/immunity path, the RL selector's retarget(), the scripted
+  // arm's schedule_execute(), and solver_control.cpp's accept_turn()) is deleted at every site
+  // this phase touches (233.1-01/02/03). The function is kept, not deleted, so that a future
+  // re-introduction of a turn site fails LOUDLY (a compile-time-visible caller hitting this
+  // assert at runtime) instead of silently compiling a new turn mechanism back into the engine.
+  // `facing_epoch`'s two live readers (sc_shaman.cpp's shaped-action target caches) are
+  // unaffected: with no caller, the epoch never bumps, which is CORRECT -- facing never moves.
+  // `turn_removal.selftest.py` (233.1-06) is the gate-time scan that proves no caller survives.
+  assert( false && "R6-8 (owner, 2026-09-07): no turning. player_t::face() must have no caller." );
 }
 
 bool player_t::is_in_front( const player_t& t, double cos_half_angle ) const
