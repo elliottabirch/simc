@@ -61,10 +61,12 @@ struct pick_slot
 std::unordered_map<const action_t*, pick_slot> g_pick_table;
 
 // 230-04 (SCOR-02, R-B): the per-decision candidate block table, keyed on the resolved
-// action_t* exactly like g_pick_table above -- select() fills it ONLY when the scorer preference
-// is active (candidate_block::features "the facts the scorer looked at", R-B's own wording).
-// `features` is reused across calls (never reallocated once sized), same WR-05 discipline as
-// g_candidate_buffer below.
+// action_t* exactly like g_pick_table above (candidate_block::features "the facts the scorer
+// looked at", R-B's own wording). 233.1-03 (R6-13, OV-5): select() now fills it on EVERY
+// preference, not only the scorer's -- the rules path fills it from its own full build_enemy_fact
+// per candidate (never the lite fact it scores the decision with), so scorer_block_equivalence.py
+// has a real, non-vacuous row to compare on a rules-only corpus. `features` is reused across calls
+// (never reallocated once sized), same WR-05 discipline as g_candidate_buffer below.
 struct candidate_block_slot
 {
   std::vector<float> features;
@@ -131,6 +133,13 @@ std::uint64_t g_every_targeted_action_illegal = 0;
 // states (a second concurrent select() on this buffer would race). Avoids a fresh heap allocation
 // on every targeted action's every decision.
 std::vector<player_t*> g_candidate_buffer;
+
+// 233.1-03 (R6-13, OV-5): the rules path's own candidate-feature scratch, beside g_candidate_buffer
+// above -- `w.scorer.feature_scratch` does NOT exist when `has_scorer == false` (no weights blob
+// loaded), so reusing it on the rules path would be a null deref. Sized once to RL_TARGET_FEATURES
+// and reused across every select() call and every candidate within a call, mirroring
+// g_candidate_buffer's own reuse discipline (never reallocated once sized).
+std::vector<float> g_rules_feature_scratch;
 
 } // anonymous namespace
 
@@ -472,6 +481,41 @@ void compute_chain_hop_counts( double radius, int cap, const std::vector<player_
     out[ candidates[ start_index ] ] = hop_count;
   }
 }
+
+// 233.1-03 (R6-13, OV-5): extracted verbatim from preference_scorer's own fill loop (below) so the
+// rules path can fill its own scratch buffer with it too -- pure, no rl_scorer_t dependency.
+// Order-locked to target_features.py's own derivation (struct enemy_fact's declaration order,
+// EXCLUDING candidate/actor_index/actor_spawn_index -- an identity number as a feature would make
+// the score depend on enumeration order), EXACTLY as preference_scorer's own comment already
+// states: this is a refactor, never a re-ordering. A reordering on either side of the RLW1 wire is
+// still caught by the feature fingerprint refusal at load (RL_TARGET_FEATURE_SHA) for the scorer
+// path, and by this function's own trailing assert for both callers.
+void fill_candidate_features( const action_t*, const enemy_fact& fact, float* out )
+{
+  std::size_t i = 0;
+  out[ i++ ] = static_cast<float>( fact.distance );
+  out[ i++ ] = fact.in_reach ? 1.0f : 0.0f;
+  out[ i++ ] = fact.in_range ? 1.0f : 0.0f;
+  out[ i++ ] = fact.in_front ? 1.0f : 0.0f;
+  out[ i++ ] = fact.alive ? 1.0f : 0.0f;
+  out[ i++ ] = fact.immune ? 1.0f : 0.0f;
+  out[ i++ ] = static_cast<float>( fact.immunity_remaining );
+  out[ i++ ] = static_cast<float>( fact.time_to_die );
+  out[ i++ ] = static_cast<float>( fact.health_pct );
+  out[ i++ ] = fact.is_boss ? 1.0f : 0.0f;
+  out[ i++ ] = static_cast<float>( fact.flame_shock_remaining );
+  out[ i++ ] = static_cast<float>( fact.neighbours_within_radius );
+  out[ i++ ] = fact.is_current_target ? 1.0f : 0.0f;
+  out[ i++ ] = static_cast<float>( fact.burning_core_remaining );
+  out[ i++ ] = static_cast<float>( fact.lightning_rod_stacks );
+  out[ i++ ] = static_cast<float>( fact.lightning_rod_remaining );
+  out[ i++ ] = static_cast<float>( fact.venomfang_remaining );
+  out[ i++ ] = static_cast<float>( fact.venomfang_debuff_stacks );
+  out[ i++ ] = static_cast<float>( fact.venomfang_debuff_remaining );
+  out[ i++ ] = static_cast<float>( fact.rune_of_unleashed_fire_lingering_remaining );
+  assert( i == RL_TARGET_FEATURES &&
+          "fill_candidate_features's fill order does not match RL_TARGET_FEATURES" );
+}
 } // anonymous namespace
 
 player_t* select( action_t* a, bool harmful, preference_fn pref )
@@ -491,10 +535,10 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
 
   // Phase 230-02 (SCOR-01, R-B): the scorer's overflow refusal -- REFUSE BY NAME the instant the
   // generic filter's own live candidate count exceeds the LOADED blob's own declared
-  // `scorer.slots`, never truncate and never drop the tail. Checked before the single-candidate
-  // shortcut below so a slot count of 0 (already refused at load, T-230-01-01) can never reach
-  // this far, and before the scoring loop so a malformed blob is refused at the FIRST decision it
-  // would ever be consulted, not silently mid-loop.
+  // `scorer.slots`, never truncate and never drop the tail. Checked before the scoring loop so a
+  // malformed blob is refused at the FIRST decision it would ever be consulted, not silently
+  // mid-loop. 233.1-03 (R6-13, OV-5): this declared-slots refusal STAYS scorer-only -- the rules
+  // path has no weights blob to declare slots against (there is nothing to compare against).
   rl_policy::rl_scorer_t* scorer_scratch = nullptr;  // 230-04: non-null only when pref == preference_scorer
   if ( pref == preference_scorer )
   {
@@ -506,24 +550,34 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
           "the loaded scorer's declared slots={} -- refusing rather than truncating",
           candidates.size(), a->name_str, w.scorer.slots ) );
     }
-    // 230-04 (SCOR-02, R-B): the translog's own candidate block is a FIXED RL_TARGET_SLOTS-wide
-    // table -- a SEPARATE, tighter bound than the blob's own declared scorer.slots above (which
-    // may legally be as wide as 64, RLW1_MAX_SCORER_SLOTS). Refuse rather than write past the
-    // fixed block's own bound; this can only fire on a blob whose declared slots exceeds
-    // RL_TARGET_SLOTS, which no committed 230-* fixture does.
-    if ( candidates.size() > RL_TARGET_SLOTS )
-    {
-      throw sc_runtime_error( fmt::format(
-          "rl_target_select::select: {} candidates passed the generic filter for '{}', exceeding "
-          "the transition log's fixed RL_TARGET_SLOTS={} -- refusing rather than writing past the "
-          "candidate block",
-          candidates.size(), a->name_str, RL_TARGET_SLOTS ) );
-    }
     scorer_scratch = &w.scorer;
+  }
 
-    // Stamp the candidate block table for THIS decision up front, before any early return, so a
-    // stale block from an earlier decision can never be read as current (mirrors g_pick_table's
-    // own stamp discipline). Re-filled below as candidates are actually scored.
+  // 233.1-03 (R6-13, OV-5): the translog's own candidate block is a FIXED RL_TARGET_SLOTS-wide
+  // table -- a SEPARATE, tighter bound than the scorer blob's own declared scorer.slots above
+  // (which may legally be as wide as 64, RLW1_MAX_SCORER_SLOTS; checked scorer-only, immediately
+  // above). This bound is now checked on EVERY preference, not only the scorer's, because select()
+  // fills the candidate block on every preference below (previously scorer-only, 230-04's original
+  // SCOR-02) -- refuse rather than write past the fixed block's own bound. On the scorer path this
+  // can only fire on a blob whose declared slots exceeds RL_TARGET_SLOTS, which no committed 230-*
+  // fixture does; on the rules path there is no blob to have refused it earlier, so this is now the
+  // ONLY overflow refusal a rules-path decision gets.
+  if ( candidates.size() > RL_TARGET_SLOTS )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_target_select::select: {} candidates passed the generic filter for '{}', exceeding "
+        "the transition log's fixed RL_TARGET_SLOTS={} -- refusing rather than writing past the "
+        "candidate block",
+        candidates.size(), a->name_str, RL_TARGET_SLOTS ) );
+  }
+
+  // 233.1-03 (R6-13, OV-5): stamp the candidate block table for THIS decision up front, before any
+  // early return, so a stale block from an earlier decision can never be read as current (mirrors
+  // g_pick_table's own stamp discipline) -- on EVERY preference now, not only the scorer's, so
+  // scorer_block_equivalence.py has a real (non-vacuous) row to compare on a rules-only corpus
+  // (233-08's own finding: every rules-path decision previously recorded candidate_count == 0).
+  // Re-filled below as candidates are actually scored.
+  {
     candidate_block_slot& slot = g_candidate_block_table[ a ];
     if ( slot.features.size() != RL_TARGET_SLOTS * RL_TARGET_FEATURES )
       slot.features.assign( RL_TARGET_SLOTS * RL_TARGET_FEATURES, 0.0f );
@@ -536,15 +590,14 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
     slot.has_stamp    = true;
   }
 
-  // TGT-02 edge: single -- that candidate is the pick regardless of preference; the sticky clause
-  // cannot override it (there is nothing else to be sticky about). The general algorithm below
-  // would reach the identical answer without this shortcut, but stating it explicitly matches the
-  // must-have's own wording and keeps the edge case visible in code, not just in behaviour.
-  // 230-04: SKIPPED when the scorer is active -- the general loop below is what CAPTURES the
-  // candidate block (R-B), and a single-candidate decision still needs its (trivial, one-slot)
-  // block recorded, never silently skipped.
-  if ( candidates.size() == 1 && pref != preference_scorer )
-    return candidates.front();
+  // 233.1-03 (R6-13, OV-5): the single-candidate shortcut that used to return early here (TGT-02
+  // edge: single) is REMOVED -- every preference now needs the general loop below to run so its
+  // (trivial, one-slot) candidate block is captured, never silently skipped. The general algorithm
+  // below reaches the identical PICK either way (stated originally only to keep the edge case
+  // visible in code, per the removed comment); this changes 0 picks, only whether the block gets
+  // filled for a one-candidate decision.
+  if ( g_rules_feature_scratch.size() != RL_TARGET_FEATURES )
+    g_rules_feature_scratch.assign( RL_TARGET_FEATURES, 0.0f );
 
   // BL-01 (232-13) / ME-4 (232-15b): resolve the Thorim's-branch geometry ONCE per decision, HERE
   // -- before the per-candidate scoring loop below. `resolve_thorims_branch_geometry` calls
@@ -606,25 +659,56 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
     //
     // Phase 230-02 (SCOR-01): the NINTH preference (the learned scorer) is the one exception --
     // its v1 scorecard (R-C) reads every field the struct carries, so it gets the FULL builder
-    // instead of the lite one. This costs more per candidate than the rules path, paid ONLY when
-    // a scorer is actually loaded and active (preference_for's own gate) -- the eight rule
-    // preferences' own performance is completely unaffected by this branch.
+    // instead of the lite one for SCORING. 233.1-03 (R6-13, OV-5) rewrites the second half of this
+    // comment's claim -- it is NO LONGER true that "the eight rule preferences' own performance is
+    // completely unaffected by this branch". The SCORING fact below is deliberately left as-is
+    // (the lite-vs-full fork here still decides only what `pref()` sees, and changing that for the
+    // rule preferences would regress BL-01/232-13's geometry fix for the two Thorim's-aware melee
+    // strikes -- windstrike/stormstrike's own zero radius vs. Tempest's/Chain Lightning's resolved
+    // radius, ME-4/233.1-02). What changes is CAPTURE, just below: every preference now pays a
+    // SECOND, full `build_enemy_fact` call per candidate to fill the candidate block, because
+    // `scorer_block_equivalence.py`'s comparison target (decision_dump.cpp's own
+    // `build_candidate_facts()`) is always that full, uncorrected fact -- including its own
+    // deliberately-uncorrected zero neighbours_within_radius for the two strikes (build_enemy_fact
+    // is "DELIBERATELY untouched by BL-01's fix", this file's own comment above). Capturing via the
+    // SAME uncorrected builder the dump uses is what makes the two records comparable at all; this
+    // extra full-fact build -- a find_dot scan, an O(n) neighbours walk, time_to_percent,
+    // health_percentage, is_boss, and four debuff lookups the lite builder skips
+    // (233.1-RESEARCH.md Section A.8) -- is the real per-decision cost this plan owes plan
+    // 233.1-12's proving run; it is MEASURED there, never asserted small here (R6-13).
     enemy_fact fact  = ( pref == preference_scorer )
                            ? build_enemy_fact( a, c )
                            : build_enemy_fact_for_scoring(
                                  a, c, pref, has_precomputed_geo ? &precomputed_geo : nullptr );
     double     score = pref( a, fact );
 
-    // 230-04 (SCOR-02, R-B): CAPTURE, never recompute -- preference_scorer's own call just above
-    // filled `scorer_scratch->feature_scratch` with this candidate's feature vector (the SAME
-    // buffer forward_scorer just read to produce `score`); copy the declared feature prefix
-    // (excluding the trailing aiming-spell one-hot, which is per-ACTION not per-candidate) into
-    // this decision's persistent candidate block at THIS candidate's slot.
+    // 233.1-03 (R6-13, OV-5): CAPTURE the candidate block on EVERY preference now (230-04's
+    // original SCOR-02 comment scoped this scorer-only).
+    const float* capture_feats = nullptr;
     if ( scorer_scratch != nullptr )
+    {
+      // preference_scorer's own call just above (via pref(a, fact)) already filled
+      // `scorer_scratch->feature_scratch` from `fact` (already the full build_enemy_fact on this
+      // path) through fill_candidate_features -- CAPTURE that, never recompute (230-04's own
+      // SCOR-02 discipline).
+      capture_feats = scorer_scratch->feature_scratch.data();
+    }
+    else
+    {
+      // The rules path has no scorer scratch to capture from, and `fact` above is the LITE,
+      // geometry-corrected fact used for SCORING (see the comment above `fact`'s declaration) --
+      // build a fresh, uncorrected FULL fact here, specifically for capture, matching
+      // decision_dump.cpp's own build_candidate_facts() exactly (including its own
+      // deliberately-uncorrected zero neighbours_within_radius for the two Thorim's-aware melee
+      // strikes), and fill it into the rules-path scratch buffer beside g_candidate_buffer.
+      enemy_fact capture_fact = build_enemy_fact( a, c );
+      fill_candidate_features( a, capture_fact, g_rules_feature_scratch.data() );
+      capture_feats = g_rules_feature_scratch.data();
+    }
     {
       candidate_block_slot& slot = g_candidate_block_table[ a ];
       std::memcpy( slot.features.data() + slot_index * RL_TARGET_FEATURES,
-                   scorer_scratch->feature_scratch.data(), RL_TARGET_FEATURES * sizeof( float ) );
+                   capture_feats, RL_TARGET_FEATURES * sizeof( float ) );
       slot.mask |= static_cast<std::uint16_t>( 1u << slot_index );
       slot.count = static_cast<std::uint8_t>( slot.count + 1 );
     }
@@ -666,7 +750,10 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
     }
   }
 
-  if ( scorer_scratch != nullptr && best != nullptr )
+  // 233.1-03 (R6-13, OV-5): stamp the chosen slot on EVERY preference now -- the block itself is
+  // captured on every preference above, so a rules-path decision's chosen_slot must be real too
+  // (previously scorer_scratch-gated, matching the old scorer-only capture).
+  if ( best != nullptr )
     g_candidate_block_table[ a ].chosen_slot = static_cast<std::uint8_t>( best_slot );
 
   return best;
@@ -1153,34 +1240,16 @@ double preference_scorer( const action_t* a, const enemy_fact& fact )
   // s.feature_scratch is load-time-sized to features + n_tok (rl_policy_net.cpp's load_rlw1) --
   // reused every call, never reallocated per decision (this plan's own no-allocation-in-the-
   // per-decision-score-path prohibition).
-  float*      feats = s.feature_scratch.data();
-  std::size_t i     = 0;
+  float* feats = s.feature_scratch.data();
 
-  // Order-locked to target_features.py's own derivation (struct enemy_fact's declaration order,
-  // EXCLUDING candidate/actor_index/actor_spawn_index -- an identity number as a feature would
-  // make the score depend on enumeration order) -- a reordering on either side of the RLW1 wire
-  // is caught by the feature fingerprint refusal at load (RL_TARGET_FEATURE_SHA), never a
-  // silently wrong score.
-  feats[ i++ ] = static_cast<float>( fact.distance );
-  feats[ i++ ] = fact.in_reach ? 1.0f : 0.0f;
-  feats[ i++ ] = fact.in_range ? 1.0f : 0.0f;
-  feats[ i++ ] = fact.in_front ? 1.0f : 0.0f;
-  feats[ i++ ] = fact.alive ? 1.0f : 0.0f;
-  feats[ i++ ] = fact.immune ? 1.0f : 0.0f;
-  feats[ i++ ] = static_cast<float>( fact.immunity_remaining );
-  feats[ i++ ] = static_cast<float>( fact.time_to_die );
-  feats[ i++ ] = static_cast<float>( fact.health_pct );
-  feats[ i++ ] = fact.is_boss ? 1.0f : 0.0f;
-  feats[ i++ ] = static_cast<float>( fact.flame_shock_remaining );
-  feats[ i++ ] = static_cast<float>( fact.neighbours_within_radius );
-  feats[ i++ ] = fact.is_current_target ? 1.0f : 0.0f;
-  feats[ i++ ] = static_cast<float>( fact.burning_core_remaining );
-  feats[ i++ ] = static_cast<float>( fact.lightning_rod_stacks );
-  feats[ i++ ] = static_cast<float>( fact.lightning_rod_remaining );
-  feats[ i++ ] = static_cast<float>( fact.venomfang_remaining );
-  feats[ i++ ] = static_cast<float>( fact.venomfang_debuff_stacks );
-  feats[ i++ ] = static_cast<float>( fact.venomfang_debuff_remaining );
-  feats[ i++ ] = static_cast<float>( fact.rune_of_unleashed_fire_lingering_remaining );
+  // 233.1-03 (R6-13, OV-5): the fill loop itself moved to fill_candidate_features (this file,
+  // above select()) -- extracted so the rules path can fill its own scratch buffer with it too,
+  // never reusing this scorer-only scratch (which does not exist when has_scorer == false).
+  // Byte-identical fill order to before this extraction (a refactor, never a re-ordering); the
+  // order-lock to target_features.py's own derivation is documented at that function's own
+  // definition now, not duplicated here.
+  fill_candidate_features( a, fact, feats );
+  std::size_t i = RL_TARGET_FEATURES;
   assert( i == s.features &&
           "preference_scorer's fill order does not match s.features's declared count" );
 

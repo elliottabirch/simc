@@ -157,10 +157,13 @@ void fill_pick( action_t* resolved, bool harmful, preference_fn pref );
 // three-copies failure the fork already learned once for action lookup).
 player_t* lookup_pick( const action_t* resolved, bool* out_found );
 
-// 230-04 (SCOR-02, R-B): the per-decision candidate block select() CAPTURED for `resolved` when
-// the scorer preference was active -- the feature block preference_scorer actually scored for
-// each candidate (CAPTURED at the moment it scored it, never recomputed here, mirroring
-// lookup_pick's own D-12 discipline), the mask of which slots were real, the live candidate
+// 230-04 (SCOR-02, R-B): the per-decision candidate block select() CAPTURED for `resolved` --
+// 233.1-03 (R6-13, OV-5): on EVERY preference now, not only the scorer's. On the scorer path this
+// is the feature block preference_scorer actually scored for each candidate (CAPTURED at the
+// moment it scored it, never recomputed here, mirroring lookup_pick's own D-12 discipline); on the
+// rules path it is a full build_enemy_fact per candidate, built specifically for this capture
+// (never the lite fact the decision was actually scored with) -- see rl_target_select.cpp's own
+// comment at that call site. Either way: the mask of which slots were real, the live candidate
 // count, and the slot the pick actually took. `features` points at
 // `RL_TARGET_SLOTS * RL_TARGET_FEATURES` floats, slot-major, owned by this module and valid only
 // until the NEXT call into this module for the SAME action -- copy out before that if the caller
@@ -175,9 +178,10 @@ struct candidate_block
 };
 
 // Reads the candidate block stamped for `resolved` at the CURRENT decision. `*out_found` is
-// false when no block was captured this decision (a wait, an untargeted cast, or the rules path
-// was active -- the scorer never ran for this action this decision) -- the caller must then pass
-// a null candidate block to rl_translog::record_decision, never fabricate one.
+// false when no block was captured this decision (a wait, an untargeted cast, or `select()` was
+// never called for this action this decision -- 233.1-03: no longer scorer-only, select() now
+// stamps a block on every preference) -- the caller must then pass a null candidate block to
+// rl_translog::record_decision, never fabricate one.
 candidate_block lookup_candidate_block( const action_t* resolved, bool* out_found );
 
 // 232-04 (OBS-02, R-T): the pre-cast snapshot for the two decision-instant values
