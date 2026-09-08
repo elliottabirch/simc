@@ -212,30 +212,39 @@ inline constexpr std::uint32_t FORMAT_VERSION = 7u;  // 230-04: candidate block 
 // mistyped literal cannot silently drift from the formula and still compile (tstl 220-03,
 // OBS-06; formula updated 260901-pb1 Task 3 for version 5, updated again 228-09 for version 6,
 // updated again 230-04 for version 7 -- see top-of-file comment).
-inline constexpr std::uint32_t RECORD_SIZE = 1776u;  // 233-05b (chain-I R-AO/R-AP/R-AQ correction):
-                                                       // 1824 -> 1776 -- roundup8(45 + 4*270 + 4*8*20 +
-                                                       // 4) = roundup8(1769) = 1776. The chain-I review
-                                                       // found eighteen of the 283 columns dead by ENGINE
-                                                       // CONSTRUCTION (fourteen target_facts.<token>.
-                                                       // immune/.immunity_remaining, R-AO; four zero-radius
-                                                       // target_facts.<token>.neighbours_within_radius,
-                                                       // R-AE), and a source read of the five cross-token
-                                                       // in_reach redundancy prunes found none provably
-                                                       // structural, restoring all five (R-AQ):
-                                                       // 283 - 14 - 4 + 5 = 270, matching
-                                                       // `gen_obs_schema.py`'s own re-emitted width and
-                                                       // `translog.py`'s own 233-05b re-bless of this SAME
-                                                       // value. This is a CORRECTION within the same
-                                                       // schema move (R-AT) -- no binary was ever built at
-                                                       // 283. RL_TARGET_SLOTS=8/RL_TARGET_FEATURES=20
+inline constexpr std::uint32_t RECORD_SIZE = 1744u;  // 233.1-07 (TURN-04, no-turning width move):
+                                                       // 1776 -> 1744 -- roundup8(45 + 4*263 + 4*8*20 +
+                                                       // 4) = roundup8(1741) = 1744. OBS_DIM moves
+                                                       // 270 -> 263: -7 (seven LIVE target_facts.<token>.
+                                                       // in_front columns retired dead-by-engine-
+                                                       // construction, R6-8 -- CONTEXT.md anticipated
+                                                       // eight, but primordial_storm's own in_front was
+                                                       // already retired in phase 233's R-G ruling,
+                                                       // leaving only seven live to prune this round)
+                                                       // + 2 (player_buffs.short_circuit added,
+                                                       // replacing the never-resolving mid2_enh_4pc
+                                                       // member-name bug, Finding F1) - 1 (deck.
+                                                       // ti_lightning_bolt dropped, P233.1-4) - 1 (the
+                                                       // legality family's turn-action member, already
+                                                       // reflected in the 20-action registry since
+                                                       // 233.1-03/04): 270 - 7 + 2 - 1 - 1 = 263,
+                                                       // matching `gen_obs_schema.py`'s own re-emitted
+                                                       // width and `translog.py`'s own 233.1-07
+                                                       // re-bless of this SAME value. The five restored
+                                                       // in_reach columns were re-examined under the
+                                                       // SAME 233-05b decision rule and found unchanged
+                                                       // (preference_for()'s routing is untouched by
+                                                       // this phase's code) -- 0 width change from that
+                                                       // axis. RL_TARGET_SLOTS=8/RL_TARGET_FEATURES=20
                                                        // unchanged. Confirmed, not assumed, by the
                                                        // static_assert immediately below, which
                                                        // recomputes from the live RL_OBS_DIM/
                                                        // RL_TARGET_SLOTS/RL_TARGET_FEATURES constants
-                                                       // at compile time. PREVIOUS comment (233-05,
-                                                       // RIG-01, R5-1): roundup8(45 + 4*283 + 4*8*20 + 4)
-                                                       // = roundup8(1821) = 1824. See top-of-file
-                                                       // version-7 comment for the closed form.
+                                                       // at compile time. PREVIOUS comment (233-05b,
+                                                       // chain-I correction): roundup8(45 + 4*270 +
+                                                       // 4*8*20 + 4) = roundup8(1769) = 1776. See
+                                                       // top-of-file version-7 comment for the closed
+                                                       // form.
 static_assert( RECORD_SIZE == ( ( 45u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) +
                                    4u * static_cast<std::uint32_t>( RL_TARGET_SLOTS ) *
                                        static_cast<std::uint32_t>( RL_TARGET_FEATURES ) + 4u + 7u ) / 8u ) * 8u,
