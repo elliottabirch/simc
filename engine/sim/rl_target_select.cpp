@@ -152,15 +152,17 @@ bool generic_filter( const action_t* a, player_t* candidate, bool harmful )
        a->player->get_player_distance( *candidate ) > a->range + candidate->combat_reach )
     return false;
 
-  // G4 REMOVED (260902/cr4, CR-04 RULING (a)): a behind candidate is no longer excluded from the
-  // selector's own candidate set. facing_enabled's meaning changed from "a behind target is
-  // refused" to "the player turns to face what it casts at" -- the turn (accept_cast/retarget(),
-  // and the scripted arm's own cast-commit site) makes a selected-behind candidate legal BY THE
-  // TIME it is actually cast on, so excluding it here would just deadlock the selector on a
-  // candidate set that no longer needs excluding. "In front" survives only as the RAW,
-  // non-gating `enemy_fact::in_front` field (observation ground truth) and inside the two SHAPED
-  // actions' own cone/rectangle geometry (unaffected by this change -- OR-2 keeps them from ever
-  // turning).
+  // G4 RESTORED (R6-8, owner, 2026-09-07): "no turning allowed ... the target picker will ever
+  // only suggest targets that are in front and in range." facing_enabled's meaning REVERTS to its
+  // pre-cr4 meaning -- "a behind target is refused" -- not "the player turns to face what it
+  // casts at" (that turn mechanism is deleted at every site this phase, 233.1-01). A behind
+  // candidate is therefore excluded from the selector's own candidate set again; there is no
+  // later turn that would have made it legal by cast time. "In front" is otherwise still also
+  // available as the RAW, non-gating `enemy_fact::in_front` field below (observation ground
+  // truth, D-16) and inside the two SHAPED actions' own cone/rectangle geometry (OR-2, unaffected
+  // -- they never turned).
+  if ( !a->player->is_in_front( *candidate, 0.0 ) )
+    return false;
 
   return true;
 }

@@ -2363,24 +2363,11 @@ void action_t::schedule_execute( action_state_t* state )
     return;
   }
 
-  // CR-04 (260902/cr4, RULING (a)): a targeted cast at a target BEHIND the player turns the
-  // player to face it first, instantly, per Q3 -- the single site where a FOREGROUND action (RL
-  // OR scripted arm alike, since accept_cast's own p->face() call already ran earlier for the RL
-  // arm and this is a harmless idempotent re-face in that case) commits to its target. Scoped
-  // harmful && range >= 0, the SAME gate target_ready's now-removed fourth clause used, so a
-  // self/friendly/trinket action is never facing-gated. `!background` is REQUIRED (Rule 1 fix,
-  // found via shape_hitset_agreement.py's own regression on this exact change): without it, every
-  // secondary/proc/cleave hit (Windfury Attack, Static Charge, tier-set procs -- anything
-  // `background`, which can legitimately land on an enemy OTHER than the player's own current
-  // target) would ALSO turn the player, yanking the facing vector away from the primary target
-  // between two ordinary foreground casts and breaking the shaped spells' own cone/rectangle,
-  // which never turn (OR-2) but read whatever the CURRENT facing happens to be. The two SHAPED
-  // actions (crash_lightning, sundering) are ALSO excluded by name -- OR-2 says they never turn,
-  // they cast in the CURRENT facing.
-  if ( sim->facing_enabled && harmful && range >= 0 && !background && target &&
-       name_str != "crash_lightning" && name_str != "sundering" )
-    player->face( *target );
-
+  // The auto-face-on-cast site formerly here (R6-8, owner, 2026-09-07: "no turning allowed") is
+  // DELETED, not disabled -- the player's facing is fixed for the whole fight (233.1-01). A cast
+  // whose target is behind the player never reaches this point: the picker refuses it upstream
+  // (generic_filter's G4 for the RL arm, this file's own target-ready check's restored fourth
+  // clause for the scripted arm).
   sim->print_log( "{} schedules execute for {}", *player, *this );
 
   time_to_execute = execute_time();
@@ -2556,16 +2543,17 @@ bool action_t::target_ready( player_t* candidate_target )
        player->get_player_distance( *candidate_target ) > range + candidate_target->combat_reach )
     return false;
 
-  // Facing guard REMOVED (260902/cr4, CR-04 RULING (a)). 228-01's own fourth guard (the
-  // 180-degree half-plane refusal) is gone -- `facing_enabled`'s meaning changed from "a behind
-  // target is refused" to "the player turns to face what it casts at" (Q3: "the live engine has
-  // mechanics for this"). The turn happens at the cast-target-set site (accept_cast/retarget() on
-  // the RL arm, this file's own `schedule_execute()` on the scripted arm), BEFORE this function
-  // is next evaluated against the SAME candidate -- so refusing here would only ever block the
-  // FIRST decision toward a behind candidate, not protect anything a live turn does not already
-  // cover. "In front" now shapes ONLY the two SHAPED actions' own cone/rectangle hit sets
-  // (OR-2: neither ever turns) and leaves splash from a front target alone, unaffected by this
-  // removal -- check_distance_targeting, available_targets and target_list are still untouched.
+  // Facing guard RESTORED (R6-8, owner, 2026-09-07; P233.1-3, orchestrator ledger row): this is
+  // the SCRIPTED arm's own behind-refusal -- the APL arm never reaches rl_target_select's
+  // generic_filter, so its G4 restore alone does not touch this arm. Without this clause the 30
+  // bars this phase re-cuts would measure a scripted arm that still casts at behind targets, an
+  // arm the agent is structurally forbidden from matching. There is no longer a turn anywhere
+  // that would make a behind candidate legal by the time this is next evaluated -- the player's
+  // facing never moves (233.1-01).
+  if ( sim->facing_enabled && harmful && range > 0 &&
+       !player->is_in_front( *candidate_target, 0.0 ) )
+    return false;
+
   return true;
 }
 

@@ -1012,16 +1012,17 @@ struct sim_t : private sc_thread_t
   bool maximize_reporting;
   std::string apikey, user_apitoken;
   bool distance_targeting_enabled;
-  // 228-01, D-06/R-F: ORIGINALLY the cast-target in-front test (action_t::target_ready's fourth
-  // guard, refusing a cast at a behind target). RE-POINTED by 260902/cr4 CR-04 RULING (a): that
-  // fourth guard is REMOVED, and this option now instead gates the TURN -- a targeted cast at an
-  // enemy behind the player turns the player to face it first, instantly (Q3), at the
-  // cast-target-set site (accept_cast/retarget() on the RL arm, action_t::schedule_execute() on
-  // the scripted arm). Off means the stock engine, no facing model at all -- 228-01's own D-24
-  // overlay pair (facing_enabled=0 vs =1) is still a real comparison, now of "does the player
-  // turn" rather than "is a behind cast refused". "In front" survives only inside the two SHAPED
-  // actions' own cone/rectangle geometry (facing_shapes) and the splash-exemption rule, both
-  // unaffected by this re-pointing.
+  // 228-01, D-06/R-F: the cast-target in-front test (action_t::target_ready's fourth guard,
+  // refusing a cast at a behind target on the SCRIPTED arm; rl_target_select::generic_filter's
+  // G4 on the RL arm). REVERTED to this, its pre-cr4 meaning, by R6-8 (owner, 2026-09-07): "no
+  // turning allowed ... the target picker will ever only suggest targets that are in front and
+  // in range" (233.1-01). The intervening 260902/cr4 CR-04 re-pointing -- this option gating an
+  // instant turn-to-face instead of a refusal -- is gone along with every turn site it drove; no
+  // code path turns the player anymore. Off means the stock engine, no facing model at all --
+  // 228-01's own D-24 overlay pair (facing_enabled=0 vs =1) is a real comparison of "is a behind
+  // cast refused". The default stays `false`; the rig turns it on per fight. "In front" is also
+  // exposed unconditionally inside the two SHAPED actions' own cone/rectangle geometry
+  // (facing_shapes) and the splash-exemption rule, both unaffected by this revert.
   bool facing_enabled;
   // 228-01, R-F: the player-centred cone/rectangle target filter for shaped spells (Crash
   // Lightning, Sundering). Registered here; stays INERT until plan 228-03 installs the filter
