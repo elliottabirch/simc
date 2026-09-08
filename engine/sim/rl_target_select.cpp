@@ -553,16 +553,23 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
     scorer_scratch = &w.scorer;
   }
 
-  // 233.1-03 (R6-13, OV-5): the translog's own candidate block is a FIXED RL_TARGET_SLOTS-wide
-  // table -- a SEPARATE, tighter bound than the scorer blob's own declared scorer.slots above
-  // (which may legally be as wide as 64, RLW1_MAX_SCORER_SLOTS; checked scorer-only, immediately
-  // above). This bound is now checked on EVERY preference, not only the scorer's, because select()
-  // fills the candidate block on every preference below (previously scorer-only, 230-04's original
-  // SCOR-02) -- refuse rather than write past the fixed block's own bound. On the scorer path this
-  // can only fire on a blob whose declared slots exceeds RL_TARGET_SLOTS, which no committed 230-*
-  // fixture does; on the rules path there is no blob to have refused it earlier, so this is now the
-  // ONLY overflow refusal a rules-path decision gets.
-  if ( candidates.size() > RL_TARGET_SLOTS )
+  // 233.1-03b (R6-13, P233.1-36): on the RULES path this bound is now a DIAGNOSTIC, not a gate.
+  // 233.1-03's own change above (filling the candidate block on EVERY preference) moved this
+  // refusal out of the scorer-only guard with it, so a rules-path decision whose candidate set
+  // exceeds RL_TARGET_SLOTS aborted the whole training-arm iteration -- measured on real training
+  // shapes: big-pack-burst's 10+/-2-add melee pack and a four-target Hectic Add Cleave corpus both
+  // crash the AGENT arm (see the todo this plan closes:
+  // 2026-09-08-big-pack-burst-agent-arm-exceeds-rl-target-slots-8.md). The fix (the THIRD option,
+  // not a RL_TARGET_SLOTS bump and not a truncation): an overflowing rules-path decision keeps its
+  // FULL candidate set for the pick below -- select() still ranks EVERY candidate and returns the
+  // identical pick it would have returned before 233.1-03 -- and records NO candidate block for
+  // that decision (the up-front stamp state just below: count 0, mask 0, sentinel chosen slot).
+  // scorer_block_equivalence.py counts this by name as rowsOverflowSkipped, never as a mismatch.
+  // On the SCORER path the refusal STAYS: a loaded scorer needs the WHOLE block (there is nothing
+  // to score a decision against from a partial candidate table), so refusing still beats
+  // truncating there.
+  const bool capture_block = candidates.size() <= RL_TARGET_SLOTS;
+  if ( !capture_block && pref == preference_scorer )
   {
     throw sc_runtime_error( fmt::format(
         "rl_target_select::select: {} candidates passed the generic filter for '{}', exceeding "
@@ -683,34 +690,41 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
     double     score = pref( a, fact );
 
     // 233.1-03 (R6-13, OV-5): CAPTURE the candidate block on EVERY preference now (230-04's
-    // original SCOR-02 comment scoped this scorer-only).
-    const float* capture_feats = nullptr;
-    if ( scorer_scratch != nullptr )
+    // original SCOR-02 comment scoped this scorer-only). 233.1-03b (P233.1-36): guarded by
+    // `capture_block` -- an overflowing rules-path decision pays NO capture cost (no extra
+    // build_enemy_fact, no memcpy) and leaves the up-front-stamped empty block (count 0, mask 0)
+    // in place; the pick logic below (`pref(a, fact)` above, `best`/`best_score`/`best_slot` and
+    // the tie-break ladder below) is completely outside this guard and therefore untouched.
+    if ( capture_block )
     {
-      // preference_scorer's own call just above (via pref(a, fact)) already filled
-      // `scorer_scratch->feature_scratch` from `fact` (already the full build_enemy_fact on this
-      // path) through fill_candidate_features -- CAPTURE that, never recompute (230-04's own
-      // SCOR-02 discipline).
-      capture_feats = scorer_scratch->feature_scratch.data();
-    }
-    else
-    {
-      // The rules path has no scorer scratch to capture from, and `fact` above is the LITE,
-      // geometry-corrected fact used for SCORING (see the comment above `fact`'s declaration) --
-      // build a fresh, uncorrected FULL fact here, specifically for capture, matching
-      // decision_dump.cpp's own build_candidate_facts() exactly (including its own
-      // deliberately-uncorrected zero neighbours_within_radius for the two Thorim's-aware melee
-      // strikes), and fill it into the rules-path scratch buffer beside g_candidate_buffer.
-      enemy_fact capture_fact = build_enemy_fact( a, c );
-      fill_candidate_features( a, capture_fact, g_rules_feature_scratch.data() );
-      capture_feats = g_rules_feature_scratch.data();
-    }
-    {
-      candidate_block_slot& slot = g_candidate_block_table[ a ];
-      std::memcpy( slot.features.data() + slot_index * RL_TARGET_FEATURES,
-                   capture_feats, RL_TARGET_FEATURES * sizeof( float ) );
-      slot.mask |= static_cast<std::uint16_t>( 1u << slot_index );
-      slot.count = static_cast<std::uint8_t>( slot.count + 1 );
+      const float* capture_feats = nullptr;
+      if ( scorer_scratch != nullptr )
+      {
+        // preference_scorer's own call just above (via pref(a, fact)) already filled
+        // `scorer_scratch->feature_scratch` from `fact` (already the full build_enemy_fact on this
+        // path) through fill_candidate_features -- CAPTURE that, never recompute (230-04's own
+        // SCOR-02 discipline).
+        capture_feats = scorer_scratch->feature_scratch.data();
+      }
+      else
+      {
+        // The rules path has no scorer scratch to capture from, and `fact` above is the LITE,
+        // geometry-corrected fact used for SCORING (see the comment above `fact`'s declaration) --
+        // build a fresh, uncorrected FULL fact here, specifically for capture, matching
+        // decision_dump.cpp's own build_candidate_facts() exactly (including its own
+        // deliberately-uncorrected zero neighbours_within_radius for the two Thorim's-aware melee
+        // strikes), and fill it into the rules-path scratch buffer beside g_candidate_buffer.
+        enemy_fact capture_fact = build_enemy_fact( a, c );
+        fill_candidate_features( a, capture_fact, g_rules_feature_scratch.data() );
+        capture_feats = g_rules_feature_scratch.data();
+      }
+      {
+        candidate_block_slot& slot = g_candidate_block_table[ a ];
+        std::memcpy( slot.features.data() + slot_index * RL_TARGET_FEATURES,
+                     capture_feats, RL_TARGET_FEATURES * sizeof( float ) );
+        slot.mask |= static_cast<std::uint16_t>( 1u << slot_index );
+        slot.count = static_cast<std::uint8_t>( slot.count + 1 );
+      }
     }
 
     if ( !best )
@@ -752,8 +766,11 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
 
   // 233.1-03 (R6-13, OV-5): stamp the chosen slot on EVERY preference now -- the block itself is
   // captured on every preference above, so a rules-path decision's chosen_slot must be real too
-  // (previously scorer_scratch-gated, matching the old scorer-only capture).
-  if ( best != nullptr )
+  // (previously scorer_scratch-gated, matching the old scorer-only capture). 233.1-03b
+  // (P233.1-36): additionally gated on `capture_block` -- an overflowing decision's block was
+  // never captured above, so it must keep the up-front no-pick sentinel here too, or the probe
+  // would read a chosen slot into a block of count 0.
+  if ( capture_block && best != nullptr )
     g_candidate_block_table[ a ].chosen_slot = static_cast<std::uint8_t>( best_slot );
 
   return best;
