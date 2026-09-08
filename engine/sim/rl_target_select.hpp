@@ -119,9 +119,9 @@ player_t* select( action_t* a, bool harmful, preference_fn pref );
 // mid-cast re-resolution ladder's fallback arm (action.cpp) both call, so the two can never drift
 // apart when the ladder gains a third arm. Sets `a->target` (via `set_target`, never a raw
 // `a->target = pick` write -- that skips the AoE target-cache invalidation), `p->target`, and both
-// weapon attacks to `pick`. Does NOT turn the player -- that stays a separate `p->face()` call at
-// each caller for this task (CR-04, a later gated task in this same quick-task plan, is what folds
-// the turn into this function too).
+// weapon attacks to `pick`. Does NOT turn the player -- no code path does anymore (R6-8,
+// 233.1-01): the turn this comment used to describe (folded into this function by 260902/cr4)
+// was deleted along with every other turn site in the engine.
 void retarget( action_t* a, player_t* p, player_t* pick );
 
 // ---------------------------------------------------------------------------------------------
