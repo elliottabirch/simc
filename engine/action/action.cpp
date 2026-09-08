@@ -1890,6 +1890,16 @@ void action_t::execute()
   }
 
   int num_targets = n_targets();
+
+  // R6-40 Hole 2 (todo 2026-09-07-thorims-priming-unguarded-execute-state-deref-and-early-
+  // return-hole.md), 233.1-02 Task 3: these four resets MUST run before the early return below --
+  // an action taking that return used to leave the PREVIOUS execute's hit counters in place
+  // (hit_any_target/num_targets_hit stale-true on a cast that hit nothing this time).
+  hit_any_target               = false;
+  crit_any_target              = false;
+  num_targets_hit              = 0;
+  interrupt_immediate_occurred = false;
+
   if ( num_targets == 0 && target->is_sleeping() )
     return;
 
@@ -1898,11 +1908,6 @@ void action_t::execute()
     sim->print_log("{} performs {} ({})",
         *player, *this, player->resources.current[ player->primary_resource() ] );
   }
-
-  hit_any_target               = false;
-  crit_any_target              = false;
-  num_targets_hit              = 0;
-  interrupt_immediate_occurred = false;
 
   if ( harmful && !player->in_combat )
     player->enter_combat();
