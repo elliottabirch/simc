@@ -435,7 +435,15 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
   // foreground actions, seed 20260821, bbpaladin_armory profile; see CR-01
   // in 200-REVIEW.md and the re-measurement in the repo's fork-repin
   // receipt). Dropping the conjunct restores the pre-200-04 boundary count.
-  if ( et == execute_type::FOREGROUND && !sim->solver_control_auto_attack_started )
+  // ACTOR GATE (2026-09-10), same reasoning as the re-arm block below. `solver_control_auto_attack_started`
+  // is SIM-level, so this one-shot is consumed by whichever `player_t` reaches the first FOREGROUND
+  // boundary of the iteration -- and pets/guardians/enemy actors all reach `choose()`. In practice
+  // the RL actor wins that race (its white damage demonstrably lands), so this gate is inert today;
+  // it is added because the block's entire purpose is to start THIS actor's swings, and a pet
+  // consuming the one-shot would silently leave the real actor with no auto-attack for the whole
+  // fight -- the exact failure the block was written to fix.
+  if ( et == execute_type::FOREGROUND && !sim->solver_control_auto_attack_started &&
+       std::strcmp( p->name(), RL_ACTOR_NAME ) == 0 && !p->is_pet() )
   {
     sim->solver_control_auto_attack_started = true;
     if ( p->main_hand_attack && p->main_hand_attack->execute_event == nullptr )
@@ -553,7 +561,28 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
   // above) -- this is not the fight's first decision boundary, so there is
   // no same-tick pull event ordering to protect; scheduling and falling
   // through to the rest of `choose()` is sufficient.
-  if ( et == execute_type::FOREGROUND && !p->is_moving() )
+  //
+  // ACTOR GATE (2026-09-10). This block sits ABOVE the CR-01 actor filter below, so before this
+  // gate existed it re-armed the swings of EVERY `player_t` reaching `choose()` -- pets, guardians
+  // and enemy actors included -- which is precisely what that filter's own comment says must not
+  // happen ("every other player_t reaching this hook (pets, guardians, enemy actors) must run its
+  // own APL unchanged").
+  //
+  // Measured cost, enhancement shaman, `patchwerk-t1-long`, one profile with only the
+  // `solver_policy=` line differing: the lightning wolves ran TWO melee chains each -- their own
+  // `auto_attack` action's, plus one armed here on every foreground boundary they took. At spawn
+  // that shows as 4 `melee` schedules for 2 wolves against the APL path's 2. While alive they
+  // landed 4 hits per tick against 2 wolves; and because only one chain is cancelled at demise,
+  // hits kept landing after the pets were dead -- from t=17.8s the solver path had ZERO wolves
+  // alive and two hits per tick for another five seconds. Over a 450 s fight: 762.4 wolf swings
+  // against the APL path's 153.1, worth 773,988 damage = 1,720 DPS = 0.91 % of the apl-full bar,
+  // credited to the agent in every net-vs-apl comparison the RL milestones have published.
+  //
+  // The predicate is the file's own `is_rl_actor` idiom, verbatim in shape (`:144`): exact string
+  // equality against RL_ACTOR_NAME -- never a prefix, which would match the actor's own pet
+  // records (the registry's `$actorNameComment` warns of exactly this) -- plus `!p->is_pet()`.
+  if ( et == execute_type::FOREGROUND && !p->is_moving() &&
+       std::strcmp( p->name(), RL_ACTOR_NAME ) == 0 && !p->is_pet() )
   {
     if ( p->main_hand_attack && p->main_hand_attack->execute_event == nullptr )
       p->main_hand_attack->schedule_execute();
