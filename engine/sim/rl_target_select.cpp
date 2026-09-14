@@ -141,7 +141,106 @@ std::vector<player_t*> g_candidate_buffer;
 // g_candidate_buffer's own reuse discipline (never reallocated once sized).
 std::vector<float> g_rules_feature_scratch;
 
+// 260914-rbp Task 1 (R9/R15): per-actor cache backing resolve_vb_lava_lash_geometry() below --
+// resolved at most once per actor (ACT-02 pattern), never once per candidate or once per
+// decision, since none of these values change during a fight.
+std::unordered_map<const player_t*, vb_lava_lash_geometry_t> g_vb_lava_lash_geometry_cache;
+
 } // anonymous namespace
+
+// 260914-rbp Task 1 (R5, HIT-INPUTS-DESIGN.md ss2.1): see rl_target_select.hpp's own declaration
+// comment for the full contract. Defined here (public linkage, outside the anonymous namespace
+// above) specifically so rl_policy_obs.cpp -- a DIFFERENT translation unit -- can call it for the
+// hits.chain_lightning direct_id scalar; g_chain_hop_stash/g_decision_stamp themselves stay
+// internal-linkage module state, read only through this accessor and chain_hop_fallback_used's
+// own sibling accessor below.
+int chain_hop_count_for_start( const action_t* resolved, const player_t* start )
+{
+  if ( resolved == nullptr || start == nullptr )
+    return 0;
+  auto slot_it = g_chain_hop_stash.find( resolved );
+  if ( slot_it == g_chain_hop_stash.end() || !slot_it->second.has_stamp )
+    return 0;
+  auto stamp_it = g_decision_stamp.find( resolved->player );
+  std::uint64_t current_stamp = ( stamp_it == g_decision_stamp.end() ) ? 0 : stamp_it->second;
+  if ( slot_it->second.stamp != current_stamp )
+    return 0;
+  auto hop_it = slot_it->second.hop_counts.find( start );
+  if ( hop_it == slot_it->second.hop_counts.end() )
+    return 0;
+  return hop_it->second;
+}
+
+// 260914-rbp Task 1 (R9/R15): see rl_target_select.hpp's own declaration comment. Public linkage
+// for the same cross-translation-unit reason as chain_hop_count_for_start above --
+// rl_policy_obs.cpp's hits.voltaic_blaze.*/hits.lava_lash.flame_shock_spread scalars need the
+// SAME resolved radius/cap this file's own per-candidate enemy_fact fields use.
+const vb_lava_lash_geometry_t& resolve_vb_lava_lash_geometry( player_t* p )
+{
+  auto found = g_vb_lava_lash_geometry_cache.find( p );
+  if ( found != g_vb_lava_lash_geometry_cache.end() )
+    return found->second;
+
+  vb_lava_lash_geometry_t geo;
+  if ( action_t* vb_damage = p->find_action( "voltaic_blaze_damage" ) )
+  {
+    // R13 (this task, sc_shaman.cpp): sets this child action's own `radius` to 10.0 -- read here
+    // BY NAME (the resolved field), never a bare literal. `aoe` is already set by hand at this
+    // action's own ctor (1 + Voltaic Blaze's effectN(4), HIT-INPUTS-DESIGN.md ss2.2(a)).
+    geo.vb_radius = vb_damage->radius;
+    geo.vb_cap    = vb_damage->aoe > 0 ? vb_damage->aoe : 0;
+  }
+  if ( action_t* lava_lash = p->find_action( "lava_lash" ) )
+    geo.lava_lash_radius = lava_lash->radius;
+  // player_t::find_talent_spell -- the SAME generic lookup player_t::create_expression's own
+  // "talent.<name>" parsing uses (player.cpp) -- resolved here rather than through an
+  // expr_t/create_expression round trip since this is a plain spell-data read, not an APL
+  // arithmetic string (RESEARCH SS B3's own reasoning against expression strings for a derived
+  // fork scalar, applied here to a talent lookup instead of a buff/cooldown arithmetic one).
+  player_talent_t molten_assault =
+      p->find_talent_spell( talent_tree::SPECIALIZATION, "molten_assault", p->specialization(), true );
+  if ( molten_assault.ok() )
+    geo.lava_lash_cap = static_cast<int>( molten_assault->effectN( 2 ).base_value() );
+
+  return g_vb_lava_lash_geometry_cache.emplace( p, geo ).first->second;
+}
+
+int count_neighbours_within_radius( player_t* caster, player_t* candidate, double radius )
+{
+  if ( radius <= 0.0 )
+    return 0;
+  int count = 0;
+  for ( player_t* other : caster->sim->target_non_sleeping_list )
+  {
+    if ( other == candidate || !other->is_enemy() )
+      continue;
+    if ( candidate->get_player_distance( *other ) <= radius + other->combat_reach )
+      ++count;
+  }
+  return count;
+}
+
+int count_new_flame_shock_neighbours( player_t* caster, player_t* candidate, double radius, int cap )
+{
+  if ( radius <= 0.0 || cap <= 0 )
+    return 0;
+  int count = 0;
+  for ( player_t* other : caster->sim->target_non_sleeping_list )
+  {
+    if ( other == candidate || !other->is_enemy() )
+      continue;
+    if ( candidate->get_player_distance( *other ) > radius + other->combat_reach )
+      continue;
+    // Q6 (rulings, HIT-INPUTS-DESIGN.md ss2.5): caster-filtered -- THIS actor's own Flame Shock,
+    // the SAME find_dot("flame_shock", caster) idiom build_enemy_fact's own flame_shock_remaining
+    // field already uses (WR-04, non-allocating).
+    dot_t* fs = other->find_dot( "flame_shock", caster );
+    if ( fs && fs->is_ticking() )
+      continue;
+    ++count;
+  }
+  return std::min( cap, count );
+}
 
 bool generic_filter( const action_t* a, player_t* candidate, bool harmful )
 {
@@ -263,6 +362,20 @@ enemy_fact build_enemy_fact( const action_t* a, player_t* candidate )
   if ( dot_t* ruf = candidate->find_dot( "rune_of_unleashed_fire_lingering", a->player ) )
     f.rune_of_unleashed_fire_lingering_remaining = ruf->remains().total_seconds();
 
+  // 260914-rbp Task 1 Step 6 (R15, rulings Q16): the targeting-lens fields -- see enemy_fact's
+  // own per-field comments (rl_target_select.hpp) for exactly what each counts and why the
+  // ordering is fixed. Computed for EVERY caller (this is the FULL builder, "every field
+  // filled" per this function's own header comment), unlike build_enemy_fact_for_scoring's own
+  // pref-conditional lite computation below.
+  f.chain_hop_count = ( a->name_str == "chain_lightning" ) ? chain_hop_count_for_start( a, candidate ) : 0;
+  {
+    const vb_lava_lash_geometry_t& geo = resolve_vb_lava_lash_geometry( a->player );
+    f.vb_new_flame_shocks_within_10yd =
+        count_new_flame_shock_neighbours( a->player, candidate, geo.vb_radius, geo.vb_cap );
+    f.lava_lash_spread_within_12yd =
+        count_new_flame_shock_neighbours( a->player, candidate, geo.lava_lash_radius, geo.lava_lash_cap );
+  }
+
   return f;
 }
 
@@ -375,6 +488,17 @@ enemy_fact build_enemy_fact_for_scoring( const action_t* a, player_t* candidate,
   {
     dot_t* fs = candidate->find_dot( "flame_shock", a->player );  // WR-04
     f.flame_shock_remaining = fs ? fs->remains().total_seconds() : 0.0;
+
+    // 260914-rbp Task 1 Step 6 (R15, rulings Q16): only the ONE new targeting-lens field the
+    // DISPATCHED preference actually reads -- WR-05's own "skip what the dispatched preference
+    // doesn't need" discipline, applied here exactly like flame_shock_remaining just above.
+    const vb_lava_lash_geometry_t& geo = resolve_vb_lava_lash_geometry( a->player );
+    if ( pref == preference_voltaic_blaze )
+      f.vb_new_flame_shocks_within_10yd =
+          count_new_flame_shock_neighbours( a->player, candidate, geo.vb_radius, geo.vb_cap );
+    else  // preference_lava_lash
+      f.lava_lash_spread_within_12yd =
+          count_new_flame_shock_neighbours( a->player, candidate, geo.lava_lash_radius, geo.lava_lash_cap );
   }
 
   // BL-01 (232-13) / ME-4 (232-15b): the neighbour count is computed at the MODELLED spell's own
@@ -519,6 +643,26 @@ void fill_candidate_features( const action_t*, const enemy_fact& fact, float* ou
   out[ i++ ] = static_cast<float>( fact.venomfang_debuff_stacks );
   out[ i++ ] = static_cast<float>( fact.venomfang_debuff_remaining );
   out[ i++ ] = static_cast<float>( fact.rune_of_unleashed_fire_lingering_remaining );
+
+  // 260914-rbp Task 1 Step 6a (R15): the three NEW targeting-lens features (enemy_fact's own
+  // trailing fields, added this task -- see that struct's declaration comment). Bounds-guarded
+  // against `out` -- RL_TARGET_FEATURES (rl_policy_constants.h) is a GENERATED constant this
+  // task deliberately does NOT hand-edit (Task 2 of this plan's batch regenerates it 20 -> 23
+  // alongside the registry); until that regen lands, every existing caller still sizes `out` to
+  // the OLD width 20 (g_rules_feature_scratch, the candidate_block_slot::features vector, the
+  // loaded scorer's own feature_scratch), and an unguarded write here would silently overrun
+  // that buffer on every `capture_block` call in select() -- MEASURED as a live, every-decision
+  // path (233.1-03), never merely a scorer-only one. The guard is a no-op the instant
+  // RL_TARGET_FEATURES becomes 23; the trailing assert below still fires in a DEBUG build for
+  // the whole window, exactly as intended (Rule 2 auto-fix -- see this plan's own SUMMARY for
+  // the deviation this guard closes).
+  if ( i < RL_TARGET_FEATURES ) out[ i ] = static_cast<float>( fact.chain_hop_count );
+  ++i;
+  if ( i < RL_TARGET_FEATURES ) out[ i ] = static_cast<float>( fact.vb_new_flame_shocks_within_10yd );
+  ++i;
+  if ( i < RL_TARGET_FEATURES ) out[ i ] = static_cast<float>( fact.lava_lash_spread_within_12yd );
+  ++i;
+
   assert( i == RL_TARGET_FEATURES &&
           "fill_candidate_features's fill order does not match RL_TARGET_FEATURES" );
 }
@@ -1145,30 +1289,48 @@ double preference_shortest_time_to_die( const action_t* a, const enemy_fact& fac
 
 double preference_lava_lash( const action_t* a, const enemy_fact& fact )
 {
-  // OR-1 (owner ruling 2026-09-02, 228-04 Task 1 Step 0c(b)): the carrier clause is UNCHANGED --
-  // among Flame Shock carriers in reach the shortest remaining wins (offset above every
-  // non-carrier so carriers are always preferred), copying the STRUCTURE of
-  // shortest_duration_target() (sc_shaman.cpp:6877-6911). The non-carrier fallback now CALLS the
-  // flipped base preference (`preference_shortest_time_to_die`) rather than re-implementing the
-  // ordering (D-03: no third copy of any rule) -- but the base's own dominance offset (1.0e9)
-  // means its outlives-the-cast branch can itself approach 1.0e9 (as time_to_die -> 0), so the
-  // carrier branch's offset is raised to 2.0e9 (a full 1.0e9 above the base's ceiling) to keep
-  // the two ranges provably disjoint: carrier ranges over roughly
-  // [2.0e9 - flame_shock_duration, 2.0e9], the base's return value never reaches 1.0e9, so
-  // carrier always outranks non-carrier regardless of how short flame_shock_remaining or
-  // time_to_die get (re-checked, not assumed -- both ranges are written out in
-  // 228-SCHEMA-RECEIPT.md).
+  // NEW (260914-rbp Task 1 Step 6b, rulings Q16/R15): among Flame Shock carriers, the carrier
+  // whose OWN 12-yd spread would plant the MOST new Flame Shocks
+  // (enemy_fact::lava_lash_spread_within_12yd) wins; tie-break SHORTEST remaining -- kept from
+  // the OLD rule (below) so among equally-good spreads the more urgent refresh still wins.
+  // Carriers still dominate non-carriers via the SAME 2.0e9 offset the OLD rule used; the extra
+  // 1.0e12-per-spread-unit term sits far enough above that offset that ordering is decided by
+  // spread count FIRST, remaining SECOND, for any realistic spread count (single digits) --
+  // re-checked, not assumed: 1.0e12 * 1 already dwarfs the ENTIRE 2.0e9 carrier range. Non-carrier
+  // fallback UNCHANGED (calls the SAME flipped base preference, D-03: no third copy of any rule).
+  //
+  // OLD rule (superseded 260914-rbp, kept here for the record): among Flame Shock carriers in
+  // reach the shortest remaining wins (offset above every non-carrier so carriers are always
+  // preferred), copying the STRUCTURE of shortest_duration_target() (sc_shaman.cpp:6877-6911) --
+  // `return fact.flame_shock_remaining > 0.0 ? 2.0e9 - fact.flame_shock_remaining :
+  // preference_shortest_time_to_die( a, fact );`.
   if ( fact.flame_shock_remaining > 0.0 )
-    return 2.0e9 - fact.flame_shock_remaining;
+  {
+    double primary = static_cast<double>( fact.lava_lash_spread_within_12yd ) * 1.0e12;
+    return primary + ( 2.0e9 - fact.flame_shock_remaining );
+  }
   return preference_shortest_time_to_die( a, fact );
 }
 
 double preference_voltaic_blaze( const action_t*, const enemy_fact& fact )
 {
-  // Without Flame Shock outranks with it (offset), ordered by longest-lived within each group --
-  // if every candidate carries Flame Shock this still returns the longest-lived carrier, never
-  // "invalid" (the same reason the always-legal wait exists).
-  return ( fact.flame_shock_remaining <= 0.0 ? 1.0e9 : 0.0 ) + fact.time_to_die;
+  // NEW (260914-rbp Task 1 Step 6b, rulings Q16/R15): the candidate whose OWN 10-yd cleave would
+  // plant the MOST new Flame Shocks (enemy_fact::vb_new_flame_shocks_within_10yd) wins; the OLD
+  // rule's own no-carrier-first dominance clause is KEPT as the tie-break's SECOND key (so a
+  // fully-dotted pack, where every candidate reads 0 new Flame Shocks, still separates on
+  // carrier state rather than collapsing to an arbitrary tie); longest-lived is the tie-break's
+  // THIRD/final key. The 1.0e12-per-new-Flame-Shock primary term dwarfs the 1.0e9 dominance
+  // clause and the <=600s time_to_die term for any realistic count, so ordering is decided by
+  // new-Flame-Shock count FIRST, carrier state SECOND, longest-lived THIRD.
+  //
+  // OLD rule (superseded 260914-rbp, kept here for the record): without Flame Shock outranks
+  // with it (offset), ordered by longest-lived within each group -- if every candidate carries
+  // Flame Shock this still returns the longest-lived carrier, never "invalid" (the same reason
+  // the always-legal wait exists) -- `return (fact.flame_shock_remaining <= 0.0 ? 1.0e9 : 0.0) +
+  // fact.time_to_die;`.
+  double primary   = static_cast<double>( fact.vb_new_flame_shocks_within_10yd ) * 1.0e12;
+  double dominance = ( fact.flame_shock_remaining <= 0.0 ? 1.0e9 : 0.0 );
+  return primary + dominance + fact.time_to_die;
 }
 
 double preference_chain_lightning( const action_t* a, const enemy_fact& fact )

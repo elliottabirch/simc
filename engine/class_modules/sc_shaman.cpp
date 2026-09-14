@@ -10288,6 +10288,23 @@ struct voltaic_blaze_t : public shaman_spell_t
       background = dual = true;
       stats = player->get_stats( "voltaic_blaze" );
       aoe = 1 + as<int>( player->talent.voltaic_blaze->effectN( 4 ).base_value() );
+
+      // 260914-rbp Task 1 Step 5 (R13, rulings Q10): Voltaic Blaze's 10-yd cleave radius is not
+      // implemented anywhere in this action -- talent 470057's own effects are all Dummy/Energize
+      // Power (HIT-INPUTS-DESIGN.md ss A.9), so `action_t::radius` never resolves it from spell
+      // data the way `chained_base_t`'s ctor resolves Chain Lightning's own 10-yd jump radius
+      // (sc_shaman.cpp:6566). Without this line, `check_distance_targeting`'s last branch prunes
+      // by `range` (40yd) from the PLAYER instead -- i.e. this action cleaves any 6 enemies within
+      // 40 yd of the player, ignoring the 10-yd radius around the TARGET the spell describes.
+      // Set here BY NAME from spell 470057's own effect #1 ("Radius: 0 - 10 yards"), the same
+      // "resolved by name, never a bare literal" discipline every other geometry constant in this
+      // batch follows -- 470057 declares no `radius_max()`-bearing effect this ctor's own
+      // `find_spell`/`data()` machinery could read automatically (the effect is Dummy), so this
+      // is a deliberate, hand-set fidelity fix, not a magic number: the value IS the cited spell's
+      // own tooltip radius, just not one `action_t::init()` can parse off it unassisted. Changes
+      // the sim's OWN mechanics (the bars are re-cut on this binary later, per this batch's own
+      // sequencing -- expected, not a regression).
+      radius = 10.0;
     }
 
     double composite_target_crit_chance( player_t* /* t */ ) const override

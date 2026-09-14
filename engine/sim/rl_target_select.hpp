@@ -72,7 +72,70 @@ struct enemy_fact
   int       venomfang_debuff_stacks = 0;      // trinket-sourced buff (source == a->player)
   double    venomfang_debuff_remaining = 0.0;
   double    rune_of_unleashed_fire_lingering_remaining = 0.0;  // omnium-sourced dot (source == a->player)
+
+  // 260914-rbp Task 1 Step 6 (R15, rulings Q16): the targeting-lens fields -- per-candidate
+  // counts the dormant Phase-230 scorer's own feature contract (fill_candidate_features,
+  // rl_target_select.cpp) did not carry before this task, appended in EXACTLY this order (never
+  // inserted mid-struct -- that would silently reorder every existing scorer feature index).
+  // `chain_hop_count` reads 0 for every caller OTHER than chain_lightning's own build_enemy_fact
+  // call (HIT-INPUTS-DESIGN.md ss2.1's "no pick => 0" contract, applied here to "not a chain
+  // caller => 0"); the other two are computed for EVERY candidate regardless of the calling
+  // action `a` -- they are properties of the CANDIDATE relative to this actor's own Voltaic
+  // Blaze / Lava Lash geometry, not of `a`.
+  int       chain_hop_count                 = 0;  // this candidate's OWN greedy chain-hop count, treated as the walk's START (compute_chain_hop_counts, read via the SAME per-decision stash preference_chain_lightning reads -- chain_hop_count_for_start, below)
+  int       vb_new_flame_shocks_within_10yd = 0;  // enemies within Voltaic Blaze's own resolved cleave radius (+reach) of THIS candidate that lack this actor's Flame Shock, capped at the cleave's own resolved aoe -- HIT-INPUTS-DESIGN.md ss2.2(b)'s formula, centred on the candidate instead of the stamped pick
+  int       lava_lash_spread_within_12yd    = 0;  // enemies within Lava Lash's own resolved spread radius (+reach) of THIS candidate that lack this actor's Flame Shock, capped at Molten Assault's own resolved spread cap, 0 unless talent.molten_assault.ok() -- HIT-INPUTS-DESIGN.md ss2.3's lava_lash formula, centred on the candidate
 };
+
+// 260914-rbp Task 1 (R5, HIT-INPUTS-DESIGN.md ss2.1): reads the SAME per-decision greedy
+// chain-hop stash preference_chain_lightning() itself reads (RULE-02, rl_target_select.cpp) for
+// ONE specific start candidate -- the stamped PICK a targeted-action observation leaf
+// (hits.chain_lightning) needs, and the per-candidate enemy_fact::chain_hop_count field above,
+// never a fresh compute_chain_hop_counts() walk (D-20: the stash IS the walk, filled once per
+// decision by select()'s own pref==preference_chain_lightning branch every decision
+// read_action_gate_bits calls fill_pick() for the registry's chain_lightning token). Returns 0
+// when no stash entry is current for `resolved` this decision (a stale or never-filled stash) or
+// `start` has no entry in it -- the SAME "no pick => 0" contract every hits.* leaf's own binding
+// comment documents, never a fallback to the retired neighbour-count approximation
+// preference_chain_lightning uses internally for ITS OWN staleness case (an observation leaf
+// reporting a stale value would be worse than reporting 0).
+int chain_hop_count_for_start( const action_t* resolved, const player_t* start );
+
+// 260914-rbp Task 1 (R9/R15): the Voltaic Blaze cleave / Lava Lash spread geometry this file's
+// own per-candidate targeting-lens fields (enemy_fact::vb_new_flame_shocks_within_10yd/
+// lava_lash_spread_within_12yd) and rl_policy_obs.cpp's own hits.voltaic_blaze.*/
+// hits.lava_lash.flame_shock_spread direct_id scalars BOTH need -- resolved BY NAME from spell
+// data (VB cleave radius/cap: voltaic_blaze_damage's own resolved radius/aoe, set by R13/hand
+// respectively; Lava Lash spread radius: lava_lash's own resolved radius; Lava Lash spread cap:
+// Molten Assault's own resolved effectN(2)), ONE definition shared by both callers (D-20's "no
+// second copy" rule, applied across the module boundary). Cached per-actor (ACT-02 pattern,
+// mirrors rl_policy_obs.cpp's g_action_handle_cache) since none of these values change during a
+// fight -- resolved at most once per actor, never once per candidate or once per decision.
+struct vb_lava_lash_geometry_t
+{
+  double vb_radius        = 0.0;  // voltaic_blaze_damage's own resolved radius (0 until R13 lands, or if untalented -- the action does not exist)
+  int    vb_cap           = 0;    // voltaic_blaze_damage's own resolved aoe (0 if untalented/unresolved)
+  double lava_lash_radius = 0.0;  // lava_lash's own resolved radius (12.0)
+  int    lava_lash_cap    = 0;    // Molten Assault's own resolved effectN(2), 0 unless talent.molten_assault.ok()
+};
+const vb_lava_lash_geometry_t& resolve_vb_lava_lash_geometry( player_t* p );
+
+// 260914-rbp Task 1 (R9): counts live enemies within `radius` (+ candidate's own combat_reach) of
+// `candidate` -- the SAME inequality convention build_enemy_fact's own neighbours_within_radius
+// already uses (`dist <= radius + other->combat_reach`), exposed here so the pick-centred
+// hits.voltaic_blaze.cleave scalar (rl_policy_obs.cpp) and this file's own per-candidate geometry
+// share ONE walk rather than two. 0 when radius <= 0.0 (an untalented/unresolved action).
+int count_neighbours_within_radius( player_t* caster, player_t* candidate, double radius );
+
+// 260914-rbp Task 1 (R9): counts live enemies within `radius` (+ combat_reach) of `candidate`
+// that LACK `caster`'s own Flame Shock (candidate->find_dot("flame_shock", caster) -- the SAME
+// caster-filtered read rl_target_select.cpp's own build_enemy_fact::flame_shock_remaining
+// already uses, rulings Q6), clamped at `cap`. Shared by every Flame-Shock-dependent geometry
+// leaf this task adds (Voltaic Blaze's new-Flame-Shocks count, Lava Lash's spread count, both
+// the per-candidate enemy_fact fields above and rl_policy_obs.cpp's own hits.* direct_id
+// scalars) -- ONE definition, per D-20. 0 when radius <= 0.0 or cap <= 0 (an untalented/
+// unresolved geometry source).
+int count_new_flame_shock_neighbours( player_t* caster, player_t* candidate, double radius, int cap );
 
 // The four-clause generic filter (D-09), checked in the SAME order action_t::target_ready checks
 // them (alive, immune-while-harmful, reach, front) -- generic_filter and target_ready must never
