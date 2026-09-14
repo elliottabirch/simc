@@ -837,12 +837,6 @@ enum class direct_id
   fw_enemies_in_front, fw_flame_shock_carrier_count, fw_soonest_time_to_die,
   fw_longest_time_to_die, fw_dying_within_5s, fw_dying_within_15s, fw_nearest_enemy_distance,
   fw_immunity_in, fw_immunity_remaining,
-  // 260913-vv8 stage B (SW1 "stackwin"): two derived crash_lightning-stack scalars, computed in
-  // build_obs from the SAME crash_lightning buff_t*/strike cooldown_t* handles slots 10/11/49
-  // already bind at bind time (RESEARCH §B4/§F4 -- never a fresh p->buff_list/p->cooldown_list
-  // name scan, never a create_expression round-trip on an arithmetic string, which
-  // player_t::create_expression cannot parse -- it is a name resolver, not an arithmetic parser).
-  cl_stack_window, cl_strikes_in_window,
   // 260914-rbp Task 1 (R5/R7/R9, HIT-INPUTS-DESIGN.md §2, rulings §B): the seven per-ability
   // "how many targets will this hit" scalars -- geometry only, never SimC's own target_list()/
   // chain resolver (memo §B.3's HARD constraint). Every one reads 0 when no pick is stamped for
@@ -850,22 +844,23 @@ enum class direct_id
   // `lookup_status::absent` -- these are always-answerable counts, not facts about a pick that
   // may not exist. NAMING NOTE for Task 2 (the registry/generator, a DIFFERENT file set): these
   // seven belong to the `scalars` pseudo-family (rl_family_kind::scalar) exactly like
-  // `active_enemies`/`cl_stack_window` above, dispatched here via `direct_id` -- their registry
-  // `source` string must resolve to a BARE scalar leaf name equal to the literal strings
-  // resolve_scalar_leaf (below) strcmp's against, even though four of the seven contain a `.`
-  // (gen_rl_constants.py's own `_split_source_by_family` splits any `family.member.leaf` string
-  // on `.` and expects a KNOWN family for the first segment -- "hits" is not one of the declared
-  // `rl_family` entries in rl_policy_constants.h, RL_OBS_FAMILIES -- so Task 2 must either treat
-  // these seven source strings as opaque/bare despite the dot, or extend that split function's
-  // own bare-name detection; this is Task 2's decision to make, not pre-empted here).
+  // `active_enemies`/`raid_event_next_in` above, dispatched here via `direct_id` -- their
+  // registry `source` string must resolve to a BARE scalar leaf name equal to the literal
+  // strings resolve_scalar_leaf (below) strcmp's against, even though four of the seven contain
+  // a `.` (gen_rl_constants.py's own `_split_source_by_family` splits any `family.member.leaf`
+  // string on `.` and expects a KNOWN family for the first segment -- "hits" is not one of the
+  // declared `rl_family` entries in rl_policy_constants.h, RL_OBS_FAMILIES -- so Task 2 must
+  // either treat these seven source strings as opaque/bare despite the dot, or extend that split
+  // function's own bare-name detection; this is Task 2's decision to make, not pre-empted here).
   hits_chain_lightning, hits_tempest, hits_crash_lightning,
   hits_lava_lash_flame_shock_spread, hits_voltaic_blaze_cleave, hits_voltaic_blaze_new_flame_shocks,
   hits_fire_nova,
   // 260914-rbp Task 1 (R14, rulings §B/Q13, DEC-038): the two engine scalars DEC-038 item 2
   // requires for an ASYNCHRONOUS stacking buff -- next-expiry and the stack-seconds sum, read off
   // `buff_t::expiration` (one event per live stack, oldest first) rather than the retired
-  // stacks*newest-remains product `cl_stack_window`/`cl_strikes_in_window` compute. Both read 0
-  // on a build where crash_lightning's own `stack_behavior` is NOT ASYNCHRONOUS (no Storm
+  // stacks*newest-remains product the (now-removed, R1) `crash_lightning_stack_window`/
+  // `crash_lightning_strikes_in_window` scalars used to compute. Both read 0 on a build where
+  // crash_lightning's own `stack_behavior` is NOT ASYNCHRONOUS (no Storm
   // Unleashed 1) -- documented at each build_obs case below.
   crash_lightning_next_expiry, crash_lightning_stack_seconds
 };
@@ -1163,26 +1158,16 @@ slot_binding resolve_scalar_leaf( const rl_leaf_desc& leaf )
     b.direct = direct_id::time_to_bloodlust;
     return b;
   }
-  if ( std::strcmp( leaf.leaf, "crash_lightning_stack_window" ) == 0 )
-  {
-    // 260913-vv8 stage B (SW1 "stackwin"): stacks * remains(seconds) -- computed in build_obs
-    // off the SAME crash_lightning buff_t* handle slots 10/11 already bind, never through
-    // create_expression (RESEARCH §B3: a SimC arithmetic string like
-    // "buff.crash_lightning.stack*buff.crash_lightning.remains" is not parseable by
-    // player_t::create_expression, a name resolver -- it would silently encode 0.0).
-    b.kind = slot_binding_kind::direct;
-    b.direct = direct_id::cl_stack_window;
-    return b;
-  }
-  if ( std::strcmp( leaf.leaf, "crash_lightning_strikes_in_window" ) == 0 )
-  {
-    // 260913-vv8 stage B (SW1 "stackwin"): charges_fractional(strike) + max(0, cl_remains -
-    // strike_recharge_time) / strike_duration, guarded duration<=0 -- computed in build_obs off
-    // the SAME strike cooldown_t*/crash_lightning buff_t* handles slots 49/10-11 already bind.
-    b.kind = slot_binding_kind::direct;
-    b.direct = direct_id::cl_strikes_in_window;
-    return b;
-  }
+  // 260914-rbp Task 1 Step 2 (R1, rulings §B): crash_lightning_stack_window's/
+  // crash_lightning_strikes_in_window's own resolve_scalar_leaf branches (and the
+  // direct_id::cl_stack_window/cl_strikes_in_window enumerators + build_obs cases they bound
+  // to) are REMOVED here -- DEC-038's synchronous-reading-of-an-asynchronous-buff defect
+  // (README.md:456, ~2.6x stack-seconds over-count); superseded by
+  // direct_id::crash_lightning_next_expiry/crash_lightning_stack_seconds (R14, above), the
+  // engine-side scalars DEC-038 item 2 actually asks for. This removal is its OWN commit
+  // (separately revertable from the rest of this task, per the rulings' own conditional-keep
+  // clause: "inside SW1's seed spread -> drop; worse on >= 2/3 seeds -> keep until R14's
+  // scalars replace them").
   // 260914-rbp Task 1 (R5/R7/R9): the seven hits.* scalars -- see direct_id::hits_chain_lightning's
   // own enum-declaration comment above for the naming note Task 2 (registry/generator) must
   // resolve before these can be wired to a slot. Every case below is resolved fresh, once per
@@ -2861,70 +2846,10 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
               status = lookup_status::present;
               break;
 
-            // 260913-vv8 stage B (SW1 "stackwin"): stacks * remains(seconds), 0 when the buff is
-            // down. Reads the SAME crash_lightning buff_t* handle slots 10/11
-            // (player_buffs.crash_lightning.{stacks,remains}) already bind at bind time via
-            // `t.bindings[10].buff` -- slots 10 and 11 share one member scan (bind_slots'
-            // "resolve ONCE per member" discipline), so this is not a second name lookup.
-            case direct_id::cl_stack_window:
-            {
-              buff_t* cl_buff = t.bindings[ 10 ].buff;
-              double stacks = 0.0;
-              double remains_s = 0.0;
-              if ( cl_buff != nullptr && cl_buff->check() > 0 )
-              {
-                stacks = static_cast<double>( cl_buff->check() );
-                const timespan_t remains = cl_buff->remains();
-                remains_s = ( remains == timespan_t::min() ) ? 0.0 : remains.total_seconds();
-              }
-              raw = stacks * remains_s;
-              status = lookup_status::present;
-              break;
-            }
-
-            // 260913-vv8 stage B (SW1 "stackwin"): charges_fractional(strike) + max(0,
-            // cl_remains - strike_recharge_time) / strike_duration, guarded duration<=0 -> just
-            // charges_fractional. Reads the SAME strike cooldown_t* handle slot 49
-            // (cooldowns.strike.charges_fractional) already binds via `t.bindings[49].cooldown`
-            // (`cooldown.strike` is the shared Stormstrike/Windstrike row, sc_shaman.cpp:
-            // 5638-5643) and the same crash_lightning buff_t* handle as cl_stack_window above --
-            // never a fresh p->cooldown_list name scan (RESEARCH §F4: a mistyped
-            // `cooldown.<name>` expression fabricates a live-but-meaningless placeholder cooldown
-            // rather than throwing, so this reads the pre-bound handle instead of any name
-            // string). `strike_recharge_time` mirrors slot 51's own
-            // cooldown_leaf_kind::recharge_time compute exactly (recharge_event->remains(), 0.0
-            // if not recharging) so this feature and slot 51 never disagree on what "recharge
-            // time" means for this cooldown.
-            case direct_id::cl_strikes_in_window:
-            {
-              cooldown_t* strike_cd = t.bindings[ 49 ].cooldown;
-              if ( strike_cd == nullptr )
-              {
-                raw = 0.0;
-              }
-              else
-              {
-                const double charges_fractional = strike_cd->charges_fractional();
-                buff_t* cl_buff = t.bindings[ 10 ].buff;
-                double cl_remains_s = 0.0;
-                if ( cl_buff != nullptr && cl_buff->check() > 0 )
-                {
-                  const timespan_t remains = cl_buff->remains();
-                  cl_remains_s = ( remains == timespan_t::min() ) ? 0.0 : remains.total_seconds();
-                }
-                const double strike_recharge_time_s = strike_cd->recharge_event
-                    ? strike_cd->recharge_event->remains().total_seconds() : 0.0;
-                const double strike_duration_s = strike_cd->duration.total_seconds();
-                double extra = 0.0;
-                if ( strike_duration_s > 0.0 )
-                {
-                  extra = std::max( 0.0, cl_remains_s - strike_recharge_time_s ) / strike_duration_s;
-                }
-                raw = charges_fractional + extra;
-              }
-              status = lookup_status::present;
-              break;
-            }
+            // 260914-rbp Task 1 Step 2 (R1, rulings §B): direct_id::cl_stack_window's and
+            // direct_id::cl_strikes_in_window's own build_obs cases (stacks*newest-remains and
+            // its cooldown-derived sibling) are REMOVED here -- see the resolve_scalar_leaf
+            // removal comment above for the full rationale; this removal is its own commit.
 
             // 260914-rbp Task 1 (R5, HIT-INPUTS-DESIGN.md §2.1): the stamped pick's own greedy
             // chain-hop count (radius 10.0, cap 3/5, both resolved BY NAME through
