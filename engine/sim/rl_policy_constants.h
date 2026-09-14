@@ -104,7 +104,7 @@ inline constexpr std::size_t RL_ACTION_DIM = 20;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
-inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:9da0dcc712f986d92dc77e6cd52f7dbe1eb5fbd1c60cd7a65305d8c818d206c7";
+inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:94e80e6393d9e99bcb2b671d6ffa67aeea7c07256bc63c72eb950dc30330c545";
 inline constexpr const char* RL_MASK_RULES_SHA = "3f930294d36b217dca01fc51600c0da9d0568e20152fb53c588b6e8ddccf7662";
 inline constexpr const char* RL_ACTION_SPACE_SHA = "b9c219883e8ea75c0e9e04d2ecb74c04bc8682756d2b90435f5c964e1732f89a";
 
@@ -405,7 +405,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_6[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 8.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_7[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 20.0, false, 1.0, nullptr, 0, false },
+    { "stacks", rl_kind::k_int, 0.0, true, 6.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 12.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_8[] = {
@@ -530,7 +530,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_3[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_4[] = {
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_5[] = {
     { "charges_fractional", rl_kind::k_float, 2.0, true, 2.0, false, 1.0, nullptr, 0, false },
@@ -980,7 +980,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "soonest_time_to_die", rl_kind::k_seconds, 0.0, false, 1.0, true, 600.0, nullptr, 0, false },
     { "reserved_next_wave_size", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
     { "reserved_lifetime_class", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
-    { "crash_lightning_stack_window", rl_kind::k_seconds, 0.0, false, 1.0, true, 240.0, nullptr, 0, false },
+    { "crash_lightning_stack_window", rl_kind::k_seconds, 0.0, false, 1.0, true, 72.0, nullptr, 0, false },
     { "crash_lightning_strikes_in_window", rl_kind::k_seconds, 0.0, false, 1.0, true, 4.0, nullptr, 0, false },
 };
 inline constexpr rl_obs_member RL_OBS_FAMILY_SCALARS_MEMBERS[] = {
