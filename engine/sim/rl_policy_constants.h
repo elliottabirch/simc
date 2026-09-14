@@ -98,13 +98,13 @@ struct rl_talent_gate
 
 inline constexpr const char* RL_REGISTRY_ID = "enhancement";
 inline constexpr const char* RL_ACTOR_NAME = "MID2_Shaman_Enhancement_Stormbringer";
-inline constexpr int RL_ENCODER_VERSION = 5;
-inline constexpr std::size_t RL_OBS_DIM = 263;
+inline constexpr int RL_ENCODER_VERSION = 6;
+inline constexpr std::size_t RL_OBS_DIM = 265;
 inline constexpr std::size_t RL_ACTION_DIM = 20;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
-inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v5:18c287bc3ac63cd5df2e501be5ce11eac89a26fbf36d6adbd48e1cba7a5fa104";
+inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:2927eafee13a4b0fc8b193aa61a443cee1b38e9d29d7cb0d39957e40f83f454b";
 inline constexpr const char* RL_MASK_RULES_SHA = "3f930294d36b217dca01fc51600c0da9d0568e20152fb53c588b6e8ddccf7662";
 inline constexpr const char* RL_ACTION_SPACE_SHA = "b9c219883e8ea75c0e9e04d2ecb74c04bc8682756d2b90435f5c964e1732f89a";
 
@@ -374,6 +374,8 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "soonest_time_to_die",
   "reserved_next_wave_size",
   "reserved_lifetime_class",
+  "crash_lightning_stack_window",
+  "crash_lightning_strikes_in_window",
 };
 
 // ---- Per-family observation tables ----
@@ -403,7 +405,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_6[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 8.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_7[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 20.0, false, 1.0, nullptr, 0, false },
+    { "stacks", rl_kind::k_int, 0.0, true, 4.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 12.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_8[] = {
@@ -978,9 +980,11 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "soonest_time_to_die", rl_kind::k_seconds, 0.0, false, 1.0, true, 600.0, nullptr, 0, false },
     { "reserved_next_wave_size", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
     { "reserved_lifetime_class", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "crash_lightning_stack_window", rl_kind::k_seconds, 0.0, false, 1.0, true, 48.0, nullptr, 0, false },
+    { "crash_lightning_strikes_in_window", rl_kind::k_seconds, 0.0, false, 1.0, true, 4.0, nullptr, 0, false },
 };
 inline constexpr rl_obs_member RL_OBS_FAMILY_SCALARS_MEMBERS[] = {
-  { "", "", RL_OBS_FAMILY_SCALARS_LEAVES_0, 19 },
+  { "", "", RL_OBS_FAMILY_SCALARS_LEAVES_0, 21 },
 };
 
 inline constexpr std::size_t RL_OBS_FAMILY_COUNT = 12;
@@ -997,7 +1001,7 @@ inline constexpr rl_obs_family RL_OBS_FAMILIES[RL_OBS_FAMILY_COUNT] = {
   { rl_family::raid_events, "raid_events", rl_family_kind::expression, false, RL_OBS_FAMILY_RAID_EVENTS_MEMBERS, 2, 212, 10 },
   { rl_family::legality, "legality", rl_family_kind::legality, false, RL_OBS_FAMILY_LEGALITY_MEMBERS, 20, 222, 20 },
   { rl_family::proc_chances, "proc_chances", rl_family_kind::proc_chance, false, RL_OBS_FAMILY_PROC_CHANCES_MEMBERS, 2, 242, 2 },
-  { rl_family::scalars, "scalars", rl_family_kind::scalar, true, RL_OBS_FAMILY_SCALARS_MEMBERS, 1, 244, 19 },
+  { rl_family::scalars, "scalars", rl_family_kind::scalar, true, RL_OBS_FAMILY_SCALARS_MEMBERS, 1, 244, 21 },
 };
 
 // ---- Action descriptors ----

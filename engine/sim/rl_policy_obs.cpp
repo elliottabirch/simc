@@ -836,7 +836,13 @@ enum class direct_id
   fw_enemies_total, fw_enemies_in_melee, fw_enemies_within_8yd, fw_enemies_within_40yd,
   fw_enemies_in_front, fw_flame_shock_carrier_count, fw_soonest_time_to_die,
   fw_longest_time_to_die, fw_dying_within_5s, fw_dying_within_15s, fw_nearest_enemy_distance,
-  fw_immunity_in, fw_immunity_remaining
+  fw_immunity_in, fw_immunity_remaining,
+  // 260913-vv8 stage B (SW1 "stackwin"): two derived crash_lightning-stack scalars, computed in
+  // build_obs from the SAME crash_lightning buff_t*/strike cooldown_t* handles slots 10/11/49
+  // already bind at bind time (RESEARCH §B4/§F4 -- never a fresh p->buff_list/p->cooldown_list
+  // name scan, never a create_expression round-trip on an arithmetic string, which
+  // player_t::create_expression cannot parse -- it is a name resolver, not an arithmetic parser).
+  cl_stack_window, cl_strikes_in_window
 };
 
 // rl_family_kind::cooldown's own `direct`-style dispatch (220-05 Task 2):
@@ -1130,6 +1136,26 @@ slot_binding resolve_scalar_leaf( const rl_leaf_desc& leaf )
     // create_expression, mirroring raid_event_next_in's own direct dispatch.
     b.kind = slot_binding_kind::direct;
     b.direct = direct_id::time_to_bloodlust;
+    return b;
+  }
+  if ( std::strcmp( leaf.leaf, "crash_lightning_stack_window" ) == 0 )
+  {
+    // 260913-vv8 stage B (SW1 "stackwin"): stacks * remains(seconds) -- computed in build_obs
+    // off the SAME crash_lightning buff_t* handle slots 10/11 already bind, never through
+    // create_expression (RESEARCH §B3: a SimC arithmetic string like
+    // "buff.crash_lightning.stack*buff.crash_lightning.remains" is not parseable by
+    // player_t::create_expression, a name resolver -- it would silently encode 0.0).
+    b.kind = slot_binding_kind::direct;
+    b.direct = direct_id::cl_stack_window;
+    return b;
+  }
+  if ( std::strcmp( leaf.leaf, "crash_lightning_strikes_in_window" ) == 0 )
+  {
+    // 260913-vv8 stage B (SW1 "stackwin"): charges_fractional(strike) + max(0, cl_remains -
+    // strike_recharge_time) / strike_duration, guarded duration<=0 -- computed in build_obs off
+    // the SAME strike cooldown_t*/crash_lightning buff_t* handles slots 49/10-11 already bind.
+    b.kind = slot_binding_kind::direct;
+    b.direct = direct_id::cl_strikes_in_window;
     return b;
   }
   // 228-11 (D-16, TGT-05/TGT-06): the identity-free fight-wide aggregates and the two
@@ -2733,6 +2759,71 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
               raw = s.has_immunity_remaining ? s.immunity_remaining : 0.0;
               status = lookup_status::present;
               break;
+
+            // 260913-vv8 stage B (SW1 "stackwin"): stacks * remains(seconds), 0 when the buff is
+            // down. Reads the SAME crash_lightning buff_t* handle slots 10/11
+            // (player_buffs.crash_lightning.{stacks,remains}) already bind at bind time via
+            // `t.bindings[10].buff` -- slots 10 and 11 share one member scan (bind_slots'
+            // "resolve ONCE per member" discipline), so this is not a second name lookup.
+            case direct_id::cl_stack_window:
+            {
+              buff_t* cl_buff = t.bindings[ 10 ].buff;
+              double stacks = 0.0;
+              double remains_s = 0.0;
+              if ( cl_buff != nullptr && cl_buff->check() > 0 )
+              {
+                stacks = static_cast<double>( cl_buff->check() );
+                const timespan_t remains = cl_buff->remains();
+                remains_s = ( remains == timespan_t::min() ) ? 0.0 : remains.total_seconds();
+              }
+              raw = stacks * remains_s;
+              status = lookup_status::present;
+              break;
+            }
+
+            // 260913-vv8 stage B (SW1 "stackwin"): charges_fractional(strike) + max(0,
+            // cl_remains - strike_recharge_time) / strike_duration, guarded duration<=0 -> just
+            // charges_fractional. Reads the SAME strike cooldown_t* handle slot 49
+            // (cooldowns.strike.charges_fractional) already binds via `t.bindings[49].cooldown`
+            // (`cooldown.strike` is the shared Stormstrike/Windstrike row, sc_shaman.cpp:
+            // 5638-5643) and the same crash_lightning buff_t* handle as cl_stack_window above --
+            // never a fresh p->cooldown_list name scan (RESEARCH §F4: a mistyped
+            // `cooldown.<name>` expression fabricates a live-but-meaningless placeholder cooldown
+            // rather than throwing, so this reads the pre-bound handle instead of any name
+            // string). `strike_recharge_time` mirrors slot 51's own
+            // cooldown_leaf_kind::recharge_time compute exactly (recharge_event->remains(), 0.0
+            // if not recharging) so this feature and slot 51 never disagree on what "recharge
+            // time" means for this cooldown.
+            case direct_id::cl_strikes_in_window:
+            {
+              cooldown_t* strike_cd = t.bindings[ 49 ].cooldown;
+              if ( strike_cd == nullptr )
+              {
+                raw = 0.0;
+              }
+              else
+              {
+                const double charges_fractional = strike_cd->charges_fractional();
+                buff_t* cl_buff = t.bindings[ 10 ].buff;
+                double cl_remains_s = 0.0;
+                if ( cl_buff != nullptr && cl_buff->check() > 0 )
+                {
+                  const timespan_t remains = cl_buff->remains();
+                  cl_remains_s = ( remains == timespan_t::min() ) ? 0.0 : remains.total_seconds();
+                }
+                const double strike_recharge_time_s = strike_cd->recharge_event
+                    ? strike_cd->recharge_event->remains().total_seconds() : 0.0;
+                const double strike_duration_s = strike_cd->duration.total_seconds();
+                double extra = 0.0;
+                if ( strike_duration_s > 0.0 )
+                {
+                  extra = std::max( 0.0, cl_remains_s - strike_recharge_time_s ) / strike_duration_s;
+                }
+                raw = charges_fractional + extra;
+              }
+              status = lookup_status::present;
+              break;
+            }
 
             default:
               status = lookup_status::absent;

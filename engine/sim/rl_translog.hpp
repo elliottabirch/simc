@@ -212,39 +212,44 @@ inline constexpr std::uint32_t FORMAT_VERSION = 7u;  // 230-04: candidate block 
 // mistyped literal cannot silently drift from the formula and still compile (tstl 220-03,
 // OBS-06; formula updated 260901-pb1 Task 3 for version 5, updated again 228-09 for version 6,
 // updated again 230-04 for version 7 -- see top-of-file comment).
-inline constexpr std::uint32_t RECORD_SIZE = 1744u;  // 233.1-07 (TURN-04, no-turning width move):
-                                                       // 1776 -> 1744 -- roundup8(45 + 4*263 + 4*8*20 +
-                                                       // 4) = roundup8(1741) = 1744. OBS_DIM moves
-                                                       // 270 -> 263: -7 (seven LIVE target_facts.<token>.
-                                                       // in_front columns retired dead-by-engine-
-                                                       // construction, R6-8 -- CONTEXT.md anticipated
-                                                       // eight, but primordial_storm's own in_front was
-                                                       // already retired in phase 233's R-G ruling,
-                                                       // leaving only seven live to prune this round)
-                                                       // + 2 (player_buffs.short_circuit added,
-                                                       // replacing the never-resolving mid2_enh_4pc
-                                                       // member-name bug, Finding F1) - 1 (deck.
-                                                       // ti_lightning_bolt dropped, P233.1-4) - 1 (the
-                                                       // legality family's turn-action member, already
-                                                       // reflected in the 20-action registry since
-                                                       // 233.1-03/04): 270 - 7 + 2 - 1 - 1 = 263,
-                                                       // matching `gen_obs_schema.py`'s own re-emitted
-                                                       // width and `translog.py`'s own 233.1-07
-                                                       // re-bless of this SAME value. The five restored
-                                                       // in_reach columns were re-examined under the
-                                                       // SAME 233-05b decision rule and found unchanged
-                                                       // (preference_for()'s routing is untouched by
-                                                       // this phase's code) -- 0 width change from that
-                                                       // axis. RL_TARGET_SLOTS=8/RL_TARGET_FEATURES=20
-                                                       // unchanged. Confirmed, not assumed, by the
-                                                       // static_assert immediately below, which
-                                                       // recomputes from the live RL_OBS_DIM/
-                                                       // RL_TARGET_SLOTS/RL_TARGET_FEATURES constants
-                                                       // at compile time. PREVIOUS comment (233-05b,
-                                                       // chain-I correction): roundup8(45 + 4*270 +
-                                                       // 4*8*20 + 4) = roundup8(1769) = 1776. See
-                                                       // top-of-file version-7 comment for the closed
-                                                       // form.
+inline constexpr std::uint32_t RECORD_SIZE = 1752u;  // 260913-vv8 stage B (SW1 "stackwin"):
+                                                       // 1744 -> 1752 -- roundup8(45 + 4*265 +
+                                                       // 4*8*20 + 4) = roundup8(1749) = 1752.
+                                                       // OBS_DIM moves 263 -> 265: two scalars
+                                                       // appended (crash_lightning_stack_window,
+                                                       // crash_lightning_strikes_in_window),
+                                                       // 260913-vv8-PLAN.md decision 2/4.
+                                                       // RL_TARGET_SLOTS=8/RL_TARGET_FEATURES=20
+                                                       // unchanged (rl_policy_constants.h:1050-1051,
+                                                       // this session). DEVIATION FROM THE PLAN'S
+                                                       // STATED LITERAL: 260913-vv8-PLAN.md decision
+                                                       // 4 says "RECORD_SIZE 1816", derived from
+                                                       // 260913-vv8-RESEARCH.md's B6 worked example,
+                                                       // which used RL_TARGET_FEATURES=22 (that
+                                                       // number is stale/inapplicable here -- it
+                                                       // matches a DIFFERENT, unrelated width move
+                                                       // this same header's top-of-file comment
+                                                       // documents at RL_OBS_DIM=372, not this one).
+                                                       // The live RL_TARGET_FEATURES is 20, confirmed
+                                                       // by rl_policy_constants.h's own generated
+                                                       // constant and by this header's OWN prior
+                                                       // 233.1-07 comment ("RL_TARGET_SLOTS=8/
+                                                       // RL_TARGET_FEATURES=20 unchanged"), so 1752 --
+                                                       // not 1816 -- is what the static_assert
+                                                       // immediately below (this task's own stated
+                                                       // oracle) actually requires at RL_OBS_DIM=265.
+                                                       // Stage A (commit 788179f7c, its own "owed"
+                                                       // item) flagged this exact discrepancy in
+                                                       // advance and independently derived 1752 for
+                                                       // translog.py/obs_transport_coupling; this
+                                                       // fork-side value matches that repo-side value
+                                                       // byte-for-byte, as it must (translog.py's own
+                                                       // _verify_layout() already enforces the
+                                                       // repo-side half of this same formula).
+                                                       // Confirmed, not assumed, by the static_assert
+                                                       // immediately below, which recomputes from the
+                                                       // live RL_OBS_DIM/RL_TARGET_SLOTS/
+                                                       // RL_TARGET_FEATURES constants at compile time.
 static_assert( RECORD_SIZE == ( ( 45u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) +
                                    4u * static_cast<std::uint32_t>( RL_TARGET_SLOTS ) *
                                        static_cast<std::uint32_t>( RL_TARGET_FEATURES ) + 4u + 7u ) / 8u ) * 8u,
