@@ -83,7 +83,7 @@ struct enemy_fact
   // action `a` -- they are properties of the CANDIDATE relative to this actor's own Voltaic
   // Blaze / Lava Lash geometry, not of `a`.
   int       chain_hop_count                 = 0;  // this candidate's OWN greedy chain-hop count, treated as the walk's START (compute_chain_hop_counts, read via the SAME per-decision stash preference_chain_lightning reads -- chain_hop_count_for_start, below)
-  int       vb_new_flame_shocks_within_10yd = 0;  // enemies within Voltaic Blaze's own resolved cleave radius (+reach) of THIS candidate that lack this actor's Flame Shock, capped at the cleave's own resolved aoe -- HIT-INPUTS-DESIGN.md ss2.2(b)'s formula, centred on the candidate instead of the stamped pick
+  int       vb_new_flame_shocks_within_10yd = 0;  // (+1 if THIS candidate itself lacks the Flame Shock, Task 2b A2 correction -- "a splash always hits its centre") enemies within Voltaic Blaze's own resolved cleave radius (+reach) of THIS candidate that lack this actor's Flame Shock, capped at the cleave's own resolved aoe -- HIT-INPUTS-DESIGN.md ss2.2(b)'s formula, centred on the candidate instead of the stamped pick
   int       lava_lash_spread_within_12yd    = 0;  // enemies within Lava Lash's own resolved spread radius (+reach) of THIS candidate that lack this actor's Flame Shock, capped at Molten Assault's own resolved spread cap, 0 unless talent.molten_assault.ok() -- HIT-INPUTS-DESIGN.md ss2.3's lava_lash formula, centred on the candidate
 };
 
@@ -120,22 +120,35 @@ struct vb_lava_lash_geometry_t
 };
 const vb_lava_lash_geometry_t& resolve_vb_lava_lash_geometry( player_t* p );
 
-// 260914-rbp Task 1 (R9): counts live enemies within `radius` (+ candidate's own combat_reach) of
-// `candidate` -- the SAME inequality convention build_enemy_fact's own neighbours_within_radius
-// already uses (`dist <= radius + other->combat_reach`), exposed here so the pick-centred
-// hits.voltaic_blaze.cleave scalar (rl_policy_obs.cpp) and this file's own per-candidate geometry
-// share ONE walk rather than two. 0 when radius <= 0.0 (an untalented/unresolved action).
+// 260914-rbp Task 1 (R9); CORRECTED Task 2b (Q17 review, A2 -- HIT-INPUTS-DESIGN.md ss2.0 lines
+// 315-316: "a splash always hits its centre; a cleave always hits its target"): returns
+// `1 + (live enemies within `radius` (+ candidate's own combat_reach) of `candidate`)` -- the
+// candidate itself is ALWAYS counted as a hit, matching the sim's own aoe accounting (a cleave's
+// `aoe = 6` counts the primary target as one of the six). Every caller of this function (Voltaic
+// Blaze cleave, Tempest, per-carrier Fire Nova) is exactly this "always hits its centre" shape;
+// there is no caller that wants the OLD neighbours-only convention -- that convention lives on
+// unchanged in build_enemy_fact's own `neighbours_within_radius` field (the target_facts.*
+// one-hop proxy family, a SEPARATE computation, untouched by this correction) and in
+// count_new_flame_shock_neighbours below (Lava Lash spread keeps its own centre-excluded
+// convention -- the centre there is the SOURCE carrier, never a spread target). 0 when
+// `radius <= 0.0` (an untalented/unresolved action) -- deliberately NOT `1` in that case, since a
+// radius of 0 means the action itself does not exist on this build, not "cleave of one".
 int count_neighbours_within_radius( player_t* caster, player_t* candidate, double radius );
 
-// 260914-rbp Task 1 (R9): counts live enemies within `radius` (+ combat_reach) of `candidate`
-// that LACK `caster`'s own Flame Shock (candidate->find_dot("flame_shock", caster) -- the SAME
-// caster-filtered read rl_target_select.cpp's own build_enemy_fact::flame_shock_remaining
-// already uses, rulings Q6), clamped at `cap`. Shared by every Flame-Shock-dependent geometry
-// leaf this task adds (Voltaic Blaze's new-Flame-Shocks count, Lava Lash's spread count, both
-// the per-candidate enemy_fact fields above and rl_policy_obs.cpp's own hits.* direct_id
-// scalars) -- ONE definition, per D-20. 0 when radius <= 0.0 or cap <= 0 (an untalented/
-// unresolved geometry source).
-int count_new_flame_shock_neighbours( player_t* caster, player_t* candidate, double radius, int cap );
+// 260914-rbp Task 1 (R9); CORRECTED Task 2b (Q17 review, A2): counts live enemies within
+// `radius` (+ combat_reach) of `candidate` that LACK `caster`'s own Flame Shock
+// (candidate->find_dot("flame_shock", caster) -- the SAME caster-filtered read
+// rl_target_select.cpp's own build_enemy_fact::flame_shock_remaining already uses, rulings Q6),
+// PLUS one more if `include_pick` is true AND `candidate` itself lacks that Flame Shock --
+// clamped at `cap` (the +1 counts toward the same cap, never added after clamping). Shared by
+// every Flame-Shock-dependent geometry leaf this task adds: `include_pick = true` for Voltaic
+// Blaze's new-Flame-Shocks count (its cleave always hits and can Flame-Shock its own pick,
+// memo ss2.0/A.3); `include_pick = false` for Lava Lash's spread count (the pick is the SOURCE
+// carrier that casts Lava Lash, never one of the enemies its spread plants a NEW Flame Shock on
+// -- deliberately UNCHANGED by this correction). ONE definition for both conventions, per D-20.
+// 0 when radius <= 0.0 or cap <= 0 (an untalented/unresolved geometry source).
+int count_new_flame_shock_neighbours( player_t* caster, player_t* candidate, double radius, int cap,
+                                       bool include_pick );
 
 // The four-clause generic filter (D-09), checked in the SAME order action_t::target_ready checks
 // them (alive, immune-while-harmful, reach, front) -- generic_filter and target_ready must never

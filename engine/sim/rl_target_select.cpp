@@ -217,10 +217,13 @@ int count_neighbours_within_radius( player_t* caster, player_t* candidate, doubl
     if ( candidate->get_player_distance( *other ) <= radius + other->combat_reach )
       ++count;
   }
-  return count;
+  // Task 2b (Q17 review, A2 -- HIT-INPUTS-DESIGN.md ss2.0 lines 315-316): the candidate itself
+  // is always hit -- every caller of this function is a "hits its centre" shape (cleave/splash).
+  return 1 + count;
 }
 
-int count_new_flame_shock_neighbours( player_t* caster, player_t* candidate, double radius, int cap )
+int count_new_flame_shock_neighbours( player_t* caster, player_t* candidate, double radius, int cap,
+                                       bool include_pick )
 {
   if ( radius <= 0.0 || cap <= 0 )
     return 0;
@@ -238,6 +241,17 @@ int count_new_flame_shock_neighbours( player_t* caster, player_t* candidate, dou
     if ( fs && fs->is_ticking() )
       continue;
     ++count;
+  }
+  // Task 2b (Q17 review, A2): Voltaic Blaze's cleave always hits (and can Flame-Shock) its own
+  // pick -- `include_pick` adds that +1 (before the cap, same as every neighbour) when the pick
+  // itself still lacks this caster's Flame Shock. Lava Lash's spread passes include_pick=false:
+  // its pick is the SOURCE carrier casting Lava Lash, never a spread target (deliberately
+  // UNCHANGED convention).
+  if ( include_pick )
+  {
+    dot_t* pick_fs = candidate->find_dot( "flame_shock", caster );
+    if ( !pick_fs || !pick_fs->is_ticking() )
+      ++count;
   }
   return std::min( cap, count );
 }
@@ -370,10 +384,13 @@ enemy_fact build_enemy_fact( const action_t* a, player_t* candidate )
   f.chain_hop_count = ( a->name_str == "chain_lightning" ) ? chain_hop_count_for_start( a, candidate ) : 0;
   {
     const vb_lava_lash_geometry_t& geo = resolve_vb_lava_lash_geometry( a->player );
+    // Task 2b (Q17 review, A2): VB's cleave always hits (and can Flame-Shock) its own pick
+    // (include_pick=true); Lava Lash's spread pick is the SOURCE carrier, never a spread target
+    // (include_pick=false, unchanged).
     f.vb_new_flame_shocks_within_10yd =
-        count_new_flame_shock_neighbours( a->player, candidate, geo.vb_radius, geo.vb_cap );
-    f.lava_lash_spread_within_12yd =
-        count_new_flame_shock_neighbours( a->player, candidate, geo.lava_lash_radius, geo.lava_lash_cap );
+        count_new_flame_shock_neighbours( a->player, candidate, geo.vb_radius, geo.vb_cap, true );
+    f.lava_lash_spread_within_12yd = count_new_flame_shock_neighbours(
+        a->player, candidate, geo.lava_lash_radius, geo.lava_lash_cap, false );
   }
 
   return f;
@@ -493,12 +510,13 @@ enemy_fact build_enemy_fact_for_scoring( const action_t* a, player_t* candidate,
     // DISPATCHED preference actually reads -- WR-05's own "skip what the dispatched preference
     // doesn't need" discipline, applied here exactly like flame_shock_remaining just above.
     const vb_lava_lash_geometry_t& geo = resolve_vb_lava_lash_geometry( a->player );
+    // Task 2b (Q17 review, A2): same include_pick convention as build_enemy_fact above.
     if ( pref == preference_voltaic_blaze )
-      f.vb_new_flame_shocks_within_10yd =
-          count_new_flame_shock_neighbours( a->player, candidate, geo.vb_radius, geo.vb_cap );
+      f.vb_new_flame_shocks_within_10yd = count_new_flame_shock_neighbours(
+          a->player, candidate, geo.vb_radius, geo.vb_cap, true );
     else  // preference_lava_lash
-      f.lava_lash_spread_within_12yd =
-          count_new_flame_shock_neighbours( a->player, candidate, geo.lava_lash_radius, geo.lava_lash_cap );
+      f.lava_lash_spread_within_12yd = count_new_flame_shock_neighbours(
+          a->player, candidate, geo.lava_lash_radius, geo.lava_lash_cap, false );
   }
 
   // BL-01 (232-13) / ME-4 (232-15b): the neighbour count is computed at the MODELLED spell's own
