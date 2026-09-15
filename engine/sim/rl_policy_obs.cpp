@@ -63,6 +63,39 @@ namespace
 // declaration precede first use in the same translation unit.
 std::unordered_map<const player_t*, std::vector<action_t*>> g_action_handle_cache;
 
+// 260914-rbp Task 2b (A3, perf; recommended by the plan, small): per-actor cache of the hits.*
+// family's OWN find_action() handles -- chain_lightning/tempest/lava_lash/voltaic_blaze/
+// fire_nova_explosion -- resolved at most once per actor (ACT-02 pattern, mirrors
+// rl_target_select.cpp's own resolve_vb_lava_lash_geometry per-actor cache), never once per
+// decision. Without this, five of the seven hits.* scalars each did their own p->find_action()
+// name scan every decision -- a linear scan over the action list, five times per decision.
+// hits.crash_lightning is not in this cache: it goes through compute_crash_lightning_shape(),
+// not find_action(), same as before this task.
+struct hits_action_handles_t
+{
+  action_t* chain_lightning     = nullptr;
+  action_t* tempest             = nullptr;
+  action_t* lava_lash           = nullptr;
+  action_t* voltaic_blaze       = nullptr;
+  action_t* fire_nova_explosion = nullptr;
+};
+std::unordered_map<const player_t*, hits_action_handles_t> g_hits_action_handle_cache;
+
+const hits_action_handles_t& resolve_hits_action_handles( const player_t* p )
+{
+  auto found = g_hits_action_handle_cache.find( p );
+  if ( found != g_hits_action_handle_cache.end() )
+    return found->second;
+
+  hits_action_handles_t handles;
+  handles.chain_lightning     = p->find_action( "chain_lightning" );
+  handles.tempest             = p->find_action( "tempest" );
+  handles.lava_lash           = p->find_action( "lava_lash" );
+  handles.voltaic_blaze       = p->find_action( "voltaic_blaze" );
+  handles.fire_nova_explosion = p->find_action( "fire_nova_explosion" );
+  return g_hits_action_handle_cache.emplace( p, handles ).first->second;
+}
+
 // 260902/cr4 (CR-02): the two output arrays a BOUNDARY read_action_gate_bits call computed for
 // the CURRENT decision stamp, cached so the later non-boundary call (decision_dump::record(),
 // which always runs after solver_control::choose() has already retargeted/turned the player)
@@ -76,6 +109,15 @@ struct gate_bits_cache_entry
 };
 std::unordered_map<const player_t*, gate_bits_cache_entry> g_gate_bits_cache;
 } // anonymous namespace
+
+// 260914-rbp Task 2c (ADD-2): see rl_policy.hpp's own declaration comment -- clears
+// g_hits_action_handle_cache above, called from rl_target_select::reset( sim_t* ) (a different
+// translation unit) once per iteration so a stale handle from a torn-down iteration's player_t*
+// address never leaks into the next one.
+void clear_hits_action_handle_cache()
+{
+  g_hits_action_handle_cache.clear();
+}
 
 // ---------------------------------------------------------------------------
 // rl_state_t lookups -- absent is a distinct state, never a zero default.
@@ -798,7 +840,12 @@ enum class slot_binding_kind
   unresolved
 };
 
-enum class buff_leaf_kind { stacks, remains };
+// 260914-rbp Task 2b (Q17, DEC-038): the ASYNC STACK PROFILE family adds four leaves --
+// next_expiry/expiry_2/expiry_3 (the oldest/second-oldest/third-oldest live stack's own
+// remaining time, read off buff_t::expiration, oldest-first) and stack_seconds (their sum) --
+// bound ONLY for a member whose stack_behavior() is ASYNCHRONOUS on this build
+// (resolve_buff_leaf's own bind-time refusal enforces this; see its comment below).
+enum class buff_leaf_kind { stacks, remains, next_expiry, expiry_2, expiry_3, stack_seconds };
 
 // The `scalars` pseudo-family's `direct`-kind leaves this task resolves,
 // PLUS (220-05 Task 2) the `stats`/`swing_cast`/`position` families' own
@@ -837,12 +884,29 @@ enum class direct_id
   fw_enemies_in_front, fw_flame_shock_carrier_count, fw_soonest_time_to_die,
   fw_longest_time_to_die, fw_dying_within_5s, fw_dying_within_15s, fw_nearest_enemy_distance,
   fw_immunity_in, fw_immunity_remaining,
-  // 260913-vv8 stage B (SW1 "stackwin"): two derived crash_lightning-stack scalars, computed in
-  // build_obs from the SAME crash_lightning buff_t*/strike cooldown_t* handles slots 10/11/49
-  // already bind at bind time (RESEARCH §B4/§F4 -- never a fresh p->buff_list/p->cooldown_list
-  // name scan, never a create_expression round-trip on an arithmetic string, which
-  // player_t::create_expression cannot parse -- it is a name resolver, not an arithmetic parser).
-  cl_stack_window, cl_strikes_in_window
+  // 260914-rbp Task 1 (R5/R7/R9, HIT-INPUTS-DESIGN.md §2, rulings §B): the seven per-ability
+  // "how many targets will this hit" scalars -- geometry only, never SimC's own target_list()/
+  // chain resolver (memo §B.3's HARD constraint). Every one reads 0 when no pick is stamped for
+  // its own targeted ability this decision (documented at each build_obs case below), never
+  // `lookup_status::absent` -- these are always-answerable counts, not facts about a pick that
+  // may not exist. NAMING NOTE for Task 2 (the registry/generator, a DIFFERENT file set): these
+  // seven belong to the `scalars` pseudo-family (rl_family_kind::scalar) exactly like
+  // `active_enemies`/`raid_event_next_in` above, dispatched here via `direct_id` -- their
+  // registry `source` string must resolve to a BARE scalar leaf name equal to the literal
+  // strings resolve_scalar_leaf (below) strcmp's against, even though four of the seven contain
+  // a `.` (gen_rl_constants.py's own `_split_source_by_family` splits any `family.member.leaf`
+  // string on `.` and expects a KNOWN family for the first segment -- "hits" is not one of the
+  // declared `rl_family` entries in rl_policy_constants.h, RL_OBS_FAMILIES -- so Task 2 must
+  // either treat these seven source strings as opaque/bare despite the dot, or extend that split
+  // function's own bare-name detection; this is Task 2's decision to make, not pre-empted here).
+  hits_chain_lightning, hits_tempest, hits_crash_lightning,
+  hits_lava_lash_flame_shock_spread, hits_voltaic_blaze_cleave, hits_voltaic_blaze_new_flame_shocks,
+  hits_fire_nova
+  // 260914-rbp Task 1's R14 (crash_lightning_next_expiry/crash_lightning_stack_seconds, two
+  // ad-hoc scalar direct_ids) is MIGRATED and REMOVED here (Task 2b, Q17): the ASYNC STACK
+  // PROFILE is now a generic `player_buffs.<b>.*` buff-family leaf (buff_leaf_kind::next_expiry/
+  // expiry_2/expiry_3/stack_seconds, resolve_buff_leaf + fill_async_stack_profile below), so
+  // there is exactly ONE definition instead of a per-buff scalar pair.
 };
 
 // rl_family_kind::cooldown's own `direct`-style dispatch (220-05 Task 2):
@@ -1034,19 +1098,96 @@ buff_t* resolve_generic_consumable_buff( player_t* p, const std::string& member 
   return nullptr;   // not a generic-consumable member -- caller falls through to a name scan
 }
 
-// rl_family_kind::buff resolution: `stacks`/`remains` are the only two
-// leaves this schema's census artifact declares for this family -- an
-// UNRECOGNISED leaf name binds `unresolved` (a generator/artifact
-// mismatch, not a per-fight data fact). A recognised leaf ALWAYS binds
-// `kind::buff`, even when `member_buff` is null -- a member whose handle
-// this run simply never created (an untalented proc buff, a raid-event-
-// gated buff under a fight style that never injects that event) is a
-// RUNTIME absence build_obs already encodes correctly (buff==nullptr ->
-// absent -> `missing`), not an unimplemented resolution strategy. Binding
-// it `unresolved` instead would conflate "this fight has no such buff"
-// with "plans 220-05/220-06 still owe this family a binding" -- exactly
-// the distinction the acceptance criteria (player_buffs fully resolved,
-// `unresolved[]` names only families this task defers) requires.
+// 260914-rbp Task 2b (Q17, DEC-038): the ASYNC STACK PROFILE -- a 4-double struct filled by
+// ONE generic function from `buff_t::expiration` (one event per live stack). `next_expiry`/
+// `expiry_2`/`expiry_3` are the SOONEST/second-soonest/third-soonest-expiring live stack's own
+// remaining time (0 when fewer than that many stacks are up); `stack_seconds` is their sum
+// across every live stack, not just the first three -- the honest "total remaining
+// stack-seconds" DEC-038 item 2 asks for, as distinct from stacks * remains (README.md's own
+// ~2.6x over-count citation for why that product is wrong for an asynchronous buff). Read fresh
+// per leaf per decision (never cached at bind time -- a leaf's binding only stores
+// buff_t*/buff_leaf_kind, mirroring every other buff-family leaf in this file); walking
+// `expiration` (max a handful of live stacks) four times a decision is cheaper than adding
+// per-binding cache state for one function used by two buffs.
+//
+// 260914-rbp Task 2d (orchestrator review of Task 2c): `buff_t::expiration` is filled in TRIGGER
+// order (buff.cpp:2511 push_back), which the leaves' contract ("soonest expiry first") requires
+// to equal expiry order -- true whenever every trigger shares one duration (crash_lightning), but
+// FALSE for crackling_surge, whose two lightning-wolf trigger sites pass different durations (8 s
+// Flowing Spirits wolf, sc_shaman.cpp:9047; 12 s Rolling Thunder wolf, sc_shaman.cpp:9055, via
+// buff.crackling_surge->trigger(duration) at sc_shaman.cpp:11977) -- a later 8 s trigger can
+// expire before an earlier still-live 12 s one. Copy each live entry's remaining time into a
+// small fixed-size local array (bounded by max_stack(), never heap-allocated) and sort it
+// ascending before assigning next_expiry/expiry_2/expiry_3, so the leaves' contract holds
+// regardless of trigger order; stack_seconds stays the sum over all entries (order-independent).
+// Filed, not fixed on the engine side: `expiration_t::execute` (buff.cpp:239) itself erases
+// `begin()` assuming it is the executing event, which the same mixed-duration ordering can
+// violate -- see .planning/todos/pending/
+// 2026-09-15-simc-async-expiration-vector-assumes-trigger-order-equals-expiry-order.md.
+struct async_stack_profile
+{
+  double next_expiry = 0.0;
+  double expiry_2 = 0.0;
+  double expiry_3 = 0.0;
+  double stack_seconds = 0.0;
+};
+
+void fill_async_stack_profile( const buff_t* buff, async_stack_profile& out )
+{
+  out = async_stack_profile{};
+  if ( buff == nullptr )
+    return;
+
+  // Fixed-size local buffer, bounded by max_stack() (10 for both crash_lightning and
+  // crackling_surge today) -- no heap allocation. buff->expiration.size() cannot exceed
+  // max_stack() (one expiration event per live stack), but clamp defensively anyway.
+  const std::size_t cap = std::max<std::size_t>( 1, static_cast<std::size_t>( buff->max_stack() ) );
+  std::array<double, 32> remains_buf{};
+  std::size_t live_count = 0;
+  for ( event_t* e : buff->expiration )
+  {
+    if ( e == nullptr )
+      continue;
+    const double remains = std::max( 0.0, e->remains().total_seconds() );
+    out.stack_seconds += remains;
+    if ( live_count < cap && live_count < remains_buf.size() )
+      remains_buf[ live_count ] = remains;
+    ++live_count;
+  }
+
+  const std::size_t sorted_n = std::min( live_count, std::min( cap, remains_buf.size() ) );
+  std::sort( remains_buf.begin(), remains_buf.begin() + sorted_n );
+
+  if ( sorted_n > 0 )
+    out.next_expiry = remains_buf[ 0 ];
+  if ( sorted_n > 1 )
+    out.expiry_2 = remains_buf[ 1 ];
+  if ( sorted_n > 2 )
+    out.expiry_3 = remains_buf[ 2 ];
+}
+
+// rl_family_kind::buff resolution: `stacks`/`remains` (every stack behaviour) and, since Task 2b
+// (Q17/DEC-038), `next_expiry`/`expiry_2`/`expiry_3`/`stack_seconds` (ASYNCHRONOUS buffs only)
+// are the leaves this schema's census artifact declares for this family -- an UNRECOGNISED leaf
+// name binds `unresolved` (a generator/artifact mismatch, not a per-fight data fact). A
+// recognised leaf ALWAYS binds `kind::buff`, even when `member_buff` is null -- a member whose
+// handle this run simply never created (an untalented proc buff, a raid-event-gated buff under a
+// fight style that never injects that event) is a RUNTIME absence build_obs already encodes
+// correctly (buff==nullptr -> absent -> `missing`), not an unimplemented resolution strategy.
+// Binding it `unresolved` instead would conflate "this fight has no such buff" with "plans
+// 220-05/220-06 still owe this family a binding" -- exactly the distinction the acceptance
+// criteria (player_buffs fully resolved, `unresolved[]` names only families this task defers)
+// requires.
+//
+// BIND-TIME REFUSAL (Q17): the four profile leaves are valid ONLY for a member whose
+// `stack_behavior()` is ASYNCHRONOUS on this build -- crash_lightning is asynchronous only with
+// Storm Unleashed 1 (sc_shaman.cpp:13271-13278, talent-gated: DEFAULT without the talent). When
+// `member_buff` exists but is NOT asynchronous and one of the four is requested, this is a
+// registry/build mismatch (the same class of loud refusal build_obs' own bucket/permanent check
+// throws below, never a silent 0) -- fail fatally here, at bind time, naming both the buff and
+// the leaf. A null `member_buff` (this run never created the handle at all -- a different build
+// entirely) is NOT refused here: that is the ordinary runtime-absence case every other buff leaf
+// already handles via `buff==nullptr -> absent` in build_obs' own switch.
 slot_binding resolve_buff_leaf( buff_t* member_buff, const rl_leaf_desc& leaf )
 {
   slot_binding b;
@@ -1062,11 +1203,60 @@ slot_binding resolve_buff_leaf( buff_t* member_buff, const rl_leaf_desc& leaf )
     b.kind = slot_binding_kind::buff;
     b.buff_leaf = buff_leaf_kind::remains;
   }
+  else if ( std::strcmp( leaf.leaf, "next_expiry" ) == 0 || std::strcmp( leaf.leaf, "expiry_2" ) == 0 ||
+            std::strcmp( leaf.leaf, "expiry_3" ) == 0 || std::strcmp( leaf.leaf, "stack_seconds" ) == 0 )
+  {
+    if ( member_buff != nullptr && member_buff->stack_behavior != buff_stack_behavior::ASYNCHRONOUS )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::resolve_buff_leaf: leaf '{}' requested for buff '{}' whose stack_behavior "
+          "is not ASYNCHRONOUS on this build (Q17/DEC-038: next_expiry/expiry_2/expiry_3/"
+          "stack_seconds are valid only for an asynchronous stacking buff) -- this is a "
+          "registry/build mismatch, not a runtime data problem",
+          leaf.leaf, member_buff->name() ) );
+    }
+    b.kind = slot_binding_kind::buff;
+    if ( std::strcmp( leaf.leaf, "next_expiry" ) == 0 )
+      b.buff_leaf = buff_leaf_kind::next_expiry;
+    else if ( std::strcmp( leaf.leaf, "expiry_2" ) == 0 )
+      b.buff_leaf = buff_leaf_kind::expiry_2;
+    else if ( std::strcmp( leaf.leaf, "expiry_3" ) == 0 )
+      b.buff_leaf = buff_leaf_kind::expiry_3;
+    else
+      b.buff_leaf = buff_leaf_kind::stack_seconds;
+  }
   else
   {
     b.kind = slot_binding_kind::unresolved;
   }
   return b;
+}
+
+// 260914-rbp Task 2c (BL-2 fork half): a `hits.*` switch leaf carries the name
+// `<parent>.at_least_<k>` (Task 2's registry naming convention for the census `scalars[]` switch
+// rows) -- the PARENT'S plain name (e.g. "hits.chain_lightning") is what dispatches to a
+// direct_id below; the bucket/threshold encoding for a given `k` is applied by the per-slot
+// descriptor inside build_obs, never here. Stripping the suffix ONCE, in one helper, means every
+// `at_least_k` switch for these seven parents reuses the identical direct_id branches as its
+// magnitude sibling instead of 32 near-duplicate strcmp arms. Returns `leaf` unchanged (as a
+// std::string copy) when the suffix is absent, malformed, or non-numeric -- such a name falls
+// through to "unresolved" below exactly as it did before this task.
+std::string hits_switch_parent_name( const char* leaf )
+{
+  static constexpr char SUFFIX[] = ".at_least_";
+  std::string name( leaf );
+  auto pos = name.rfind( SUFFIX );
+  if ( pos == std::string::npos )
+    return name;
+  std::size_t k_pos = pos + ( sizeof( SUFFIX ) - 1 );
+  if ( k_pos >= name.size() )
+    return name;
+  for ( std::size_t i = k_pos; i < name.size(); ++i )
+  {
+    if ( !std::isdigit( static_cast<unsigned char>( name[ i ] ) ) )
+      return name;
+  }
+  return name.substr( 0, pos );
 }
 
 // rl_family_kind::scalar resolution (the `scalars` pseudo-family). Every
@@ -1138,26 +1328,74 @@ slot_binding resolve_scalar_leaf( const rl_leaf_desc& leaf )
     b.direct = direct_id::time_to_bloodlust;
     return b;
   }
-  if ( std::strcmp( leaf.leaf, "crash_lightning_stack_window" ) == 0 )
+  // 260914-rbp Task 1 Step 2 (R1, rulings §B): crash_lightning_stack_window's/
+  // crash_lightning_strikes_in_window's own resolve_scalar_leaf branches (and the
+  // direct_id::cl_stack_window/cl_strikes_in_window enumerators + build_obs cases they bound
+  // to) are REMOVED here -- DEC-038's synchronous-reading-of-an-asynchronous-buff defect
+  // (README.md:456, ~2.6x stack-seconds over-count); superseded by the generic
+  // player_buffs.<b>.next_expiry/.expiry_2/.expiry_3/.stack_seconds buff-family leaves
+  // (resolve_buff_leaf below, Q17/Task 2b), the engine-side ASYNC STACK PROFILE DEC-038 item 2
+  // actually asks for. This removal is its OWN commit (separately revertable from the rest of
+  // this task, per the rulings' own conditional-keep clause: "inside SW1's seed spread -> drop;
+  // worse on >= 2/3 seeds -> keep until R14's scalars replace them").
+  // 260914-rbp Task 1 (R5/R7/R9): the seven hits.* scalars -- see direct_id::hits_chain_lightning's
+  // own enum-declaration comment above for the naming note Task 2 (registry/generator) must
+  // resolve before these can be wired to a slot. Every case below is resolved fresh, once per
+  // decision, inside build_obs (never cached at bind time -- resolve_scalar_leaf has no player_t*
+  // to resolve a p->find_action()/find_talent_spell() call against; mirrors
+  // resolve_thorims_branch_geometry's own once-per-decision, never-per-candidate precedent,
+  // rl_target_select.cpp).
+  // 260914-rbp Task 2c (BL-2 fork half): dispatch on the PARENT name (hits_switch_parent_name
+  // strips a trailing `.at_least_<k>` once, above) so a switch row for any of these seven parents
+  // binds to the identical direct_id as its magnitude sibling -- the plain parent name (no
+  // suffix) keeps binding the magnitude row exactly as before.
+  const std::string hits_dispatch_name = hits_switch_parent_name( leaf.leaf );
+  if ( hits_dispatch_name == "hits.chain_lightning" )
   {
-    // 260913-vv8 stage B (SW1 "stackwin"): stacks * remains(seconds) -- computed in build_obs
-    // off the SAME crash_lightning buff_t* handle slots 10/11 already bind, never through
-    // create_expression (RESEARCH §B3: a SimC arithmetic string like
-    // "buff.crash_lightning.stack*buff.crash_lightning.remains" is not parseable by
-    // player_t::create_expression, a name resolver -- it would silently encode 0.0).
     b.kind = slot_binding_kind::direct;
-    b.direct = direct_id::cl_stack_window;
+    b.direct = direct_id::hits_chain_lightning;
     return b;
   }
-  if ( std::strcmp( leaf.leaf, "crash_lightning_strikes_in_window" ) == 0 )
+  if ( hits_dispatch_name == "hits.tempest" )
   {
-    // 260913-vv8 stage B (SW1 "stackwin"): charges_fractional(strike) + max(0, cl_remains -
-    // strike_recharge_time) / strike_duration, guarded duration<=0 -- computed in build_obs off
-    // the SAME strike cooldown_t*/crash_lightning buff_t* handles slots 49/10-11 already bind.
     b.kind = slot_binding_kind::direct;
-    b.direct = direct_id::cl_strikes_in_window;
+    b.direct = direct_id::hits_tempest;
     return b;
   }
+  if ( hits_dispatch_name == "hits.crash_lightning" )
+  {
+    b.kind = slot_binding_kind::direct;
+    b.direct = direct_id::hits_crash_lightning;
+    return b;
+  }
+  if ( hits_dispatch_name == "hits.lava_lash.flame_shock_spread" )
+  {
+    b.kind = slot_binding_kind::direct;
+    b.direct = direct_id::hits_lava_lash_flame_shock_spread;
+    return b;
+  }
+  if ( hits_dispatch_name == "hits.voltaic_blaze.cleave" )
+  {
+    b.kind = slot_binding_kind::direct;
+    b.direct = direct_id::hits_voltaic_blaze_cleave;
+    return b;
+  }
+  if ( hits_dispatch_name == "hits.voltaic_blaze.new_flame_shocks" )
+  {
+    b.kind = slot_binding_kind::direct;
+    b.direct = direct_id::hits_voltaic_blaze_new_flame_shocks;
+    return b;
+  }
+  if ( hits_dispatch_name == "hits.fire_nova" )
+  {
+    b.kind = slot_binding_kind::direct;
+    b.direct = direct_id::hits_fire_nova;
+    return b;
+  }
+  // 260914-rbp Task 1's R14 (crash_lightning_next_expiry/crash_lightning_stack_seconds, two
+  // ad-hoc `scalars`-family resolve_scalar_leaf branches) is REMOVED here (Task 2b, Q17) -- see
+  // the direct_id enum's own migration comment above; resolve_buff_leaf below is the one
+  // remaining definition of the ASYNC STACK PROFILE.
   // 228-11 (D-16, TGT-05/TGT-06): the identity-free fight-wide aggregates and the two
   // scripted-schedule immunity timers -- computed in build_obs via 228-10's
   // compute_fight_wide_aggregates()/compute_invulnerability_window(), never through
@@ -2047,6 +2285,37 @@ const slot_table& bind_slots( player_t* p )
           }
           case rl_family_kind::scalar:
             binding = resolve_scalar_leaf( leaf );
+            // 260914-rbp Task 2c (ME-4 fork half): an `unresolved` binding for a `scalars`-family
+            // leaf is FATAL, by name -- unlike a family with a legitimate "not present on this
+            // profile" absence path (deck/pets/items), every `scalars` leaf name is a literal
+            // strcmp/name-equality dispatch inside resolve_scalar_leaf/hits_switch_parent_name
+            // above; an unresolved one can only mean the census and this file's dispatch table
+            // have drifted (a typo'd leaf name, a removed direct_id case, a switch row whose
+            // `.at_least_<k>` suffix strip produced a name no branch matches) -- exactly the
+            // silent-`missing`-for-the-life-of-a-schema failure mode ME-4 closes. Thrown here,
+            // at bind time, rather than left to surface later as a quietly absent observation.
+            //
+            // 260914-rbp Task 2c A-ii fix (discovered running this task's own A5 trace-capture
+            // probe): `reserved_next_wave_size`/`reserved_lifetime_class` (233-02, R-F/R-T) are
+            // DELIBERATELY, permanently unresolved -- their own census note documents "No
+            // direct_id resolves this leaf name, so resolve_scalar_leaf ... returns unresolved;
+            // build_obs' unresolved arm treats that as absent ... so this slot reads exactly
+            // 0.0 with NO C++ edit" as the intended mechanism for a reserved-for-the-future
+            // scalar, until TMPL-10 wires a real value. The blanket fatal check above does not
+            // distinguish "reserved by design" from "drifted by accident", so it broke this
+            // mechanism outright the first time this schema loaded post-ME-4. Named allow-list
+            // (not a broader "any unresolved is fine" carve-out, which would silently defeat
+            // ME-4's own purpose) -- add a name here ONLY when its own census `note` documents
+            // the same "reads 0.0 with no C++ edit, by design" contract as these two.
+            if ( binding.kind == slot_binding_kind::unresolved &&
+                 std::strcmp( leaf.leaf, "reserved_next_wave_size" ) != 0 &&
+                 std::strcmp( leaf.leaf, "reserved_lifetime_class" ) != 0 )
+            {
+              throw sc_runtime_error( fmt::format(
+                  "rl_policy::bind_slots: scalars-family leaf '{}' (slot '{}') resolved to "
+                  "unresolved -- resolve_scalar_leaf has no dispatch branch for this leaf name",
+                  leaf.leaf, composed ) );
+            }
             break;
           case rl_family_kind::expression:
             // 220-05 Task 1 proved the seam on `deck`; Task 2 adds
@@ -2276,6 +2545,130 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
     return fw_iw;
   };
 
+  // 260914-rbp Task 2c (HI-1): crash_lightning's own shape, computed AT MOST ONCE per
+  // build_obs() call -- same "read once, use twice" lazy pattern as get_fw_agg/get_fw_iw above.
+  // Shared by the slot_binding_kind::shape_fact case (shapes.crash_lightning.enemies_hit) and
+  // hits.crash_lightning below, which previously each called compute_crash_lightning_shape()
+  // independently.
+  bool cl_shape_computed = false;
+  rl_policy::shape_hit_result_t cl_shape;
+  auto get_crash_lightning_shape = [ & ]() -> const rl_policy::shape_hit_result_t&
+  {
+    if ( !cl_shape_computed )
+    {
+      cl_shape = compute_crash_lightning_shape( const_cast<player_t*>( p ) );
+      cl_shape_computed = true;
+    }
+    return cl_shape;
+  };
+
+  // 260914-rbp Task 2c (HI-1): the seven hits.* scalars, computed AT MOST ONCE per build_obs()
+  // call. Before this task, every slot bound to a hits.* direct_id repeated this action's own
+  // lookup_pick()/count_hits_within_radius() walk independently -- with the `at_least_k`
+  // switch rows (BL-2) there can be up to 38 such slots for these seven values in a single
+  // decision. This struct is filled once regardless of how many slots read from it this
+  // decision; every hits.* case below reads a field of it instead of recomputing.
+  // hits.crash_lightning reuses get_crash_lightning_shape() above rather than a second
+  // compute_crash_lightning_shape() call.
+  struct hits_values_t
+  {
+    double chain_lightning                = 0.0;
+    double tempest                        = 0.0;
+    double crash_lightning                = 0.0;
+    double lava_lash_flame_shock_spread   = 0.0;
+    double voltaic_blaze_cleave           = 0.0;
+    double voltaic_blaze_new_flame_shocks = 0.0;
+    double fire_nova                      = 0.0;
+  };
+  bool hits_values_computed = false;
+  hits_values_t hits_values;
+  auto get_hits_values = [ & ]() -> const hits_values_t&
+  {
+    if ( hits_values_computed )
+      return hits_values;
+    hits_values_computed = true;
+
+    if ( action_t* cl_action = resolve_hits_action_handles( p ).chain_lightning )
+    {
+      bool      found = false;
+      player_t* pick  = rl_target_select::lookup_pick( cl_action, &found );
+      if ( found && pick != nullptr )
+        hits_values.chain_lightning = static_cast<double>(
+            rl_target_select::chain_hop_count_for_start( cl_action, pick ) );
+    }
+
+    if ( action_t* tempest_action = resolve_hits_action_handles( p ).tempest )
+    {
+      bool      found = false;
+      player_t* pick  = rl_target_select::lookup_pick( tempest_action, &found );
+      if ( found && pick != nullptr )
+        hits_values.tempest = static_cast<double>( rl_target_select::count_hits_within_radius(
+            tempest_action->player, pick, tempest_action->radius ) );
+    }
+
+    hits_values.crash_lightning = static_cast<double>( get_crash_lightning_shape().enemies_hit );
+
+    if ( action_t* lava_lash_action = resolve_hits_action_handles( p ).lava_lash )
+    {
+      bool      found = false;
+      player_t* pick  = rl_target_select::lookup_pick( lava_lash_action, &found );
+      if ( found && pick != nullptr )
+      {
+        const rl_target_select::vb_lava_lash_geometry_t& geo =
+            rl_target_select::resolve_vb_lava_lash_geometry( lava_lash_action->player );
+        hits_values.lava_lash_flame_shock_spread = static_cast<double>(
+            rl_target_select::count_new_flame_shock_neighbours(
+                lava_lash_action->player, pick, geo.lava_lash_radius, geo.lava_lash_cap, false ) );
+      }
+    }
+
+    if ( action_t* vb_action = resolve_hits_action_handles( p ).voltaic_blaze )
+    {
+      bool      found = false;
+      player_t* pick  = rl_target_select::lookup_pick( vb_action, &found );
+      if ( found && pick != nullptr )
+      {
+        const rl_target_select::vb_lava_lash_geometry_t& geo =
+            rl_target_select::resolve_vb_lava_lash_geometry( vb_action->player );
+        const int hits = rl_target_select::count_hits_within_radius(
+            vb_action->player, pick, geo.vb_radius );
+        hits_values.voltaic_blaze_cleave =
+            static_cast<double>( geo.vb_cap > 0 ? std::min( geo.vb_cap, hits ) : 0 );
+        hits_values.voltaic_blaze_new_flame_shocks = static_cast<double>(
+            rl_target_select::count_new_flame_shock_neighbours(
+                vb_action->player, pick, geo.vb_radius, geo.vb_cap, true ) );
+      }
+    }
+
+    if ( action_t* explosion = resolve_hits_action_handles( p ).fire_nova_explosion )
+    {
+      const double radius = explosion->radius;
+      const int    cap    = explosion->aoe > 0 ? explosion->aoe : 0;
+      if ( radius > 0.0 && cap > 0 )
+      {
+        double    sum    = 0.0;
+        player_t* caster = explosion->player;
+        for ( player_t* carrier : caster->sim->target_non_sleeping_list )
+        {
+          if ( !carrier->is_enemy() )
+            continue;
+          // Q6 (rulings, HIT-INPUTS-DESIGN.md §2.5): caster-filtered -- THIS actor's own Flame
+          // Shock, the SAME find_dot("flame_shock", caster) idiom build_enemy_fact's own
+          // flame_shock_remaining field already uses (WR-04).
+          dot_t* fs = carrier->find_dot( "flame_shock", caster );
+          if ( !fs || !fs->is_ticking() )
+            continue;
+          const int hits_from_this_carrier =
+              rl_target_select::count_hits_within_radius( caster, carrier, radius );
+          sum += static_cast<double>( std::min( cap, hits_from_this_carrier ) );
+        }
+        hits_values.fire_nova = sum;
+      }
+    }
+
+    return hits_values;
+  };
+
   // 220-06 Task 3 (OBS-07): the shared-snapshot cache for
   // hit_damage/crit_pct_current/persistent_multiplier/da_multiplier (4th
   // slot added 221-07 WR-01 -- see resolve_action_leaf's own comment for why
@@ -2331,21 +2724,34 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
       // cap) stopgap is DELETED (P226_45_FALLBACK_GONE) -- replaced by the SAME deterministic
       // per-target geometry the new target_fact/shape_fact leaves already compute (228-02/
       // 228-10), never a new computation. For a TARGETED multi-target action (chain_lightning,
-      // tempest, voltaic_blaze) the count is the current pick's own neighbours_within_radius
-      // (OBS-03, 232-02: the always-equal splash/jump pair is now one `a->radius`-parameterised
-      // field); for the two SHAPED actions (crash_lightning, sundering) it is that action's own
-      // shape fact's enemies_hit. Both come from lookup_pick()/build_enemy_fact() and
+      // tempest) the count is the current pick's own neighbours_within_radius (OBS-03, 232-02:
+      // the always-equal splash/jump pair is now one `a->radius`-parameterised field); for the
+      // two SHAPED actions (crash_lightning, sundering) it is that action's own shape fact's
+      // enemies_hit. Both come from lookup_pick()/build_enemy_fact() and
       // compute_crash_lightning_shape()/compute_sundering_shape() -- never select(), never
       // target_list() (RNG-free either way). An unrecognised multi-target action (none exist in
       // this registry today) or a targeted action with no stamped pick this decision falls back
       // to the live enemy count alone, honestly labelled here as the one remaining imperfect case
       // rather than silently guessed.
+      //
+      // 260914-rbp Task 1 Step 4 (R11): `voltaic_blaze` REMOVED from this check -- it was dead
+      // code even before this task. This branch only runs when `a->aoe == -1 || a->aoe > 1`
+      // (the enclosing `if`, above); Voltaic Blaze's PARENT action (the one `a` is here, the
+      // registry token this whole function iterates) never sets `aoe` at all (HIT-INPUTS-DESIGN.md
+      // §A.9/§B.2 -- `aoe = 6` lives on the DAMAGE CHILD, `voltaic_blaze_damage`, never on the
+      // parent), so `a->aoe` is always 0 for `an == "voltaic_blaze"` and this branch's own
+      // enclosing `if` is never entered for it -- confirmed unaffected by this task's own R13
+      // change (which sets `radius` on the CHILD action only, never touches the parent's `aoe`).
+      // The honest VB cleave/new-Flame-Shocks counts this task adds live in the NEW
+      // `hits.voltaic_blaze.*` direct_id scalars instead (R9, above) -- this masked `hit_damage`
+      // leaf's own scaling input was never that count to begin with (it read the live enemy
+      // count the whole time, per this dead branch never firing).
       const int live_enemies = s.has_active_enemies
                                     ? static_cast<int>( s.active_enemies )
                                     : static_cast<int>( p->sim->active_enemies );
       int geometry_count = live_enemies;
       const std::string& an = a->name_str;
-      if ( an == "chain_lightning" || an == "tempest" || an == "voltaic_blaze" )
+      if ( an == "chain_lightning" || an == "tempest" )
       {
         bool      pick_found = false;
         player_t* pick       = rl_target_select::lookup_pick( a, &pick_found );
@@ -2451,10 +2857,10 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
           buff_t* buff = b.buff;
           if ( buff == nullptr || buff->check() <= 0 )
           {
-            // Not up (or unresolved) -- absent for BOTH leaves of this
-            // member, matching the retired walk's own `s.buffs` filter
-            // (a not-up buff was skipped entirely, so find_buff() would
-            // return nullptr for it there too).
+            // Not up (or unresolved) -- absent for every leaf of this member (stacks/remains
+            // and, since Task 2b, the four ASYNC STACK PROFILE leaves alike), matching the
+            // retired walk's own `s.buffs` filter (a not-up buff was skipped entirely, so
+            // find_buff() would return nullptr for it there too).
             status = lookup_status::absent;
           }
           else if ( b.buff_leaf == buff_leaf_kind::stacks )
@@ -2462,7 +2868,7 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
             raw = static_cast<double>( buff->check() );
             status = lookup_status::present;
           }
-          else   // remains
+          else if ( b.buff_leaf == buff_leaf_kind::remains )
           {
             const timespan_t remains = buff->remains();
             if ( remains == timespan_t::min() )
@@ -2474,6 +2880,25 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
               raw = remains.total_seconds();
               status = lookup_status::present;
             }
+          }
+          else
+          {
+            // next_expiry / expiry_2 / expiry_3 / stack_seconds (Q17, DEC-038): the ASYNC STACK
+            // PROFILE. resolve_buff_leaf's own bind-time refusal already guarantees this buff's
+            // stack_behavior is ASYNCHRONOUS whenever one of these four is bound to it, so no
+            // runtime re-check is needed here -- only the profile computation, ONE definition
+            // (fill_async_stack_profile) shared by both crash_lightning and crackling_surge.
+            async_stack_profile profile;
+            fill_async_stack_profile( buff, profile );
+            switch ( b.buff_leaf )
+            {
+              case buff_leaf_kind::next_expiry:   raw = profile.next_expiry;   break;
+              case buff_leaf_kind::expiry_2:      raw = profile.expiry_2;      break;
+              case buff_leaf_kind::expiry_3:      raw = profile.expiry_3;      break;
+              case buff_leaf_kind::stack_seconds: raw = profile.stack_seconds; break;
+              default:                            raw = 0.0;                  break;
+            }
+            status = lookup_status::present;
           }
           break;
         }
@@ -2760,70 +3185,108 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
               status = lookup_status::present;
               break;
 
-            // 260913-vv8 stage B (SW1 "stackwin"): stacks * remains(seconds), 0 when the buff is
-            // down. Reads the SAME crash_lightning buff_t* handle slots 10/11
-            // (player_buffs.crash_lightning.{stacks,remains}) already bind at bind time via
-            // `t.bindings[10].buff` -- slots 10 and 11 share one member scan (bind_slots'
-            // "resolve ONCE per member" discipline), so this is not a second name lookup.
-            case direct_id::cl_stack_window:
-            {
-              buff_t* cl_buff = t.bindings[ 10 ].buff;
-              double stacks = 0.0;
-              double remains_s = 0.0;
-              if ( cl_buff != nullptr && cl_buff->check() > 0 )
-              {
-                stacks = static_cast<double>( cl_buff->check() );
-                const timespan_t remains = cl_buff->remains();
-                remains_s = ( remains == timespan_t::min() ) ? 0.0 : remains.total_seconds();
-              }
-              raw = stacks * remains_s;
-              status = lookup_status::present;
-              break;
-            }
+            // 260914-rbp Task 1 Step 2 (R1, rulings §B): direct_id::cl_stack_window's and
+            // direct_id::cl_strikes_in_window's own build_obs cases (stacks*newest-remains and
+            // its cooldown-derived sibling) are REMOVED here -- see the resolve_scalar_leaf
+            // removal comment above for the full rationale; this removal is its own commit.
 
-            // 260913-vv8 stage B (SW1 "stackwin"): charges_fractional(strike) + max(0,
-            // cl_remains - strike_recharge_time) / strike_duration, guarded duration<=0 -> just
-            // charges_fractional. Reads the SAME strike cooldown_t* handle slot 49
-            // (cooldowns.strike.charges_fractional) already binds via `t.bindings[49].cooldown`
-            // (`cooldown.strike` is the shared Stormstrike/Windstrike row, sc_shaman.cpp:
-            // 5638-5643) and the same crash_lightning buff_t* handle as cl_stack_window above --
-            // never a fresh p->cooldown_list name scan (RESEARCH §F4: a mistyped
-            // `cooldown.<name>` expression fabricates a live-but-meaningless placeholder cooldown
-            // rather than throwing, so this reads the pre-bound handle instead of any name
-            // string). `strike_recharge_time` mirrors slot 51's own
-            // cooldown_leaf_kind::recharge_time compute exactly (recharge_event->remains(), 0.0
-            // if not recharging) so this feature and slot 51 never disagree on what "recharge
-            // time" means for this cooldown.
-            case direct_id::cl_strikes_in_window:
-            {
-              cooldown_t* strike_cd = t.bindings[ 49 ].cooldown;
-              if ( strike_cd == nullptr )
-              {
-                raw = 0.0;
-              }
-              else
-              {
-                const double charges_fractional = strike_cd->charges_fractional();
-                buff_t* cl_buff = t.bindings[ 10 ].buff;
-                double cl_remains_s = 0.0;
-                if ( cl_buff != nullptr && cl_buff->check() > 0 )
-                {
-                  const timespan_t remains = cl_buff->remains();
-                  cl_remains_s = ( remains == timespan_t::min() ) ? 0.0 : remains.total_seconds();
-                }
-                const double strike_recharge_time_s = strike_cd->recharge_event
-                    ? strike_cd->recharge_event->remains().total_seconds() : 0.0;
-                const double strike_duration_s = strike_cd->duration.total_seconds();
-                double extra = 0.0;
-                if ( strike_duration_s > 0.0 )
-                {
-                  extra = std::max( 0.0, cl_remains_s - strike_recharge_time_s ) / strike_duration_s;
-                }
-                raw = charges_fractional + extra;
-              }
+            // 260914-rbp Task 1 (R5, HIT-INPUTS-DESIGN.md §2.1): the stamped pick's own greedy
+            // chain-hop count (radius 10.0, cap 3/5, both resolved BY NAME through
+            // resolve_thorims_branch_geometry) -- read via the SAME per-decision stash
+            // preference_chain_lightning itself reads (rl_target_select::chain_hop_count_for_start),
+            // never a fresh walk. 0 when no pick is stamped for chain_lightning this decision.
+            // 260914-rbp Task 2c (HI-1): reads the per-decision memoised hits_values_t above --
+            // computed once regardless of how many switch/at_least_k slots bind to this direct_id.
+            case direct_id::hits_chain_lightning:
+              raw = get_hits_values().chain_lightning;
               status = lookup_status::present;
               break;
-            }
+
+            // 260914-rbp Task 1 (R6, rulings Q3); CORRECTED Task 2b (Q17 review, A2): 1 +
+            // live enemies within Tempest's own resolved radius (+ combat_reach) of the pick,
+            // UNCAPPED -- the pick itself is always hit (memo ss2.0's "a splash always hits its
+            // centre"), so this is NOT an alias of target_facts.tempest.neighbours_within_radius
+            // (that one-hop proxy family stays centre-excluded, untouched). Computed directly
+            // via count_hits_within_radius against tempest_action's OWN resolved radius,
+            // never through the full build_enemy_fact (which also walks three extra O(N) fields
+            // per call for nothing this scalar does not need). 0 when no pick is stamped for
+            // tempest this decision.
+            case direct_id::hits_tempest:
+              raw = get_hits_values().tempest;
+              status = lookup_status::present;
+              break;
+
+            // 260914-rbp Task 1 (R9, HIT-INPUTS-DESIGN.md §2.3): compute_crash_lightning_shape(p)
+            // .enemies_hit -- an ALIAS of what slot 163 (shapes.crash_lightning.enemies_hit)
+            // already reads today; never a pick-based read since Crash Lightning is a
+            // player-centred CONE, not a targeted pick (OR-2).
+            case direct_id::hits_crash_lightning:
+              raw = get_hits_values().crash_lightning;
+              status = lookup_status::present;
+              break;
+
+            // 260914-rbp Task 1 (R7, HIT-INPUTS-DESIGN.md §2.3, rulings Q6): min(5, enemies
+            // within 12 yd (+ reach) of the pick that LACK this actor's Flame Shock), 0 unless
+            // talent.molten_assault.ok() -- radius/cap resolved BY NAME through
+            // rl_target_select::resolve_vb_lava_lash_geometry (lava_lash's own resolved radius,
+            // Molten Assault's own resolved effectN(2)). 0 when no pick is stamped for lava_lash
+            // this decision.
+            case direct_id::hits_lava_lash_flame_shock_spread:
+              raw = get_hits_values().lava_lash_flame_shock_spread;
+              status = lookup_status::present;
+              break;
+
+            // 260914-rbp Task 1 (R9, HIT-INPUTS-DESIGN.md §2.2a); CORRECTED Task 2b (Q17
+            // review, A2 -- memo ss2.0 lines 315-316: "a cleave always hits its target"):
+            // min(6, 1 + enemies within 10 yd (+ reach) of the pick) -- radius/cap resolved BY
+            // NAME off voltaic_blaze_damage's own resolved radius (R13, this task) / aoe (set by
+            // hand at that action's own ctor from Voltaic Blaze's effectN(4)). The +1 for the
+            // pick itself is now baked into count_hits_within_radius (it matches the
+            // engine's own `aoe=6` counting the primary target as one of the six). 0 when no
+            // pick is stamped for voltaic_blaze this decision.
+            case direct_id::hits_voltaic_blaze_cleave:
+              raw = get_hits_values().voltaic_blaze_cleave;
+              status = lookup_status::present;
+              break;
+
+            // 260914-rbp Task 1 (R9, HIT-INPUTS-DESIGN.md §2.2b); CORRECTED Task 2b (Q17
+            // review, A2): of the cleave hits (including the pick itself, A2's "cleave always
+            // hits its target"), how many lack this actor's Flame Shock -- min(cap, (pick lacks
+            // Flame Shock ? 1 : 0) + new-Flame-Shock neighbours), SAME radius/cap as
+            // hits_voltaic_blaze_cleave, via count_new_flame_shock_neighbours(include_pick=true)
+            // (naturally bounded by the cleave count: the Flame-Shock filter only ever REMOVES
+            // candidates from the identical hit set). 0 when no pick is stamped for
+            // voltaic_blaze this decision.
+            case direct_id::hits_voltaic_blaze_new_flame_shocks:
+              raw = get_hits_values().voltaic_blaze_new_flame_shocks;
+              status = lookup_status::present;
+              break;
+
+            // 260914-rbp Task 1 (R9, HIT-INPUTS-DESIGN.md §2.2c, rulings Q2); CORRECTED
+            // Task 2b (Q17 review, A2 -- memo §A.6: "the explosion is centred ON the carrier and
+            // hits it", spell 333977 aoe 6 counts the centre): Σ over enemies carrying THIS
+            // actor's Flame Shock of min(6, 1 + enemies within 8 yd (+ reach) of that carrier) --
+            // the +1 for the carrier itself is baked into count_hits_within_radius, so a
+            // single Flame-Shocked carrier with zero neighbours now reads 1 (not 0), matching
+            // "single target with one carrier now reads 1" (A2). Double-counting across carriers
+            // is still allowed (a tight pack's overlap IS the value this leaf carries, never
+            // erased by de-duplicating). ONE GLOBAL scalar, not keyed on any stamped pick (Q2:
+            // Fire Nova is a 30% roll on every Voltaic Blaze cast that explodes on every CURRENT
+            // carrier, so its hit count is target-independent) -- radius/cap resolved BY NAME off
+            // fire_nova_explosion's own resolved radius/aoe (spell 333977, "8 yd radius" /
+            // "Max Targets 6"). 0 when the explosion action does not exist (Fire Nova untalented
+            // on this build).
+            case direct_id::hits_fire_nova:
+              raw = get_hits_values().fire_nova;
+              status = lookup_status::present;
+              break;
+
+            // 260914-rbp Task 1's R14 (crash_lightning_next_expiry/crash_lightning_stack_seconds
+            // direct_id cases, reading a hardcoded t.bindings[10] slot index) is MIGRATED and
+            // REMOVED here (Task 2b, Q17) -- the ASYNC STACK PROFILE is now a generic
+            // player_buffs.<b>.* buff-family leaf handled in the slot_binding_kind::buff case
+            // above (fill_async_stack_profile), so there is exactly ONE definition and no
+            // hardcoded slot-index dependency.
 
             default:
               status = lookup_status::absent;
@@ -3054,10 +3517,12 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
           // compute_sundering_shape() -- the CURRENT facing only, no per-decision pick (the
           // shaped actions never appear in targeted_picks, OR-2). `p` is only ever read here
           // (const-safe: neither compute function mutates the player), so no const_cast is
-          // needed at this call site.
+          // needed at this call site. 260914-rbp Task 2c (HI-1): the crash_lightning arm now
+          // reads the shared get_crash_lightning_shape() lazy getter above, so this slot and
+          // hits.crash_lightning never each pay their own compute_crash_lightning_shape() call.
           const rl_policy::shape_hit_result_t shape =
               ( b.shape_fact_action == shape_fact_action_kind::crash_lightning )
-                  ? compute_crash_lightning_shape( const_cast<player_t*>( p ) )
+                  ? get_crash_lightning_shape()
                   : compute_sundering_shape( const_cast<player_t*>( p ) );
           switch ( b.shape_fact_leaf )
           {

@@ -10288,6 +10288,52 @@ struct voltaic_blaze_t : public shaman_spell_t
       background = dual = true;
       stats = player->get_stats( "voltaic_blaze" );
       aoe = 1 + as<int>( player->talent.voltaic_blaze->effectN( 4 ).base_value() );
+
+      // 260914-rbp Task 1 Step 5 (R13, rulings Q10); CORRECTED Task 2c (ME-2, HI-2): Voltaic
+      // Blaze's 10-yd cleave radius is not implemented anywhere else in this action -- talent
+      // 470057's own effect #1 is Dummy (its Base/Scaled Value are both 0), so `action_t::radius`
+      // never resolves it the way `chained_base_t`'s ctor resolves Chain Lightning's own 10-yd
+      // jump radius (sc_shaman.cpp:6566). Without this line, `check_distance_targeting`'s last
+      // branch prunes by `range` (40yd) from the PLAYER instead -- i.e. this action cleaves any 6
+      // enemies within 40 yd of the player, ignoring the 10-yd radius around the TARGET the spell
+      // describes. ME-2 correction: 470057 effect #1 DOES carry a `radius_max()`-bearing field
+      // despite being Dummy-typed (`spell_query=spell.id=470057` prints "Radius: 0 - 10 yards" on
+      // effect #1, independent of the effect's own Dummy subtype) -- the prior "no
+      // radius_max()-bearing effect" sentence here was false; resolved BY NAME below instead of
+      // the bare literal this ctor used before. Also HI-2 (attribute 11, same effect: "Add Target
+      // (Dest) Combat Reach to AOE") -- see check_distance_targeting override below for the
+      // engine-side prune fix this attribute requires. Changes the sim's OWN mechanics (the bars
+      // are re-cut on this binary later, per this batch's own sequencing -- expected, not a
+      // regression).
+      radius = player->talent.voltaic_blaze->effectN( 1 ).radius_max();
+      assert( radius == 10.0 && "voltaic_blaze effect #1 radius_max() expected 10.0 yards (470057)" );
+    }
+
+    // 260914-rbp Task 2c (HI-2): base action_t::check_distance_targeting's target-radiate branch
+    // (action.cpp, the `radius > 0 && range > 0` arm's final `else if
+    // ( t->get_player_distance( *target ) > radius )`) prunes WITHOUT the target's combat reach --
+    // that branch is shared by every radius+range multi-target action in the engine, so it is not
+    // itself parameterised by reach. Spell 470057 effect #1 carries attribute 11 ("Add Target
+    // (Dest) Combat Reach to AOE", confirmed via `spell_query=spell.id=470057`), so THIS action's
+    // own prune must add `combat_reach`, matching the RL leaf's own `<= radius + other->
+    // combat_reach` convention (rl_target_select.cpp::count_hits_within_radius) -- decision:
+    // "engine+reach" (the override below), not the leaf-reach-dropped fallback. Voltaic Blaze is
+    // never ground_aoe and always has both range (40yd, spell data) and radius (10.0, set above)
+    // > 0, so only that one branch of the base function's several ever applies to this action --
+    // routing around the whole function (which also handles ground_aoe/parent_dot/execute_state
+    // branches this action never reaches) rather than threading a reach parameter through it.
+    std::vector<player_t*>& check_distance_targeting( std::vector<player_t*>& tl ) const override
+    {
+      if ( !sim->distance_targeting_enabled )
+        return shaman_spell_t::check_distance_targeting( tl );
+      size_t i = tl.size();
+      while ( i > 0 )
+      {
+        i--;
+        if ( tl[ i ] != target && tl[ i ]->get_player_distance( *target ) > radius + tl[ i ]->combat_reach )
+          tl.erase( tl.begin() + i );
+      }
+      return tl;
     }
 
     double composite_target_crit_chance( player_t* /* t */ ) const override
