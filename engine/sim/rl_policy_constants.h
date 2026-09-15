@@ -104,7 +104,7 @@ inline constexpr std::size_t RL_ACTION_DIM = 20;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
-inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:b628ea95a2f6cdea4351d495b64dab40b46e9bf91319e89ee54a5b821724e27c";
+inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:f80f383c5871d695e28dfd3d190d8beabcb2c629b4107ad3e648487e867aacee";
 inline constexpr const char* RL_MASK_RULES_SHA = "3f930294d36b217dca01fc51600c0da9d0568e20152fb53c588b6e8ddccf7662";
 inline constexpr const char* RL_ACTION_SPACE_SHA = "b9c219883e8ea75c0e9e04d2ecb74c04bc8682756d2b90435f5c964e1732f89a";
 
@@ -893,10 +893,10 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_1[] = {
     { "value", rl_kind::k_float, 0.0, true, 5000.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_2[] = {
-    { "value", rl_kind::k_float, 0.0, true, 0.4, false, 1.0, nullptr, 0, false },
+    { "value", rl_kind::k_float, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_3[] = {
-    { "value", rl_kind::k_float, 0.0, true, 1500.0, false, 1.0, nullptr, 0, false },
+    { "value", rl_kind::k_float, 0.0, true, 3000.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_4[] = {
     { "value", rl_kind::k_float, 0.0, true, 0.15, false, 1.0, nullptr, 0, false },
