@@ -1099,16 +1099,31 @@ buff_t* resolve_generic_consumable_buff( player_t* p, const std::string& member 
 }
 
 // 260914-rbp Task 2b (Q17, DEC-038): the ASYNC STACK PROFILE -- a 4-double struct filled by
-// ONE generic function from `buff_t::expiration` (one event per live stack, oldest first: the
-// vector's own invariant, never re-sorted here). `next_expiry`/`expiry_2`/`expiry_3` are the
-// oldest/second-oldest/third-oldest live stack's own remaining time (0 when fewer than that many
-// stacks are up); `stack_seconds` is their sum across every live stack, not just the first three
-// -- the honest "total remaining stack-seconds" DEC-038 item 2 asks for, as distinct from
-// stacks * remains (README.md's own ~2.6x over-count citation for why that product is wrong for
-// an asynchronous buff). Read fresh per leaf per decision (never cached at bind time -- a leaf's
-// binding only stores buff_t*/buff_leaf_kind, mirroring every other buff-family leaf in this
-// file); walking `expiration` (max a handful of live stacks) four times a decision is cheaper
-// than adding per-binding cache state for one function used by two buffs.
+// ONE generic function from `buff_t::expiration` (one event per live stack). `next_expiry`/
+// `expiry_2`/`expiry_3` are the SOONEST/second-soonest/third-soonest-expiring live stack's own
+// remaining time (0 when fewer than that many stacks are up); `stack_seconds` is their sum
+// across every live stack, not just the first three -- the honest "total remaining
+// stack-seconds" DEC-038 item 2 asks for, as distinct from stacks * remains (README.md's own
+// ~2.6x over-count citation for why that product is wrong for an asynchronous buff). Read fresh
+// per leaf per decision (never cached at bind time -- a leaf's binding only stores
+// buff_t*/buff_leaf_kind, mirroring every other buff-family leaf in this file); walking
+// `expiration` (max a handful of live stacks) four times a decision is cheaper than adding
+// per-binding cache state for one function used by two buffs.
+//
+// 260914-rbp Task 2d (orchestrator review of Task 2c): `buff_t::expiration` is filled in TRIGGER
+// order (buff.cpp:2511 push_back), which the leaves' contract ("soonest expiry first") requires
+// to equal expiry order -- true whenever every trigger shares one duration (crash_lightning), but
+// FALSE for crackling_surge, whose two lightning-wolf trigger sites pass different durations (8 s
+// Flowing Spirits wolf, sc_shaman.cpp:9047; 12 s Rolling Thunder wolf, sc_shaman.cpp:9055, via
+// buff.crackling_surge->trigger(duration) at sc_shaman.cpp:11977) -- a later 8 s trigger can
+// expire before an earlier still-live 12 s one. Copy each live entry's remaining time into a
+// small fixed-size local array (bounded by max_stack(), never heap-allocated) and sort it
+// ascending before assigning next_expiry/expiry_2/expiry_3, so the leaves' contract holds
+// regardless of trigger order; stack_seconds stays the sum over all entries (order-independent).
+// Filed, not fixed on the engine side: `expiration_t::execute` (buff.cpp:239) itself erases
+// `begin()` assuming it is the executing event, which the same mixed-duration ordering can
+// violate -- see .planning/todos/pending/
+// 2026-09-15-simc-async-expiration-vector-assumes-trigger-order-equals-expiry-order.md.
 struct async_stack_profile
 {
   double next_expiry = 0.0;
@@ -1122,21 +1137,33 @@ void fill_async_stack_profile( const buff_t* buff, async_stack_profile& out )
   out = async_stack_profile{};
   if ( buff == nullptr )
     return;
-  std::size_t live_index = 0;
+
+  // Fixed-size local buffer, bounded by max_stack() (10 for both crash_lightning and
+  // crackling_surge today) -- no heap allocation. buff->expiration.size() cannot exceed
+  // max_stack() (one expiration event per live stack), but clamp defensively anyway.
+  const std::size_t cap = std::max<std::size_t>( 1, static_cast<std::size_t>( buff->max_stack() ) );
+  std::array<double, 32> remains_buf{};
+  std::size_t live_count = 0;
   for ( event_t* e : buff->expiration )
   {
     if ( e == nullptr )
       continue;
     const double remains = std::max( 0.0, e->remains().total_seconds() );
     out.stack_seconds += remains;
-    if ( live_index == 0 )
-      out.next_expiry = remains;
-    else if ( live_index == 1 )
-      out.expiry_2 = remains;
-    else if ( live_index == 2 )
-      out.expiry_3 = remains;
-    ++live_index;
+    if ( live_count < cap && live_count < remains_buf.size() )
+      remains_buf[ live_count ] = remains;
+    ++live_count;
   }
+
+  const std::size_t sorted_n = std::min( live_count, std::min( cap, remains_buf.size() ) );
+  std::sort( remains_buf.begin(), remains_buf.begin() + sorted_n );
+
+  if ( sorted_n > 0 )
+    out.next_expiry = remains_buf[ 0 ];
+  if ( sorted_n > 1 )
+    out.expiry_2 = remains_buf[ 1 ];
+  if ( sorted_n > 2 )
+    out.expiry_3 = remains_buf[ 2 ];
 }
 
 // rl_family_kind::buff resolution: `stacks`/`remains` (every stack behaviour) and, since Task 2b

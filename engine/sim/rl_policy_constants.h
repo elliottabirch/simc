@@ -104,7 +104,7 @@ inline constexpr std::size_t RL_ACTION_DIM = 20;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
-inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:bc56f86b7afc8ae6259be8b8820f398a10fd2507b97b2b652eb70a1aa1e9179a";
+inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:6ac0e64ec23d2e9fc7320b7336d036f589be56edec63868f25ee1a4ce6eba89f";
 inline constexpr const char* RL_MASK_RULES_SHA = "3f930294d36b217dca01fc51600c0da9d0568e20152fb53c588b6e8ddccf7662";
 inline constexpr const char* RL_ACTION_SPACE_SHA = "b9c219883e8ea75c0e9e04d2ecb74c04bc8682756d2b90435f5c964e1732f89a";
 
@@ -443,10 +443,10 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_5[] = {
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_6[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 10.0, false, 1.0, nullptr, 0, false },
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 8.0, nullptr, 0, false },
-    { "next_expiry", rl_kind::k_seconds, 0.0, false, 1.0, true, 8.0, nullptr, 0, false },
-    { "expiry_2", rl_kind::k_seconds, 0.0, false, 1.0, true, 8.0, nullptr, 0, false },
-    { "expiry_3", rl_kind::k_seconds, 0.0, false, 1.0, true, 8.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 12.0, nullptr, 0, false },
+    { "next_expiry", rl_kind::k_seconds, 0.0, false, 1.0, true, 12.0, nullptr, 0, false },
+    { "expiry_2", rl_kind::k_seconds, 0.0, false, 1.0, true, 12.0, nullptr, 0, false },
+    { "expiry_3", rl_kind::k_seconds, 0.0, false, 1.0, true, 12.0, nullptr, 0, false },
     { "stack_seconds", rl_kind::k_seconds, 0.0, false, 1.0, true, 40.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_7[] = {
