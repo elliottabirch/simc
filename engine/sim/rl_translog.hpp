@@ -212,44 +212,31 @@ inline constexpr std::uint32_t FORMAT_VERSION = 7u;  // 230-04: candidate block 
 // mistyped literal cannot silently drift from the formula and still compile (tstl 220-03,
 // OBS-06; formula updated 260901-pb1 Task 3 for version 5, updated again 228-09 for version 6,
 // updated again 230-04 for version 7 -- see top-of-file comment).
-inline constexpr std::uint32_t RECORD_SIZE = 1752u;  // 260913-vv8 stage B (SW1 "stackwin"):
-                                                       // 1744 -> 1752 -- roundup8(45 + 4*265 +
-                                                       // 4*8*20 + 4) = roundup8(1749) = 1752.
-                                                       // OBS_DIM moves 263 -> 265: two scalars
-                                                       // appended (crash_lightning_stack_window,
-                                                       // crash_lightning_strikes_in_window),
-                                                       // 260913-vv8-PLAN.md decision 2/4.
-                                                       // RL_TARGET_SLOTS=8/RL_TARGET_FEATURES=20
-                                                       // unchanged (rl_policy_constants.h:1050-1051,
-                                                       // this session). DEVIATION FROM THE PLAN'S
-                                                       // STATED LITERAL: 260913-vv8-PLAN.md decision
-                                                       // 4 says "RECORD_SIZE 1816", derived from
-                                                       // 260913-vv8-RESEARCH.md's B6 worked example,
-                                                       // which used RL_TARGET_FEATURES=22 (that
-                                                       // number is stale/inapplicable here -- it
-                                                       // matches a DIFFERENT, unrelated width move
-                                                       // this same header's top-of-file comment
-                                                       // documents at RL_OBS_DIM=372, not this one).
-                                                       // The live RL_TARGET_FEATURES is 20, confirmed
-                                                       // by rl_policy_constants.h's own generated
-                                                       // constant and by this header's OWN prior
-                                                       // 233.1-07 comment ("RL_TARGET_SLOTS=8/
-                                                       // RL_TARGET_FEATURES=20 unchanged"), so 1752 --
-                                                       // not 1816 -- is what the static_assert
-                                                       // immediately below (this task's own stated
-                                                       // oracle) actually requires at RL_OBS_DIM=265.
-                                                       // Stage A (commit 788179f7c, its own "owed"
-                                                       // item) flagged this exact discrepancy in
-                                                       // advance and independently derived 1752 for
-                                                       // translog.py/obs_transport_coupling; this
-                                                       // fork-side value matches that repo-side value
-                                                       // byte-for-byte, as it must (translog.py's own
-                                                       // _verify_layout() already enforces the
-                                                       // repo-side half of this same formula).
-                                                       // Confirmed, not assumed, by the static_assert
-                                                       // immediately below, which recomputes from the
-                                                       // live RL_OBS_DIM/RL_TARGET_SLOTS/
-                                                       // RL_TARGET_FEATURES constants at compile time.
+inline constexpr std::uint32_t RECORD_SIZE = 1992u;  // 260914-rbp Task 2 (the "fork legs" this
+                                                       // module's own obs_transport_coupling
+                                                       // .selftest.py comment attributes to Task 2):
+                                                       // 1752 -> 1992 -- roundup8(45 + 4*300 +
+                                                       // 4*8*23 + 4) = roundup8(1985) = 1992.
+                                                       // RL_OBS_DIM moves 265 -> 300 (R1 removes 2
+                                                       // scalars, R5/R6/R7 repurpose 3 target_facts
+                                                       // leaves into 3 scalars net 0, R9 adds 3 new
+                                                       // scalars, R10 adds 32 "at least k" bucket
+                                                       // switches, R14 adds 2 new engine scalars --
+                                                       // .planning/RULINGS-260914-question-queue.md
+                                                       // SS B). RL_TARGET_FEATURES moves 20 -> 23
+                                                       // (R15: struct enemy_fact gains
+                                                       // chain_hop_count/
+                                                       // vb_new_flame_shocks_within_10yd/
+                                                       // lava_lash_spread_within_12yd, Task 1).
+                                                       // RL_TARGET_SLOTS stays 8. Both new constants
+                                                       // read from rl_policy_constants.h's own
+                                                       // regenerated values (this task), never
+                                                       // hand-typed. Confirmed, not assumed, by the
+                                                       // static_assert immediately below, which
+                                                       // recomputes from the live
+                                                       // RL_OBS_DIM/RL_TARGET_SLOTS/
+                                                       // RL_TARGET_FEATURES constants at compile
+                                                       // time.
 static_assert( RECORD_SIZE == ( ( 45u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) +
                                    4u * static_cast<std::uint32_t>( RL_TARGET_SLOTS ) *
                                        static_cast<std::uint32_t>( RL_TARGET_FEATURES ) + 4u + 7u ) / 8u ) * 8u,
