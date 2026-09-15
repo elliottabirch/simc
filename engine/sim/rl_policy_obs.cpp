@@ -865,6 +865,8 @@ enum class direct_id
   // stats
   stats_attack_haste, stats_attack_crit_chance, stats_mastery_value,
   stats_damage_versatility, stats_attack_power,
+  stats_agility, stats_crit_rating, stats_haste_rating, stats_mastery_rating,
+  stats_versatility_rating,
   // swing_cast
   swing_cast_auto_attack_interval, swing_cast_casting_remains, swing_cast_gcd_length,
   swing_cast_gcd_remains, swing_cast_swing_mh_remains, swing_cast_swing_oh_remains,
@@ -1610,6 +1612,11 @@ slot_binding resolve_stats_swing_cast_position_leaf( rl_family fam_id, const std
     else if ( member == "damage_versatility" ) b.direct = direct_id::stats_damage_versatility;
     else if ( member == "haste" )        b.direct = direct_id::stats_attack_haste;
     else if ( member == "mastery_value" ) b.direct = direct_id::stats_mastery_value;
+    else if ( member == "agility" )      b.direct = direct_id::stats_agility;
+    else if ( member == "crit_rating" )  b.direct = direct_id::stats_crit_rating;
+    else if ( member == "haste_rating" ) b.direct = direct_id::stats_haste_rating;
+    else if ( member == "mastery_rating" ) b.direct = direct_id::stats_mastery_rating;
+    else if ( member == "versatility_rating" ) b.direct = direct_id::stats_versatility_rating;
     else b.kind = slot_binding_kind::unresolved;
   }
   else if ( fam_id == rl_family::swing_cast )
@@ -2948,6 +2955,35 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
               break;
             case direct_id::stats_attack_power:
               raw = p->cache.attack_power();
+              status = lookup_status::present;
+              break;
+
+            // 260915-sti Task 1: the four secondary-rating getters and
+            // agility, unconditionally well-defined -- never absent. These
+            // four rating getters, and no others, are exactly what
+            // util::stat_value (util.cpp:262-280) reads for STAT_CRIT_RATING /
+            // STAT_HASTE_RATING / STAT_MASTERY_RATING / STAT_VERSATILITY_RATING,
+            // which is what potion_of_recklessness's own execute() argmaxes
+            // over (unique_gear_midnight.cpp:208-214) -- the net gets the
+            // potion's exact deterministic argmax inputs.
+            case direct_id::stats_agility:
+              raw = p->cache.agility();
+              status = lookup_status::present;
+              break;
+            case direct_id::stats_crit_rating:
+              raw = p->composite_melee_crit_rating();
+              status = lookup_status::present;
+              break;
+            case direct_id::stats_haste_rating:
+              raw = p->composite_melee_haste_rating();
+              status = lookup_status::present;
+              break;
+            case direct_id::stats_mastery_rating:
+              raw = p->composite_mastery_rating();
+              status = lookup_status::present;
+              break;
+            case direct_id::stats_versatility_rating:
+              raw = p->composite_damage_versatility_rating();
               status = lookup_status::present;
               break;
 
