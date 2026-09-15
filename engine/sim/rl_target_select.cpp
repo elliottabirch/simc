@@ -1387,6 +1387,13 @@ double preference_voltaic_blaze( const action_t*, const enemy_fact& fact )
   // Flame Shock this still returns the longest-lived carrier, never "invalid" (the same reason
   // the always-legal wait exists) -- `return (fact.flame_shock_remaining <= 0.0 ? 1.0e9 : 0.0) +
   // fact.time_to_die;`.
+  //
+  // 260914-rbp Task 2c (ME-3): Q16 is delivered ONLY with the INCLUDING-centre +1 --
+  // `vb_new_flame_shocks_within_10yd` itself already counts the candidate's OWN Flame-Shock
+  // absence as one of its "new Flame Shocks" (its own field comment, rl_target_select.hpp:88:
+  // "+1 if THIS candidate itself lacks the Flame Shock ... a splash always hits its centre"),
+  // never just the secondary cleave hits around it -- the same convention `hits.voltaic_blaze.
+  // new_flame_shocks` applies on the training-observation side (HIT-INPUTS-DESIGN.md §2.0).
   double primary   = static_cast<double>( fact.vb_new_flame_shocks_within_10yd ) * 1.0e12;
   double dominance = ( fact.flame_shock_remaining <= 0.0 ? 1.0e9 : 0.0 );
   return primary + dominance + fact.time_to_die;

@@ -2267,7 +2267,22 @@ const slot_table& bind_slots( player_t* p )
             // `.at_least_<k>` suffix strip produced a name no branch matches) -- exactly the
             // silent-`missing`-for-the-life-of-a-schema failure mode ME-4 closes. Thrown here,
             // at bind time, rather than left to surface later as a quietly absent observation.
-            if ( binding.kind == slot_binding_kind::unresolved )
+            //
+            // 260914-rbp Task 2c A-ii fix (discovered running this task's own A5 trace-capture
+            // probe): `reserved_next_wave_size`/`reserved_lifetime_class` (233-02, R-F/R-T) are
+            // DELIBERATELY, permanently unresolved -- their own census note documents "No
+            // direct_id resolves this leaf name, so resolve_scalar_leaf ... returns unresolved;
+            // build_obs' unresolved arm treats that as absent ... so this slot reads exactly
+            // 0.0 with NO C++ edit" as the intended mechanism for a reserved-for-the-future
+            // scalar, until TMPL-10 wires a real value. The blanket fatal check above does not
+            // distinguish "reserved by design" from "drifted by accident", so it broke this
+            // mechanism outright the first time this schema loaded post-ME-4. Named allow-list
+            // (not a broader "any unresolved is fine" carve-out, which would silently defeat
+            // ME-4's own purpose) -- add a name here ONLY when its own census `note` documents
+            // the same "reads 0.0 with no C++ edit, by design" contract as these two.
+            if ( binding.kind == slot_binding_kind::unresolved &&
+                 std::strcmp( leaf.leaf, "reserved_next_wave_size" ) != 0 &&
+                 std::strcmp( leaf.leaf, "reserved_lifetime_class" ) != 0 )
             {
               throw sc_runtime_error( fmt::format(
                   "rl_policy::bind_slots: scalars-family leaf '{}' (slot '{}') resolved to "
