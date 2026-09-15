@@ -212,31 +212,30 @@ inline constexpr std::uint32_t FORMAT_VERSION = 7u;  // 230-04: candidate block 
 // mistyped literal cannot silently drift from the formula and still compile (tstl 220-03,
 // OBS-06; formula updated 260901-pb1 Task 3 for version 5, updated again 228-09 for version 6,
 // updated again 230-04 for version 7 -- see top-of-file comment).
-inline constexpr std::uint32_t RECORD_SIZE = 1992u;  // 260914-rbp Task 2 (the "fork legs" this
-                                                       // module's own obs_transport_coupling
-                                                       // .selftest.py comment attributes to Task 2):
-                                                       // 1752 -> 1992 -- roundup8(45 + 4*300 +
-                                                       // 4*8*23 + 4) = roundup8(1985) = 1992.
-                                                       // RL_OBS_DIM moves 265 -> 300 (R1 removes 2
-                                                       // scalars, R5/R6/R7 repurpose 3 target_facts
-                                                       // leaves into 3 scalars net 0, R9 adds 3 new
-                                                       // scalars, R10 adds 32 "at least k" bucket
-                                                       // switches, R14 adds 2 new engine scalars --
+inline constexpr std::uint32_t RECORD_SIZE = 2016u;  // 260914-rbp Task 2b (Q17, DEC-038):
+                                                       // 1992 -> 2016 -- roundup8(45 + 4*306 +
+                                                       // 4*8*23 + 4) = roundup8(2009) = 2016.
+                                                       // RL_OBS_DIM moves 300 -> 306 (Task 2's R14
+                                                       // ad-hoc crash_lightning_next_expiry/
+                                                       // crash_lightning_stack_seconds scalars are
+                                                       // REMOVED, -2, and replaced by the generic
+                                                       // ASYNC STACK PROFILE family -- four new
+                                                       // player_buffs.<b>.* leaves on EACH of
+                                                       // crash_lightning and crackling_surge, +8;
+                                                       // net +6 -- see
                                                        // .planning/RULINGS-260914-question-queue.md
-                                                       // SS B). RL_TARGET_FEATURES moves 20 -> 23
-                                                       // (R15: struct enemy_fact gains
-                                                       // chain_hop_count/
-                                                       // vb_new_flame_shocks_within_10yd/
-                                                       // lava_lash_spread_within_12yd, Task 1).
-                                                       // RL_TARGET_SLOTS stays 8. Both new constants
-                                                       // read from rl_policy_constants.h's own
-                                                       // regenerated values (this task), never
-                                                       // hand-typed. Confirmed, not assumed, by the
+                                                       // SS A Q17). RL_TARGET_FEATURES stays 23
+                                                       // (unchanged by this task). RL_TARGET_SLOTS
+                                                       // stays 8. Both constants read from
+                                                       // rl_policy_constants.h's own regenerated
+                                                       // values (this task), never hand-typed.
+                                                       // Confirmed, not assumed, by the
                                                        // static_assert immediately below, which
                                                        // recomputes from the live
                                                        // RL_OBS_DIM/RL_TARGET_SLOTS/
                                                        // RL_TARGET_FEATURES constants at compile
-                                                       // time.
+                                                       // time. This is a re-pin: one-way,
+                                                       // checkpoint-invalidating.
 static_assert( RECORD_SIZE == ( ( 45u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) +
                                    4u * static_cast<std::uint32_t>( RL_TARGET_SLOTS ) *
                                        static_cast<std::uint32_t>( RL_TARGET_FEATURES ) + 4u + 7u ) / 8u ) * 8u,
