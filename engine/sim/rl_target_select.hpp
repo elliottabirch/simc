@@ -77,11 +77,13 @@ struct enemy_fact
   // counts the dormant Phase-230 scorer's own feature contract (fill_candidate_features,
   // rl_target_select.cpp) did not carry before this task, appended in EXACTLY this order (never
   // inserted mid-struct -- that would silently reorder every existing scorer feature index).
-  // `chain_hop_count` reads 0 for every caller OTHER than chain_lightning's own build_enemy_fact
-  // call (HIT-INPUTS-DESIGN.md ss2.1's "no pick => 0" contract, applied here to "not a chain
-  // caller => 0"); the other two are computed for EVERY candidate regardless of the calling
-  // action `a` -- they are properties of the CANDIDATE relative to this actor's own Voltaic
-  // Blaze / Lava Lash geometry, not of `a`.
+  // `chain_hop_count` reads 0 whenever `a` has no chain-hop stash entry for THIS decision
+  // (NOTE-1, Task 2c: chain_hop_count_for_start's own stash-and-stamp check is the gate, not a
+  // name comparison against `a` -- a Thorim's-routed melee strike that compute_chain_hop_counts
+  // resolved geometry for gets its real hop count exactly like a literal chain_lightning cast
+  // does); the other two are computed for EVERY candidate regardless of the calling action `a` --
+  // they are properties of the CANDIDATE relative to this actor's own Voltaic Blaze / Lava Lash
+  // geometry, not of `a`.
   int       chain_hop_count                 = 0;  // this candidate's OWN greedy chain-hop count, treated as the walk's START (compute_chain_hop_counts, read via the SAME per-decision stash preference_chain_lightning reads -- chain_hop_count_for_start, below)
   int       vb_new_flame_shocks_within_10yd = 0;  // (+1 if THIS candidate itself lacks the Flame Shock, Task 2b A2 correction -- "a splash always hits its centre") enemies within Voltaic Blaze's own resolved cleave radius (+reach) of THIS candidate that lack this actor's Flame Shock, capped at the cleave's own resolved aoe -- HIT-INPUTS-DESIGN.md ss2.2(b)'s formula, centred on the candidate instead of the stamped pick
   int       lava_lash_spread_within_12yd    = 0;  // enemies within Lava Lash's own resolved spread radius (+reach) of THIS candidate that lack this actor's Flame Shock, capped at Molten Assault's own resolved spread cap, 0 unless talent.molten_assault.ok() -- HIT-INPUTS-DESIGN.md ss2.3's lava_lash formula, centred on the candidate
@@ -133,7 +135,7 @@ const vb_lava_lash_geometry_t& resolve_vb_lava_lash_geometry( player_t* p );
 // convention -- the centre there is the SOURCE carrier, never a spread target). 0 when
 // `radius <= 0.0` (an untalented/unresolved action) -- deliberately NOT `1` in that case, since a
 // radius of 0 means the action itself does not exist on this build, not "cleave of one".
-int count_neighbours_within_radius( player_t* caster, player_t* candidate, double radius );
+int count_hits_within_radius( player_t* caster, player_t* candidate, double radius );
 
 // 260914-rbp Task 1 (R9); CORRECTED Task 2b (Q17 review, A2): counts live enemies within
 // `radius` (+ combat_reach) of `candidate` that LACK `caster`'s own Flame Shock

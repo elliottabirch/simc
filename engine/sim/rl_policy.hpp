@@ -530,4 +530,12 @@ int          masked_argmax( const float q[ RL_ACTION_DIM ], const std::uint8_t m
 // RLW1_V4_AIMING_SPELL_COUNT` floats -- the caller (rl_target_select's scorer preference) fills
 // `s.feature_scratch` itself and passes `s.feature_scratch.data()`.
 float forward_scorer( const rl_scorer_t& s, const float* in );
+
+// 260914-rbp Task 2c (ADD-2): clears rl_policy_obs.cpp's own per-actor g_hits_action_handle_cache
+// (the hits.* family's find_action() handle cache) -- declared here, defined in rl_policy_obs.cpp,
+// called from rl_target_select::reset( sim_t* ) (a DIFFERENT translation unit, the one sim.cpp's
+// own sim_t::reset() already calls) so a stale handle from a torn-down iteration's player_t*
+// address can never leak into the next iteration. See rl_target_select.cpp's reset() for the
+// call site and the ME-1 sibling cache it clears alongside this one.
+void clear_hits_action_handle_cache();
 }

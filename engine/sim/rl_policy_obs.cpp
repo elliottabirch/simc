@@ -110,6 +110,15 @@ struct gate_bits_cache_entry
 std::unordered_map<const player_t*, gate_bits_cache_entry> g_gate_bits_cache;
 } // anonymous namespace
 
+// 260914-rbp Task 2c (ADD-2): see rl_policy.hpp's own declaration comment -- clears
+// g_hits_action_handle_cache above, called from rl_target_select::reset( sim_t* ) (a different
+// translation unit) once per iteration so a stale handle from a torn-down iteration's player_t*
+// address never leaks into the next one.
+void clear_hits_action_handle_cache()
+{
+  g_hits_action_handle_cache.clear();
+}
+
 // ---------------------------------------------------------------------------
 // rl_state_t lookups -- absent is a distinct state, never a zero default.
 // ---------------------------------------------------------------------------
@@ -1196,6 +1205,33 @@ slot_binding resolve_buff_leaf( buff_t* member_buff, const rl_leaf_desc& leaf )
   return b;
 }
 
+// 260914-rbp Task 2c (BL-2 fork half): a `hits.*` switch leaf carries the name
+// `<parent>.at_least_<k>` (Task 2's registry naming convention for the census `scalars[]` switch
+// rows) -- the PARENT'S plain name (e.g. "hits.chain_lightning") is what dispatches to a
+// direct_id below; the bucket/threshold encoding for a given `k` is applied by the per-slot
+// descriptor inside build_obs, never here. Stripping the suffix ONCE, in one helper, means every
+// `at_least_k` switch for these seven parents reuses the identical direct_id branches as its
+// magnitude sibling instead of 32 near-duplicate strcmp arms. Returns `leaf` unchanged (as a
+// std::string copy) when the suffix is absent, malformed, or non-numeric -- such a name falls
+// through to "unresolved" below exactly as it did before this task.
+std::string hits_switch_parent_name( const char* leaf )
+{
+  static constexpr char SUFFIX[] = ".at_least_";
+  std::string name( leaf );
+  auto pos = name.rfind( SUFFIX );
+  if ( pos == std::string::npos )
+    return name;
+  std::size_t k_pos = pos + ( sizeof( SUFFIX ) - 1 );
+  if ( k_pos >= name.size() )
+    return name;
+  for ( std::size_t i = k_pos; i < name.size(); ++i )
+  {
+    if ( !std::isdigit( static_cast<unsigned char>( name[ i ] ) ) )
+      return name;
+  }
+  return name.substr( 0, pos );
+}
+
 // rl_family_kind::scalar resolution (the `scalars` pseudo-family). Every
 // leaf this task resolves reads a value `build_obs` already has to hand
 // with NO per-decision engine lookup of its own: `active_enemies`/`t` come
@@ -1282,43 +1318,48 @@ slot_binding resolve_scalar_leaf( const rl_leaf_desc& leaf )
   // to resolve a p->find_action()/find_talent_spell() call against; mirrors
   // resolve_thorims_branch_geometry's own once-per-decision, never-per-candidate precedent,
   // rl_target_select.cpp).
-  if ( std::strcmp( leaf.leaf, "hits.chain_lightning" ) == 0 )
+  // 260914-rbp Task 2c (BL-2 fork half): dispatch on the PARENT name (hits_switch_parent_name
+  // strips a trailing `.at_least_<k>` once, above) so a switch row for any of these seven parents
+  // binds to the identical direct_id as its magnitude sibling -- the plain parent name (no
+  // suffix) keeps binding the magnitude row exactly as before.
+  const std::string hits_dispatch_name = hits_switch_parent_name( leaf.leaf );
+  if ( hits_dispatch_name == "hits.chain_lightning" )
   {
     b.kind = slot_binding_kind::direct;
     b.direct = direct_id::hits_chain_lightning;
     return b;
   }
-  if ( std::strcmp( leaf.leaf, "hits.tempest" ) == 0 )
+  if ( hits_dispatch_name == "hits.tempest" )
   {
     b.kind = slot_binding_kind::direct;
     b.direct = direct_id::hits_tempest;
     return b;
   }
-  if ( std::strcmp( leaf.leaf, "hits.crash_lightning" ) == 0 )
+  if ( hits_dispatch_name == "hits.crash_lightning" )
   {
     b.kind = slot_binding_kind::direct;
     b.direct = direct_id::hits_crash_lightning;
     return b;
   }
-  if ( std::strcmp( leaf.leaf, "hits.lava_lash.flame_shock_spread" ) == 0 )
+  if ( hits_dispatch_name == "hits.lava_lash.flame_shock_spread" )
   {
     b.kind = slot_binding_kind::direct;
     b.direct = direct_id::hits_lava_lash_flame_shock_spread;
     return b;
   }
-  if ( std::strcmp( leaf.leaf, "hits.voltaic_blaze.cleave" ) == 0 )
+  if ( hits_dispatch_name == "hits.voltaic_blaze.cleave" )
   {
     b.kind = slot_binding_kind::direct;
     b.direct = direct_id::hits_voltaic_blaze_cleave;
     return b;
   }
-  if ( std::strcmp( leaf.leaf, "hits.voltaic_blaze.new_flame_shocks" ) == 0 )
+  if ( hits_dispatch_name == "hits.voltaic_blaze.new_flame_shocks" )
   {
     b.kind = slot_binding_kind::direct;
     b.direct = direct_id::hits_voltaic_blaze_new_flame_shocks;
     return b;
   }
-  if ( std::strcmp( leaf.leaf, "hits.fire_nova" ) == 0 )
+  if ( hits_dispatch_name == "hits.fire_nova" )
   {
     b.kind = slot_binding_kind::direct;
     b.direct = direct_id::hits_fire_nova;
@@ -2217,6 +2258,22 @@ const slot_table& bind_slots( player_t* p )
           }
           case rl_family_kind::scalar:
             binding = resolve_scalar_leaf( leaf );
+            // 260914-rbp Task 2c (ME-4 fork half): an `unresolved` binding for a `scalars`-family
+            // leaf is FATAL, by name -- unlike a family with a legitimate "not present on this
+            // profile" absence path (deck/pets/items), every `scalars` leaf name is a literal
+            // strcmp/name-equality dispatch inside resolve_scalar_leaf/hits_switch_parent_name
+            // above; an unresolved one can only mean the census and this file's dispatch table
+            // have drifted (a typo'd leaf name, a removed direct_id case, a switch row whose
+            // `.at_least_<k>` suffix strip produced a name no branch matches) -- exactly the
+            // silent-`missing`-for-the-life-of-a-schema failure mode ME-4 closes. Thrown here,
+            // at bind time, rather than left to surface later as a quietly absent observation.
+            if ( binding.kind == slot_binding_kind::unresolved )
+            {
+              throw sc_runtime_error( fmt::format(
+                  "rl_policy::bind_slots: scalars-family leaf '{}' (slot '{}') resolved to "
+                  "unresolved -- resolve_scalar_leaf has no dispatch branch for this leaf name",
+                  leaf.leaf, composed ) );
+            }
             break;
           case rl_family_kind::expression:
             // 220-05 Task 1 proved the seam on `deck`; Task 2 adds
@@ -2444,6 +2501,130 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
       fw_iw_computed = true;
     }
     return fw_iw;
+  };
+
+  // 260914-rbp Task 2c (HI-1): crash_lightning's own shape, computed AT MOST ONCE per
+  // build_obs() call -- same "read once, use twice" lazy pattern as get_fw_agg/get_fw_iw above.
+  // Shared by the slot_binding_kind::shape_fact case (shapes.crash_lightning.enemies_hit) and
+  // hits.crash_lightning below, which previously each called compute_crash_lightning_shape()
+  // independently.
+  bool cl_shape_computed = false;
+  rl_policy::shape_hit_result_t cl_shape;
+  auto get_crash_lightning_shape = [ & ]() -> const rl_policy::shape_hit_result_t&
+  {
+    if ( !cl_shape_computed )
+    {
+      cl_shape = compute_crash_lightning_shape( const_cast<player_t*>( p ) );
+      cl_shape_computed = true;
+    }
+    return cl_shape;
+  };
+
+  // 260914-rbp Task 2c (HI-1): the seven hits.* scalars, computed AT MOST ONCE per build_obs()
+  // call. Before this task, every slot bound to a hits.* direct_id repeated this action's own
+  // lookup_pick()/count_hits_within_radius() walk independently -- with the `at_least_k`
+  // switch rows (BL-2) there can be up to 38 such slots for these seven values in a single
+  // decision. This struct is filled once regardless of how many slots read from it this
+  // decision; every hits.* case below reads a field of it instead of recomputing.
+  // hits.crash_lightning reuses get_crash_lightning_shape() above rather than a second
+  // compute_crash_lightning_shape() call.
+  struct hits_values_t
+  {
+    double chain_lightning                = 0.0;
+    double tempest                        = 0.0;
+    double crash_lightning                = 0.0;
+    double lava_lash_flame_shock_spread   = 0.0;
+    double voltaic_blaze_cleave           = 0.0;
+    double voltaic_blaze_new_flame_shocks = 0.0;
+    double fire_nova                      = 0.0;
+  };
+  bool hits_values_computed = false;
+  hits_values_t hits_values;
+  auto get_hits_values = [ & ]() -> const hits_values_t&
+  {
+    if ( hits_values_computed )
+      return hits_values;
+    hits_values_computed = true;
+
+    if ( action_t* cl_action = resolve_hits_action_handles( p ).chain_lightning )
+    {
+      bool      found = false;
+      player_t* pick  = rl_target_select::lookup_pick( cl_action, &found );
+      if ( found && pick != nullptr )
+        hits_values.chain_lightning = static_cast<double>(
+            rl_target_select::chain_hop_count_for_start( cl_action, pick ) );
+    }
+
+    if ( action_t* tempest_action = resolve_hits_action_handles( p ).tempest )
+    {
+      bool      found = false;
+      player_t* pick  = rl_target_select::lookup_pick( tempest_action, &found );
+      if ( found && pick != nullptr )
+        hits_values.tempest = static_cast<double>( rl_target_select::count_hits_within_radius(
+            tempest_action->player, pick, tempest_action->radius ) );
+    }
+
+    hits_values.crash_lightning = static_cast<double>( get_crash_lightning_shape().enemies_hit );
+
+    if ( action_t* lava_lash_action = resolve_hits_action_handles( p ).lava_lash )
+    {
+      bool      found = false;
+      player_t* pick  = rl_target_select::lookup_pick( lava_lash_action, &found );
+      if ( found && pick != nullptr )
+      {
+        const rl_target_select::vb_lava_lash_geometry_t& geo =
+            rl_target_select::resolve_vb_lava_lash_geometry( lava_lash_action->player );
+        hits_values.lava_lash_flame_shock_spread = static_cast<double>(
+            rl_target_select::count_new_flame_shock_neighbours(
+                lava_lash_action->player, pick, geo.lava_lash_radius, geo.lava_lash_cap, false ) );
+      }
+    }
+
+    if ( action_t* vb_action = resolve_hits_action_handles( p ).voltaic_blaze )
+    {
+      bool      found = false;
+      player_t* pick  = rl_target_select::lookup_pick( vb_action, &found );
+      if ( found && pick != nullptr )
+      {
+        const rl_target_select::vb_lava_lash_geometry_t& geo =
+            rl_target_select::resolve_vb_lava_lash_geometry( vb_action->player );
+        const int hits = rl_target_select::count_hits_within_radius(
+            vb_action->player, pick, geo.vb_radius );
+        hits_values.voltaic_blaze_cleave =
+            static_cast<double>( geo.vb_cap > 0 ? std::min( geo.vb_cap, hits ) : 0 );
+        hits_values.voltaic_blaze_new_flame_shocks = static_cast<double>(
+            rl_target_select::count_new_flame_shock_neighbours(
+                vb_action->player, pick, geo.vb_radius, geo.vb_cap, true ) );
+      }
+    }
+
+    if ( action_t* explosion = resolve_hits_action_handles( p ).fire_nova_explosion )
+    {
+      const double radius = explosion->radius;
+      const int    cap    = explosion->aoe > 0 ? explosion->aoe : 0;
+      if ( radius > 0.0 && cap > 0 )
+      {
+        double    sum    = 0.0;
+        player_t* caster = explosion->player;
+        for ( player_t* carrier : caster->sim->target_non_sleeping_list )
+        {
+          if ( !carrier->is_enemy() )
+            continue;
+          // Q6 (rulings, HIT-INPUTS-DESIGN.md §2.5): caster-filtered -- THIS actor's own Flame
+          // Shock, the SAME find_dot("flame_shock", caster) idiom build_enemy_fact's own
+          // flame_shock_remaining field already uses (WR-04).
+          dot_t* fs = carrier->find_dot( "flame_shock", caster );
+          if ( !fs || !fs->is_ticking() )
+            continue;
+          const int hits_from_this_carrier =
+              rl_target_select::count_hits_within_radius( caster, carrier, radius );
+          sum += static_cast<double>( std::min( cap, hits_from_this_carrier ) );
+        }
+        hits_values.fire_nova = sum;
+      }
+    }
+
+    return hits_values;
   };
 
   // 220-06 Task 3 (OBS-07): the shared-snapshot cache for
@@ -2972,52 +3153,33 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
             // resolve_thorims_branch_geometry) -- read via the SAME per-decision stash
             // preference_chain_lightning itself reads (rl_target_select::chain_hop_count_for_start),
             // never a fresh walk. 0 when no pick is stamped for chain_lightning this decision.
+            // 260914-rbp Task 2c (HI-1): reads the per-decision memoised hits_values_t above --
+            // computed once regardless of how many switch/at_least_k slots bind to this direct_id.
             case direct_id::hits_chain_lightning:
-            {
-              raw = 0.0;
-              if ( action_t* cl_action = resolve_hits_action_handles( p ).chain_lightning )
-              {
-                bool found = false;
-                player_t* pick = rl_target_select::lookup_pick( cl_action, &found );
-                if ( found && pick != nullptr )
-                  raw = static_cast<double>(
-                      rl_target_select::chain_hop_count_for_start( cl_action, pick ) );
-              }
+              raw = get_hits_values().chain_lightning;
               status = lookup_status::present;
               break;
-            }
 
             // 260914-rbp Task 1 (R6, rulings Q3); CORRECTED Task 2b (Q17 review, A2): 1 +
             // live enemies within Tempest's own resolved radius (+ combat_reach) of the pick,
             // UNCAPPED -- the pick itself is always hit (memo ss2.0's "a splash always hits its
             // centre"), so this is NOT an alias of target_facts.tempest.neighbours_within_radius
             // (that one-hop proxy family stays centre-excluded, untouched). Computed directly
-            // via count_neighbours_within_radius against tempest_action's OWN resolved radius,
+            // via count_hits_within_radius against tempest_action's OWN resolved radius,
             // never through the full build_enemy_fact (which also walks three extra O(N) fields
             // per call for nothing this scalar does not need). 0 when no pick is stamped for
             // tempest this decision.
             case direct_id::hits_tempest:
-            {
-              raw = 0.0;
-              if ( action_t* tempest_action = resolve_hits_action_handles( p ).tempest )
-              {
-                bool found = false;
-                player_t* pick = rl_target_select::lookup_pick( tempest_action, &found );
-                if ( found && pick != nullptr )
-                  raw = static_cast<double>( rl_target_select::count_neighbours_within_radius(
-                      tempest_action->player, pick, tempest_action->radius ) );
-              }
+              raw = get_hits_values().tempest;
               status = lookup_status::present;
               break;
-            }
 
             // 260914-rbp Task 1 (R9, HIT-INPUTS-DESIGN.md §2.3): compute_crash_lightning_shape(p)
             // .enemies_hit -- an ALIAS of what slot 163 (shapes.crash_lightning.enemies_hit)
             // already reads today; never a pick-based read since Crash Lightning is a
             // player-centred CONE, not a targeted pick (OR-2).
             case direct_id::hits_crash_lightning:
-              raw = static_cast<double>(
-                  compute_crash_lightning_shape( const_cast<player_t*>( p ) ).enemies_hit );
+              raw = get_hits_values().crash_lightning;
               status = lookup_status::present;
               break;
 
@@ -3028,56 +3190,22 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
             // Molten Assault's own resolved effectN(2)). 0 when no pick is stamped for lava_lash
             // this decision.
             case direct_id::hits_lava_lash_flame_shock_spread:
-            {
-              raw = 0.0;
-              if ( action_t* lava_lash_action = resolve_hits_action_handles( p ).lava_lash )
-              {
-                bool found = false;
-                player_t* pick = rl_target_select::lookup_pick( lava_lash_action, &found );
-                if ( found && pick != nullptr )
-                {
-                  const rl_target_select::vb_lava_lash_geometry_t& geo =
-                      rl_target_select::resolve_vb_lava_lash_geometry( lava_lash_action->player );
-                  // Task 2b (Q17 review, A2): include_pick=false -- the pick here is the SOURCE
-                  // carrier casting Lava Lash, never one of the spread's own targets. UNCHANGED
-                  // convention (this is the one hits.* leaf the correction deliberately leaves
-                  // centre-excluded).
-                  raw = static_cast<double>( rl_target_select::count_new_flame_shock_neighbours(
-                      lava_lash_action->player, pick, geo.lava_lash_radius, geo.lava_lash_cap,
-                      false ) );
-                }
-              }
+              raw = get_hits_values().lava_lash_flame_shock_spread;
               status = lookup_status::present;
               break;
-            }
 
             // 260914-rbp Task 1 (R9, HIT-INPUTS-DESIGN.md §2.2a); CORRECTED Task 2b (Q17
             // review, A2 -- memo ss2.0 lines 315-316: "a cleave always hits its target"):
             // min(6, 1 + enemies within 10 yd (+ reach) of the pick) -- radius/cap resolved BY
             // NAME off voltaic_blaze_damage's own resolved radius (R13, this task) / aoe (set by
             // hand at that action's own ctor from Voltaic Blaze's effectN(4)). The +1 for the
-            // pick itself is now baked into count_neighbours_within_radius (it matches the
+            // pick itself is now baked into count_hits_within_radius (it matches the
             // engine's own `aoe=6` counting the primary target as one of the six). 0 when no
             // pick is stamped for voltaic_blaze this decision.
             case direct_id::hits_voltaic_blaze_cleave:
-            {
-              raw = 0.0;
-              if ( action_t* vb_action = resolve_hits_action_handles( p ).voltaic_blaze )
-              {
-                bool found = false;
-                player_t* pick = rl_target_select::lookup_pick( vb_action, &found );
-                if ( found && pick != nullptr )
-                {
-                  const rl_target_select::vb_lava_lash_geometry_t& geo =
-                      rl_target_select::resolve_vb_lava_lash_geometry( vb_action->player );
-                  const int hits = rl_target_select::count_neighbours_within_radius(
-                      vb_action->player, pick, geo.vb_radius );
-                  raw = static_cast<double>( geo.vb_cap > 0 ? std::min( geo.vb_cap, hits ) : 0 );
-                }
-              }
+              raw = get_hits_values().voltaic_blaze_cleave;
               status = lookup_status::present;
               break;
-            }
 
             // 260914-rbp Task 1 (R9, HIT-INPUTS-DESIGN.md §2.2b); CORRECTED Task 2b (Q17
             // review, A2): of the cleave hits (including the pick itself, A2's "cleave always
@@ -3088,29 +3216,15 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
             // candidates from the identical hit set). 0 when no pick is stamped for
             // voltaic_blaze this decision.
             case direct_id::hits_voltaic_blaze_new_flame_shocks:
-            {
-              raw = 0.0;
-              if ( action_t* vb_action = resolve_hits_action_handles( p ).voltaic_blaze )
-              {
-                bool found = false;
-                player_t* pick = rl_target_select::lookup_pick( vb_action, &found );
-                if ( found && pick != nullptr )
-                {
-                  const rl_target_select::vb_lava_lash_geometry_t& geo =
-                      rl_target_select::resolve_vb_lava_lash_geometry( vb_action->player );
-                  raw = static_cast<double>( rl_target_select::count_new_flame_shock_neighbours(
-                      vb_action->player, pick, geo.vb_radius, geo.vb_cap, true ) );
-                }
-              }
+              raw = get_hits_values().voltaic_blaze_new_flame_shocks;
               status = lookup_status::present;
               break;
-            }
 
             // 260914-rbp Task 1 (R9, HIT-INPUTS-DESIGN.md §2.2c, rulings Q2); CORRECTED
             // Task 2b (Q17 review, A2 -- memo §A.6: "the explosion is centred ON the carrier and
             // hits it", spell 333977 aoe 6 counts the centre): Σ over enemies carrying THIS
             // actor's Flame Shock of min(6, 1 + enemies within 8 yd (+ reach) of that carrier) --
-            // the +1 for the carrier itself is baked into count_neighbours_within_radius, so a
+            // the +1 for the carrier itself is baked into count_hits_within_radius, so a
             // single Flame-Shocked carrier with zero neighbours now reads 1 (not 0), matching
             // "single target with one carrier now reads 1" (A2). Double-counting across carriers
             // is still allowed (a tight pack's overlap IS the value this leaf carries, never
@@ -3121,35 +3235,9 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
             // "Max Targets 6"). 0 when the explosion action does not exist (Fire Nova untalented
             // on this build).
             case direct_id::hits_fire_nova:
-            {
-              double sum = 0.0;
-              if ( action_t* explosion = resolve_hits_action_handles( p ).fire_nova_explosion )
-              {
-                const double radius = explosion->radius;
-                const int    cap    = explosion->aoe > 0 ? explosion->aoe : 0;
-                if ( radius > 0.0 && cap > 0 )
-                {
-                  player_t* caster = explosion->player;
-                  for ( player_t* carrier : caster->sim->target_non_sleeping_list )
-                  {
-                    if ( !carrier->is_enemy() )
-                      continue;
-                    // Q6 (rulings, HIT-INPUTS-DESIGN.md §2.5): caster-filtered -- THIS actor's
-                    // own Flame Shock, the SAME find_dot("flame_shock", caster) idiom
-                    // build_enemy_fact's own flame_shock_remaining field already uses (WR-04).
-                    dot_t* fs = carrier->find_dot( "flame_shock", caster );
-                    if ( !fs || !fs->is_ticking() )
-                      continue;
-                    const int hits_from_this_carrier =
-                        rl_target_select::count_neighbours_within_radius( caster, carrier, radius );
-                    sum += static_cast<double>( std::min( cap, hits_from_this_carrier ) );
-                  }
-                }
-              }
-              raw = sum;
+              raw = get_hits_values().fire_nova;
               status = lookup_status::present;
               break;
-            }
 
             // 260914-rbp Task 1's R14 (crash_lightning_next_expiry/crash_lightning_stack_seconds
             // direct_id cases, reading a hardcoded t.bindings[10] slot index) is MIGRATED and
@@ -3387,10 +3475,12 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
           // compute_sundering_shape() -- the CURRENT facing only, no per-decision pick (the
           // shaped actions never appear in targeted_picks, OR-2). `p` is only ever read here
           // (const-safe: neither compute function mutates the player), so no const_cast is
-          // needed at this call site.
+          // needed at this call site. 260914-rbp Task 2c (HI-1): the crash_lightning arm now
+          // reads the shared get_crash_lightning_shape() lazy getter above, so this slot and
+          // hits.crash_lightning never each pay their own compute_crash_lightning_shape() call.
           const rl_policy::shape_hit_result_t shape =
               ( b.shape_fact_action == shape_fact_action_kind::crash_lightning )
-                  ? compute_crash_lightning_shape( const_cast<player_t*>( p ) )
+                  ? get_crash_lightning_shape()
                   : compute_sundering_shape( const_cast<player_t*>( p ) );
           switch ( b.shape_fact_leaf )
           {
