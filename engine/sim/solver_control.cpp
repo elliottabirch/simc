@@ -1184,9 +1184,20 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
             // own overwrite now also goes through) overwrites the STAMPED pick (so accept_cast()'s
             // own lookup_pick() call below sees the replacement) and the block's own chosen_slot
             // (so the row records what happened, never what the score would have chosen).
+            //
+            // 240-05 Task 3 (D5(a), must_haves: "The aim random-try dial runs on the rules path
+            // too"): the `has_scorer` test this condition used to carry is REMOVED -- it never let
+            // the draw fire on any arm to date (no v4 blob with a scorer section had ever been
+            // loaded), and the comparator arm now carries a real scorer section too (D8(a): the
+            // SAME binary, the SAME weights file, aim forced to the rules), so gating on a loaded
+            // head would have made the comparator pay NO aim randomisation while the learning arms
+            // paid its full cost -- an unmatched comparison. The null check on
+            // `sim->solver_policy_weights` itself stays (a scripted/non-RL run may carry no
+            // weights blob at all, and `.scorer.exploration` immediately below needs a live object
+            // to read); every OTHER condition is unchanged: a stamped pick must exist, the
+            // candidate table must be present, and there must be more than one candidate.
             if ( found && pick != nullptr && candidate_block_features != nullptr &&
-                 candidate_block_count > 1 && sim->solver_policy_weights &&
-                 sim->solver_policy_weights->has_scorer )
+                 candidate_block_count > 1 && sim->solver_policy_weights )
             {
               const float candidate_exploration = sim->solver_policy_weights->scorer.exploration;
               if ( candidate_exploration > 0.0f &&

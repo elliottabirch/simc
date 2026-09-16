@@ -504,6 +504,25 @@ rl_weights_t load_rlw1( const std::string& path )
           "rl_policy::load_rlw1: file '{}' declares scorer_slots={}, must be {}..{}",
           path, scorer_slots, RLW1_MIN_SCORER_SLOTS, RLW1_MAX_SCORER_SLOTS ) );
     }
+    // 240-05 Task 3 (must_haves: "A weights file whose declared slot count disagrees with the
+    // compiled one is refused when it is LOADED, by name, at startup -- not at the first decision
+    // that would have read past the table."): this is the replacement for the two per-decision
+    // scorer-declared-slots refusals task 2 removed from rl_target_select.cpp::select() -- the
+    // refusal did not disappear, it MOVED here. Unconditional, like the scorer_features/
+    // scorer_feature_sha agreement checks below -- a mismatch means this blob was trained against
+    // a different candidate-table width than this binary was compiled for (RL_TARGET_SLOTS,
+    // rl_policy_constants.h; `run_target_head`'s own scoring loop iterates the COMPILED
+    // RL_TARGET_SLOTS, never this declared value, so an un-refused mismatch would silently score
+    // against a table sized for a different geometry than the blob was trained on), refused by
+    // name at load rather than reading past the compiled candidate block on the first decision
+    // that needed the extra slots.
+    if ( scorer_slots != RL_TARGET_SLOTS )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' declares scorer_slots={}, does not match this build's "
+          "RL_TARGET_SLOTS={}",
+          path, scorer_slots, RL_TARGET_SLOTS ) );
+    }
     if ( scorer_features < RLW1_MIN_SCORER_FEATURES || scorer_features > RLW1_MAX_SCORER_FEATURES )
     {
       throw sc_runtime_error( fmt::format(
