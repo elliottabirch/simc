@@ -241,13 +241,12 @@ void fill_pick( action_t* resolved, bool harmful, preference_fn pref );
 player_t* lookup_pick( const action_t* resolved, bool* out_found );
 
 // 230-04 (SCOR-02, R-B): the per-decision candidate block select() CAPTURED for `resolved` --
-// 233.1-03 (R6-13, OV-5): on EVERY preference now, not only the scorer's. On the scorer path this
-// is the feature block preference_scorer actually scored for each candidate (CAPTURED at the
-// moment it scored it, never recomputed here, mirroring lookup_pick's own D-12 discipline); on the
-// rules path it is a full build_enemy_fact per candidate, built specifically for this capture
-// (never the lite fact the decision was actually scored with) -- see rl_target_select.cpp's own
-// comment at that call site. Either way: the mask of which slots were real, the live candidate
-// count, and the slot the pick actually took. `features` points at
+// 233.1-03 (R6-13, OV-5): captured on EVERY decision now (the rule runs and builds the table
+// unconditionally, 240-05 Task 2). A full build_enemy_fact per candidate, built specifically for
+// this capture (never the lite fact the decision was actually scored with) -- see
+// rl_target_select.cpp's own comment at that call site. `run_target_head` (this file) reads this
+// SAME captured block to score against, never recomputing it. The mask of which slots were real,
+// the live candidate count, and the slot the pick actually took. `features` points at
 // `RL_TARGET_SLOTS * RL_TARGET_FEATURES` floats, slot-major, owned by this module and valid only
 // until the NEXT call into this module for the SAME action -- copy out before that if the caller
 // needs to keep it (rl_translog::record_decision's own contract: memcpy's it into the row
@@ -295,18 +294,39 @@ void stamp_target_fact_is_current_target( const action_t* resolved, bool is_curr
 // found-but-partial slot reports each half honestly.
 target_fact_snapshot lookup_target_fact_snapshot( const action_t* resolved, bool* out_found );
 
-// 230-04 (SCOR-02, R-B): applies the SECOND exploration dial's replacement pick -- the ONLY
-// mutator of an already-stamped pick, called from solver_control.cpp's cast branch AFTER the
-// action has been chosen (never from inside select()/fill_pick, which fill gate bits for every
-// targeted spell every decision, not only the one actually cast). Overwrites BOTH the stamped
-// pick (so accept_cast()'s own lookup_pick() call, and the mid-cast re-resolution ladder, see the
-// REPLACED candidate, never the scorer's original one) and the candidate block's chosen_slot (so
-// the transition log records what happened, never what was intended). Returns false, changing
+// 230-04 (SCOR-02, R-B), renamed 240-05 Task 2 (D1(a)/D8(a)): the ONE seam that mutates an
+// already-stamped pick -- TWO callers now, never a third: `run_target_head` (below, the target
+// head's own overwrite, called from `rl_policy_obs.cpp` immediately after the rule's fill_pick
+// loop, BEFORE the observation is built) and the aim random-try exploration dial
+// (`solver_control.cpp`'s cast branch, AFTER the action has been chosen). Neither call site is
+// inside `select()`/`fill_pick` itself, which fill gate bits for every targeted spell every
+// decision, not only the one actually cast/aimed. Overwrites BOTH the stamped pick (so
+// accept_cast()'s own lookup_pick() call, and the mid-cast re-resolution ladder, see the REPLACED
+// candidate, never the rule's original one) and the candidate block's chosen_slot (so the
+// transition log records what happened, never what was intended). Returns false, changing
 // nothing, when no pick was stamped for `resolved` at the current decision -- mirrors
 // lookup_pick's own staleness discipline; the caller must then leave the original pick and
 // candidate block untouched.
-bool apply_candidate_exploration( const action_t* resolved, player_t* replacement,
-                                   std::uint8_t replacement_slot );
+bool apply_head_pick( const action_t* resolved, player_t* replacement,
+                       std::uint8_t replacement_slot );
+
+// 240-05 Task 2 (D1(a)): re-aims one targeted spell for the CURRENT decision, using the loaded
+// target head. Reads the candidate block `select()` already stamped for `resolved` this decision
+// (via the SAME staleness-checked access `lookup_candidate_block` uses -- never recomputed, never
+// an extra `build_enemy_fact` pass), scores every REAL slot with `rl_policy::forward_scorer` (the
+// slot's 23 stored facts plus the eight-wide spell one-hot), picks the winner with the SAME tie
+// ladder `select()` itself uses (one definition, two callers), and overwrites the stamped pick and
+// chosen slot through `apply_head_pick` above. No-op -- the rule's own aim stands -- when `resolved`
+// is null, when no head is loaded, or when no candidate block was captured this decision (an
+// overflowing rules-path decision, or an action `fill_pick` never reached this decision): never
+// throws, never truncates, and the skip is counted (`get_target_head_no_block_count`) so the
+// fallback is measurable, not silent.
+void run_target_head( const action_t* resolved );
+
+// One fight's total of `run_target_head` calls that found no usable candidate block for their
+// decision (see that function's own doc comment for the three cases) -- cleared by `reset( sim )`
+// below, same one-fight-totals lifetime as every other counter in this file.
+std::uint64_t get_target_head_no_block_count();
 
 // True for exactly the eight targeted registry tokens this plan governs (stormstrike,
 // lightning_bolt, chain_lightning, tempest, windstrike, lava_lash, voltaic_blaze,
@@ -405,19 +425,13 @@ bool chain_hop_fallback_used( const action_t* resolved );
 // (above) for why this plan does not split the computation.
 double preference_tempest( const action_t* a, const enemy_fact& fact );
 
-// Phase 230-02 (SCOR-01, D-01/D-02): the learned scorer -- a NINTH preference, same
-// function-pointer signature as the eight above, registered through `preference_for`'s own
-// by-name dispatch rather than a separate call path. Reads the scorer out of
-// `a->player->sim->solver_policy_weights` (refuses by assertion if `has_scorer` is false --
-// `preference_for` only ever returns this pointer when the loaded weights actually carry one),
-// fills the SAME file-static feature buffer every call reuses
-// (`rl_policy::rl_scorer_t::feature_scratch`, sized at load) from `fact`'s fields in
-// `target_features.py`'s declared order (mirrored here field-for-field, `rl_target_select.cpp`'s
-// own comment states the order explicitly) plus the eight-wide aiming-spell one-hot
-// (`targeted_action_tokens()`'s own order, CK1-1), and returns `rl_policy::forward_scorer`'s one
-// number. Higher wins, matching every other preference's own contract -- `select()` never knows
-// this preference is anything but a ninth ordinary one.
-double preference_scorer( const action_t* a, const enemy_fact& fact );
+// Phase 230-02 (SCOR-01, D-01/D-02): the learned scorer used to be registered here as a NINTH
+// preference, dispatched through `preference_for`'s own by-name switch. REMOVED 240-05 Task 2
+// (D1(a)/D8(a)): the rule now runs on EVERY decision unconditionally (that is what makes the
+// RULES comparator free -- see `preference_for`'s own comment), and the scorer's arithmetic moved
+// to `run_target_head` (above), which scores the candidate table the rule already built instead
+// of replacing the rule's own preference. `preference_for` no longer has a branch returning a
+// scorer preference.
 
 // ---------------------------------------------------------------------------------------------
 // Mid-cast re-resolution counters (D-14, TGT-03). action_execute_event_t::execute() (action.cpp)

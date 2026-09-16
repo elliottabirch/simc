@@ -863,6 +863,14 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
   bool any_targeted_action_seen  = false;
   bool any_targeted_action_ready = false;
 
+  // 240-05 Task 2 (D1(a)): actions whose rule pick the loop below stamps, captured for the target
+  // head's own pass immediately AFTER this loop (below) -- filled ONLY inside the SAME gate
+  // fill_pick itself runs under, just below, so the head never evaluates an action the rule never
+  // scored this decision. Sized generically at RL_ACTION_DIM (never CK1-1's hardcoded eight) so a
+  // future registry growth needs no change here.
+  std::array<action_t*, RL_ACTION_DIM> targeted_actions_this_decision{};
+  std::size_t                          targeted_actions_count = 0;
+
   const std::vector<action_t*>& handles = cached->second;
   for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
   {
@@ -914,6 +922,9 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
                 "rl_target_select: a pick just filled for this decision must be immediately "
                 "readable (228-02, D-12)" );
         out_ready[ i ] = ( a->ready() && pick != nullptr && a->target_ready( pick ) ) ? 1 : 0;
+        // 240-05 Task 2: record this action for the target head's own pass, immediately after
+        // this loop -- see that pass's own comment (below) for why identical gating matters.
+        targeted_actions_this_decision[ targeted_actions_count++ ] = a;
       }
       else
       {
@@ -947,6 +958,22 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
   // which already passed this check the time it was computed) -- named abort, not a silent
   // default, the instant a zero capability's governed action would otherwise read legal.
   rl_capability_assert_no_governed_action_legal( p, out_resolvable, out_ready );
+
+  // 240-05 Task 2 (D1(a)): the target head re-aims every targeted spell BEFORE the observation is
+  // built, immediately after the fill_pick loop above has stamped the rules' own picks and
+  // candidate tables for all eight aimable spells. One evaluation per decision, no second pass:
+  // this is what makes the 105 target_facts.*/38 hits.* fields (build_obs, solver_control.cpp)
+  // describe the head's aim rather than the rule's. Gated on a head actually being loaded AND the
+  // comparator switch (target_scorer_force_rules) being off -- the comparator arm never reaches
+  // this call, so its own aim stays exactly the rule's (D8(a)). `targeted_actions_count` is
+  // naturally 0 off the decision boundary (the loop above only appends inside its own boundary
+  // branch), so no separate `is_decision_boundary` check is needed here.
+  if ( p->sim->solver_policy_weights && p->sim->solver_policy_weights->has_scorer &&
+       !p->sim->target_scorer_force_rules )
+  {
+    for ( std::size_t k = 0; k < targeted_actions_count; ++k )
+      rl_target_select::run_target_head( targeted_actions_this_decision[ k ] );
+  }
 
   if ( is_decision_boundary )
   {
