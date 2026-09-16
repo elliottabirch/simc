@@ -1179,10 +1179,11 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
             // `build_candidate_facts` reuses `generic_filter`/`build_enemy_fact` VERBATIM (D-20:
             // no third copy of the filter) against a game state that has not advanced since
             // `select()` scored it moments earlier this same decision, so its order matches the
-            // block's own slot order exactly. `apply_candidate_exploration` overwrites the
-            // STAMPED pick (so accept_cast()'s own lookup_pick() call below sees the replacement)
-            // and the block's own chosen_slot (so the row records what happened, never what the
-            // score would have chosen).
+            // block's own slot order exactly. `apply_head_pick` (renamed from
+            // `apply_candidate_exploration`, 240-05 Task 2 -- the SAME seam `run_target_head`'s
+            // own overwrite now also goes through) overwrites the STAMPED pick (so accept_cast()'s
+            // own lookup_pick() call below sees the replacement) and the block's own chosen_slot
+            // (so the row records what happened, never what the score would have chosen).
             if ( found && pick != nullptr && candidate_block_features != nullptr &&
                  candidate_block_count > 1 && sim->solver_policy_weights &&
                  sim->solver_policy_weights->has_scorer )
@@ -1198,9 +1199,9 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
                   const int draw = static_cast<int>(
                       sim->solver_explore_rng.range( 0.0, static_cast<double>( legal.size() ) ) );
                   const std::uint8_t draw_slot = static_cast<std::uint8_t>( draw );
-                  if ( rl_target_select::apply_candidate_exploration( resolved_for_pick,
-                                                                       legal[ draw ].candidate,
-                                                                       draw_slot ) )
+                  if ( rl_target_select::apply_head_pick( resolved_for_pick,
+                                                           legal[ draw ].candidate,
+                                                           draw_slot ) )
                   {
                     chosen_target_actor_index =
                         static_cast<std::uint16_t>( legal[ draw ].actor_index );

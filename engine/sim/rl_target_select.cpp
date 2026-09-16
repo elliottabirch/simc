@@ -34,11 +34,11 @@ namespace
 // re-derived from scripts/rl/specs/enhancement.json's specs.enhancement.actions[] at planning
 // time). SHAPED (crash_lightning, sundering) is plan 228-03's, deliberately absent here.
 //
-// 230-02 (CK1-1, owner ruling Q1): this is also the scorer's own one-hot registry --
-// preference_scorer (below) walks this SAME array for its aiming-spell one-hot, so the shaped
-// pair can never reach the scorer either. Settled once, not a run-time discovery: Crash Lightning
-// and Sundering cast in the current facing direction only, have no selector and never turn, so
-// they have no pick to score and no column to occupy.
+// 230-02 (CK1-1, owner ruling Q1): this is also the target head's own one-hot registry (240-05
+// Task 2) -- run_target_head (below) walks this SAME array for its aiming-spell one-hot, so the
+// shaped pair can never reach the head either. Settled once, not a run-time discovery: Crash
+// Lightning and Sundering cast in the current facing direction only, have no selector and never
+// turn, so they have no pick to score and no column to occupy.
 constexpr const char* TARGETED_TOKENS[] = {
   "stormstrike", "lightning_bolt", "chain_lightning", "tempest",
   "windstrike",  "lava_lash",      "voltaic_blaze",   "primordial_storm",
@@ -75,6 +75,15 @@ struct candidate_block_slot
   std::uint8_t         chosen_slot = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
   std::uint64_t         stamp       = 0;
   bool                   has_stamp   = false;
+
+  // 240-05 (D1(a)): parallel per-slot actor identity, captured in LOCKSTEP with `features` above
+  // by select()'s own per-candidate loop -- zero extra walk. Deliberately NOT part of the public
+  // candidate_block struct or the transition log (an identity number as a scoring INPUT is
+  // excluded from `features` for exactly the reason fill_candidate_features's own comment states
+  // for the feature array itself: it would make the score depend on enumeration order). Read ONLY
+  // by run_target_head (below), which needs the real player_t* both for the existing tie ladder's
+  // final (actor_index, actor_spawn_index) rung and to hand a real candidate to apply_head_pick.
+  std::vector<player_t*> actors;
 };
 std::unordered_map<const action_t*, candidate_block_slot> g_candidate_block_table;
 
@@ -127,6 +136,11 @@ reresolution_counts g_reresolution_counts;
 // CR-04 (260902/cr4): decisions where every one of the RL-controlled actor's registry actions
 // read not-ready -- the deadlock census. Same one-fight-totals lifetime as the counters above.
 std::uint64_t g_every_targeted_action_illegal = 0;
+
+// 240-05 (must_haves): run_target_head calls that found no usable candidate block for their
+// decision -- never a throw, never a truncation, the skip is COUNTED so the fallback is
+// measurable. Same one-fight-totals lifetime as the counters above.
+std::uint64_t g_target_head_no_block_count = 0;
 
 // WR-05 (260902/cr4): a file-static candidate buffer reused across every select() call, cleared
 // (not reallocated) per call -- same single-thread precondition begin_decision's own assert
@@ -664,14 +678,15 @@ void compute_chain_hop_counts( double radius, int cap, const std::vector<player_
   }
 }
 
-// 233.1-03 (R6-13, OV-5): extracted verbatim from preference_scorer's own fill loop (below) so the
-// rules path can fill its own scratch buffer with it too -- pure, no rl_scorer_t dependency.
-// Order-locked to target_features.py's own derivation (struct enemy_fact's declaration order,
-// EXCLUDING candidate/actor_index/actor_spawn_index -- an identity number as a feature would make
-// the score depend on enumeration order), EXACTLY as preference_scorer's own comment already
-// states: this is a refactor, never a re-ordering. A reordering on either side of the RLW1 wire is
-// still caught by the feature fingerprint refusal at load (RL_TARGET_FEATURE_SHA) for the scorer
-// path, and by this function's own trailing assert for both callers.
+// 233.1-03 (R6-13, OV-5): extracted verbatim from the old preference_scorer's own fill loop
+// (230-02; folded into run_target_head, 240-05 Task 2) so the rules path can fill its own scratch
+// buffer with it too -- pure, no rl_scorer_t dependency. Order-locked to target_features.py's own
+// derivation (struct enemy_fact's declaration order, EXCLUDING candidate/actor_index/
+// actor_spawn_index -- an identity number as a feature would make the score depend on enumeration
+// order), EXACTLY as run_target_head's own comment states: this is a refactor, never a
+// re-ordering. A reordering on either side of the RLW1 wire is still caught by the feature
+// fingerprint refusal at load (RL_TARGET_FEATURE_SHA) for the head path, and by this function's
+// own trailing assert for both callers.
 void fill_candidate_features( const action_t*, const enemy_fact& fact, float* out )
 {
   std::size_t i = 0;
@@ -711,6 +726,29 @@ void fill_candidate_features( const action_t*, const enemy_fact& fact, float* ou
   assert( i == RL_TARGET_FEATURES &&
           "fill_candidate_features's fill order does not match RL_TARGET_FEATURES" );
 }
+
+// 240-05 Task 2 (must_haves: "the head's argmax must reuse this, not invent one"): the ONE tie
+// ladder both select()'s own rule pick (below) and run_target_head's head pick use -- extracted
+// here so there is one definition, two callers, never a second copy. Ladder, unchanged from
+// select()'s pre-240-05 inline logic: (1) `!best` -- the first candidate seen always wins so far;
+// (2) highest score; (3) among equal scores, the player's CURRENT target; (4) final tie-break on
+// the stable (actor_index, actor_spawn_index) identity pair, ascending -- a total order, so a run
+// stays reproducible (TGT-02 edge: ordering) regardless of which rung a caller's own candidate
+// enumeration order would otherwise have decided.
+bool candidate_is_better( double score, player_t* c, double best_score, player_t* best,
+                            player_t* current_target )
+{
+  if ( !best )
+    return true;
+  if ( score != best_score )
+    return score > best_score;
+  bool c_is_current    = ( c == current_target );
+  bool best_is_current = ( best == current_target );
+  if ( c_is_current != best_is_current )
+    return c_is_current;
+  return std::tie( c->actor_index, c->actor_spawn_index ) <
+         std::tie( best->actor_index, best->actor_spawn_index );
+}
 } // anonymous namespace
 
 player_t* select( action_t* a, bool harmful, preference_fn pref )
@@ -728,50 +766,27 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
   if ( candidates.empty() )
     return nullptr;
 
-  // Phase 230-02 (SCOR-01, R-B): the scorer's overflow refusal -- REFUSE BY NAME the instant the
-  // generic filter's own live candidate count exceeds the LOADED blob's own declared
-  // `scorer.slots`, never truncate and never drop the tail. Checked before the scoring loop so a
-  // malformed blob is refused at the FIRST decision it would ever be consulted, not silently
-  // mid-loop. 233.1-03 (R6-13, OV-5): this declared-slots refusal STAYS scorer-only -- the rules
-  // path has no weights blob to declare slots against (there is nothing to compare against).
-  rl_policy::rl_scorer_t* scorer_scratch = nullptr;  // 230-04: non-null only when pref == preference_scorer
-  if ( pref == preference_scorer )
-  {
-    rl_policy::rl_weights_t& w = *a->player->sim->solver_policy_weights;
-    if ( candidates.size() > w.scorer.slots )
-    {
-      throw sc_runtime_error( fmt::format(
-          "rl_target_select::select: {} candidates passed the generic filter for '{}', exceeding "
-          "the loaded scorer's declared slots={} -- refusing rather than truncating",
-          candidates.size(), a->name_str, w.scorer.slots ) );
-    }
-    scorer_scratch = &w.scorer;
-  }
-
-  // 233.1-03b (R6-13, P233.1-36): on the RULES path this bound is now a DIAGNOSTIC, not a gate.
-  // 233.1-03's own change above (filling the candidate block on EVERY preference) moved this
-  // refusal out of the scorer-only guard with it, so a rules-path decision whose candidate set
-  // exceeds RL_TARGET_SLOTS aborted the whole training-arm iteration -- measured on real training
-  // shapes: big-pack-burst's 10+/-2-add melee pack and a four-target Hectic Add Cleave corpus both
-  // crash the AGENT arm (see the todo this plan closes:
-  // 2026-09-08-big-pack-burst-agent-arm-exceeds-rl-target-slots-8.md). The fix (the THIRD option,
-  // not a RL_TARGET_SLOTS bump and not a truncation): an overflowing rules-path decision keeps its
-  // FULL candidate set for the pick below -- select() still ranks EVERY candidate and returns the
-  // identical pick it would have returned before 233.1-03 -- and records NO candidate block for
-  // that decision (the up-front stamp state just below: count 0, mask 0, sentinel chosen slot).
-  // scorer_block_equivalence.py counts this by name as rowsOverflowSkipped, never as a mismatch.
-  // On the SCORER path the refusal STAYS: a loaded scorer needs the WHOLE block (there is nothing
-  // to score a decision against from a partial candidate table), so refusing still beats
-  // truncating there.
+  // 240-05 Task 2 (D1(a)/D8(a)): BOTH of this function's former overflow refusals (the
+  // scorer-declared-slots refusal, and the `!capture_block && pref == preference_scorer` refusal
+  // immediately below this comment used to guard) are REMOVED here -- they can never fire any
+  // more, because `preference_for` (below) no longer ever returns a scorer preference: the rule
+  // runs on EVERY decision unconditionally now, so `pref == preference_scorer` is not merely rare,
+  // it is impossible (the symbol itself no longer exists). The refusal they existed for did NOT
+  // disappear -- it MOVED to load time (task 3, `rl_policy_net.cpp`'s loader), where a weights
+  // file whose declared slot/feature counts disagree with the compiled constants is refused ONCE
+  // at startup, by name, rather than aborting an iteration hours into a run. At sixteen slots
+  // (240-01/240-02's own re-pin) there is nothing left for a PER-DECISION refusal to catch that
+  // the loader hasn't already ruled out.
+  //
+  // 233.1-03b (R6-13, P233.1-36): the rules path itself still treats RL_TARGET_SLOTS as a
+  // DIAGNOSTIC bound, not a gate -- an overflowing decision keeps its FULL candidate set for the
+  // pick below (select() still ranks EVERY candidate and returns the identical pick it always
+  // would) and records NO candidate block for that decision (the up-front stamp state just below:
+  // count 0, mask 0, sentinel chosen slot); run_target_head's own no-block counter is what makes
+  // this skip measurable now that the scorer-as-preference path (which used to refuse instead) is
+  // gone. scorer_block_equivalence.py counts this by name as rowsOverflowSkipped, never as a
+  // mismatch.
   const bool capture_block = candidates.size() <= RL_TARGET_SLOTS;
-  if ( !capture_block && pref == preference_scorer )
-  {
-    throw sc_runtime_error( fmt::format(
-        "rl_target_select::select: {} candidates passed the generic filter for '{}', exceeding "
-        "the transition log's fixed RL_TARGET_SLOTS={} -- refusing rather than writing past the "
-        "candidate block",
-        candidates.size(), a->name_str, RL_TARGET_SLOTS ) );
-  }
 
   // 233.1-03 (R6-13, OV-5): stamp the candidate block table for THIS decision up front, before any
   // early return, so a stale block from an earlier decision can never be read as current (mirrors
@@ -785,6 +800,12 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
       slot.features.assign( RL_TARGET_SLOTS * RL_TARGET_FEATURES, 0.0f );
     else
       std::fill( slot.features.begin(), slot.features.end(), 0.0f );
+    // 240-05 (D1(a)): actors sized/cleared in lockstep with features -- see candidate_block_slot's
+    // own doc comment for why this parallel array exists and who reads it.
+    if ( slot.actors.size() != RL_TARGET_SLOTS )
+      slot.actors.assign( RL_TARGET_SLOTS, nullptr );
+    else
+      std::fill( slot.actors.begin(), slot.actors.end(), nullptr );
     slot.mask        = 0;
     slot.count       = 0;
     slot.chosen_slot = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
@@ -859,99 +880,44 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
     // is UNCHANGED -- it is what external readers (the observation writer, 228-04 onward) call,
     // with every field filled.
     //
-    // Phase 230-02 (SCOR-01): the NINTH preference (the learned scorer) is the one exception --
-    // its v1 scorecard (R-C) reads every field the struct carries, so it gets the FULL builder
-    // instead of the lite one for SCORING. 233.1-03 (R6-13, OV-5) rewrites the second half of this
-    // comment's claim -- it is NO LONGER true that "the eight rule preferences' own performance is
-    // completely unaffected by this branch". The SCORING fact below is deliberately left as-is
-    // (the lite-vs-full fork here still decides only what `pref()` sees, and changing that for the
-    // rule preferences would regress BL-01/232-13's geometry fix for the two Thorim's-aware melee
-    // strikes -- windstrike/stormstrike's own zero radius vs. Tempest's/Chain Lightning's resolved
-    // radius, ME-4/233.1-02). What changes is CAPTURE, just below: every preference now pays a
-    // SECOND, full `build_enemy_fact` call per candidate to fill the candidate block, because
-    // `scorer_block_equivalence.py`'s comparison target (decision_dump.cpp's own
-    // `build_candidate_facts()`) is always that full, uncorrected fact -- including its own
-    // deliberately-uncorrected zero neighbours_within_radius for the two strikes (build_enemy_fact
-    // is "DELIBERATELY untouched by BL-01's fix", this file's own comment above). Capturing via the
-    // SAME uncorrected builder the dump uses is what makes the two records comparable at all; this
-    // extra full-fact build -- a find_dot scan, an O(n) neighbours walk, time_to_percent,
-    // health_percentage, is_boss, and four debuff lookups the lite builder skips
-    // (233.1-RESEARCH.md Section A.8) -- is the real per-decision cost this plan owes plan
-    // 233.1-12's proving run; it is MEASURED there, never asserted small here (R6-13).
-    enemy_fact fact  = ( pref == preference_scorer )
-                           ? build_enemy_fact( a, c )
-                           : build_enemy_fact_for_scoring(
-                                 a, c, pref, has_precomputed_geo ? &precomputed_geo : nullptr );
+    // 240-05 Task 2: the NINTH preference (the learned scorer, Phase 230-02) that used to need the
+    // FULL builder here for SCORING is GONE -- the rule always drives this loop now, so `fact` is
+    // always the LITE, geometry-corrected fact every rule preference reads.
+    enemy_fact fact  = build_enemy_fact_for_scoring(
+        a, c, pref, has_precomputed_geo ? &precomputed_geo : nullptr );
     double     score = pref( a, fact );
 
     // 233.1-03 (R6-13, OV-5): CAPTURE the candidate block on EVERY preference now (230-04's
-    // original SCOR-02 comment scoped this scorer-only). 233.1-03b (P233.1-36): guarded by
+    // original SCOR-02 comment scoped this scorer-only; 240-05 Task 2: the scorer-scratch capture
+    // branch this comment used to describe is gone along with the scorer-as-preference path --
+    // every capture is the rules-path one below now). 233.1-03b (P233.1-36): guarded by
     // `capture_block` -- an overflowing rules-path decision pays NO capture cost (no extra
     // build_enemy_fact, no memcpy) and leaves the up-front-stamped empty block (count 0, mask 0)
     // in place; the pick logic below (`pref(a, fact)` above, `best`/`best_score`/`best_slot` and
     // the tie-break ladder below) is completely outside this guard and therefore untouched.
     if ( capture_block )
     {
-      const float* capture_feats = nullptr;
-      if ( scorer_scratch != nullptr )
-      {
-        // preference_scorer's own call just above (via pref(a, fact)) already filled
-        // `scorer_scratch->feature_scratch` from `fact` (already the full build_enemy_fact on this
-        // path) through fill_candidate_features -- CAPTURE that, never recompute (230-04's own
-        // SCOR-02 discipline).
-        capture_feats = scorer_scratch->feature_scratch.data();
-      }
-      else
-      {
-        // The rules path has no scorer scratch to capture from, and `fact` above is the LITE,
-        // geometry-corrected fact used for SCORING (see the comment above `fact`'s declaration) --
-        // build a fresh, uncorrected FULL fact here, specifically for capture, matching
-        // decision_dump.cpp's own build_candidate_facts() exactly (including its own
-        // deliberately-uncorrected zero neighbours_within_radius for the two Thorim's-aware melee
-        // strikes), and fill it into the rules-path scratch buffer beside g_candidate_buffer.
-        enemy_fact capture_fact = build_enemy_fact( a, c );
-        fill_candidate_features( a, capture_fact, g_rules_feature_scratch.data() );
-        capture_feats = g_rules_feature_scratch.data();
-      }
-      {
-        candidate_block_slot& slot = g_candidate_block_table[ a ];
-        std::memcpy( slot.features.data() + slot_index * RL_TARGET_FEATURES,
-                     capture_feats, RL_TARGET_FEATURES * sizeof( float ) );
-        slot.mask |= static_cast<std::uint16_t>( 1u << slot_index );
-        slot.count = static_cast<std::uint8_t>( slot.count + 1 );
-      }
+      // `fact` above is the LITE, geometry-corrected fact used for SCORING (see the comment above
+      // `fact`'s declaration) -- build a fresh, uncorrected FULL fact here, specifically for
+      // capture, matching decision_dump.cpp's own build_candidate_facts() exactly (including its
+      // own deliberately-uncorrected zero neighbours_within_radius for the two Thorim's-aware
+      // melee strikes), and fill it into the rules-path scratch buffer beside g_candidate_buffer.
+      enemy_fact capture_fact = build_enemy_fact( a, c );
+      fill_candidate_features( a, capture_fact, g_rules_feature_scratch.data() );
+      candidate_block_slot& slot = g_candidate_block_table[ a ];
+      std::memcpy( slot.features.data() + slot_index * RL_TARGET_FEATURES,
+                   g_rules_feature_scratch.data(), RL_TARGET_FEATURES * sizeof( float ) );
+      // 240-05 (D1(a)): parallel identity capture, same slot index -- see candidate_block_slot's
+      // own doc comment for who reads this and why.
+      slot.actors[ slot_index ] = c;
+      slot.mask |= static_cast<std::uint16_t>( 1u << slot_index );
+      slot.count = static_cast<std::uint8_t>( slot.count + 1 );
     }
 
-    if ( !best )
-    {
-      best       = c;
-      best_score = score;
-      best_slot  = slot_index;
-      continue;
-    }
-
-    bool better;
-    if ( score != best_score )
-    {
-      better = score > best_score;
-    }
-    else
-    {
-      // OBS-01/R5-5 (232-02): the sticky `c_is_prev`/`best_is_prev` rung that used to sit here
-      // (CR-03, 260902/cr4) is REMOVED -- the current target is now the only tie-break before the
-      // stable identity pair. A tie can flip when p->target moves for an unrelated reason; the
-      // ordering stays a total order because the identity pair below is the final rung, so runs
-      // remain reproducible.
-      bool c_is_current    = ( c == current_target );
-      bool best_is_current = ( best == current_target );
-      if ( c_is_current != best_is_current )
-        better = c_is_current;
-      else
-        better = std::tie( c->actor_index, c->actor_spawn_index ) <
-                 std::tie( best->actor_index, best->actor_spawn_index );
-    }
-
-    if ( better )
+    // 240-05 Task 2: the inline tie ladder that used to live here is now candidate_is_better
+    // (above, anonymous namespace) -- one definition, two callers (this loop and
+    // run_target_head's own argmax, below).
+    if ( candidate_is_better( score, c, best_score, best, current_target ) )
     {
       best       = c;
       best_score = score;
@@ -1142,8 +1108,8 @@ target_fact_snapshot lookup_target_fact_snapshot( const action_t* resolved, bool
   return out;
 }
 
-bool apply_candidate_exploration( const action_t* resolved, player_t* replacement,
-                                   std::uint8_t replacement_slot )
+bool apply_head_pick( const action_t* resolved, player_t* replacement,
+                       std::uint8_t replacement_slot )
 {
   auto it = g_pick_table.find( resolved );
   if ( it == g_pick_table.end() || !it->second.has_stamp )
@@ -1155,7 +1121,7 @@ bool apply_candidate_exploration( const action_t* resolved, player_t* replacemen
 
   // The row records what happened, never what was intended (must_haves): overwrite the STAMPED
   // pick so accept_cast()'s own lookup_pick() call -- reached AFTER this function returns, per
-  // solver_control.cpp's own call ordering -- sees the replacement, not the scorer's original.
+  // solver_control.cpp's own call ordering -- sees the replacement, not the rule's original.
   it->second.pick = replacement;
 
   auto block_it = g_candidate_block_table.find( resolved );
@@ -1166,16 +1132,97 @@ bool apply_candidate_exploration( const action_t* resolved, player_t* replacemen
   return true;
 }
 
+// 240-05 Task 2 (D1(a)): see this function's own doc comment in rl_target_select.hpp for the full
+// contract. Implementation note: scores from the candidate block select() ALREADY captured for
+// `resolved` this decision (`g_candidate_block_table`, the SAME staleness-checked access
+// `lookup_candidate_block` uses) -- never rebuilds a fact, never re-walks target_non_sleeping_list.
+// The block's own parallel `actors` array (candidate_block_slot, above) supplies the real
+// player_t* each slot names, both for `candidate_is_better`'s final tie-break rung and for the
+// `apply_head_pick` call below.
+void run_target_head( const action_t* resolved )
+{
+  if ( !resolved )
+    return;
+  const sim_t* sim = resolved->player->sim;
+  if ( !sim->solver_policy_weights || !sim->solver_policy_weights->has_scorer ||
+       sim->target_scorer_force_rules )
+    return;
+
+  auto it = g_candidate_block_table.find( resolved );
+  auto stamp_it = g_decision_stamp.find( resolved->player );
+  const std::uint64_t current_stamp = ( stamp_it == g_decision_stamp.end() ) ? 0 : stamp_it->second;
+  const bool found = ( it != g_candidate_block_table.end() && it->second.has_stamp &&
+                        it->second.stamp == current_stamp );
+  if ( !found || it->second.count == 0 )
+  {
+    // must_haves: no stamped block for this decision (never scored this decision -- e.g. an
+    // action a decision boundary never reached -- or an overflowing rules-path decision that
+    // captured no block, this file's own capture_block guard in select()) -- the rule's own aim
+    // stands. Never throws, never truncates: at sixteen slots plus this counted fallback there is
+    // nothing left to refuse mid-fight (the loader-time check, task 3, is what refuses a
+    // structurally-wrong blob, once, at startup).
+    ++g_target_head_no_block_count;
+    return;
+  }
+
+  candidate_block_slot& slot = it->second;
+  rl_policy::rl_weights_t& w = *resolved->player->sim->solver_policy_weights;
+  rl_policy::rl_scorer_t&  s = w.scorer;
+  float* feats = s.feature_scratch.data();
+
+  // CK1-1 (mirrors the removed preference_scorer's own assert): exactly eight targeted spells get
+  // a one-hot column -- this module's own TARGETED_TOKENS[] and the wire format's aiming-spell
+  // width must agree.
+  const std::size_t n_tok = targeted_action_token_count();
+  assert( n_tok == 8 && "CK1-1: exactly eight targeted spells get a one-hot column" );
+  const char* const* toks = targeted_action_tokens();
+
+  player_t*    current_target = resolved->player->target;
+  player_t*    best           = nullptr;
+  double       best_score     = 0.0;
+  std::uint8_t best_slot      = 0;
+  for ( std::size_t slot_index = 0; slot_index < RL_TARGET_SLOTS; ++slot_index )
+  {
+    // Masked slots are never scored at all -- the practical equivalent of the head's own -inf
+    // mask convention (agent/target_scorer.py's docstring: masked slots score literal -inf, never
+    // an additive penalty), achieved here by never entering them into the argmax in the first
+    // place.
+    if ( !( slot.mask & static_cast<std::uint16_t>( 1u << slot_index ) ) )
+      continue;
+    std::memcpy( feats, slot.features.data() + slot_index * RL_TARGET_FEATURES,
+                 RL_TARGET_FEATURES * sizeof( float ) );
+    for ( std::size_t k = 0; k < n_tok; ++k )
+      feats[ RL_TARGET_FEATURES + k ] = ( resolved->name_str == toks[ k ] ) ? 1.0f : 0.0f;
+    const double score = static_cast<double>( rl_policy::forward_scorer( s, feats ) );
+    player_t*    c     = slot.actors[ slot_index ];
+    if ( candidate_is_better( score, c, best_score, best, current_target ) )
+    {
+      best       = c;
+      best_score = score;
+      best_slot  = static_cast<std::uint8_t>( slot_index );
+    }
+  }
+
+  if ( best != nullptr )
+    apply_head_pick( resolved, best, best_slot );
+}
+
+std::uint64_t get_target_head_no_block_count()
+{
+  return g_target_head_no_block_count;
+}
+
 void reset( sim_t* )
 {
   // WR-11 (260902/cr4): called from sim_t::reset() (sim.cpp), once per iteration -- clears every
   // module global (the original three, plus CR-04's deadlock counter added later the same task,
   // plus 230-04's candidate block table, plus 232-04's target-fact snapshot table, plus 232-06's
-  // Chain Lightning hop-count stash, plus Task 2c's own two per-actor geometry/handle caches) so a
-  // stale pick, stamp, count or cached geometry from a PRIOR iteration can never leak into the
-  // next one. `sim` itself is unused (the tables are keyed on `player_t*`, not sim identity, per
-  // this module's own single-sim/single-thread precondition) but is taken by pointer to mirror
-  // raid_event_t::reset( sim )'s own signature at the call site.
+  // Chain Lightning hop-count stash, plus Task 2c's own two per-actor geometry/handle caches, plus
+  // 240-05's run_target_head no-block counter) so a stale pick, stamp, count or cached geometry
+  // from a PRIOR iteration can never leak into the next one. `sim` itself is unused (the tables
+  // are keyed on `player_t*`, not sim identity, per this module's own single-sim/single-thread
+  // precondition) but is taken by pointer to mirror raid_event_t::reset( sim )'s own signature at
+  // the call site.
   g_decision_stamp.clear();
   g_pick_table.clear();
   g_candidate_block_table.clear();  // 230-04
@@ -1183,6 +1230,7 @@ void reset( sim_t* )
   g_chain_hop_stash.clear();  // 232-06 (RULE-02, R-Z)
   g_reresolution_counts = reresolution_counts{};
   g_every_targeted_action_illegal = 0;  // CR-04 (260902/cr4)
+  g_target_head_no_block_count = 0;  // 240-05 (must_haves)
   // 260914-rbp Task 2c (ME-1): this file's own per-actor VB/Lava Lash geometry cache -- an
   // ACT-02-pattern cache is normally left unset for the life of a fight (the values it resolves
   // never change mid-fight), but leaving it populated ACROSS iterations means a later iteration's
@@ -1297,19 +1345,15 @@ preference_fn preference_for( const action_t* resolved )
   else
     return nullptr;
 
-  // Phase 230-02 (SCOR-01, D-01/D-02/R-K): the run-time switch is the PRESENCE of a scorer
-  // section in the loaded weights -- a rotation-only blob (has_scorer == false, v2/v3) always
-  // takes the rules path; a v4 blob with a scorer takes the scored path UNLESS
-  // sim->target_scorer_force_rules (default OFF, sim.hpp/sim.cpp -- 230-02 Task 2) forces the
-  // rules path so the PREVIOUS phase's rules-arm numbers can be re-run byte-identically on this
-  // binary (230-SWAP-RECEIPT.md's Task 3 proof). No other code path here changes -- the generic
-  // filter, the precedence ladder in select() (beyond the one `pref == preference_scorer` branch
-  // that widens the fact builder and the overflow check, both structurally inert for the rules
-  // path) and accept_cast's cast path are all unaware which of the nine preferences won.
-  const sim_t* sim = resolved->player->sim;
-  if ( sim->solver_policy_weights && sim->solver_policy_weights->has_scorer &&
-       !sim->target_scorer_force_rules )
-    return preference_scorer;
+  // Phase 230-02 (SCOR-01, D-01/D-02/R-K) added a run-time switch here -- the PRESENCE of a
+  // scorer section in the loaded weights used to swap the rule out for a ninth "scorer"
+  // preference entirely. REMOVED 240-05 Task 2 (D1(a)/D8(a)): the rule now runs UNCONDITIONALLY,
+  // on every decision, for every arm -- rules, comparator, and both learning arms alike. This is
+  // what makes the RULES comparator free (the same binary, the same rule, differing only in
+  // whether a loaded head's own overwrite -- run_target_head, called separately from
+  // rl_policy_obs.cpp after this rule has already run -- is allowed to touch the pick this
+  // function's caller stamped). `preference_for` no longer has any branch returning a scorer
+  // preference; there is no `sim`/`solver_policy_weights` read left in this function.
   return rule;
 }
 
@@ -1468,50 +1512,15 @@ double preference_tempest( const action_t*, const enemy_fact& fact )
 }
 
 // ---------------------------------------------------------------------------------------------
-// Phase 230-02 (SCOR-01): the ninth preference, the learned scorer. preference_for() only ever
-// returns this pointer when the loaded weights actually carry a scorer (D-02/R-K) -- the
-// `has_scorer` assert below is a tripwire against a future call site bypassing that gate, never a
-// real "maybe" (a preference must always return SOME score, D-12).
+// Phase 230-02 (SCOR-01) used to declare the ninth preference, the learned scorer, here --
+// REMOVED 240-05 Task 2 (D1(a)/D8(a)): `preference_for()` no longer ever swaps the rule out for
+// it, so this pointer would be dead code. Its arithmetic is FOLDED into `run_target_head` (above,
+// beside `apply_head_pick`) -- same fill order (`fill_candidate_features`, unchanged), same
+// one-hot (`targeted_action_tokens()`'s own order, CK1-1), same `rl_policy::forward_scorer` call
+// -- reading the candidate block `select()` already captured instead of a single passed-in
+// `fact`, since the head scores every slot at once rather than once per `select()` candidate-loop
+// iteration.
 // ---------------------------------------------------------------------------------------------
-
-double preference_scorer( const action_t* a, const enemy_fact& fact )
-{
-  rl_policy::rl_weights_t& w = *a->player->sim->solver_policy_weights;
-  assert( w.has_scorer &&
-          "preference_scorer called with no scorer loaded -- preference_for's own gate should "
-          "have prevented this" );
-  rl_policy::rl_scorer_t& s = w.scorer;
-
-  // CK1-1: exactly eight targeted spells get a one-hot column -- this is the one place the wire
-  // format's own aiming-spell width (rl_policy_net.cpp's RLW1_V4_AIMING_SPELL_COUNT, 8) and this
-  // module's own TARGETED_TOKENS[] must agree; asserted here rather than merely relied upon.
-  const std::size_t n_tok = targeted_action_token_count();
-  assert( n_tok == 8 && "CK1-1: exactly eight targeted spells get a one-hot column" );
-
-  // s.feature_scratch is load-time-sized to features + n_tok (rl_policy_net.cpp's load_rlw1) --
-  // reused every call, never reallocated per decision (this plan's own no-allocation-in-the-
-  // per-decision-score-path prohibition).
-  float* feats = s.feature_scratch.data();
-
-  // 233.1-03 (R6-13, OV-5): the fill loop itself moved to fill_candidate_features (this file,
-  // above select()) -- extracted so the rules path can fill its own scratch buffer with it too,
-  // never reusing this scorer-only scratch (which does not exist when has_scorer == false).
-  // Byte-identical fill order to before this extraction (a refactor, never a re-ordering); the
-  // order-lock to target_features.py's own derivation is documented at that function's own
-  // definition now, not duplicated here.
-  fill_candidate_features( a, fact, feats );
-  std::size_t i = RL_TARGET_FEATURES;
-  assert( i == s.features &&
-          "preference_scorer's fill order does not match s.features's declared count" );
-
-  // The one-hot over the eight targeted spells, TARGETED_TOKENS[]'s own order (CK1-1) -- exactly
-  // one column set, matching the resolved action's own token.
-  const char* const* toks = targeted_action_tokens();
-  for ( std::size_t k = 0; k < n_tok; ++k )
-    feats[ i + k ] = ( a->name_str == toks[ k ] ) ? 1.0f : 0.0f;
-
-  return static_cast<double>( rl_policy::forward_scorer( s, feats ) );
-}
 
 // ---------------------------------------------------------------------------------------------
 // Shaped spells (228-03). Pure geometry -- plain doubles, no engine pointer beyond what the

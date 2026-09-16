@@ -180,6 +180,27 @@
 // exact version mismatch, same rule as every prior bump) -- there is no candidate block to
 // backfill into an old row; `230-ROW-RECEIPT.md` enumerates every transition log in this tree
 // written at version 6 that this bump orphans.
+//
+// Version 8 (260916-dh Phase 240, plan 01 (Python side)/plan 05 (this file, the C++ side) --
+// D11): `RL_TARGET_SLOTS` moves 8 -> 16 (rl_policy_constants.h, regenerated plan 240-02; the
+// worst-case simultaneous candidate count measured across the 15 training shapes, `big-pack-burst`
+// alone commonly passing 12+ through the generic filter -- see plan 01's own re-bless comment).
+// DEVIATION FROM THIS FILE'S OWN STANDING CONVENTION, STATED EXPLICITLY: every RL_OBS_DIM-only
+// width move in this file's version-7-and-earlier history left FORMAT_VERSION untouched, because
+// a width-only move only changes HOW MANY of an already-understood field are present -- the
+// static_assert immediately below is what makes an un-rebuilt mismatch loud rather than a silent
+// short-read. A TARGET_SLOTS move is different IN KIND: it changes the GEOMETRY of the candidate
+// block itself and the MEANING of every bit in the `candidate_mask` column, so a pre-phase log
+// decoded by post-phase code would mis-shape the block rather than merely mis-size the row --
+// there is no geometry-preserving reinterpretation the way a wider-but-still-flat observation
+// array has. `translog.py`'s own version-8 comment (mirrored here, not a second independent
+// design) states the identical reasoning for the Python side. `RECORD_SIZE(W)` stays the SAME
+// formula as version 7 (`roundup8(45 + 4*W + 4*RL_TARGET_SLOTS*RL_TARGET_FEATURES + 4)`) --
+// only the live `RL_TARGET_SLOTS` value it is evaluated against moves, from the regenerated
+// header. At `RL_OBS_DIM=317`, `RL_TARGET_SLOTS=16`, `RL_TARGET_FEATURES=23`:
+// `roundup8(45 + 1268 + 1472 + 4) = roundup8(2789) = 2792`. Version-7 files are orphaned by
+// design (the reader refuses on an exact version mismatch, same rule as every prior bump) --
+// there is no sixteen-slot geometry to backfill into an eight-slot row.
 
 #pragma once
 
@@ -202,7 +223,7 @@ namespace rl_translog
 // trailing NUL is part of the magic itself.
 inline constexpr char MAGIC[ 4 ] = { 'R', 'L', 'T', 'L' };
 inline constexpr std::uint32_t ENDIAN_CANARY = 0x01020304u;
-inline constexpr std::uint32_t FORMAT_VERSION = 7u;  // 230-04: candidate block added, see top-of-file version-7 comment
+inline constexpr std::uint32_t FORMAT_VERSION = 8u;  // 240-05: TARGET_SLOTS 8 -> 16, see top-of-file version-8 comment
 // RECORD_SIZE stays an integer LITERAL, not a computed expression --
 // scripts/rl/obs_transport_coupling.selftest.py parses this file's own
 // source text for an `ast.Constant`-shaped literal on both sides of the
@@ -212,32 +233,21 @@ inline constexpr std::uint32_t FORMAT_VERSION = 7u;  // 230-04: candidate block 
 // mistyped literal cannot silently drift from the formula and still compile (tstl 220-03,
 // OBS-06; formula updated 260901-pb1 Task 3 for version 5, updated again 228-09 for version 6,
 // updated again 230-04 for version 7 -- see top-of-file comment).
-inline constexpr std::uint32_t RECORD_SIZE = 2056u;  // 260915-sti Task 1 (D-317):
-                                                       // 2016 -> 2056 -- roundup8(45 + 4*317 +
-                                                       // 4*8*23 + 4) = roundup8(2053) = 2056.
-                                                       // RL_OBS_DIM moves 306 -> 317 (11 new stat/
-                                                       // potion leaves: agility + four secondary-
-                                                       // rating leaves needing this task's fork
-                                                       // C++, plus crit/cooldowns.potion.remains/
-                                                       // four potion buff-remains leaves needing
-                                                       // no fork change -- see STAT-INPUTS-MEMO.md
-                                                       // (b)). RL_TARGET_FEATURES stays 23
-                                                       // (unchanged by this task). RL_TARGET_SLOTS
-                                                       // stays 8. Both constants read from
+inline constexpr std::uint32_t RECORD_SIZE = 2792u;  // 240-05 Task 2 (D11, see top-of-file
+                                                       // version-8 comment): 2056 -> 2792 --
+                                                       // roundup8(45 + 4*317 + 4*16*23 + 4) =
+                                                       // roundup8(2789) = 2792. RL_OBS_DIM stays
+                                                       // 317 (unchanged by this task).
+                                                       // RL_TARGET_FEATURES stays 23 (unchanged).
+                                                       // RL_TARGET_SLOTS moves 8 -> 16, read from
                                                        // rl_policy_constants.h's own regenerated
-                                                       // values (Task 2, this same branch), never
-                                                       // hand-typed. Confirmed, not assumed, by the
-                                                       // static_assert immediately below, which
-                                                       // recomputes from the live
+                                                       // value (plan 240-02, this same branch),
+                                                       // never hand-typed. Confirmed, not assumed,
+                                                       // by the static_assert immediately below,
+                                                       // which recomputes from the live
                                                        // RL_OBS_DIM/RL_TARGET_SLOTS/
                                                        // RL_TARGET_FEATURES constants at compile
-                                                       // time -- NOTE (Task 1 receipt): this task
-                                                       // builds against the CURRENT (pre-regen)
-                                                       // header, where RL_OBS_DIM is still 306, so
-                                                       // this static_assert FAILS here by design
-                                                       // until Task 2 regenerates
-                                                       // rl_policy_constants.h to RL_OBS_DIM=317.
-                                                       // This is a re-pin: one-way,
+                                                       // time. This is a re-pin: one-way,
                                                        // checkpoint-invalidating.
 static_assert( RECORD_SIZE == ( ( 45u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) +
                                    4u * static_cast<std::uint32_t>( RL_TARGET_SLOTS ) *
