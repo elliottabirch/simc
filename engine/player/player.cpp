@@ -6419,6 +6419,7 @@ void player_t::datacollection_begin()
   priority_iteration_dmg                = 0;
   solver_damage_so_far                  = 0;
   solver_damage_expected_so_far         = 0;
+  rl_proc::reset( rl_proc_counters );
   iteration_heal                        = 0;
   iteration_absorb                      = 0.0;
   iteration_absorb_taken                = 0.0;

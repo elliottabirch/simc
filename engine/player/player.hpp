@@ -21,6 +21,7 @@
 #include "sc_enums.hpp"
 #include "sim/proc.hpp"
 #include "sim/proc_rng.hpp"
+#include "sim/rl_proc_counters.hpp"
 #include "talent.hpp"
 #include "util/cache.hpp"
 #include "util/parse_util.hpp"
@@ -442,6 +443,11 @@ struct player_t : public actor_t
   // player_t::datacollection_begin(). Pets routed to owner identically to
   // stats_t::add_result's pet->owner branch (stats.cpp:199).
   double solver_damage_expected_so_far;
+  // Per-fight cumulative proc-roll observers for the RL transition log
+  // (tstl-sylvanas quick task 260917-pcn). Reset alongside
+  // solver_damage_so_far in player_t::datacollection_begin(). See
+  // rl_proc_counters.hpp.
+  rl_proc::counters_t rl_proc_counters{};
   double dpr;
   struct incoming_damage_entry_t {
     timespan_t time;

@@ -84,6 +84,13 @@ private:
   timespan_t accumulated_blp;
   unsigned scales_with;
   blp blp_state;
+  // The chance the most recent trigger() rolled against, or -1.0 when
+  // trigger() returned on a no-roll early exit (tstl-sylvanas quick task
+  // 260917-pcn). Read by the rl_proc counters AFTER trigger() returns,
+  // because the chance is computed inside trigger() after accumulated_blp
+  // moves -- a caller reading proc_chance() before trigger() would see a
+  // stale bad-luck-protection value.
+  double last_roll_chance = -1.0;
 
   static constexpr timespan_t max_interval = 3.5_s;
   static constexpr timespan_t max_bad_luck_prot = 1000_s;
@@ -127,6 +134,8 @@ public:
 
   blp get_blp_state() const
   { return blp_state; }
+
+  double get_last_roll_chance() const { return last_roll_chance; }
 
   timespan_t get_last_trigger_attempt()
   { return last_trigger_attempt; }

@@ -11,6 +11,7 @@
 
 #include "sim/rl_translog.hpp"
 
+#include "player/pet.hpp"
 #include "player/player.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/sim.hpp"
@@ -20,6 +21,24 @@
 #include "fmt/format.h"
 
 #include <cstring>
+
+// Pure observer for the RL transition log's per-proc counter block
+// (tstl-sylvanas quick task 260917-pcn). Routes a pet's roll to its owner,
+// mirroring stats.cpp's own solver_damage_so_far pet->owner rule; ignores
+// enemies and a null player. Declared in rl_proc_counters.hpp, defined here
+// because it needs player_t/pet_t complete.
+void rl_count_proc( player_t* p, rl_proc::id which, double chance, bool success )
+{
+  if ( p == nullptr ) return;
+  if ( p->is_pet() ) { p = p->cast_pet()->owner; if ( p == nullptr ) return; }
+  if ( p->is_enemy() ) return;
+  auto& c = p->rl_proc_counters;
+  const auto i = static_cast<std::size_t>( which );
+  if ( c.attempts[ i ] < 65535u ) ++c.attempts[ i ];
+  if ( success && c.successes[ i ] < 65535u ) ++c.successes[ i ];
+  const double clamped = chance < 0.0 ? 0.0 : ( chance > 1.0 ? 1.0 : chance );
+  c.chance_sum[ i ] += static_cast<float>( clamped );
+}
 
 namespace rl_translog
 {

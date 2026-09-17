@@ -100,15 +100,22 @@ void real_ppm_t::reset( reset_type_e /* reset_type */)
 int real_ppm_t::trigger( action_state_t* )
 {
   if ( freq <= 0 )
+  {
+    last_roll_chance = -1.0;
     return false;
+  }
 
   if ( last_trigger_attempt == player->sim->current_time() )
+  {
+    last_roll_chance = -1.0;
     return false;
+  }
 
   // 2020-10-11: Instead of using the aboslute time to the last successful proc, it appears
   // that the amount of time that is added on each trigger attempt is capped at max_interval
   accumulated_blp += std::min( player->sim->current_time() - last_trigger_attempt, max_interval );
   double chance = proc_chance();
+  last_roll_chance = chance;
   bool success = player->rng().roll( chance );
 
   last_trigger_attempt = player->sim->current_time();

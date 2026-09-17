@@ -154,6 +154,7 @@ sim/decision_dump.hpp
 sim/solver_control.hpp
 sim/rl_policy.hpp
 sim/rl_policy_constants.h
+sim/rl_proc_counters.hpp
 sim/rl_target_select.hpp
 sim/rl_translog.hpp
 sim/expressions.hpp
