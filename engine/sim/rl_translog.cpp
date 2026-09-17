@@ -58,7 +58,7 @@ sim_t* root_of( sim_t* sim )
   return root;
 }
 
-// Appends one RECORD_SIZE-byte row (72 bytes as of version 3) onto the
+// Appends one RECORD_SIZE-byte row (RECORD_SIZE bytes; 2216 as of version 9) onto the
 // root's in-memory buffer. Does not
 // flush -- callers decide the flush cadence (D-13: once per fight end, not
 // once per row).
@@ -201,6 +201,30 @@ void open_and_write_header( sim_t* sim )
   root->rl_translog_stream->write( reinterpret_cast<const char*>( &h ), sizeof( h ) );
   root->rl_translog_stream->flush();
   assert_stream_ok( root, "open_and_write_header" );
+
+  // Version 9 (260917-pcn): a JSON sidecar naming the proc-counter registry, written once per
+  // translog file right next to it (`<path>.procs.json`), plain text and deliberately NOT part
+  // of the binary format itself -- so a Python reader never hand-types the 20 registry names in
+  // a second place. Numbers come straight from the live constants (never hand-typed either).
+  {
+    const std::string sidecar_path = root->rl_translog_file_str + ".procs.json";
+    std::ofstream sidecar( sidecar_path, std::ios::out | std::ios::trunc );
+    if ( !sidecar.is_open() )
+    {
+      throw sc_runtime_error(
+          fmt::format( "rl_translog=: unable to open '{}' for writing.", sidecar_path ) );
+    }
+    sidecar << "{\"format_version\": " << FORMAT_VERSION << ", \"proc_count\": " << rl_proc::COUNT
+            << ", \"record_size\": " << RECORD_SIZE << ", \"proc_block_offset\": " << PROC_BLOCK_OFFSET
+            << ", \"names\": [";
+    for ( std::uint32_t i = 0; i < rl_proc::COUNT; ++i )
+    {
+      if ( i != 0 )
+        sidecar << ", ";
+      sidecar << "\"" << rl_proc::NAMES[ i ] << "\"";
+    }
+    sidecar << "]}";
+  }
 }
 
 void record_decision( sim_t* sim, const player_t* p, std::uint64_t seq, const float obs[ RL_OBS_DIM ],
@@ -276,6 +300,11 @@ void record_decision( sim_t* sim, const player_t* p, std::uint64_t seq, const fl
   r.thread = static_cast<std::uint8_t>( sim->thread_index );
   r.kind = KIND_DECISION;
   r.reserved = 0;
+  // Version 9 (260917-pcn): the per-fight cumulative proc-roll observer totals at this
+  // decision boundary -- see rl_proc_counters.hpp and rl_translog.hpp's top-of-file comment.
+  std::memcpy( r.proc_attempts, p->rl_proc_counters.attempts, sizeof( r.proc_attempts ) );
+  std::memcpy( r.proc_successes, p->rl_proc_counters.successes, sizeof( r.proc_successes ) );
+  std::memcpy( r.proc_chance_sum, p->rl_proc_counters.chance_sum, sizeof( r.proc_chance_sum ) );
 
   // Append only -- no flush. The fight's close row flushes the whole
   // fight at once (D-13).
@@ -327,6 +356,11 @@ void record_close( sim_t* sim )
   r.thread = static_cast<std::uint8_t>( sim->thread_index );
   r.kind = KIND_CLOSE;
   r.reserved = 0;
+  // Version 9 (260917-pcn): the fight's own FINAL proc-roll observer totals, from the same
+  // solo actor `p` (not root) -- see rl_translog.hpp's top-of-file comment.
+  std::memcpy( r.proc_attempts, p->rl_proc_counters.attempts, sizeof( r.proc_attempts ) );
+  std::memcpy( r.proc_successes, p->rl_proc_counters.successes, sizeof( r.proc_successes ) );
+  std::memcpy( r.proc_chance_sum, p->rl_proc_counters.chance_sum, sizeof( r.proc_chance_sum ) );
 
   append_row( root, &r );
   root->rl_translog_pending_decisions = 0;
@@ -421,6 +455,8 @@ void write_footer( sim_t* sim )
   r.thread = static_cast<std::uint8_t>( sim->thread_index );
   r.kind = KIND_FOOTER;
   r.reserved = 0;
+  // Version 9 (260917-pcn): no fight owns the footer -- written zero.
+  std::memset( r.zero_proc_block, 0, sizeof( r.zero_proc_block ) );
 
   append_row( root, &r );
   root->rl_translog_stream->write(

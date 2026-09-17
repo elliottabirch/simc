@@ -180,10 +180,44 @@
 // exact version mismatch, same rule as every prior bump) -- there is no candidate block to
 // backfill into an old row; `230-ROW-RECEIPT.md` enumerates every transition log in this tree
 // written at version 6 that this bump orphans.
+//
+// Version 9 (tstl-sylvanas quick task 260917-pcn, "GPL rung 3" -- format version 8 is RESERVED
+// by the unmerged `260916-dual-head` branch's own incompatible candidate-table relayout, so this
+// bump skips straight to 9): a 160-byte per-proc-mechanic counter block, `rl_proc::counters_t`
+// (struct-of-arrays: `attempts`/`successes`/`chance_sum`, 8 bytes per registered mechanic across
+// 20 registry slots defined in `rl_proc_counters.hpp`), appended to every row kind. The block is
+// CUMULATIVE per fight -- `decision_record`'s own copy is the running total at that decision
+// boundary, `close_record`'s is the fight's final total -- exactly the same convention `damage`
+// already uses, so a reader wanting one window's counts takes a difference between two
+// consecutive rows' copies, never a bare read of one row. The intent is to name WHICH proc
+// mechanics carry the unpriced in-window credit spread the noise-by-bucket probe (260917-vnp3)
+// measured on the exploration-free corpus, something the existing `damage`/`obs` fields cannot
+// answer on their own.
+//
+// The block is placed at the very END of every row -- immediately after `reserved`, at
+// `PROC_BLOCK_OFFSET` (defined below; numerically equal to the version-7 `RECORD_SIZE`, i.e. the
+// row size before this bump) -- specifically so every version-7 field, `kind` and `reserved`
+// included, keeps its version-7 offset unchanged: a reader decoding only the version-7-shaped
+// PREFIX of a version-9 row (ignoring the trailing bytes) gets byte-identical results to decoding
+// an actual version-7 row. `close_record`/`footer_record` gain the SAME three field names as
+// `decision_record` (not zero-written twins under different names, unlike every prior version's
+// convention for a decision-only field) because both are legitimate populated values -- a
+// fight's own final counts -- except `footer_record`, which owns no fight and writes the block
+// zero (`zero_proc_block`, matching every other footer zero-fill).
+//
+// `RECORD_SIZE(W)` moves from `roundup8(45 + 4*W + 4*RL_TARGET_SLOTS*RL_TARGET_FEATURES + 4)` to
+// that same expression plus `8*rl_proc::COUNT` -- at `RL_OBS_DIM=317`, `RL_TARGET_SLOTS=8`,
+// `RL_TARGET_FEATURES=23`, `rl_proc::COUNT=20`: `2056 + 160 = 2216`. Version-7/version-8 files
+// are orphaned by design (the reader refuses on an exact version mismatch, same rule as every
+// prior bump) -- there is no proc-counter history to backfill into an old row, since this stage
+// (A of 4) does not yet hook any roll site: every row this binary writes carries an all-zero
+// block until stage B wires the roll sites named in the registry. The Python reader keeps
+// versions 7 AND 9 both readable (two known-good shapes); this C++ writer only ever writes 9.
 
 #pragma once
 
 #include "sim/rl_policy_constants.h"
+#include "sim/rl_proc_counters.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -202,17 +236,21 @@ namespace rl_translog
 // trailing NUL is part of the magic itself.
 inline constexpr char MAGIC[ 4 ] = { 'R', 'L', 'T', 'L' };
 inline constexpr std::uint32_t ENDIAN_CANARY = 0x01020304u;
-inline constexpr std::uint32_t FORMAT_VERSION = 7u;  // 230-04: candidate block added, see top-of-file version-7 comment
+inline constexpr std::uint32_t FORMAT_VERSION = 9u;  // 260917-pcn: per-proc counter block
+                                                        // appended (see top-of-file version-9
+                                                        // comment); 8 is RESERVED by the unmerged
+                                                        // dual-head branch
 // RECORD_SIZE stays an integer LITERAL, not a computed expression --
 // scripts/rl/obs_transport_coupling.selftest.py parses this file's own
 // source text for an `ast.Constant`-shaped literal on both sides of the
 // language boundary, and a computed expression here would break that
 // parse. The static_assert immediately below is what keeps the literal
-// honest: RECORD_SIZE(W) = roundup8(45 + 4*W + 4*RL_TARGET_SLOTS*RL_TARGET_FEATURES + 4), so a
-// mistyped literal cannot silently drift from the formula and still compile (tstl 220-03,
-// OBS-06; formula updated 260901-pb1 Task 3 for version 5, updated again 228-09 for version 6,
-// updated again 230-04 for version 7 -- see top-of-file comment).
-inline constexpr std::uint32_t RECORD_SIZE = 2056u;  // 260915-sti Task 1 (D-317):
+// honest: RECORD_SIZE(W) = roundup8(45 + 4*W + 4*RL_TARGET_SLOTS*RL_TARGET_FEATURES + 4) +
+// 8*rl_proc::COUNT, so a mistyped literal cannot silently drift from the formula and still
+// compile (tstl 220-03, OBS-06; formula updated 260901-pb1 Task 3 for version 5, updated again
+// 228-09 for version 6, updated again 230-04 for version 7, updated again 260917-pcn for
+// version 9 -- see top-of-file comment).
+inline constexpr std::uint32_t RECORD_SIZE = 2216u;  // 260915-sti Task 1 (D-317):
                                                        // 2016 -> 2056 -- roundup8(45 + 4*317 +
                                                        // 4*8*23 + 4) = roundup8(2053) = 2056.
                                                        // RL_OBS_DIM moves 306 -> 317 (11 new stat/
@@ -239,10 +277,21 @@ inline constexpr std::uint32_t RECORD_SIZE = 2056u;  // 260915-sti Task 1 (D-317
                                                        // rl_policy_constants.h to RL_OBS_DIM=317.
                                                        // This is a re-pin: one-way,
                                                        // checkpoint-invalidating.
-static_assert( RECORD_SIZE == ( ( 45u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) +
-                                   4u * static_cast<std::uint32_t>( RL_TARGET_SLOTS ) *
-                                       static_cast<std::uint32_t>( RL_TARGET_FEATURES ) + 4u + 7u ) / 8u ) * 8u,
-               "RECORD_SIZE must be roundup8(45 + 4*RL_OBS_DIM + 4*RL_TARGET_SLOTS*RL_TARGET_FEATURES + 4)" );
+                                                       // 260917-pcn: 2056 -> 2216, the 160-byte
+                                                       // proc block.
+// 260917-pcn: the version-7 row size (unchanged formula) is where the new proc-counter block
+// starts; PROC_BLOCK_SIZE is the block's own byte count (8 bytes per registered mechanic --
+// see rl_proc_counters.hpp's counters_t). Declared after RECORD_SIZE's literal so the replaced
+// static_assert immediately below can reference them (an assert may only reference constants
+// declared above it).
+inline constexpr std::uint32_t PROC_BLOCK_OFFSET =
+    ( ( 45u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) +
+        4u * static_cast<std::uint32_t>( RL_TARGET_SLOTS ) * static_cast<std::uint32_t>( RL_TARGET_FEATURES ) +
+        4u + 7u ) / 8u ) * 8u;
+inline constexpr std::uint32_t PROC_BLOCK_SIZE = 8u * rl_proc::COUNT;
+static_assert( RECORD_SIZE == PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE,
+               "RECORD_SIZE must be roundup8(45 + 4*RL_OBS_DIM + 4*RL_TARGET_SLOTS*RL_TARGET_FEATURES + 4) + "
+               "8*rl_proc::COUNT" );
 static_assert( RL_OBS_DIM >= 2, "footer_record's zero40[RL_OBS_DIM-1] needs at least one element" );
 inline constexpr std::uint32_t HEADER_SIZE = 256u;
 
@@ -376,6 +425,13 @@ struct decision_record
                                //         CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK.
   std::uint8_t kind;          // @47+4W+4SF -- KIND_DECISION
   std::uint8_t reserved;      // @48+4W+4SF -- written zero
+  // Version 9 (260917-pcn): the per-fight CUMULATIVE proc-roll observer block, struct-of-arrays,
+  // alignas(8) so it starts exactly at PROC_BLOCK_OFFSET (= the version-7 row size) at any width W.
+  // A window's counts are consecutive-row differences, exactly like `damage`. Sits AFTER `reserved`
+  // so every version-7 field, `kind` and `reserved` included, keeps its version-7 offset (D-02).
+  alignas( 8 ) std::uint16_t proc_attempts[ rl_proc::COUNT ];   // @PROC_BLOCK_OFFSET
+  std::uint16_t proc_successes[ rl_proc::COUNT ];               // @PROC_BLOCK_OFFSET + 2*COUNT
+  float proc_chance_sum[ rl_proc::COUNT ];                      // @PROC_BLOCK_OFFSET + 4*COUNT
 };
 
 struct close_record
@@ -420,6 +476,11 @@ struct close_record
                                           //         sits at decision_record's own chosen_candidate_slot offset
   std::uint8_t kind;                         // @47+4W+4SF -- KIND_CLOSE
   std::uint8_t reserved;                      // @48+4W+4SF -- written zero
+  // Version 9 (260917-pcn): the per-fight FINAL proc-roll observer totals -- named the same as
+  // decision_record's own fields (not a zero-twin) so a reader gets the fight's closing counts.
+  alignas( 8 ) std::uint16_t proc_attempts[ rl_proc::COUNT ];   // @PROC_BLOCK_OFFSET
+  std::uint16_t proc_successes[ rl_proc::COUNT ];               // @PROC_BLOCK_OFFSET + 2*COUNT
+  float proc_chance_sum[ rl_proc::COUNT ];                      // @PROC_BLOCK_OFFSET + 4*COUNT
 };
 
 // 212-CR-FIX BL-01: this footer carries two DIFFERENT populations of fight,
@@ -474,6 +535,8 @@ struct footer_record
                                           //         at decision_record's own chosen_candidate_slot offset
   std::uint8_t kind;                     // @47+4W+4SF -- KIND_FOOTER
   std::uint8_t reserved;                 // @48+4W+4SF -- written zero
+  // Version 9 (260917-pcn): written zero -- no fight owns the footer.
+  alignas( 8 ) std::uint8_t zero_proc_block[ PROC_BLOCK_SIZE ];  // @PROC_BLOCK_OFFSET
 };
 
 // The header. The two fields at @20/@24 used to be pure alignment padding
@@ -650,6 +713,19 @@ static_assert( offsetof( decision_record, candidate_count ) == offsetof( close_r
 static_assert( offsetof( close_record, zero_candidate_count ) == offsetof( footer_record, zero_candidate_count ) );
 static_assert( offsetof( decision_record, chosen_candidate_slot ) == offsetof( close_record, zero_chosen_candidate_slot ) );
 static_assert( offsetof( close_record, zero_chosen_candidate_slot ) == offsetof( footer_record, zero_chosen_candidate_slot ) );
+
+// 260917-pcn (version 9): the per-proc counter block lands at PROC_BLOCK_OFFSET (the version-7
+// row size) in every row shape -- decision_record and close_record's own NAMED fields,
+// footer_record's zero-written twin.
+static_assert( offsetof( decision_record, proc_attempts ) == PROC_BLOCK_OFFSET );
+static_assert( offsetof( decision_record, proc_successes ) == PROC_BLOCK_OFFSET + 2u * rl_proc::COUNT );
+static_assert( offsetof( decision_record, proc_chance_sum ) == PROC_BLOCK_OFFSET + 4u * rl_proc::COUNT );
+static_assert( offsetof( close_record, proc_attempts ) == PROC_BLOCK_OFFSET );
+static_assert( offsetof( close_record, proc_successes ) == PROC_BLOCK_OFFSET + 2u * rl_proc::COUNT );
+static_assert( offsetof( close_record, proc_chance_sum ) == PROC_BLOCK_OFFSET + 4u * rl_proc::COUNT );
+static_assert( offsetof( footer_record, zero_proc_block ) == PROC_BLOCK_OFFSET );
+static_assert( offsetof( decision_record, proc_attempts ) == offsetof( close_record, proc_attempts ) );
+static_assert( offsetof( close_record, proc_attempts ) == offsetof( footer_record, zero_proc_block ) );
 
 // Dimension guards.
 static_assert( RL_ACTION_DIM <= 32,
