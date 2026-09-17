@@ -307,10 +307,23 @@ result_e attack_t::calculate_result( action_state_t* s ) const
 
   assert( result != RESULT_NONE );
 
+  // rl_proc observers (260917-pcn B): a white swing's crit is a share of the single attack-table
+  // draw, so the attempt is the swing itself and the chance is the table's crit share -- no roll
+  // is added here.
+  if ( !special )
+  {
+    rl_count_proc( player, rl_proc::id::auto_attack_hit, 1.0 - std::min( 1.0, miss + dodge + parry ),
+                   result != RESULT_MISS && result != RESULT_DODGE && result != RESULT_PARRY );
+    if ( may_crit )
+      rl_count_proc( player, rl_proc::id::crit_hit, std::min( 1.0, crit ), result == RESULT_CRIT );
+  }
+
   // if we have a special, make a second roll for hit/crit
   if ( result == RESULT_HIT && special && may_crit )
   {
-    if ( rng().roll( crit ) )
+    const bool ok = rng().roll( crit );
+    rl_count_proc( player, rl_proc::id::crit_hit, crit, ok );
+    if ( ok )
       result = RESULT_CRIT;
   }
 

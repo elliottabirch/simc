@@ -715,6 +715,18 @@ class deck_rng_wrapper_t
       return as<unsigned>( m_rng->entry_remains() );
   }
 
+  // rl_proc observer sibling (260917-pcn B): cards left in the SUCCESS pile, for
+  // deck_draw_chance() below. Mirrors entry_remains()'s null-guard discipline.
+  unsigned proc_remains() const
+  {
+      if ( m_rng == nullptr )
+      {
+          return 0U;
+      }
+
+      return as<unsigned>( m_rng->count_remains( shuffled_rng_e::SUCCESS ) );
+  }
+
   void create_options()
   {
     std::string success_str = fmt::format( "shaman.{}_deck_success", m_name );
@@ -804,6 +816,17 @@ class deck_rng_wrapper_t
     );
   }
 };
+
+// rl_proc observer helper (260917-pcn B): the chance THIS draw succeeds given the cards left
+// in the deck. A draw on an exhausted deck (entry_remains() == 0) reshuffles inside trigger()
+// itself, so it is recorded here as chance 0.0 -- attempts/successes remain the primary signal
+// for deck mechanics, chance_sum only a secondary cross-check.
+template <typename T>
+double deck_draw_chance( const deck_rng_wrapper_t<T>& d )
+{
+  const unsigned n = d.entry_remains();
+  return n ? static_cast<double>( d.proc_remains() ) / n : 0.0;
+}
 } // Namespace rng ends
 
 // ==========================================================================
@@ -3037,6 +3060,7 @@ public:
     // identical schedule as `execute_state`'s own refresh, so it is the fresh, cause-level signal.
     if ( this->hit_any_target && p()->talent.flurry.ok() && this->execute_state->result == RESULT_CRIT )
     {
+      rl_count_proc( p(), rl_proc::id::flurry_trigger, 1.0, true );
       p()->buff.flurry->trigger( p()->buff.flurry->max_stack() );
     }
 
@@ -4815,11 +4839,18 @@ struct stormstrike_attack_t : public shaman_attack_t
   {
     shaman_attack_t::execute();
 
-    if ( p()->spec.stormbringer->ok() && rng().roll( stormsurge_proc_chance() ) )
     {
-      p()->buff.stormsurge->trigger();
-      p()->buff.stormblast->trigger();
-      p()->cooldown.strike->reset( true );
+      const bool g = p()->spec.stormbringer->ok();
+      const double c = g ? stormsurge_proc_chance() : 0.0;
+      const bool ok = g && rng().roll( c );
+      if ( g )
+        rl_count_proc( p(), rl_proc::id::stormsurge, c, ok );
+      if ( ok )
+      {
+        p()->buff.stormsurge->trigger();
+        p()->buff.stormblast->trigger();
+        p()->cooldown.strike->reset( true );
+      }
     }
 
     stormblast_trigger = false;
@@ -6885,12 +6916,18 @@ struct chain_lightning_t : public chained_base_t
     }
 
     // TODO-midnight-talent: Uniform RNG, or what?
-    if ( mw_consumed_stacks > 0 &&
-      ( is_variant( spell_variant::NORMAL ) || is_variant( spell_variant::THORIMS_INVOCATION ) ) &&
-      rng().roll( p()->talent.thunder_capacitor->effectN( 2 ).percent() ) )
     {
-      sim->print_debug( "{} procs thunder_capacitor", player->name() );
-      p()->generate_maelstrom_weapon( this, mw_consumed_stacks );
+      const bool g = mw_consumed_stacks > 0 &&
+        ( is_variant( spell_variant::NORMAL ) || is_variant( spell_variant::THORIMS_INVOCATION ) );
+      const double c = p()->talent.thunder_capacitor->effectN( 2 ).percent();
+      const bool ok = g && rng().roll( c );
+      if ( g )
+        rl_count_proc( p(), rl_proc::id::thunder_capacitor, c, ok );
+      if ( ok )
+      {
+        sim->print_debug( "{} procs thunder_capacitor", player->name() );
+        p()->generate_maelstrom_weapon( this, mw_consumed_stacks );
+      }
     }
 
     p()->trigger_thunderstrike_ward( execute_state );
@@ -7652,12 +7689,18 @@ struct lightning_bolt_t : public shaman_spell_t
     }
 
     // TODO-midnight-talent: Uniform RNG, or what?
-    if ( mw_consumed_stacks > 0 &&
-      ( is_variant( spell_variant::NORMAL ) || is_variant( spell_variant::THORIMS_INVOCATION ) )
-      && rng().roll( p()->talent.thunder_capacitor->effectN( 2 ).percent() ) )
     {
-      sim->print_debug( "{} procs thunder_capacitor", player->name() );
-      p()->generate_maelstrom_weapon( this, mw_consumed_stacks );
+      const bool g = mw_consumed_stacks > 0 &&
+        ( is_variant( spell_variant::NORMAL ) || is_variant( spell_variant::THORIMS_INVOCATION ) );
+      const double c = p()->talent.thunder_capacitor->effectN( 2 ).percent();
+      const bool ok = g && rng().roll( c );
+      if ( g )
+        rl_count_proc( p(), rl_proc::id::thunder_capacitor, c, ok );
+      if ( ok )
+      {
+        sim->print_debug( "{} procs thunder_capacitor", player->name() );
+        p()->generate_maelstrom_weapon( this, mw_consumed_stacks );
+      }
     }
 
     p()->trigger_thunderstrike_ward( execute_state );
@@ -10176,12 +10219,18 @@ struct tempest_t : public shaman_spell_t
     }
 
     // TODO-midnight-talent: Uniform RNG, or what?
-    if ( mw_consumed_stacks > 0 &&
-      ( is_variant( spell_variant::NORMAL ) || is_variant( spell_variant::THORIMS_INVOCATION ) )
-      && rng().roll( p()->talent.thunder_capacitor->effectN( 2 ).percent() ) )
     {
-      sim->print_debug( "{} procs thunder_capacitor", player->name() );
-      p()->generate_maelstrom_weapon( this, mw_consumed_stacks );
+      const bool g = mw_consumed_stacks > 0 &&
+        ( is_variant( spell_variant::NORMAL ) || is_variant( spell_variant::THORIMS_INVOCATION ) );
+      const double c = p()->talent.thunder_capacitor->effectN( 2 ).percent();
+      const bool ok = g && rng().roll( c );
+      if ( g )
+        rl_count_proc( p(), rl_proc::id::thunder_capacitor, c, ok );
+      if ( ok )
+      {
+        sim->print_debug( "{} procs thunder_capacitor", player->name() );
+        p()->generate_maelstrom_weapon( this, mw_consumed_stacks );
+      }
     }
 
     // resetting maelstrom gain
@@ -10363,10 +10412,16 @@ struct voltaic_blaze_t : public shaman_spell_t
 
     p()->generate_maelstrom_weapon( execute_state, as<int>( data().effectN( 2 ).base_value() ) );
 
-    if ( p()->talent.fire_nova.ok() && rng().roll( p()->talent.fire_nova->effectN( 2 ).percent() ) &&
-        !p()->action.fire_nova->target_list().empty() )
     {
-      p()->action.fire_nova->execute_on_target( execute_state->target );
+      const bool g = p()->talent.fire_nova.ok();
+      const double c = g ? p()->talent.fire_nova->effectN( 2 ).percent() : 0.0;
+      const bool ok = g && rng().roll( c );
+      if ( g )
+        rl_count_proc( p(), rl_proc::id::fire_nova_vb, c, ok );
+      if ( ok && !p()->action.fire_nova->target_list().empty() )
+      {
+        p()->action.fire_nova->execute_on_target( execute_state->target );
+      }
     }
     auto tl = target_list();
     for ( size_t i = 0; i < tl.size(); ++i )
@@ -11294,6 +11349,7 @@ struct maelstrom_weapon_cb_t : public dbc_proc_callback_t
     }
 
     auto triggered = rng().roll( proc_chance );
+    rl_count_proc( shaman, rl_proc::id::maelstrom_weapon_gain, proc_chance, triggered );
 
     if ( listener->sim->debug )
     {
@@ -12188,7 +12244,10 @@ void shaman_t::consume_maelstrom_weapon( const action_state_t* state, int stacks
     auto success = false;
     for ( auto draw = 0U; draw < as<unsigned>( stacks ); ++draw )
     {
-      if ( rng_obj.asc_dw.trigger() )
+      const double c = rng::deck_draw_chance( rng_obj.asc_dw );
+      const bool ok = rng_obj.asc_dw.trigger();
+      rl_count_proc( this, rl_proc::id::asc_dw_deck, c, ok );
+      if ( ok )
       {
         assert( !success );
         success = true;
@@ -12209,7 +12268,10 @@ void shaman_t::consume_maelstrom_weapon( const action_state_t* state, int stacks
     auto success = false;
     for ( auto draw = 0U; draw < as<unsigned>( stacks ); ++draw )
     {
-      if ( rng_obj.storm_unleashed.trigger() )
+      const double c = rng::deck_draw_chance( rng_obj.storm_unleashed );
+      const bool ok = rng_obj.storm_unleashed.trigger();
+      rl_count_proc( this, rl_proc::id::storm_unleashed_deck, c, ok );
+      if ( ok )
       {
         assert( !success );
         success = true;
@@ -12413,7 +12475,9 @@ void shaman_t::trigger_windfury_weapon( const action_state_t* state, double over
     solver_damage_expected_so_far +=
         wf_chance * ( 2.0 * wf_attack_expected + unruly_winds_chance * wf_attack_expected );
 
-    if ( rng().roll( wf_chance ) )
+    const bool ok = rng().roll( wf_chance );
+    rl_count_proc( this, rl_proc::id::windfury, wf_chance, ok );
+    if ( ok )
     {
       action_t* a = windfury_mh;
 
@@ -12427,7 +12491,9 @@ void shaman_t::trigger_windfury_weapon( const action_state_t* state, double over
 
       double chance = talent.unruly_winds->effectN( 1 ).percent();
 
-      if ( rng().roll( chance ) )
+      const bool uw = rng().roll( chance );
+      rl_count_proc( this, rl_proc::id::unruly_winds, chance, uw );
+      if ( uw )
       {
         trigger_secondary_ability( state, a );
         proc.windfury_uw->occur();
@@ -12505,7 +12571,10 @@ void shaman_t::trigger_elemental_assault( const action_state_t* state )
     return;
   }
 
-  if ( !rng().roll( talent.elemental_assault->effectN( 3 ).percent() )  )
+  const double c = talent.elemental_assault->effectN( 3 ).percent();
+  const bool ok = rng().roll( c );
+  rl_count_proc( this, rl_proc::id::elemental_assault, c, ok );
+  if ( !ok )
   {
     return;
   }
@@ -12523,7 +12592,10 @@ void shaman_t::trigger_stormflurry( const action_state_t* state )
     return;
   }
 
-  if ( !rng().roll( talent.stormflurry->effectN( 1 ).percent() ) )
+  const double c = talent.stormflurry->effectN( 1 ).percent();
+  const bool ok = rng().roll( c );
+  rl_count_proc( this, rl_proc::id::stormflurry, c, ok );
+  if ( !ok )
   {
     return;
   }
@@ -12671,7 +12743,10 @@ void shaman_t::trigger_tempest( T resource_count )
 
     for ( auto draw = 0U; draw < as<unsigned>( resource_count ); ++draw )
     {
-      if ( rng_obj.tempest_enh.trigger() )
+      const double c = rng::deck_draw_chance( rng_obj.tempest_enh );
+      const bool ok = rng_obj.tempest_enh.trigger();
+      rl_count_proc( this, rl_proc::id::tempest_deck, c, ok );
+      if ( ok )
       {
         assert( !success );
         success = true;
@@ -12742,7 +12817,10 @@ void shaman_t::trigger_awakening_storms( double maelstrom_consumed, player_t* ta
     return;
   }
 
-  if ( !rng().roll( maelstrom_consumed * talent.awakening_storms->effectN( 3 ).percent() * 0.01 ) )
+  const double c = maelstrom_consumed * talent.awakening_storms->effectN( 3 ).percent() * 0.01;
+  const bool ok = rng().roll( c );
+  rl_count_proc( this, rl_proc::id::awakening_storms_roll, c, ok );
+  if ( !ok )
   {
     return;
   }
@@ -12757,7 +12835,13 @@ void shaman_t::trigger_awakening_storms( const action_state_t* state )
     return;
   }
 
-  if ( !rng_obj.awakening_storms->trigger() )
+  const bool ok = rng_obj.awakening_storms->trigger();
+  {
+    const double c = rng_obj.awakening_storms->get_last_roll_chance();
+    if ( c >= 0.0 )
+      rl_count_proc( this, rl_proc::id::awakening_storms_rppm, c, ok );
+  }
+  if ( !ok )
   {
     return;
   }

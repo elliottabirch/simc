@@ -2137,8 +2137,14 @@ void action_t::tick( dot_t* d )
   {
     d->state->result = RESULT_HIT;
 
-    if ( tick_may_crit && rng().roll( d->state->composite_crit_chance() ) )
-      d->state->result = RESULT_CRIT;
+    if ( tick_may_crit )
+    {
+      const double c = d->state->composite_crit_chance();
+      const bool ok = rng().roll( c );
+      rl_count_proc( player, rl_proc::id::crit_hit, c, ok );
+      if ( ok )
+        d->state->result = RESULT_CRIT;
+    }
 
     auto stack = dot_ignore_stack ? 1 : d->current_stack();
 

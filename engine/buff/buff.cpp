@@ -2127,6 +2127,12 @@ bool buff_t::trigger( int stacks, double value, double chance, timespan_t durati
 
     bool triggered = rppm->trigger();
 
+    {
+      const double roll_c = rppm->get_last_roll_chance();
+      if ( roll_c >= 0.0 )
+        rl_count_proc( player, rl_proc::id::buff_chance_trigger, roll_c, triggered );
+    }
+
     if ( chance > 0 )
     {
       rppm->set_frequency( c );
@@ -2142,7 +2148,11 @@ bool buff_t::trigger( int stacks, double value, double chance, timespan_t durati
     if ( chance < 0 )
       chance = default_chance;
 
-    if ( !rng().roll( chance ) )
+    const bool ok = rng().roll( chance );
+    // A deterministic (chance >= 1) buff trigger is not a proc and is not counted.
+    if ( chance < 1.0 )
+      rl_count_proc( player, rl_proc::id::buff_chance_trigger, chance, ok );
+    if ( !ok )
       return false;
   }
 

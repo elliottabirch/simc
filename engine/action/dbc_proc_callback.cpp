@@ -400,11 +400,26 @@ rng::rng_t& dbc_proc_callback_t::rng() const
 bool dbc_proc_callback_t::roll( action_t* action )
 {
   if ( rppm )
-    return rppm->trigger();
+  {
+    const bool ok = rppm->trigger();
+    const double c = rppm->get_last_roll_chance();
+    if ( c >= 0.0 )
+      rl_count_proc( listener, rl_proc::id::dbc_proc_callback, c, ok );
+    return ok;
+  }
   else if ( ppm > 0 && action )
-    return rng().roll( action->ppm_proc_chance( ppm ) );
+  {
+    const double c = action->ppm_proc_chance( ppm );
+    const bool ok = rng().roll( c );
+    rl_count_proc( listener, rl_proc::id::dbc_proc_callback, c, ok );
+    return ok;
+  }
   else if ( proc_chance > 0 )
-    return rng().roll( proc_chance );
+  {
+    const bool ok = rng().roll( proc_chance );
+    rl_count_proc( listener, rl_proc::id::dbc_proc_callback, proc_chance, ok );
+    return ok;
+  }
 
   assert( false );
   return false;

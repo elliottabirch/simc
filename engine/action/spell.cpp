@@ -76,7 +76,10 @@ result_e spell_base_t::calculate_result( action_state_t* s ) const
 
     if ( may_crit )
     {
-      if ( rng().roll( std::max( s->composite_crit_chance(), 0.0 ) ) )
+      const double c = std::max( s->composite_crit_chance(), 0.0 );
+      const bool ok = rng().roll( c );
+      rl_count_proc( player, rl_proc::id::crit_hit, c, ok );
+      if ( ok )
         result = RESULT_CRIT;
     }
   }
