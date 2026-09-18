@@ -13096,16 +13096,32 @@ void shaman_t::trigger_arc_discharge( const action_state_t* state )
 
   if ( buff.arc_discharge->consume( state->action, 1 ) )
   {
+    // tstl-sylvanas quick task 260918-cbc (Stage A8.1): capture the currently active cause HERE,
+    // synchronously, while the triggering cast's own dispatch frame (impact()'s rl_cause_scope_t
+    // -- trigger_arc_discharge() is called from chain_lightning_t::impact()) is still on the
+    // stack. This is a raw make_event() lambda, not a dbc_proc_callback_t proc, so Stage A8's
+    // proc_event_t fix does not cover it -- it fires on a LATER event-loop pass (325-425ms
+    // later), by which point that frame has long since popped. Without capturing it now, the
+    // deferred execute_on_target() calls below would see an empty stack and fall through to
+    // ORPHAN despite a cause genuinely existing at trigger time. Same pattern as lightning_rod
+    // (A5.1), storm_unleashed_3 (A6.1), stormflurry (A6.2): the Arc Discharge bolt is a delayed
+    // effect of the cast that consumed the buff.
+    const rl_cause_t rl_ad_cause = rl_cause_stack.empty()
+                                        ? rl_cause_t{}
+                                        : rl_credit::promote( rl_cause_stack.back().cause );
+
     // Arc Discharge is capable of self-proccing; experimentally verified in game to roughly 3/4 of
     // re-triggering within the ICD (400ms), vs 1/4 of re-triggering outside of the ICD in which
     // case the Arc Discharge Lightning Bolt will consume the remaining stack of Arc Discharge and
     // trigger again.
     make_event( *sim, rng().range( 325_ms, 425_ms ),
-      [ this, t = state->target, rtl = s->is_variant( spell_variant::RIDE_THE_LIGHTNING ) ]() {
+      [ this, t = state->target, rtl = s->is_variant( spell_variant::RIDE_THE_LIGHTNING ), rl_ad_cause ]() {
         if ( t->is_sleeping() )
         {
           return;
         }
+
+        rl_cause_scope_t rl_cause_guard( this, rl_ad_cause );
 
         if ( rtl )
         {
