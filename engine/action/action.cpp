@@ -24,6 +24,7 @@
 #include "sim/event.hpp"
 #include "sim/expressions.hpp"
 #include "sim/proc.hpp"
+#include "sim/rl_credit.hpp"
 #include "sim/rl_target_select.hpp"
 #include "sim/sim.hpp"
 #include "util/generic.hpp"
@@ -94,6 +95,21 @@ void do_execute( action_t* action, execute_type type )
     action->player->queueing = nullptr;
   }
 }
+
+// tstl-sylvanas quick task 260918-cbc (Stage A1): RAII guard for
+// player_t::rl_cause_stack. Pushed around action_t::execute()'s per-target
+// loop and around impact()/the direct-tick assessment in tick(), so a
+// proc fired synchronously inside those scopes (a callback,
+// execute_on_target, trigger_secondary_ability, ...) inherits the right
+// cause by construction -- and pops correctly even if an exception
+// unwinds through the guarded scope (calculate_result and friends are not
+// noexcept). Pure bookkeeping: touches no RNG, schedules nothing.
+struct rl_cause_scope_t
+{
+  player_t* p;
+  rl_cause_scope_t( player_t* p_, rl_cause_t cause ) : p( p_ ) { p->rl_cause_stack.push_back( cause ); }
+  ~rl_cause_scope_t() { p->rl_cause_stack.pop_back(); }
+};
 
 struct queued_action_execute_event_t : public event_t
 {
@@ -1912,39 +1928,107 @@ void action_t::execute()
   if ( harmful && !player->in_combat )
     player->enter_combat();
 
-  // Handle tick_action initial state snapshotting, primarily for handling STATE_MUL_PERSISTENT
-  if ( tick_action )
+  // tstl-sylvanas quick task 260918-cbc (Stage A1): stamp this execute()'s own states with a
+  // cause -- which decision caused this damage and what kind of event it is -- before doing
+  // any of the per-target work below. Pure observer: reads existing state (the cause stack,
+  // last_foreground_action, repeating/special), touches no RNG, schedules nothing. See
+  // rl_credit.hpp's top-of-file comment for the full model this four-branch rule implements.
+  rl_cause_t rl_cause;
+  if ( !player->rl_cause_stack.empty() )
   {
-    if ( !tick_action->execute_state )  // grab a new state
-      tick_action->execute_state = tick_action->get_state();
-    else  // recycled state, so clean it first
-      tick_action->execute_state->initialize();
-
-    tick_action->snapshot_state( tick_action->execute_state, amount_type( tick_action->execute_state, tick_action->direct_tick ) );
+    const rl_cause_t& top = player->rl_cause_stack.back();
+    rl_cause.seq = top.seq;
+    switch ( top.cls )
+    {
+      case RL_CAUSE_CAST:
+      case RL_CAUSE_PROC_OF_CAST: rl_cause.cls = RL_CAUSE_PROC_OF_CAST; break;
+      case RL_CAUSE_DOT_TICK:
+      case RL_CAUSE_PROC_OF_DOT: rl_cause.cls = RL_CAUSE_PROC_OF_DOT; break;
+      case RL_CAUSE_AUTO:
+      case RL_CAUSE_PROC_OF_AUTO: rl_cause.cls = RL_CAUSE_PROC_OF_AUTO; break;
+      default: rl_cause.cls = RL_CAUSE_ORPHAN; break;
+    }
+  }
+  else if ( !background && player->last_foreground_action == this )
+  {
+    rl_cause.seq = static_cast<std::int64_t>( sim->solver_control_seq );
+    rl_cause.cls = RL_CAUSE_CAST;
+  }
+  else if ( repeating && !special )
+  {
+    rl_cause.seq = static_cast<std::int64_t>( sim->solver_control_seq );
+    rl_cause.cls = RL_CAUSE_AUTO;
+  }
+  else
+  {
+    rl_cause.seq = static_cast<std::int64_t>( sim->solver_control_seq );
+    rl_cause.cls = RL_CAUSE_ORPHAN;
   }
 
-  if ( num_targets == -1 || num_targets > 0 )  // aoe
+  // Pushed for the duration of the per-target work below (tick_action snapshotting included)
+  // so a proc fired synchronously inside it -- a callback, a resource-gain trigger, a nested
+  // execute() -- inherits `rl_cause` promoted to its PROC_OF_* sibling, by construction.
   {
-    std::vector<player_t*>& tl = target_list();
-    const int max_targets = as<int>( tl.size() );
-    num_targets           = ( num_targets < 0 ) ? max_targets : std::min( max_targets, num_targets );
+    rl_cause_scope_t rl_cause_guard( player, rl_cause );
 
-    for ( int t = 0; t < num_targets; t++ )
+    // Handle tick_action initial state snapshotting, primarily for handling STATE_MUL_PERSISTENT
+    if ( tick_action )
     {
+      if ( !tick_action->execute_state )  // grab a new state
+        tick_action->execute_state = tick_action->get_state();
+      else  // recycled state, so clean it first
+        tick_action->execute_state->initialize();
+
+      tick_action->snapshot_state( tick_action->execute_state, amount_type( tick_action->execute_state, tick_action->direct_tick ) );
+    }
+
+    if ( num_targets == -1 || num_targets > 0 )  // aoe
+    {
+      std::vector<player_t*>& tl = target_list();
+      const int max_targets = as<int>( tl.size() );
+      num_targets           = ( num_targets < 0 ) ? max_targets : std::min( max_targets, num_targets );
+
+      for ( int t = 0; t < num_targets; t++ )
+      {
+        action_state_t* s = get_state( pre_execute_state );
+        s->target         = tl[ t ];
+        s->n_targets      = as<unsigned>( num_targets );
+        s->chain_target   = t;
+        if ( !pre_execute_state )
+        {
+          snapshot_state( s, amount_type( s ) );
+        }
+        // Even if pre-execute state is defined, we need to snapshot target-specific state variables
+        // for aoe spells.
+        else
+        {
+          snapshot_internal( s, snapshot_flags & STATE_TARGET, pre_execute_state->result_type );
+        }
+        s->rl_cause_seq   = rl_cause.seq;
+        s->rl_cause_class = rl_cause.cls;
+        s->result       = calculate_result( s );
+        s->block_result = calculate_block_result( s );
+
+        s->result_amount = calculate_direct_amount( s );
+
+        if ( sim->debug )
+          s->debug();
+
+        schedule_travel( s );
+      }
+    }
+    else  // single target
+    {
+      num_targets = 1;
+
       action_state_t* s = get_state( pre_execute_state );
-      s->target         = tl[ t ];
-      s->n_targets      = as<unsigned>( num_targets );
-      s->chain_target   = t;
+      s->target         = target;
+      s->n_targets      = 1;
+      s->chain_target   = 0;
       if ( !pre_execute_state )
-      {
         snapshot_state( s, amount_type( s ) );
-      }
-      // Even if pre-execute state is defined, we need to snapshot target-specific state variables
-      // for aoe spells.
-      else
-      {
-        snapshot_internal( s, snapshot_flags & STATE_TARGET, pre_execute_state->result_type );
-      }
+      s->rl_cause_seq   = rl_cause.seq;
+      s->rl_cause_class = rl_cause.cls;
       s->result       = calculate_result( s );
       s->block_result = calculate_block_result( s );
 
@@ -1955,26 +2039,6 @@ void action_t::execute()
 
       schedule_travel( s );
     }
-  }
-  else  // single target
-  {
-    num_targets = 1;
-
-    action_state_t* s = get_state( pre_execute_state );
-    s->target         = target;
-    s->n_targets      = 1;
-    s->chain_target   = 0;
-    if ( !pre_execute_state )
-      snapshot_state( s, amount_type( s ) );
-    s->result       = calculate_result( s );
-    s->block_result = calculate_block_result( s );
-
-    s->result_amount = calculate_direct_amount( s );
-
-    if ( sim->debug )
-      s->debug();
-
-    schedule_travel( s );
   }
 
   if ( player->resource_regeneration == regen_type::DYNAMIC)
@@ -2150,7 +2214,17 @@ void action_t::tick( dot_t* d )
 
     d->state->result_amount = calculate_tick_amount( d->state, d->get_tick_factor() * stack );
 
-    assess_damage( amount_type( d->state, true ), d->state );
+    // tstl-sylvanas quick task 260918-cbc (Stage A1): a DoT tick assessed directly here (no
+    // tick_action) is always a DOT_TICK event, whichever class the applying/refreshing
+    // decision's own state carried in via copy_state() (CAST, AUTO, ...) -- only the class is
+    // forced, d->state->rl_cause_seq stays that decision's own seq. Pushed for the assessment
+    // so a proc fired synchronously inside it (a periodic-damage trigger) inherits
+    // PROC_OF_DOT.
+    d->state->rl_cause_class = RL_CAUSE_DOT_TICK;
+    {
+      rl_cause_scope_t rl_cause_guard( player, rl_cause_t{ d->state->rl_cause_seq, d->state->rl_cause_class } );
+      assess_damage( amount_type( d->state, true ), d->state );
+    }
 
     if ( sim->debug )
       d->state->debug();
@@ -4622,6 +4696,12 @@ void action_t::schedule_travel( action_state_t* s )
 
 void action_t::impact( action_state_t* s )
 {
+  // tstl-sylvanas quick task 260918-cbc (Stage A1): pushed for the duration of this impact so
+  // anything fired synchronously inside it (trigger_dot's own procs, a nested impact_action
+  // execute()) inherits `s`'s own cause promoted to its PROC_OF_* sibling. `s` already carries
+  // the stamp execute() wrote (or a DoT tick forced to DOT_TICK -- see action_t::tick()).
+  rl_cause_scope_t rl_cause_guard( player, rl_cause_t{ s->rl_cause_seq, s->rl_cause_class } );
+
   // Note, Critical damage bonus for direct amounts is computed on impact, instead of cast finish.
   s->result_amount = calculate_crit_damage_bonus( s );
 

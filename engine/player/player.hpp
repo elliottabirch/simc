@@ -21,6 +21,7 @@
 #include "sc_enums.hpp"
 #include "sim/proc.hpp"
 #include "sim/proc_rng.hpp"
+#include "sim/rl_credit.hpp"
 #include "sim/rl_proc_counters.hpp"
 #include "talent.hpp"
 #include "util/cache.hpp"
@@ -32,6 +33,7 @@
 #include <map>
 #include <set>
 #include <unordered_map>
+#include <vector>
 
 struct absorb_buff_t;
 struct action_t;
@@ -448,6 +450,28 @@ struct player_t : public actor_t
   // solver_damage_so_far in player_t::datacollection_begin(). See
   // rl_proc_counters.hpp.
   rl_proc::counters_t rl_proc_counters{};
+  // Credit-by-cause (tstl-sylvanas quick task 260918-cbc, stage A). Pure
+  // observer bookkeeping -- see rl_credit.hpp's top-of-file comment for
+  // the full model. All four reset alongside solver_damage_so_far in
+  // player_t::datacollection_begin().
+  //
+  // The cause stack: pushed around action_t::execute()'s per-target loop
+  // and around impact()/the direct-tick assessment in tick(), so a proc
+  // fired synchronously inside those scopes inherits the right cause.
+  std::vector<rl_cause_t> rl_cause_stack;
+  // The cause the next stats_t::add_result() sink should route under --
+  // stats_t::add_result() takes no action_state_t, so assess_damage() sets
+  // this immediately before calling record_data(state), which is the last
+  // point the state is still in scope.
+  rl_cause_t rl_sink_cause;
+  // The twelve (six realized + six expectation-corrected) cumulative
+  // per-fight credit streams themselves.
+  rl_credit_streams_t rl_credit;
+  // Per-fight census of realized damage routed to the orphan stream,
+  // keyed by the contributing stats_t's own name -- lets a diagnostic
+  // print name exactly which actions land with no cause context, rather
+  // than a bare aggregate percentage. Reset alongside solver_damage_so_far.
+  std::unordered_map<std::string, double> rl_orphan_damage_by_action;
   double dpr;
   struct incoming_damage_entry_t {
     timespan_t time;

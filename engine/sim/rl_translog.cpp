@@ -20,6 +20,7 @@
 
 #include "fmt/format.h"
 
+#include <cassert>
 #include <cstring>
 
 // Pure observer for the RL transition log's per-proc counter block
@@ -38,6 +39,52 @@ void rl_count_proc( player_t* p, rl_proc::id which, double chance, bool success 
   if ( success && c.successes[ i ] < 65535u ) ++c.successes[ i ];
   const double clamped = chance < 0.0 ? 0.0 : ( chance > 1.0 ? 1.0 : chance );
   c.chance_sum[ i ] += static_cast<float>( clamped );
+}
+
+// Pure observer for the RL transition log's credit-by-cause block
+// (tstl-sylvanas quick task 260918-cbc, stage A). Routes one damage (or
+// expected-damage) increment into the right of the six per-fight
+// cumulative credit streams -- see rl_credit.hpp's top-of-file comment
+// for the full model. `p` is already resolved to the owning player by
+// every call site (a pet's realized/expected damage routes to its OWNER
+// before calling this, mirroring stats.cpp's/accrue_expected_damage's own
+// pet->owner rules). Defined here because it needs player_t complete,
+// mirroring rl_count_proc's own placement immediately above.
+void rl_credit_route( player_t* p, rl_cause_t cause, std::uint64_t now_seq, double amount, bool expected,
+                       const char* action_name )
+{
+  if ( p == nullptr ) return;
+
+  // A cause can never be stamped with a decision seq that lies in the future of the CURRENT
+  // decision boundary -- the stamp is always written at or before the routing site runs.
+  assert( cause.seq < 0 || static_cast<std::uint64_t>( cause.seq ) <= now_seq );
+
+  std::uint32_t index;
+  switch ( cause.cls )
+  {
+    case RL_CAUSE_CAST:
+    case RL_CAUSE_PROC_OF_CAST:
+      index = ( cause.seq == static_cast<std::int64_t>( now_seq ) ) ? 0u : 1u;  // own_cast : tail_cast
+      break;
+    case RL_CAUSE_DOT_TICK:
+    case RL_CAUSE_PROC_OF_DOT:
+      index = ( cause.seq == static_cast<std::int64_t>( now_seq ) ) ? 2u : 3u;  // own_dot : tail_dot
+      break;
+    case RL_CAUSE_AUTO:
+    case RL_CAUSE_PROC_OF_AUTO:
+      index = 4u;  // background
+      break;
+    default:
+      index = 5u;  // orphan
+      break;
+  }
+
+  ( expected ? p->rl_credit.exp : p->rl_credit.real )[ index ] += amount;
+
+  // Orphan census: realized-only, keyed by the contributing stats_t's own name (the only
+  // identity a realized sink has -- stats_t::add_result carries no action_state_t/action_t).
+  if ( index == 5u && !expected && action_name != nullptr )
+    p->rl_orphan_damage_by_action[ action_name ] += amount;
 }
 
 namespace rl_translog

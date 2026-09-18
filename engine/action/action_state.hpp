@@ -13,6 +13,7 @@
 #include "sc_enums.hpp"
 #include "dbc/data_enums.hh"
 #include "sim/event.hpp"
+#include "sim/rl_credit.hpp"
 
 struct action_t;
 struct player_t;
@@ -28,6 +29,12 @@ struct action_state_t : private noncopyable
   int             chain_target;         // The chain target number, 0 == no chain, 1 == first target, etc.
   double original_x;
   double original_y;
+  // tstl-sylvanas quick task 260918-cbc (Stage A1): which decision caused this state's damage
+  // and what kind of event it is -- stamped once in action_t::execute(), carried through
+  // travel/impact unchanged, and carried into a DoT's own state at application/refresh via
+  // copy_state() below. Pure bookkeeping: never read by any RNG or scheduling decision.
+  std::int64_t    rl_cause_seq = -1;
+  std::uint8_t    rl_cause_class = RL_CAUSE_ORPHAN;
   // Execution results
   result_amount_type           result_type;
   result_e        result;

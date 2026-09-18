@@ -6420,6 +6420,15 @@ void player_t::datacollection_begin()
   solver_damage_so_far                  = 0;
   solver_damage_expected_so_far         = 0;
   rl_proc::reset( rl_proc_counters );
+  // 260918-cbc: reset alongside solver_damage_so_far -- these are all
+  // per-fight cumulative like it. The stack is not "reset" so much as
+  // asserted empty: every push in execute()/impact()/tick() is paired
+  // with a pop in the same call, so a non-empty stack here would mean an
+  // earlier fight leaked a push, which is a bug worth catching rather
+  // than silently clearing.
+  assert( rl_cause_stack.empty() );
+  rl_credit.reset();
+  rl_orphan_damage_by_action.clear();
   iteration_heal                        = 0;
   iteration_absorb                      = 0.0;
   iteration_absorb_taken                = 0.0;

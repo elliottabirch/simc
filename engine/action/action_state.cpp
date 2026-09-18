@@ -56,6 +56,11 @@ void action_state_t::initialize()
   result_type  = result_amount_type::NONE;
   block_result = BLOCK_RESULT_UNBLOCKED;
   result_raw = result_total = result_mitigated = result_absorbed = result_amount = self_absorb_amount = 0;
+  // 260918-cbc: reset to the "never stamped" sentinel -- action_t::execute() re-stamps every
+  // state it creates before use, so this only matters for a state initialized but never routed
+  // through execute() (routing treats it identically to an explicit ORPHAN).
+  rl_cause_seq   = -1;
+  rl_cause_class = RL_CAUSE_ORPHAN;
 }
 /*
 void action_state_t::copy_state( const action_state_t* o )
@@ -113,6 +118,12 @@ void action_state_t::copy_state( const action_state_t* o )
   target_mitigation_da_multiplier = o->target_mitigation_da_multiplier;
   target_mitigation_ta_multiplier = o->target_mitigation_ta_multiplier;
   target_armor                    = o->target_armor;
+
+  // 260918-cbc: carries the cause stamp into a DoT's own state at
+  // application/refresh (dot->state->copy_state(s)) -- a tick years later
+  // still remembers which decision applied it.
+  rl_cause_seq   = o->rl_cause_seq;
+  rl_cause_class = o->rl_cause_class;
 }
 
 action_state_t::action_state_t( action_t* a, player_t* t )
