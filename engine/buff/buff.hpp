@@ -11,6 +11,7 @@
 #include "dbc/data_enums.hh"
 #include "player/actor_pair.hpp"
 #include "sc_enums.hpp"
+#include "sim/rl_credit.hpp"
 #include "sim/uptime.hpp"
 #include "util/parse_util.hpp"
 #include "util/sample_data.hpp"
@@ -125,6 +126,17 @@ public:
   std::vector<buff_stack_change_callback_t> stack_change_callback;
   buff_expire_callback_t expire_callback;
   bool allow_precombat;
+
+  // Credit-by-cause (tstl-sylvanas quick task 260918-cbc, stage A6). The cause stamp of the
+  // decision that most recently applied/refreshed this buff -- start() and refresh() set this
+  // from the SOURCE player's rl_cause_stack (see those functions in buff.cpp for the "source
+  // player" resolution rule: buff->source when it is a non-enemy player_t, else buff->player).
+  // A tick/expire callback invocation is a delayed effect of this decision, exactly like a
+  // dot_t tick already is -- see rl_credit.hpp's top-of-file comment. seq == -1 (rl_cause_t's
+  // default) means "no applier known"; a refresh that finds an empty source stack leaves the
+  // existing stamp unchanged rather than resetting it (a refresh driven by a buff-tick/timer
+  // path keeps the last known applier). Reset in buff_t::reset(). Pure bookkeeping.
+  rl_cause_t rl_applied_cause;
 
   // Ticking buff values
   unsigned current_tick;

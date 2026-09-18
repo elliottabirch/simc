@@ -20,6 +20,7 @@
 #include "sim/sim.hpp"
 #include "util/rng.hpp"
 
+#include <optional>
 #include <sstream>
 #include <utility>
 
@@ -159,6 +160,23 @@ struct react_ready_trigger_t : public buff_event_t
   }
 };
 
+// Credit-by-cause (tstl-sylvanas quick task 260918-cbc, stage A6): resolve the player whose
+// rl_cause_stack names "who applied/refreshed this buff" -- buff->source when it is a
+// non-enemy player_t (a debuff on an enemy has buff->player == the enemy and buff->source ==
+// the caster; the cause stack lives on the caster), else buff->player (a self-buff, or a
+// buff/debuff constructed with no distinct source). Returns nullptr when neither resolves to a
+// usable player_t (e.g. a raid-wide buff with player == nullptr). Used both to stamp
+// rl_applied_cause (start()/refresh()) and to push the DOT_TICK scope around the buff's
+// tick/expire callback invocations below -- the SAME resolution both times, so the scope is
+// pushed on the stack that the triggered action's own player actually reads from
+// (action_t::rl_resolve_cause() reads `player->rl_cause_stack`).
+player_t* rl_buff_source_player( buff_t* b )
+{
+  if ( b->source && !b->source->is_enemy() )
+    return b->source;
+  return b->player;
+}
+
 struct tick_t : public buff_event_t
 {
   double current_value;
@@ -196,6 +214,18 @@ struct tick_t : public buff_event_t
       // made through the int arguments passed to the function call.
       if ( buff->tick_callback )
       {
+        // Credit-by-cause (260918-cbc A6): this periodic tick is a delayed effect of the
+        // decision that applied/refreshed the buff, exactly like a DoT tick already is --
+        // see rl_credit.hpp's top-of-file comment. Only pushed when an applier is known
+        // (rl_applied_cause.seq >= 0); otherwise nothing is pushed and any damage the
+        // callback deals stays orphan (a legitimate finding, not a bug).
+        std::optional<rl_cause_scope_t> rl_scope;
+        if ( buff->rl_applied_cause.seq >= 0 )
+        {
+          player_t* rl_source = rl_buff_source_player( buff );
+          if ( rl_source )
+            rl_scope.emplace( rl_source, rl_cause_t{ buff->rl_applied_cause.seq, RL_CAUSE_DOT_TICK } );
+        }
         buff->tick_callback( buff, total_ticks, tick_time );
       }
 
@@ -268,6 +298,15 @@ struct expiration_t : public buff_event_t
 
       if ( buff->tick_callback )
       {
+        // Credit-by-cause (260918-cbc A6): the expiration event's own "last tick" is the same
+        // delayed-effect-of-the-applying-decision as tick_t's periodic ticks above.
+        std::optional<rl_cause_scope_t> rl_scope;
+        if ( buff->rl_applied_cause.seq >= 0 )
+        {
+          player_t* rl_source = rl_buff_source_player( buff );
+          if ( rl_source )
+            rl_scope.emplace( rl_source, rl_cause_t{ buff->rl_applied_cause.seq, RL_CAUSE_DOT_TICK } );
+        }
         buff->tick_callback( buff, buff->current_tick, actual_tick_time );
       }
     }
@@ -2454,6 +2493,18 @@ void buff_t::start( int stacks, double value, timespan_t duration )
   if ( _max_stack == 0 )
     return;
 
+  // Credit-by-cause (260918-cbc A6): stamp who applied this buff, from the SOURCE player's
+  // cause stack (rl_buff_source_player -- see its comment above). A fresh application with no
+  // known applier really is unknown (unlike refresh(), there is no "previous stamp" worth
+  // preserving), so an empty stack resets to rl_cause_t{}'s default (seq == -1, orphan).
+  {
+    player_t* rl_source = rl_buff_source_player( this );
+    if ( rl_source && !rl_source->rl_cause_stack.empty() )
+      rl_applied_cause = rl_credit::promote( rl_source->rl_cause_stack.back().cause );
+    else
+      rl_applied_cause = rl_cause_t{};
+  }
+
   if ( value == DEFAULT_VALUE() )
     value = default_value;
 
@@ -2557,6 +2608,16 @@ void buff_t::refresh( int stacks, double value, timespan_t duration )
 {
   if ( _max_stack == 0 )
     return;
+
+  // Credit-by-cause (260918-cbc A6): re-stamp on refresh, exactly like dot_t::refresh already
+  // does for DoT ticks. Unlike start(), an EMPTY source stack at refresh time leaves the
+  // existing stamp UNCHANGED (do NOT reset to unknown) -- a refresh reached via a buff-tick or
+  // timer path keeps the last known applier rather than discarding it.
+  {
+    player_t* rl_source = rl_buff_source_player( this );
+    if ( rl_source && !rl_source->rl_cause_stack.empty() )
+      rl_applied_cause = rl_credit::promote( rl_source->rl_cause_stack.back().cause );
+  }
 
   if ( value == DEFAULT_VALUE() )
     value = current_value;
@@ -2989,6 +3050,18 @@ void buff_t::expire( timespan_t d )
     expire_count++;
   }
 
+  // Credit-by-cause (260918-cbc A6): expire_callback, expire_override and
+  // stack_change_callback are all delayed effects of the decision that applied/refreshed this
+  // buff, exactly like the tick callbacks above -- one scope spans all three since none of them
+  // schedule anything that would need a narrower boundary.
+  std::optional<rl_cause_scope_t> rl_expire_scope;
+  if ( rl_applied_cause.seq >= 0 )
+  {
+    player_t* rl_source = rl_buff_source_player( this );
+    if ( rl_source )
+      rl_expire_scope.emplace( rl_source, rl_cause_t{ rl_applied_cause.seq, RL_CAUSE_DOT_TICK } );
+  }
+
   if ( expire_callback )
   {
     expire_callback( this, expiration_stacks, remaining_duration );
@@ -3006,6 +3079,8 @@ void buff_t::expire( timespan_t d )
 
   for ( const auto& cb : stack_change_callback )
     cb( this, old_stack, current_stack );
+
+  rl_expire_scope.reset();
 
   if ( player )
     player->trigger_ready();
@@ -3075,6 +3150,10 @@ void buff_t::reset()
   event_t::cancel( expiration_delay );
   event_t::cancel( tick_event );
   cooldown->reset( false );
+  // Credit-by-cause (260918-cbc A6): reset BEFORE calling expire() below, so a reset-driven
+  // expire() (iteration/fight boundary, not a genuine game-state expiry) does not leak the
+  // previous iteration's applier into this call's expire_callback/stack_change_callback scope.
+  rl_applied_cause = rl_cause_t{};
   expire();
   last_start        = timespan_t::min();
   last_trigger      = timespan_t::min();
