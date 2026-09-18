@@ -68,8 +68,58 @@ struct rl_cause_t
   std::uint8_t cls = RL_CAUSE_ORPHAN;
 };
 
+// RAII guard for player_t::rl_cause_stack. tstl-sylvanas quick task 260918-cbc: originally
+// (Stage A1) a private struct local to action.cpp, pushed for the duration of just
+// action_t::impact()'s OWN function body. Promoted to this header in Stage A4 and its push
+// site moved OUT to impact()'s two call sites (action_t::do_schedule_travel's zero-travel-time
+// branch, travel_event_t::execute()) -- action_t::impact() is virtual, and many spec overrides
+// call their base class's impact() and then keep going (triggering a secondary ability off the
+// same state) AFTER that call returns; a guard scoped to only the base function's own body pops
+// before that override tail runs, so the tail's proc dispatch saw an empty stack even though a
+// cause plainly existed. Wrapping the call site instead spans the full virtual dispatch,
+// including every override's post-`Base::impact()` continuation. Also used around
+// action_t::execute()'s per-target loop and the direct-tick assessment in action_t::tick() (both
+// unchanged from Stage A1) -- pushed for the duration of a scope so anything fired synchronously
+// inside it (a callback, execute_on_target, trigger_secondary_ability, schedule_execute, ...)
+// inherits the right cause by construction, and pops correctly even if an exception unwinds
+// through the guarded scope. Pure bookkeeping: touches no RNG, schedules nothing. Constructor/
+// destructor are defined out-of-line in rl_translog.cpp (needs player_t complete), mirroring
+// rl_credit_route's own placement.
+struct rl_cause_scope_t
+{
+  player_t* p;
+  rl_cause_scope_t( player_t* p_, rl_cause_t cause );
+  ~rl_cause_scope_t();
+};
+
 namespace rl_credit
 {
+
+// Promote a cause to its PROC_OF_* sibling class (CAST/PROC_OF_CAST ->
+// PROC_OF_CAST, DOT_TICK/PROC_OF_DOT -> PROC_OF_DOT, AUTO/PROC_OF_AUTO ->
+// PROC_OF_AUTO, anything else -> ORPHAN), keeping the seq unchanged.
+// Idempotent -- promoting an already-promoted cause is a no-op on its
+// class. tstl-sylvanas quick task 260918-cbc (Stage A4): factored out of
+// action_t::execute()'s stamp rule so action_t::schedule_execute() can
+// apply the identical rule when carrying a cause across the deferred
+// action_execute_event_t boundary (a proc's secondary_state, a DoT's own
+// pre_execute_state, ...). Pure bookkeeping.
+inline rl_cause_t promote( const rl_cause_t& cause )
+{
+  rl_cause_t out;
+  out.seq = cause.seq;
+  switch ( cause.cls )
+  {
+    case RL_CAUSE_CAST:
+    case RL_CAUSE_PROC_OF_CAST: out.cls = RL_CAUSE_PROC_OF_CAST; break;
+    case RL_CAUSE_DOT_TICK:
+    case RL_CAUSE_PROC_OF_DOT: out.cls = RL_CAUSE_PROC_OF_DOT; break;
+    case RL_CAUSE_AUTO:
+    case RL_CAUSE_PROC_OF_AUTO: out.cls = RL_CAUSE_PROC_OF_AUTO; break;
+    default: out.cls = RL_CAUSE_ORPHAN; break;
+  }
+  return out;
+}
 
 // Six cumulative per-fight credit streams, in this fixed index order --
 // mirrored by the translog's CREDIT_BLOCK layout (rl_translog.hpp) and by

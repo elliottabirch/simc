@@ -281,6 +281,11 @@ void travel_event_t::execute()
 {
   if ( !state->target->is_sleeping() )
   {
+    // tstl-sylvanas quick task 260918-cbc (Stage A4): see rl_credit.hpp's rl_cause_scope_t doc
+    // comment -- this wraps impact()'s full virtual dispatch (base body + any override's
+    // post-Base::impact() tail) across the DEFERRED travel-time boundary, not just
+    // action_t::impact()'s own body.
+    rl_cause_scope_t rl_cause_guard( action->player, rl_cause_t{ state->rl_cause_seq, state->rl_cause_class } );
     action->impact( state );
   }
 

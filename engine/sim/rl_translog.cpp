@@ -42,6 +42,20 @@ void rl_count_proc( player_t* p, rl_proc::id which, double chance, bool success 
   c.chance_sum[ i ] += static_cast<float>( clamped );
 }
 
+// rl_cause_scope_t's constructor/destructor (tstl-sylvanas quick task 260918-cbc, Stage A4) --
+// declared in rl_credit.hpp, defined here because they need player_t complete (mirroring
+// rl_credit_route's own placement below). Pure bookkeeping: push/pop of the player-scoped
+// cause stack, nothing else.
+rl_cause_scope_t::rl_cause_scope_t( player_t* p_, rl_cause_t cause ) : p( p_ )
+{
+  p->rl_cause_stack.push_back( cause );
+}
+
+rl_cause_scope_t::~rl_cause_scope_t()
+{
+  p->rl_cause_stack.pop_back();
+}
+
 // Pure observer for the RL transition log's credit-by-cause block
 // (tstl-sylvanas quick task 260918-cbc, stage A). Routes one damage (or
 // expected-damage) increment into the right of the six per-fight

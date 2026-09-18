@@ -96,20 +96,9 @@ void do_execute( action_t* action, execute_type type )
   }
 }
 
-// tstl-sylvanas quick task 260918-cbc (Stage A1): RAII guard for
-// player_t::rl_cause_stack. Pushed around action_t::execute()'s per-target
-// loop and around impact()/the direct-tick assessment in tick(), so a
-// proc fired synchronously inside those scopes (a callback,
-// execute_on_target, trigger_secondary_ability, ...) inherits the right
-// cause by construction -- and pops correctly even if an exception
-// unwinds through the guarded scope (calculate_result and friends are not
-// noexcept). Pure bookkeeping: touches no RNG, schedules nothing.
-struct rl_cause_scope_t
-{
-  player_t* p;
-  rl_cause_scope_t( player_t* p_, rl_cause_t cause ) : p( p_ ) { p->rl_cause_stack.push_back( cause ); }
-  ~rl_cause_scope_t() { p->rl_cause_stack.pop_back(); }
-};
+// tstl-sylvanas quick task 260918-cbc (Stage A4): rl_cause_scope_t moved to rl_credit.hpp --
+// see that header's doc comment. The struct definition that used to live here (Stage A1) is
+// gone; only its former call sites below still reference the (now shared) type.
 
 struct queued_action_execute_event_t : public event_t
 {
@@ -1928,26 +1917,38 @@ void action_t::execute()
   if ( harmful && !player->in_combat )
     player->enter_combat();
 
-  // tstl-sylvanas quick task 260918-cbc (Stage A1): stamp this execute()'s own states with a
+  // tstl-sylvanas quick task 260918-cbc (Stage A1/A4): stamp this execute()'s own states with a
   // cause -- which decision caused this damage and what kind of event it is -- before doing
-  // any of the per-target work below. Pure observer: reads existing state (the cause stack,
-  // last_foreground_action, repeating/special), touches no RNG, schedules nothing. See
-  // rl_credit.hpp's top-of-file comment for the full model this four-branch rule implements.
+  // any of the per-target work below. Pure observer: reads existing state (a carried
+  // pre_execute_state's own stamp, a pending cause parked at schedule_execute() time, the
+  // cause stack, last_foreground_action, repeating/special), touches no RNG, schedules
+  // nothing. See rl_credit.hpp's top-of-file comment for the full model this rule implements.
+  //
+  // The first two branches carry a cause ACROSS the deferred action_execute_event_t boundary
+  // (Stage A4): a proc/secondary ability's schedule_execute() call happens while the
+  // triggering action's own rl_cause_scope_t is still on the stack, but by the time THIS
+  // execute() runs -- on a later event-loop tick -- that scope has already unwound, so the
+  // stack-based branch below would otherwise fall through to ORPHAN despite a cause genuinely
+  // existing at dispatch time. A deferred sub-action must never be re-stamped as a fresh
+  // CAST/AUTO just because the stack happens to be non-empty when it fires (it legitimately
+  // can be, when this event fires INSIDE another action's own scope) -- the carried cause
+  // always wins, hence these two branches run first.
   rl_cause_t rl_cause;
-  if ( !player->rl_cause_stack.empty() )
+  if ( pre_execute_state && pre_execute_state->rl_cause_seq >= 0 )
   {
-    const rl_cause_t& top = player->rl_cause_stack.back();
-    rl_cause.seq = top.seq;
-    switch ( top.cls )
-    {
-      case RL_CAUSE_CAST:
-      case RL_CAUSE_PROC_OF_CAST: rl_cause.cls = RL_CAUSE_PROC_OF_CAST; break;
-      case RL_CAUSE_DOT_TICK:
-      case RL_CAUSE_PROC_OF_DOT: rl_cause.cls = RL_CAUSE_PROC_OF_DOT; break;
-      case RL_CAUSE_AUTO:
-      case RL_CAUSE_PROC_OF_AUTO: rl_cause.cls = RL_CAUSE_PROC_OF_AUTO; break;
-      default: rl_cause.cls = RL_CAUSE_ORPHAN; break;
-    }
+    // Already stamped at schedule_execute() time (or copied down from a parent state via
+    // copy_state()) -- promote() is idempotent, so re-applying it here is harmless.
+    rl_cause = rl_credit::promote(
+        rl_cause_t{ pre_execute_state->rl_cause_seq, pre_execute_state->rl_cause_class } );
+  }
+  else if ( rl_pending_cause.seq >= 0 )
+  {
+    rl_cause         = rl_pending_cause;
+    rl_pending_cause = rl_cause_t{};
+  }
+  else if ( !player->rl_cause_stack.empty() )
+  {
+    rl_cause = rl_credit::promote( player->rl_cause_stack.back() );
   }
   else if ( !background && player->last_foreground_action == this )
   {
@@ -2464,6 +2465,35 @@ void action_t::schedule_execute( action_state_t* state )
       action_state_t::release( state );
     }
     return;
+  }
+
+  // tstl-sylvanas quick task 260918-cbc (Stage A4): carry the cause across the deferred
+  // action_execute_event_t boundary. schedule_execute() is called WHILE the triggering
+  // action's own rl_cause_scope_t is still on the stack (impact()'s proc dispatch,
+  // execute()'s per-target loop, trigger_secondary_ability(), ...) -- this is the only place
+  // that scope is still visible before the event fires on a later tick and the stack has
+  // unwound back to empty. If a state object is being carried (the common proc/secondary
+  // case), stamp IT (idempotent -- a state that already carries a stamp, e.g. one that was
+  // itself produced by get_state(pre_execute_state) copying a parent's, keeps its own).
+  // Otherwise -- schedule_execute() with no state, e.g. an auto-attack rescheduling itself --
+  // there's nothing to stamp, so park the cause on this action for its own coming execute()
+  // to pick up. Pure bookkeeping: reads the existing stack, touches no RNG, schedules nothing.
+  {
+    const rl_cause_t rl_pending = player->rl_cause_stack.empty()
+                                       ? rl_cause_t{}
+                                       : rl_credit::promote( player->rl_cause_stack.back() );
+    if ( state )
+    {
+      if ( state->rl_cause_seq < 0 && rl_pending.seq >= 0 )
+      {
+        state->rl_cause_seq   = rl_pending.seq;
+        state->rl_cause_class = rl_pending.cls;
+      }
+    }
+    else if ( rl_pending.seq >= 0 )
+    {
+      rl_pending_cause = rl_pending;
+    }
   }
 
   // The auto-face-on-cast site formerly here (R6-8, owner, 2026-09-07: "no turning allowed") is
@@ -4677,6 +4707,10 @@ void action_t::do_schedule_travel( action_state_t* state, timespan_t time_ )
 {
   if ( time_ <= timespan_t::zero() )
   {
+    // tstl-sylvanas quick task 260918-cbc (Stage A4): see rl_credit.hpp's rl_cause_scope_t doc
+    // comment -- this wraps impact()'s full virtual dispatch (base body + any override's
+    // post-Base::impact() tail), not just action_t::impact()'s own body.
+    rl_cause_scope_t rl_cause_guard( player, rl_cause_t{ state->rl_cause_seq, state->rl_cause_class } );
     impact( state );
     action_state_t::release( state );
   }
@@ -4714,11 +4748,12 @@ void action_t::schedule_travel( action_state_t* s )
 
 void action_t::impact( action_state_t* s )
 {
-  // tstl-sylvanas quick task 260918-cbc (Stage A1): pushed for the duration of this impact so
-  // anything fired synchronously inside it (trigger_dot's own procs, a nested impact_action
-  // execute()) inherits `s`'s own cause promoted to its PROC_OF_* sibling. `s` already carries
-  // the stamp execute() wrote (or a DoT tick forced to DOT_TICK -- see action_t::tick()).
-  rl_cause_scope_t rl_cause_guard( player, rl_cause_t{ s->rl_cause_seq, s->rl_cause_class } );
+  // tstl-sylvanas quick task 260918-cbc (Stage A1, guard moved to the call sites in Stage A4):
+  // impact() is virtual and many spec overrides call `Base::impact(s)` and then keep going
+  // (triggering a secondary ability off the same `s`/`execute_state`) AFTER that call returns
+  // -- see rl_credit.hpp's rl_cause_scope_t doc comment for why the guard now lives at
+  // do_schedule_travel's zero-travel-time branch and travel_event_t::execute() instead of here,
+  // spanning the full virtual dispatch rather than just this function's own body.
 
   // Note, Critical damage bonus for direct amounts is computed on impact, instead of cast finish.
   s->result_amount = calculate_crit_damage_bonus( s );

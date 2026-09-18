@@ -11,6 +11,7 @@
 #include "dbc/data_definitions.hh"
 #include "player/target_specific.hpp"
 #include "sc_enums.hpp"
+#include "sim/rl_credit.hpp"
 #include "util/format.hpp"
 #include "util/generic.hpp"
 #include "util/parse_util.hpp"
@@ -610,6 +611,13 @@ public:
 
   /// Optional - if defined before execute(), will be copied into execute_state
   action_state_t* pre_execute_state;
+
+  // tstl-sylvanas quick task 260918-cbc (Stage A4): a cause captured at schedule_execute()
+  // time for THIS action's own coming (deferred) execute() to pick up, when schedule_execute()
+  // was called with no action_state_t to stamp directly (e.g. a repeating auto-attack
+  // rescheduling itself). Cleared (reset to a default rl_cause_t, seq -1) the moment execute()
+  // consumes it. Pure bookkeeping -- see rl_credit.hpp's top-of-file comment.
+  rl_cause_t rl_pending_cause;
 
   unsigned snapshot_flags;
 
