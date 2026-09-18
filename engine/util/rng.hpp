@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iterator>
+#include <string_view>
 #ifdef RNG_STREAM_DEBUG
 #include <iostream>
 #endif
@@ -28,6 +29,63 @@ namespace rng {
 
 double stdnormal_cdf( double u );
 double stdnormal_inv( double u );
+
+// Per-source RNG streams (tstl-sylvanas quick task 260918-psr). Behind sim_t::per_source_rng
+// (default false, byte-identical OFF path). When enabled, every dice-rolling source in the sim
+// (player_t, action_t, buff_t, dbc_proc_callback_t) rolls from its OWN xoshiro256plus_t stream
+// instead of the one shared sim_t::_rng, reseeded once per iteration from a small tuple of
+// stable inputs -- see per_source_seed() below and each rng() accessor's call site for the
+// source_key construction rules (sim.hpp's per_source_rng doc comment has the full contract).
+
+/// splitmix64 64-bit integer mixer (public-domain algorithm, Sebastiano Vigna). Used only to
+/// decorrelate a handful of small, related integer inputs deterministically -- not a
+/// cryptographic requirement, just enough avalanche that adjacent (seed, iteration) pairs don't
+/// produce visibly related streams.
+inline uint64_t splitmix64_mix( uint64_t x )
+{
+  x += 0x9E3779B97F4A7C15ULL;
+  uint64_t z = x;
+  z = ( z ^ ( z >> 30 ) ) * 0xBF58476D1CE4E5B9ULL;
+  z = ( z ^ ( z >> 27 ) ) * 0x94D049BB133111EBULL;
+  return z ^ ( z >> 31 );
+}
+
+/// Deterministic FNV-1a 64-bit hash over a byte string. Deliberately NOT std::hash<std::string>
+/// -- that hash's algorithm/seed is an implementation detail of the standard library vendor and
+/// is not documented as stable across processes, so two builds (or even two runs linked against
+/// different libstdc++ versions) are not guaranteed to agree. FNV-1a here is fully specified and
+/// portable, which per_source_rng's cross-process/cross-policy pairing guarantee depends on.
+inline uint64_t fnv1a64( std::string_view s )
+{
+  uint64_t h = 14695981039346656037ULL;
+  for ( unsigned char c : s )
+  {
+    h ^= c;
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+
+/// Derive a per-source RNG seed from (sim seed, thread index, iteration, stable source key).
+/// thread_index is folded in beyond the brief's 3-input formula (sim seed, iteration, source
+/// key) as a deliberate, documented deviation (260918-psr receipt): sim_t::seed is the SAME
+/// base seed inherited by every worker thread's child sim_t (see sim_t's threaded-child
+/// constructors), and each child's sim_t::current_iteration is a LOCAL per-thread counter, not
+/// a global iteration index -- two threads can simultaneously be at local iteration N for two
+/// genuinely different fight iterations. Omitting thread_index would let those two threads
+/// derive identical per-source seeds for the same source_key, re-coupling exactly the kind of
+/// cross-iteration dependency this feature exists to remove. thread_index is 0 in the common
+/// single-fight-per-process pattern this codebase's RL/eval tooling actually uses (see the
+/// probe's P1-P4 receipt), so folding it in is a no-op there and only matters for iterations>1
+/// multi-threaded invocations.
+inline uint64_t per_source_seed( uint64_t sim_seed, int thread_index, int iteration, std::string_view source_key )
+{
+  uint64_t x = splitmix64_mix( sim_seed );
+  x = splitmix64_mix( x ^ splitmix64_mix( static_cast<uint64_t>( thread_index ) ) );
+  x = splitmix64_mix( x ^ splitmix64_mix( static_cast<uint64_t>( iteration ) ) );
+  x = splitmix64_mix( x ^ fnv1a64( source_key ) );
+  return x;
+}
 
 // CDF cached truncated timespan_t gaussian distribution
 // This is ~2x slower than non-truncated basic_rng_t::gauss( double, double )

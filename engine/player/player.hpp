@@ -344,6 +344,11 @@ struct player_t : public actor_t
   timespan_t cast_delay_reaction;
   timespan_t cast_delay_occurred;
 
+  // Per-source RNG stream (tstl-sylvanas quick task 260918-psr). Only used when
+  // sim->per_source_rng is true -- see sim.hpp's per_source_rng doc comment and player_t::rng()/
+  // player_t::reset() in player.cpp. Seeded once per iteration in reset().
+  rng::rng_t source_rng_;
+
   // Callbacks
   effect_callbacks_t callbacks;
   auto_dispose< std::vector<special_effect_t*> > special_effects;

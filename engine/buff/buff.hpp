@@ -14,6 +14,7 @@
 #include "sim/rl_credit.hpp"
 #include "sim/uptime.hpp"
 #include "util/parse_util.hpp"
+#include "util/rng.hpp"
 #include "util/sample_data.hpp"
 #include "util/span.hpp"
 #include "util/string_view.hpp"
@@ -35,10 +36,6 @@ struct item_t;
 struct real_ppm_t;
 struct spelleffect_data_t;
 struct stats_t;
-namespace rng
-{
-struct rng_t;
-}
 
 using buff_tick_callback_t = std::function<void(buff_t* buff, int remaining_ticks, timespan_t tick_time)>;
 using buff_tick_time_callback_t = std::function<timespan_t(const buff_t*, unsigned)>;
@@ -59,6 +56,10 @@ public:
   const spell_data_t* s_data;
   const spell_data_t* s_data_reporting;
   player_t* const source;
+  /// Per-source RNG stream (tstl-sylvanas quick task 260918-psr). Only used when
+  /// sim->per_source_rng is true -- see sim.hpp's per_source_rng doc comment, buff_t::rng() and
+  /// buff_t::reset() in buff.cpp. Seeded once per iteration in reset().
+  rng::rng_t source_rng_;
   std::vector<event_t*> expiration;
   std::vector<event_t*> delay;
   event_t* expiration_delay;

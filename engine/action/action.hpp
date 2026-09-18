@@ -73,6 +73,11 @@ public:
   /// Item back-pointer for trinket-sourced actions so we can show proper tooltips in reports
   const item_t* item;
 
+  /// Per-source RNG stream (tstl-sylvanas quick task 260918-psr). Only used when
+  /// sim->per_source_rng is true -- see sim.hpp's per_source_rng doc comment, action_t::rng()
+  /// and action_t::reset() in action.cpp. Seeded once per iteration in reset().
+  rng::rng_t source_rng_;
+
   /// Weapon used for this ability. If set extra weapon damage is calculated.
   weapon_t* weapon;
 

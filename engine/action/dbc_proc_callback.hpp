@@ -9,6 +9,7 @@
 
 #include "action_callback.hpp"
 #include "player/target_specific.hpp"
+#include "util/rng.hpp"
 
 #include <functional>
 
@@ -19,10 +20,6 @@ struct target_specific_cooldown_t;
 struct spell_data_t;
 struct item_t;
 struct real_ppm_t;
-namespace rng
-{
-struct rng_t;
-}
 struct special_effect_t;
 struct weapon_t;
 struct proc_event_t;
@@ -77,6 +74,12 @@ struct dbc_proc_callback_t : public action_callback_t
   target_specific_t<buff_t> target_specific_debuff;
   const spell_data_t* target_debuff;
 
+  /// Per-source RNG stream (tstl-sylvanas quick task 260918-psr). Gets its OWN stream, not
+  /// routed through listener->rng() -- see sim.hpp's per_source_rng doc comment,
+  /// dbc_proc_callback_t::rng() and dbc_proc_callback_t::reset() in dbc_proc_callback.cpp.
+  /// Seeded once per iteration in reset().
+  rng::rng_t source_rng_;
+
   // Proc trigger types, cached/initialized here from special_effect_t to avoid
   // needless spell data lookups in vast majority of cases
   real_ppm_t* rppm;
@@ -110,6 +113,8 @@ struct dbc_proc_callback_t : public action_callback_t
   dbc_proc_callback_t( player_t* p, const special_effect_t& e );
 
   void initialize() override;
+
+  void reset() override;
 
   cooldown_t* get_cooldown( player_t* target );
 

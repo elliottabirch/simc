@@ -6785,6 +6785,15 @@ void player_t::reset()
 {
   sim->print_debug( "Resetting {}.", *this );
 
+  // Per-source RNG (260918-psr): reseed once per iteration, before anything this iteration
+  // could roll dice. source_key = "<player name>|player" -- see sim.hpp's per_source_rng doc
+  // comment for the full contract.
+  if ( sim->per_source_rng )
+  {
+    source_rng_.seed( rng::per_source_seed( sim->seed, sim->thread_index, sim->current_iteration,
+                                             fmt::format( "{}|player", name_str ) ) );
+  }
+
   last_cast = timespan_t::zero();
   gcd_ready = timespan_t::zero();
   off_gcd_ready = timespan_t::min();
@@ -14240,11 +14249,15 @@ void player_t::check_resource_change_for_callback( resource_e resource, double p
 
 rng::rng_t& player_t::rng()
 {
+  if ( sim->per_source_rng )
+    return source_rng_;
   return sim -> rng();
 }
 
 rng::rng_t& player_t::rng() const
 {
+  if ( sim->per_source_rng )
+    return const_cast<player_t*>( this )->source_rng_;
   return sim -> rng();
 }
 

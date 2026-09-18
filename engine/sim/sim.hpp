@@ -213,6 +213,24 @@ struct sim_t : private sc_thread_t
   int deterministic;
   int strict_work_queue;
   int average_range, average_gauss;
+  // Per-source RNG streams (tstl-sylvanas quick task 260918-psr). Default false = byte-identical
+  // to the shared-stream behavior above (player_t::rng()/action_t::rng()/buff_t::rng()/
+  // dbc_proc_callback_t::rng() all still return sim->rng()). When true, each of those objects
+  // instead returns its OWN rng::rng_t stream (a `source_rng_` member), reseeded once per
+  // iteration -- in that object's reset() -- from rng::per_source_seed( seed, thread_index,
+  // current_iteration, source_key ), where source_key is a stable string built from the object's
+  // owner name plus its position in a stable list (see each rng() accessor's call site). Point:
+  // decorrelate re-phasing -- today the FIRST decision that differs between two policies playing
+  // the same fight seed re-phases every later roll off the one shared _rng stream, because that
+  // stream is seeded once per thread (not per iteration) and serves the entire fight in draw
+  // order. With per_source_rng=1, two policies that make the same decision for a given source at
+  // a given moment draw the SAME dice from that source, regardless of what either policy did
+  // earlier for a DIFFERENT source -- see .planning/quick/260918-psr-per-source-rng/PSR-RECEIPT.md
+  // for the P1 (no-op when off) / P2 (determinism) / P3 (distribution) / P4 (paired-SD) proof.
+  // Inherited by threaded child sims exactly like `deterministic` above -- sim_t::setup()
+  // re-parses every global option (including this one) from the shared sim_control_t for each
+  // child, so no separate propagation code is needed.
+  bool per_source_rng = false;
 
   // Raid Events
   std::vector<std::unique_ptr<raid_event_t>> raid_events;

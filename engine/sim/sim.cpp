@@ -4090,6 +4090,9 @@ void sim_t::create_options()
   add_option( opt_timespan( "regen_periodicity", regen_periodicity ) );
   // RNG
   add_option( opt_bool( "deterministic", deterministic ) );
+  // Per-source RNG streams (tstl-sylvanas quick task 260918-psr). See sim.hpp's per_source_rng
+  // doc comment. Default false, byte-identical to today's shared-stream behavior.
+  add_option( opt_bool( "per_source_rng", per_source_rng ) );
   add_option( opt_bool( "strict_work_queue", strict_work_queue ) );
   add_option( opt_float( "report_iteration_data", report_iteration_data ) );
   add_option( opt_int( "min_report_iteration_data", min_report_iteration_data ) );

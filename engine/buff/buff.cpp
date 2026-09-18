@@ -3142,6 +3142,34 @@ void buff_t::aura_loss()
 
 void buff_t::reset()
 {
+  // Per-source RNG (260918-psr): reseed once per iteration, BEFORE expire() below (which can
+  // itself roll dice via expire_callback/stack_change_callback). source_key =
+  // "<owner name>|buff|<index in owner's buff_list>|<buff name_str>", where "owner" is `player`
+  // (the buff's carrier) when set, else the sim itself for sim-scoped raid buffs (buff_t's
+  // sim_t-only constructor overloads leave `player` null and register into sim->buff_list
+  // instead -- see the buff_t ctor above). The index is stable across two runs of the same
+  // profile for the same reason action_t's is: buff_list only grows during init(), in a fixed
+  // order, and never reorders or shrinks afterward. See sim.hpp's per_source_rng doc comment.
+  if ( sim->per_source_rng )
+  {
+    std::string owner_name = player ? player->name_str : std::string( "sim" );
+    size_t idx;
+    if ( player )
+    {
+      auto it = range::find( player->buff_list, this );
+      idx = it != player->buff_list.end() ? static_cast<size_t>( std::distance( player->buff_list.begin(), it ) )
+                                           : player->buff_list.size();
+    }
+    else
+    {
+      auto it = range::find( sim->buff_list, this );
+      idx = it != sim->buff_list.end() ? static_cast<size_t>( std::distance( sim->buff_list.begin(), it ) )
+                                        : sim->buff_list.size();
+    }
+    source_rng_.seed( rng::per_source_seed( sim->seed, sim->thread_index, sim->current_iteration,
+                                             fmt::format( "{}|buff|{}|{}", owner_name, idx, name_str ) ) );
+  }
+
   for ( auto e : delay )
   {
     event_t::cancel( e );
@@ -3390,11 +3418,15 @@ util::string_view buff_t::source_name() const
 
 rng::rng_t& buff_t::rng()
 {
+  if ( sim->per_source_rng )
+    return source_rng_;
   return sim->rng();
 }
 
 rng::rng_t& buff_t::rng() const
 {
+  if ( sim->per_source_rng )
+    return const_cast<buff_t*>( this )->source_rng_;
   return sim -> rng();
 }
 

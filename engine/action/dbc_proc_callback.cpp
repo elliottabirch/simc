@@ -413,7 +413,32 @@ player_t* dbc_proc_callback_t::get_target( player_t* target, action_state_t* sta
 
 rng::rng_t& dbc_proc_callback_t::rng() const
 {
+  if ( listener->sim->per_source_rng )
+    return const_cast<dbc_proc_callback_t*>( this )->source_rng_;
   return listener->rng();
+}
+
+void dbc_proc_callback_t::reset()
+{
+  // Per-source RNG (260918-psr): reseed once per iteration, before anything this iteration
+  // could roll dice. Gets its OWN stream -- deliberately NOT routed through listener->rng(),
+  // so a proc callback's dice are independent of the listener player's own direct rolls.
+  // source_key = "<listener name>|proc|<index in listener->callbacks.all_callbacks>|<driver
+  // spell id>:<effect name>". The index is stable across two runs of the same profile: every
+  // dbc_proc_callback_t is appended to all_callbacks exactly once, at construction
+  // (action_callback_t::action_callback_t()), in the fixed order special effects are created
+  // for a given actor/gear/talent set, and the vector is never reordered or shrunk afterward.
+  // See sim.hpp's per_source_rng doc comment for the full contract.
+  if ( listener->sim->per_source_rng )
+  {
+    auto it = range::find( listener->callbacks.all_callbacks, static_cast<action_callback_t*>( this ) );
+    size_t idx = it != listener->callbacks.all_callbacks.end()
+                     ? static_cast<size_t>( std::distance( listener->callbacks.all_callbacks.begin(), it ) )
+                     : listener->callbacks.all_callbacks.size();
+    source_rng_.seed( rng::per_source_seed(
+        listener->sim->seed, listener->sim->thread_index, listener->sim->current_iteration,
+        fmt::format( "{}|proc|{}|{}:{}", listener->name_str, idx, effect.spell_id, effect.name() ) ) );
+  }
 }
 
 bool dbc_proc_callback_t::roll( action_t* action )

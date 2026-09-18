@@ -3391,6 +3391,22 @@ void action_t::init_finished()
 
 void action_t::reset()
 {
+  // Per-source RNG (260918-psr): reseed once per iteration, before anything this iteration
+  // could roll dice. source_key = "<player name>|action|<index in player->action_list>|<action
+  // name_str>" -- the index is stable across two runs of the same profile because
+  // player->action_list only grows during init() (player_t::create_actions() et al.), in a
+  // fixed order driven by the same APL/talents/gear, and never reorders or shrinks afterward --
+  // see sim.hpp's per_source_rng doc comment for the full contract.
+  if ( sim->per_source_rng )
+  {
+    auto it = range::find( player->action_list, this );
+    size_t idx = it != player->action_list.end()
+                     ? static_cast<size_t>( std::distance( player->action_list.begin(), it ) )
+                     : player->action_list.size();
+    source_rng_.seed( rng::per_source_seed( sim->seed, sim->thread_index, sim->current_iteration,
+                                             fmt::format( "{}|action|{}|{}", player->name_str, idx, name_str ) ) );
+  }
+
   if ( pre_execute_state )
   {
     action_state_t::release( pre_execute_state );
@@ -5471,10 +5487,18 @@ void action_t::reschedule_queue_event()
   }
 }
 rng::rng_t& action_t::rng()
-{ return sim->rng(); }
+{
+  if ( sim->per_source_rng )
+    return source_rng_;
+  return sim->rng();
+}
 
 rng::rng_t& action_t::rng() const
-{ return sim -> rng(); }
+{
+  if ( sim->per_source_rng )
+    return const_cast<action_t*>( this )->source_rng_;
+  return sim -> rng();
+}
 
 /**
  * Acquire a new target, where the context is the actor that sources the retarget event, and the actor-level candidate
