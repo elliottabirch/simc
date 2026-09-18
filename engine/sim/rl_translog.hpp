@@ -213,9 +213,45 @@
 // (A of 4) does not yet hook any roll site: every row this binary writes carries an all-zero
 // block until stage B wires the roll sites named in the registry. The Python reader keeps
 // versions 7 AND 9 both readable (two known-good shapes); this C++ writer only ever writes 9.
+//
+// Version 10 (tstl-sylvanas quick task 260918-cbc, "credit by cause" -- stage A of 2, fork
+// side): a 96-byte credit-by-cause block, `rl_credit_streams_t` (two `double[6]` arrays --
+// `credit_real`/`credit_exp`, one per `rl_credit::STREAM_COUNT` stream: own_cast, tail_cast,
+// own_dot, tail_dot, background, orphan -- see `rl_credit.hpp`), appended immediately after
+// the version-9 proc block. Answers, for every point of damage, WHICH DECISION caused it and
+// WHAT KIND of event it was: this decision's own cast (and anything it set off), a later tail
+// of an EARLIER decision (travel, delayed strikes, splash), a DoT tick (or its own tail), an
+// auto-attack (and anything it set off), or an orphan with no cause context. Both arrays are
+// CUMULATIVE per fight -- exactly the version-9 proc block's own convention, and `damage`'s
+// before that -- so a reader wanting one window's twelve numbers takes a difference between
+// two consecutive rows' copies. `sum(credit_real) == final_damage_total` and
+// `sum(credit_exp) == final_damage_expected_total` are IDENTITIES, not tolerances: every
+// stream is fed by the exact same additions those two totals already receive (see
+// `rl_credit_route()`, `rl_translog.cpp`), never a separately-derived estimate.
+//
+// The block is placed at `CREDIT_BLOCK_OFFSET` (defined below; numerically equal to the
+// version-9 `RECORD_SIZE`, i.e. the row size before this bump) -- specifically so every
+// version-9 field, the proc block included, keeps its version-9 offset unchanged: a reader
+// decoding only the version-9-shaped PREFIX of a version-10 row (ignoring the trailing bytes)
+// gets byte-identical results to decoding an actual version-9 row. `close_record` gains the
+// SAME two field names as `decision_record` (a fight's own final twelve numbers are a
+// legitimate populated value, mirroring the proc block's own precedent) except
+// `footer_record`, which owns no fight and writes the block zero (`zero_credit_block`,
+// matching every other footer zero-fill).
+//
+// `RECORD_SIZE` moves from `PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE` (2216) to
+// `CREDIT_BLOCK_OFFSET + CREDIT_BLOCK_SIZE` where `CREDIT_BLOCK_OFFSET = PROC_BLOCK_OFFSET +
+// PROC_BLOCK_SIZE` (= 2216, the version-9 row size) and `CREDIT_BLOCK_SIZE =
+// 8 * 2 * rl_credit::STREAM_COUNT` (= 96 at `STREAM_COUNT=6`): `2216 + 96 = 2312`.
+// Version-9-and-earlier files are orphaned by design (the reader refuses on an exact version
+// mismatch, same rule as every prior bump) -- there is no credit-by-cause history to backfill
+// into an old row. The `.credit.json` sidecar (mirroring the existing `.procs.json`) names the
+// six stream names and the block's own offset/size so a Python reader never hand-types them in
+// a second place. This C++ writer only ever writes 10; stage B (rig side) is the reader.
 
 #pragma once
 
+#include "sim/rl_credit.hpp"
 #include "sim/rl_policy_constants.h"
 #include "sim/rl_proc_counters.hpp"
 
@@ -236,8 +272,8 @@ namespace rl_translog
 // trailing NUL is part of the magic itself.
 inline constexpr char MAGIC[ 4 ] = { 'R', 'L', 'T', 'L' };
 inline constexpr std::uint32_t ENDIAN_CANARY = 0x01020304u;
-inline constexpr std::uint32_t FORMAT_VERSION = 9u;  // 260917-pcn: per-proc counter block
-                                                        // appended (see top-of-file version-9
+inline constexpr std::uint32_t FORMAT_VERSION = 10u;  // 260918-cbc: credit-by-cause block
+                                                        // appended (see top-of-file version-10
                                                         // comment); 8 is RESERVED by the unmerged
                                                         // dual-head branch
 // RECORD_SIZE stays an integer LITERAL, not a computed expression --
@@ -250,7 +286,7 @@ inline constexpr std::uint32_t FORMAT_VERSION = 9u;  // 260917-pcn: per-proc cou
 // compile (tstl 220-03, OBS-06; formula updated 260901-pb1 Task 3 for version 5, updated again
 // 228-09 for version 6, updated again 230-04 for version 7, updated again 260917-pcn for
 // version 9 -- see top-of-file comment).
-inline constexpr std::uint32_t RECORD_SIZE = 2216u;  // 260915-sti Task 1 (D-317):
+inline constexpr std::uint32_t RECORD_SIZE = 2312u;  // 260915-sti Task 1 (D-317):
                                                        // 2016 -> 2056 -- roundup8(45 + 4*317 +
                                                        // 4*8*23 + 4) = roundup8(2053) = 2056.
                                                        // RL_OBS_DIM moves 306 -> 317 (11 new stat/
@@ -278,7 +314,8 @@ inline constexpr std::uint32_t RECORD_SIZE = 2216u;  // 260915-sti Task 1 (D-317
                                                        // This is a re-pin: one-way,
                                                        // checkpoint-invalidating.
                                                        // 260917-pcn: 2056 -> 2216, the 160-byte
-                                                       // proc block.
+                                                       // proc block. 260918-cbc: 2216 -> 2312,
+                                                       // the 96-byte credit-by-cause block.
 // 260917-pcn: the version-7 row size (unchanged formula) is where the new proc-counter block
 // starts; PROC_BLOCK_SIZE is the block's own byte count (8 bytes per registered mechanic --
 // see rl_proc_counters.hpp's counters_t). Declared after RECORD_SIZE's literal so the replaced
@@ -289,9 +326,19 @@ inline constexpr std::uint32_t PROC_BLOCK_OFFSET =
         4u * static_cast<std::uint32_t>( RL_TARGET_SLOTS ) * static_cast<std::uint32_t>( RL_TARGET_FEATURES ) +
         4u + 7u ) / 8u ) * 8u;
 inline constexpr std::uint32_t PROC_BLOCK_SIZE = 8u * rl_proc::COUNT;
-static_assert( RECORD_SIZE == PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE,
+static_assert( PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE == 2216u,
+               "PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE must equal the version-9 row size (2216) -- "
+               "CREDIT_BLOCK_OFFSET below is pinned to that exact value" );
+// 260918-cbc: the version-9 row size (unchanged formula) is where the new credit-by-cause
+// block starts; CREDIT_BLOCK_SIZE is the block's own byte count (two double[STREAM_COUNT]
+// arrays -- see rl_credit.hpp's rl_credit_streams_t). Declared after PROC_BLOCK_SIZE so the
+// static_assert immediately below can reference them (an assert may only reference constants
+// declared above it).
+inline constexpr std::uint32_t CREDIT_BLOCK_OFFSET = PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE;
+inline constexpr std::uint32_t CREDIT_BLOCK_SIZE = 8u * 2u * rl_credit::STREAM_COUNT;
+static_assert( RECORD_SIZE == CREDIT_BLOCK_OFFSET + CREDIT_BLOCK_SIZE,
                "RECORD_SIZE must be roundup8(45 + 4*RL_OBS_DIM + 4*RL_TARGET_SLOTS*RL_TARGET_FEATURES + 4) + "
-               "8*rl_proc::COUNT" );
+               "8*rl_proc::COUNT + 16*rl_credit::STREAM_COUNT" );
 static_assert( RL_OBS_DIM >= 2, "footer_record's zero40[RL_OBS_DIM-1] needs at least one element" );
 inline constexpr std::uint32_t HEADER_SIZE = 256u;
 
@@ -432,6 +479,14 @@ struct decision_record
   alignas( 8 ) std::uint16_t proc_attempts[ rl_proc::COUNT ];   // @PROC_BLOCK_OFFSET
   std::uint16_t proc_successes[ rl_proc::COUNT ];               // @PROC_BLOCK_OFFSET + 2*COUNT
   float proc_chance_sum[ rl_proc::COUNT ];                      // @PROC_BLOCK_OFFSET + 4*COUNT
+  // Version 10 (260918-cbc): the per-fight CUMULATIVE credit-by-cause block -- which decision
+  // caused each point of damage and what kind of event it was, realized and
+  // expectation-corrected. alignas(8) so it starts exactly at CREDIT_BLOCK_OFFSET (= the
+  // version-9 row size) at any width W. A window's twelve numbers are consecutive-row
+  // differences, exactly like `damage` and the proc block above. Sits AFTER the proc block so
+  // every version-9 field keeps its version-9 offset.
+  alignas( 8 ) double credit_real[ rl_credit::STREAM_COUNT ];  // @CREDIT_BLOCK_OFFSET
+  double credit_exp[ rl_credit::STREAM_COUNT ];                 // @CREDIT_BLOCK_OFFSET + 8*STREAM_COUNT
 };
 
 struct close_record
@@ -481,6 +536,11 @@ struct close_record
   alignas( 8 ) std::uint16_t proc_attempts[ rl_proc::COUNT ];   // @PROC_BLOCK_OFFSET
   std::uint16_t proc_successes[ rl_proc::COUNT ];               // @PROC_BLOCK_OFFSET + 2*COUNT
   float proc_chance_sum[ rl_proc::COUNT ];                      // @PROC_BLOCK_OFFSET + 4*COUNT
+  // Version 10 (260918-cbc): the per-fight FINAL credit-by-cause totals -- named the same as
+  // decision_record's own fields (not a zero-twin) so a reader gets the fight's closing twelve
+  // numbers, exactly like the proc block's own precedent immediately above.
+  alignas( 8 ) double credit_real[ rl_credit::STREAM_COUNT ];  // @CREDIT_BLOCK_OFFSET
+  double credit_exp[ rl_credit::STREAM_COUNT ];                 // @CREDIT_BLOCK_OFFSET + 8*STREAM_COUNT
 };
 
 // 212-CR-FIX BL-01: this footer carries two DIFFERENT populations of fight,
@@ -537,6 +597,9 @@ struct footer_record
   std::uint8_t reserved;                 // @48+4W+4SF -- written zero
   // Version 9 (260917-pcn): written zero -- no fight owns the footer.
   alignas( 8 ) std::uint8_t zero_proc_block[ PROC_BLOCK_SIZE ];  // @PROC_BLOCK_OFFSET
+  // Version 10 (260918-cbc): written zero -- no fight owns the footer, matching the proc
+  // block's own precedent immediately above.
+  alignas( 8 ) std::uint8_t zero_credit_block[ CREDIT_BLOCK_SIZE ];  // @CREDIT_BLOCK_OFFSET
 };
 
 // The header. The two fields at @20/@24 used to be pure alignment padding
@@ -726,6 +789,17 @@ static_assert( offsetof( close_record, proc_chance_sum ) == PROC_BLOCK_OFFSET + 
 static_assert( offsetof( footer_record, zero_proc_block ) == PROC_BLOCK_OFFSET );
 static_assert( offsetof( decision_record, proc_attempts ) == offsetof( close_record, proc_attempts ) );
 static_assert( offsetof( close_record, proc_attempts ) == offsetof( footer_record, zero_proc_block ) );
+
+// 260918-cbc (version 10): the credit-by-cause block lands at CREDIT_BLOCK_OFFSET (the
+// version-9 row size) in every row shape -- decision_record and close_record's own NAMED
+// fields, footer_record's zero-written twin.
+static_assert( offsetof( decision_record, credit_real ) == CREDIT_BLOCK_OFFSET );
+static_assert( offsetof( decision_record, credit_exp ) == CREDIT_BLOCK_OFFSET + 8u * rl_credit::STREAM_COUNT );
+static_assert( offsetof( close_record, credit_real ) == CREDIT_BLOCK_OFFSET );
+static_assert( offsetof( close_record, credit_exp ) == CREDIT_BLOCK_OFFSET + 8u * rl_credit::STREAM_COUNT );
+static_assert( offsetof( footer_record, zero_credit_block ) == CREDIT_BLOCK_OFFSET );
+static_assert( offsetof( decision_record, credit_real ) == offsetof( close_record, credit_real ) );
+static_assert( offsetof( close_record, credit_real ) == offsetof( footer_record, zero_credit_block ) );
 
 // Dimension guards.
 static_assert( RL_ACTION_DIM <= 32,
