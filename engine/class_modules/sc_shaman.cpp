@@ -6372,7 +6372,20 @@ struct crash_lightning_t : public shaman_attack_t
     {
       double mid2_4pc_mul = p()->buff.mid2_enh_4pc->check_stack_value();
 
-      make_repeating_event( sim, 1_s, [ this, mul = mid2_4pc_mul ]() {
+      // tstl-sylvanas quick task 260918-cbc (Stage A6.1): capture the currently active cause
+      // HERE, synchronously, while this cast's own dispatch frame is still on the stack --
+      // make_repeating_event()'s callback fires on LATER, separate event-loop passes (1s
+      // apart, up to N times), by which point that frame has long since popped. Without
+      // capturing it now, crash_lightning_unleashed_t::trigger()'s execute_on_target() calls
+      // would see an empty stack and fall through to ORPHAN despite a cause genuinely existing
+      // at cast time -- exactly the lightning_rod pattern above (rl_credit.hpp, A5.1), reused
+      // here because every one of the N repeats is a delayed effect of this SAME cast.
+      const rl_cause_t rl_su3_cause = p()->rl_cause_stack.empty()
+                                           ? rl_cause_t{}
+                                           : rl_credit::promote( p()->rl_cause_stack.back().cause );
+
+      make_repeating_event( sim, 1_s, [ this, mul = mid2_4pc_mul, rl_su3_cause ]() {
+        rl_cause_scope_t rl_cause_guard( p(), rl_su3_cause );
         for ( auto t : target_list() )
         {
           if ( !rng().roll( p()->options.crash_lightning_su_hit_chance ) )
