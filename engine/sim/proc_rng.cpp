@@ -18,13 +18,31 @@ proc_rng_t::proc_rng_t( rng_type_e type_, std::string_view n, player_t* p )
   : name_str( n ), player( p ), rng_type_( type_ )
 {}
 
+rng::rng_t& proc_rng_t::rng()
+{
+  if ( player->sim->per_source_rng )
+    return source_rng_;
+  return player->rng();
+}
+
+void proc_rng_t::reseed_source_rng( size_t index_in_list )
+{
+  if ( !player || !player->sim->per_source_rng )
+    return;
+
+  source_rng_.seed( rng::per_source_seed( player->sim->seed, player->sim->thread_index,
+                                           player->sim->current_iteration,
+                                           fmt::format( "{}|procrng|{}|{}|{}", player->name_str, index_in_list,
+                                                         static_cast<int>( rng_type_ ), name_str ) ) );
+}
+
 simple_proc_t::simple_proc_t( std::string_view n, player_t* p, double c )
   : proc_rng_t( rng_type, n, p ), chance( c )
 {}
 
 int simple_proc_t::trigger( action_state_t* )
 {
-  return player->rng().roll( chance );
+  return rng().roll( chance );
 }
 
 real_ppm_t::real_ppm_t( std::string_view n, player_t* p, double f, double mod, unsigned s, blp b )
@@ -116,7 +134,7 @@ int real_ppm_t::trigger( action_state_t* )
   accumulated_blp += std::min( player->sim->current_time() - last_trigger_attempt, max_interval );
   double chance = proc_chance();
   last_roll_chance = chance;
-  bool success = player->rng().roll( chance );
+  bool success = rng().roll( chance );
 
   last_trigger_attempt = player->sim->current_time();
 
@@ -155,7 +173,7 @@ void shuffled_rng_t::init( initializer data )
 
 void shuffled_rng_t::reset( reset_type_e /* reset_type */)
 {
-  player->rng().shuffle( entries.begin(), entries.end() );
+  rng().shuffle( entries.begin(), entries.end() );
   position = entries.begin();
 }
 
@@ -206,7 +224,7 @@ int accumulated_rng_t::trigger( action_state_t* state )
     chance = max_count > 0 && trigger_count >= max_count ? 1.0 : proc_chance * trigger_count;
 
   assert( !std::isnan( chance ) ); // nan check
-  bool result = player->rng().roll( chance );
+  bool result = rng().roll( chance );
 
   if ( player->sim->debug )
   {
@@ -230,14 +248,14 @@ threshold_rng_t::threshold_rng_t( std::string_view n, player_t* p, double increm
   : proc_rng_t( rng_type, n, p ),
     accumulator_fn( std::move( fn ) ),
     increment_max( increment_max ),
-    accumulated_chance( random_initial_state ? player->rng().real() : 0 ),
+    accumulated_chance( random_initial_state ? rng().real() : 0 ),
     random_initial_state( random_initial_state ),
     roll_over( roll_over )
 {}
 
 void threshold_rng_t::reset( reset_type_e /* reset_type */)
 {
-  accumulated_chance = random_initial_state ? player->rng().real() : 0;
+  accumulated_chance = random_initial_state ? rng().real() : 0;
 }
 
 double threshold_rng_t::get_accumulated_chance()
@@ -255,7 +273,7 @@ int threshold_rng_t::trigger( action_state_t* state )
   if ( increment_max <= 0 )
     return false;
 
-  auto result = accumulator_fn ? accumulator_fn( increment_max, state ) : player->rng().range( increment_max );
+  auto result = accumulator_fn ? accumulator_fn( increment_max, state ) : rng().range( increment_max );
 
   if ( player->sim->debug )
   {

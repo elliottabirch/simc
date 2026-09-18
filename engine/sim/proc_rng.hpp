@@ -8,6 +8,7 @@
 #include "config.hpp"
 
 #include "sc_enums.hpp"
+#include "util/rng.hpp"
 #include "util/timespan.hpp"
 
 #include <functional>
@@ -19,9 +20,6 @@ struct item_t;
 struct player_t;
 struct sim_t;
 struct spell_data_t;
-namespace rng {
-  struct rng_t;
-}
 
 enum class reset_type_e : int
 {
@@ -36,6 +34,23 @@ protected:
   player_t* player;
   const rng_type_e rng_type_;
 
+  // Per-source RNG stream (tstl-sylvanas quick task 260918-psr, stage 2). Only used when
+  // player->sim->per_source_rng is true -- see sim.hpp's per_source_rng doc comment. Reseeded
+  // once per iteration by reseed_source_rng() below, called from player_t::reset()'s
+  // proc_rng_list loop BEFORE each entry's own reset(reset_type_e::ITERATION) -- non-virtual
+  // and independent of whatever a subclass's reset() override does, so a subclass that fully
+  // reimplements reset() without calling any base reset() (sc_shaman.cpp's dre_deck_rng_t) is
+  // still reseeded correctly.
+  rng::rng_t source_rng_;
+
+  /// Returns this source's own stream when per_source_rng is on, else falls through to
+  /// player->rng() (which itself resolves to sim->rng() when per_source_rng is off) -- the OFF
+  /// path is therefore byte-identical to every pre-existing direct `player->rng()` call site
+  /// this accessor replaces. Defined out-of-line in proc_rng.cpp -- player_t is only
+  /// forward-declared here, and both branches need the complete type (player->sim->
+  /// per_source_rng, player->rng()).
+  rng::rng_t& rng();
+
 public:
   static constexpr rng_type_e rng_type = RNG_NONE;
 
@@ -45,6 +60,14 @@ public:
 
   virtual int trigger( action_state_t* = nullptr ) = 0;
   virtual void reset( reset_type_e reset_type ) = 0;
+
+  /// Reseed this source's stream for the current iteration. Non-virtual, called once per
+  /// iteration by player_t::reset() for every entry in proc_rng_list, index_in_list = this
+  /// object's stable index in that vector (proc_rng_list only grows, via get_rng<RNG>/
+  /// get_rppm/get_shuffled_rng/get_accumulated_rng/get_threshold_rng/get_simple_proc_rng, in a
+  /// fixed profile-driven order, never reorders/shrinks after -- 260918-psr receipt Section 1).
+  /// Key: "<player name>|procrng|<index>|<type enum as int>|<name_str>".
+  void reseed_source_rng( size_t index_in_list );
 
   std::string_view name() const
   { return name_str; }

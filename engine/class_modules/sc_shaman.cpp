@@ -594,7 +594,11 @@ public:
       auto shuffle_attempts = 0U; // Cap shuffle attempts if people use weird options
       bool gap = false;
       do {
-        rng_idx = player->rng().range( 0U, as<unsigned>( entries.size() ) );
+        // 260918-psr stage 2 T2: dre_deck_rng_t is itself a proc_rng_t (via
+        // shuffled_rng_t) -- route through the object's own protected rng() accessor
+        // (reseeded per-iteration by player_t::reset()'s proc_rng_list loop) instead of
+        // the shared player stream.
+        rng_idx = rng().range( 0U, as<unsigned>( entries.size() ) );
 
         // Ensure that there is enough of a gap (at least max_draw) between the existing successes
         // and the new randomized success position
@@ -1051,8 +1055,11 @@ static std::vector<player_t*>& __check_distance_targeting( const action_t* actio
     while ( !targets_left_to_try.empty() && local_attempts < num_targets * 2 )
     {
       player_t* possibletarget;
+      // 260918-psr stage 2 T2: this is a target pick made on behalf of `action`'s own
+      // Chain-Lightning-style target-list build -- route to the owning action's own
+      // stream rather than the shared sim stream.
       size_t rng_target = static_cast<size_t>(
-          sim->rng().range( 0.0, ( static_cast<double>( targets_left_to_try.size() ) - 0.000001 ) ) );
+          action->rng().range( 0.0, ( static_cast<double>( targets_left_to_try.size() ) - 0.000001 ) ) );
       possibletarget = targets_left_to_try[ rng_target ];
 
       double distance_from_last_chain = last_chain->get_player_distance( *possibletarget );

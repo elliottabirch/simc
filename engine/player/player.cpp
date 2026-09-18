@@ -945,7 +945,11 @@ void residual_action::trigger( action_t* residual_action, player_t* t, double am
     static timespan_t delay_duration( player_t* p )
     {
       // Use same delay as in buff application
-      return p->sim->rng().gauss( p->sim->default_aura_delay );
+      // 260918-psr stage 2 T2: this delay is rolled on behalf of the residual_action's
+      // owning player (mirrors buff.cpp:348's own aura-delay jitter, which already rolls
+      // off the owning buff's b->rng()) -- route to the player's own stream rather than
+      // the shared sim stream.
+      return p->rng().gauss( p->sim->default_aura_delay );
     }
 
     delay_event_t( player_t* t, action_t* a, double amount ) :
@@ -6892,7 +6896,15 @@ void player_t::reset()
 
   range::for_each( proc_list, []( proc_t* proc ) { proc->reset(); } );
 
-  range::for_each( proc_rng_list, []( proc_rng_t* prng ) { prng->reset( reset_type_e::ITERATION ); } );
+  // Per-source RNG (260918-psr stage 2): reseed each proc_rng_list entry's own stream
+  // BEFORE its reset(ITERATION) call -- reseed_source_rng() is non-virtual and independent
+  // of whatever a subclass's reset() override does (some, like sc_shaman.cpp's
+  // dre_deck_rng_t, fully reimplement reset() without calling any base reset()).
+  for ( size_t rng_idx = 0; rng_idx < proc_rng_list.size(); ++rng_idx )
+  {
+    proc_rng_list[ rng_idx ]->reseed_source_rng( rng_idx );
+    proc_rng_list[ rng_idx ]->reset( reset_type_e::ITERATION );
+  }
 
   range::for_each( spawners, []( spawner::base_actor_spawner_t* obj ) { obj->reset(); } );
 
