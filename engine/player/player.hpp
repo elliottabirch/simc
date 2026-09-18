@@ -477,6 +477,32 @@ struct player_t : public actor_t
   // print name exactly which actions land with no cause context, rather
   // than a bare aggregate percentage. Reset alongside solver_damage_so_far.
   std::unordered_map<std::string, double> rl_orphan_damage_by_action;
+  // tstl-sylvanas quick task 260918-atr, stage F1: per-decision own credit, feeding the .attr
+  // sidecar (rl_translog.hpp's ATTR SIDECAR section). Indexed by (seq - rl_fight_first_seq);
+  // own_real[idx]/own_exp[idx] accumulate exactly the same class predicate rl_credit_route()
+  // already tests for own_cast/tail_cast/own_dot/tail_dot (CAST/PROC_OF_CAST/DOT_TICK/
+  // PROC_OF_DOT), keyed by the CAUSING decision's own seq rather than the routing site's
+  // now_seq -- so a decision's credit lands under its own index no matter how much later the
+  // damage actually resolves (a travel-delayed tail cast, a DoT tick fights later never happens
+  // here since fights reset, but a tick seconds later within the SAME fight does). Sized lazily
+  // in rl_credit_route() (grown to fit the highest seq-offset seen this fight); reset alongside
+  // rl_credit above in datacollection_begin(). Pure observer: read but never written by anything
+  // that also touches the RNG, an event, or a schedule.
+  std::vector<double> rl_own_real, rl_own_exp;
+  // The seq of this fight's first decision row, captured in record_decision() (rl_translog.cpp)
+  // the moment that row is written. 0 is a valid seq (the very first decision of the whole
+  // process), so a separate boolean marks "no decision recorded yet this fight" rather than
+  // overloading a sentinel value. Reset alongside rl_credit above.
+  std::uint64_t rl_fight_first_seq = 0;
+  bool rl_fight_first_seq_set = false;
+  // Realized-only census (mirrors rl_orphan_damage_by_action's realized-only convention): an
+  // own-class cause whose seq is BELOW this fight's first decision seq -- "should not happen"
+  // (fights reset the cause stack and every stamp is written at or before its routing site
+  // runs), so a nonzero value here is a finding, printed to stderr as `RL_ATTR_PRE_FIGHT
+  // <amount>` under the same RL_CREDIT_ORPHAN_CENSUS gate the orphan census above uses, in
+  // record_close(). Deliberately NOT folded into rl_own_real/sum_own_real -- see the .attr
+  // FIGHT record's own doc comment for why the identity must be able to catch this.
+  double rl_attr_pre_fight_real = 0.0;
   double dpr;
   struct incoming_damage_entry_t {
     timespan_t time;

@@ -101,6 +101,32 @@ void rl_credit_route( player_t* p, rl_cause_t cause, std::uint64_t now_seq, doub
   // identity a realized sink has -- stats_t::add_result carries no action_state_t/action_t).
   if ( index == 5u && !expected && action_name != nullptr )
     p->rl_orphan_damage_by_action[ action_name ] += amount;
+
+  // tstl-sylvanas quick task 260918-atr, stage F1: the .attr sidecar's own-credit accumulator.
+  // Mirrors the class predicate above for indices {0,1,2,3} (own_cast/tail_cast/own_dot/
+  // tail_dot -- never {4,5}, background/orphan), but keyed by the CAUSING decision's own
+  // `cause.seq` rather than the routing site's `now_seq` -- so a decision's credit lands under
+  // its own index no matter how much later the damage actually resolves (a travel-delayed tail
+  // cast, a DoT tick seconds later in the same fight).
+  if ( index <= 3u )
+  {
+    if ( p->rl_fight_first_seq_set && cause.seq >= 0 &&
+         static_cast<std::uint64_t>( cause.seq ) >= p->rl_fight_first_seq )
+    {
+      const auto idx = static_cast<std::size_t>( static_cast<std::uint64_t>( cause.seq ) -
+                                                   p->rl_fight_first_seq );
+      auto& vec = expected ? p->rl_own_exp : p->rl_own_real;
+      if ( vec.size() <= idx )
+        vec.resize( idx + 1, 0.0 );
+      vec[ idx ] += amount;
+    }
+    else if ( !expected )
+    {
+      // Realized-only pre-fight census -- see player.hpp's rl_attr_pre_fight_real doc comment
+      // for why this is a diagnostic finding, never silently folded into rl_own_real.
+      p->rl_attr_pre_fight_real += amount;
+    }
+  }
 }
 
 namespace rl_translog
@@ -315,9 +341,37 @@ void open_and_write_header( sim_t* sim )
     }
     sidecar << "]}";
   }
+
+  // Stage F1 (260918-atr): the .attr sidecar itself -- a SEPARATE binary file, own header,
+  // opened here alongside the main stream (never lazily -- same "a bad path refuses at startup"
+  // rationale as the main stream's own open call above).
+  {
+    const std::string attr_path = root->rl_translog_file_str + ".attr";
+    root->rl_translog_attr_stream = std::make_unique<io::ofstream>();
+    root->rl_translog_attr_stream->open( attr_path, std::ios::out | std::ios::trunc | std::ios::binary );
+    if ( !root->rl_translog_attr_stream->is_open() )
+    {
+      throw sc_runtime_error( fmt::format( "rl_translog=: unable to open '{}' for writing.", attr_path ) );
+    }
+
+    rl_attr::file_header ah{};
+    std::memcpy( ah.magic, rl_attr::MAGIC, sizeof( rl_attr::MAGIC ) );
+    ah.format_version = rl_attr::FORMAT_VERSION;
+    ah.record_size = rl_attr::RECORD_SIZE;
+    ah.header_size = rl_attr::HEADER_SIZE;
+    std::memset( ah.zero16, 0, sizeof( ah.zero16 ) );
+
+    root->rl_translog_attr_stream->write( reinterpret_cast<const char*>( &ah ), sizeof( ah ) );
+    root->rl_translog_attr_stream->flush();
+    if ( !*root->rl_translog_attr_stream )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_translog=: write to '{}' failed writing the header.", attr_path ) );
+    }
+  }
 }
 
-void record_decision( sim_t* sim, const player_t* p, std::uint64_t seq, const float obs[ RL_OBS_DIM ],
+void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float obs[ RL_OBS_DIM ],
                        const std::uint8_t mask[ RL_ACTION_DIM ], int action_index, float q_margin,
                        float top_q, std::uint16_t chosen_target_actor_index, bool wait_floored,
                        bool exploratory,
@@ -400,10 +454,24 @@ void record_decision( sim_t* sim, const player_t* p, std::uint64_t seq, const fl
   std::memcpy( r.credit_real, p->rl_credit.real, sizeof( r.credit_real ) );
   std::memcpy( r.credit_exp, p->rl_credit.exp, sizeof( r.credit_exp ) );
 
+  // Stage F1 (260918-atr): the first decision row THIS FIGHT writes stamps
+  // p->rl_fight_first_seq -- see player.hpp's own doc comment for why this is the one site that
+  // can name it. Cleared (rl_fight_first_seq_set = false) alongside rl_credit at the top of
+  // every fight, player.cpp's datacollection_begin().
+  if ( !p->rl_fight_first_seq_set )
+  {
+    p->rl_fight_first_seq = seq;
+    p->rl_fight_first_seq_set = true;
+  }
+
   // Append only -- no flush. The fight's close row flushes the whole
   // fight at once (D-13).
   append_row( root, &r );
   ++root->rl_translog_pending_decisions;
+  // Stage F1 (260918-atr): captured in write order, alongside the counter immediately above --
+  // record_close()'s .attr DECISION records read this back rather than assuming a gapless seq
+  // run within the fight.
+  root->rl_translog_pending_seqs.push_back( seq );
 }
 
 void record_close( sim_t* sim )
@@ -481,6 +549,64 @@ void record_close( sim_t* sim )
   }
 
   append_row( root, &r );
+
+  // Stage F1 (260918-atr): the .attr sidecar's own FIGHT + DECISION records for this fight,
+  // written right after the close row above -- see rl_translog.hpp's ATTR SIDECAR section.
+  // Guarded on rl_translog_attr_stream (always non-null by this point when the main translog is
+  // active -- open_and_write_header() throws rather than leaving it null) purely defensively.
+  if ( root->rl_translog_attr_stream )
+  {
+    const std::uint32_t n_decisions = root->rl_translog_pending_decisions;
+    assert( root->rl_translog_pending_seqs.size() == n_decisions );
+
+    double sum_own_real = 0.0;
+    for ( std::uint32_t i = 0; i < n_decisions; ++i )
+    {
+      const std::uint64_t s = root->rl_translog_pending_seqs[ i ];
+      const std::size_t idx = static_cast<std::size_t>( s - p->rl_fight_first_seq );
+      if ( idx < p->rl_own_real.size() )
+        sum_own_real += p->rl_own_real[ idx ];
+    }
+
+    rl_attr::fight_record fr{};
+    fr.kind = rl_attr::KIND_FIGHT;
+    fr.iteration = r.iteration;
+    fr.n_decisions = n_decisions;
+    fr.zero = 0;
+    fr.sum_own_real = sum_own_real;
+    root->rl_translog_attr_stream->write( reinterpret_cast<const char*>( &fr ), sizeof( fr ) );
+
+    for ( std::uint32_t i = 0; i < n_decisions; ++i )
+    {
+      const std::uint64_t s = root->rl_translog_pending_seqs[ i ];
+      const std::size_t idx = static_cast<std::size_t>( s - p->rl_fight_first_seq );
+
+      rl_attr::decision_record dr{};
+      dr.kind = rl_attr::KIND_DECISION;
+      dr.seq = static_cast<std::uint32_t>( s );  // 212-CR-FIX NT-02's own narrowing convention
+      dr.own_real = idx < p->rl_own_real.size() ? p->rl_own_real[ idx ] : 0.0;
+      dr.own_exp = idx < p->rl_own_exp.size() ? p->rl_own_exp[ idx ] : 0.0;
+      root->rl_translog_attr_stream->write( reinterpret_cast<const char*>( &dr ), sizeof( dr ) );
+    }
+
+    root->rl_translog_attr_stream->flush();
+    if ( !*root->rl_translog_attr_stream )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_translog=: write to '{}.attr' failed in record_close after {} fights -- the stream "
+          "entered a failed state; refusing to continue silently.",
+          root->rl_translog_file_str, root->rl_translog_fight_count ) );
+    }
+
+    // Pre-fight census diagnostic: same gate and convention as the orphan census above.
+    if ( ( sim->debug || std::getenv( "RL_CREDIT_ORPHAN_CENSUS" ) != nullptr ) &&
+         p->rl_attr_pre_fight_real > 0.0 )
+    {
+      fmt::print( stderr, "RL_ATTR_PRE_FIGHT {}\n", p->rl_attr_pre_fight_real );
+    }
+  }
+  root->rl_translog_pending_seqs.clear();
+
   root->rl_translog_pending_decisions = 0;
   root->rl_translog_summed_close_damage += r.final_damage_total;
   ++root->rl_translog_fight_count;
@@ -586,6 +712,28 @@ void write_footer( sim_t* sim )
   assert_stream_ok( root, "write_footer" );
   root->rl_translog_buffer.clear();
   root->rl_translog_stream->close();
+
+  // Stage F1 (260918-atr): the .attr sidecar's own FOOTER record, then close it -- mirrors the
+  // main stream's own footer-then-close sequence immediately above. n_fights is the SAME
+  // population the main footer's own fight_count field reads (root->rl_translog_fight_count),
+  // already incremented by every record_close() call this run made.
+  if ( root->rl_translog_attr_stream )
+  {
+    rl_attr::footer_record afr{};
+    afr.kind = rl_attr::KIND_FOOTER;
+    afr.n_fights = root->rl_translog_fight_count;
+    afr.zero1 = 0;
+    afr.zero2 = 0;
+    afr.zero_f = 0.0;
+    root->rl_translog_attr_stream->write( reinterpret_cast<const char*>( &afr ), sizeof( afr ) );
+    root->rl_translog_attr_stream->flush();
+    if ( !*root->rl_translog_attr_stream )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_translog=: write to '{}.attr' failed writing the footer.", root->rl_translog_file_str ) );
+    }
+    root->rl_translog_attr_stream->close();
+  }
 }
 
 } // namespace rl_translog

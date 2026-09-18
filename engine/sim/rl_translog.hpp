@@ -248,6 +248,17 @@
 // into an old row. The `.credit.json` sidecar (mirroring the existing `.procs.json`) names the
 // six stream names and the block's own offset/size so a Python reader never hand-types them in
 // a second place. This C++ writer only ever writes 10; stage B (rig side) is the reader.
+//
+// Stage F1 (tstl-sylvanas quick task 260918-atr, "attributed reward arm"): a SEPARATE sidecar
+// file, `<rl_translog_file_str>.attr`, own MAGIC/FORMAT_VERSION/RECORD_SIZE/HEADER_SIZE, NOT
+// part of the translog's own FORMAT_VERSION/RECORD_SIZE above (both of those stay unchanged --
+// format 11 stays free). Pays each decision the damage it CAUSED, whenever it landed, instead of
+// the damage that happened to land in its window: a per-decision view of exactly the same
+// own_cast/tail_cast/own_dot/tail_dot amounts the version-10 credit block already sums per
+// WINDOW, re-keyed by the CAUSING decision's own seq instead. See the "ATTR SIDECAR" section
+// below (rl_attr namespace) for the on-disk layout, and rl_translog.cpp's record_decision()/
+// record_close()/write_footer() for the writer. Pure observer, same as every credit-by-cause
+// addition above it: no roll, no event, no dispatch change.
 
 #pragma once
 
@@ -829,6 +840,119 @@ static_assert( std::string_view( RL_MASK_RULES_SHA ).size() < 72,
 static_assert( std::string_view( RL_ACTION_SPACE_SHA ).size() < 72,
                "RL_ACTION_SPACE_SHA must fit file_header::action_space_sha with room for its NUL" );
 
+// ---- ATTR SIDECAR (tstl-sylvanas quick task 260918-atr, stage F1) ----
+//
+// `<rl_translog_file_str>.attr`, same directory, same base name plus `.attr`. Written by the
+// same process that writes the translog: opened when the translog is opened
+// (open_and_write_header()), one FIGHT record plus that fight's DECISION records appended right
+// after record_close() writes the translog's own close row for that fight, footer at
+// write_footer(). Little-endian throughout, matching the translog's own convention (this
+// process only ever runs on little-endian hosts -- see file_header's own precedent above).
+//
+// This is a SEPARATE format from the translog's own (rl_attr::FORMAT_VERSION/RECORD_SIZE below
+// are independent literals, not aliases of rl_translog::FORMAT_VERSION/RECORD_SIZE) -- adding
+// this sidecar does not touch the translog's row layout at all, so format 11 stays free for
+// whatever needs it next.
+//
+// Identities a reader asserts per fight (rel 1e-9, see rl_credit_route()'s own doc comment in
+// rl_translog.cpp for the class predicate these mirror):
+//   sum_own_real == close.credit_real[0] + close.credit_real[1] + close.credit_real[2] + close.credit_real[3]
+//   (same with _exp against credit_exp) -- own_cast + tail_cast + own_dot + tail_dot, the four
+//   streams every own-class cause routes into, summed exactly once either by WINDOW (the
+//   translog's own credit block) or by CAUSING DECISION (this sidecar's sum_own_real) -- the same
+//   total, sliced two different ways. Deliberately excludes the `pre_fight_real` case (see
+//   player.hpp's rl_attr_pre_fight_real doc comment): a nonzero pre-fight value is exactly what
+//   would make this identity fail, which is the point -- it is a finding, never silently folded
+//   into sum_own_real to keep the identity looking clean.
+namespace rl_attr
+{
+
+inline constexpr char MAGIC[ 4 ] = { 'R', 'L', 'A', 'T' };
+inline constexpr std::uint32_t FORMAT_VERSION = 1u;
+inline constexpr std::uint32_t RECORD_SIZE = 24u;
+inline constexpr std::uint32_t HEADER_SIZE = 32u;
+
+inline constexpr std::uint32_t KIND_FIGHT = 1u;
+inline constexpr std::uint32_t KIND_DECISION = 2u;
+inline constexpr std::uint32_t KIND_FOOTER = 3u;
+
+// 32 bytes.
+struct alignas( 8 ) file_header
+{
+  char magic[ 4 ];                    // @0  -- MAGIC, not NUL-terminated
+  std::uint32_t format_version;       // @4  -- FORMAT_VERSION
+  std::uint32_t record_size;          // @8  -- RECORD_SIZE
+  std::uint32_t header_size;          // @12 -- HEADER_SIZE
+  std::uint8_t zero16[ 16 ];          // @16
+};
+static_assert( sizeof( file_header ) == HEADER_SIZE, "rl_attr::file_header must be exactly HEADER_SIZE bytes" );
+static_assert( alignof( file_header ) == 8, "rl_attr::file_header must be 8-aligned" );
+static_assert( offsetof( file_header, magic ) == 0 );
+static_assert( offsetof( file_header, format_version ) == 4 );
+static_assert( offsetof( file_header, record_size ) == 8 );
+static_assert( offsetof( file_header, header_size ) == 12 );
+static_assert( offsetof( file_header, zero16 ) == 16 );
+
+// One per fight, written immediately before that fight's n_decisions DECISION records.
+// `iteration` mirrors the translog row's own `iteration` field for this fight (widened to
+// uint32 here purely so the three record kinds below share one struct shape -- no 16-bit
+// row-count-style ceiling is being asserted). `sum_own_real` is the identity-checked total --
+// see this namespace's own top-of-section doc comment.
+struct fight_record
+{
+  std::uint32_t kind;          // @0  -- KIND_FIGHT
+  std::uint32_t iteration;     // @4
+  std::uint32_t n_decisions;   // @8  -- exactly n_decisions DECISION records follow, seq ascending
+  std::uint32_t zero;          // @12
+  alignas( 8 ) double sum_own_real;  // @16 -- sum(own_real) over this fight's DECISION records
+};
+static_assert( sizeof( fight_record ) == RECORD_SIZE, "rl_attr::fight_record must be exactly RECORD_SIZE bytes" );
+static_assert( alignof( fight_record ) == 8, "rl_attr::fight_record must be 8-aligned" );
+static_assert( offsetof( fight_record, kind ) == 0 );
+static_assert( offsetof( fight_record, iteration ) == 4 );
+static_assert( offsetof( fight_record, n_decisions ) == 8 );
+static_assert( offsetof( fight_record, zero ) == 12 );
+static_assert( offsetof( fight_record, sum_own_real ) == 16 );
+
+// One per decision of the fight it follows, seq ascending (write order == decision order --
+// rl_translog_pending_seqs, sim.hpp, is captured in write order by record_decision()).
+// `own_real`/`own_exp` are the SAME class-predicate accumulation as player_t::rl_own_real/
+// rl_own_exp at this seq's index (rl_credit_route(), rl_translog.cpp) -- zero-credit decisions
+// (a wait, a cast that whiffed) are written like any other, never skipped.
+struct decision_record
+{
+  std::uint32_t kind;   // @0  -- KIND_DECISION
+  std::uint32_t seq;    // @4  -- the decision row's own seq (sim->solver_control_seq at that boundary)
+  alignas( 8 ) double own_real;  // @8
+  double own_exp;                // @16
+};
+static_assert( sizeof( decision_record ) == RECORD_SIZE, "rl_attr::decision_record must be exactly RECORD_SIZE bytes" );
+static_assert( alignof( decision_record ) == 8, "rl_attr::decision_record must be 8-aligned" );
+static_assert( offsetof( decision_record, kind ) == 0 );
+static_assert( offsetof( decision_record, seq ) == 4 );
+static_assert( offsetof( decision_record, own_real ) == 8 );
+static_assert( offsetof( decision_record, own_exp ) == 16 );
+
+// Once, at translog close (write_footer()). No fight owns the footer -- both fields besides
+// n_fights are written zero, mirroring rl_translog::footer_record's own zero-fill convention.
+struct footer_record
+{
+  std::uint32_t kind;      // @0  -- KIND_FOOTER
+  std::uint32_t n_fights;  // @4  -- count of FIGHT records written (== root->rl_translog_fight_count)
+  std::uint32_t zero1;     // @8
+  std::uint32_t zero2;     // @12
+  alignas( 8 ) double zero_f;  // @16
+};
+static_assert( sizeof( footer_record ) == RECORD_SIZE, "rl_attr::footer_record must be exactly RECORD_SIZE bytes" );
+static_assert( alignof( footer_record ) == 8, "rl_attr::footer_record must be 8-aligned" );
+static_assert( offsetof( footer_record, kind ) == 0 );
+static_assert( offsetof( footer_record, n_fights ) == 4 );
+static_assert( offsetof( footer_record, zero1 ) == 8 );
+static_assert( offsetof( footer_record, zero2 ) == 12 );
+static_assert( offsetof( footer_record, zero_f ) == 16 );
+
+} // namespace rl_attr
+
 // ---- Writer interface. All five are no-ops when rl_translog= is unset. ----
 
 // Root only -- called once, from sim_t::setup(). Opens the stream and
@@ -873,7 +997,13 @@ void open_and_write_header( sim_t* sim );
 // function then writes an all-zero block, `candidate_mask=0`, `candidate_count=0` and
 // `chosen_candidate_slot=CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK` regardless of what the other
 // three parameters carry, so a caller does not need to zero them itself.
-void record_decision( sim_t* sim, const player_t* p, std::uint64_t seq,
+//
+// `p` widened from `const player_t*` to `player_t*` in stage F1 (260918-atr): this is the ONE
+// site that can name "this fight's first decision" the moment it happens, so it is where
+// `p->rl_fight_first_seq`/`rl_fight_first_seq_set` get set (see player.hpp's own doc comment) --
+// both call sites (solver_control.cpp's `choose()`) already hold a non-const `player_t*`, so
+// this widening changes no caller. Every other read in this function's body is unchanged.
+void record_decision( sim_t* sim, player_t* p, std::uint64_t seq,
                        const float obs[ RL_OBS_DIM ], const std::uint8_t mask[ RL_ACTION_DIM ],
                        int action_index, float q_margin, float top_q,
                        std::uint16_t chosen_target_actor_index, bool wait_floored,

@@ -6429,6 +6429,14 @@ void player_t::datacollection_begin()
   assert( rl_cause_stack.empty() );
   rl_credit.reset();
   rl_orphan_damage_by_action.clear();
+  // 260918-atr, stage F1: reset alongside rl_credit above -- these are all per-fight, like it.
+  // The vectors are cleared (not just their contents freed) so rl_credit_route()'s lazy resize
+  // starts this fight's own indices at 0 rather than carrying over a previous fight's length.
+  rl_own_real.clear();
+  rl_own_exp.clear();
+  rl_fight_first_seq = 0;
+  rl_fight_first_seq_set = false;
+  rl_attr_pre_fight_real = 0.0;
   iteration_heal                        = 0;
   iteration_absorb                      = 0.0;
   iteration_absorb_taken                = 0.0;

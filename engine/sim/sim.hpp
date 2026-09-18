@@ -615,7 +615,21 @@ struct sim_t : private sc_thread_t
   // dividing one by the other.
   std::uint32_t rl_translog_collected_fight_count = 0;
   std::uint32_t rl_translog_pending_decisions = 0;    // decision rows since the last close, reset there
+  // tstl-sylvanas quick task 260918-atr, stage F1: the `seq` each pending decision row carried,
+  // in write order -- captured alongside rl_translog_pending_decisions above (record_decision(),
+  // rl_translog.cpp) so record_close()'s .attr DECISION records can name each decision's real
+  // seq rather than assuming a gapless run (seq is a global, never-reset counter -- see
+  // rl_credit.hpp's top-of-file comment). Root-owned for the same single-writer reason every
+  // other rl_translog_* member above is. Cleared alongside rl_translog_pending_decisions in
+  // record_close().
+  std::vector<std::uint64_t> rl_translog_pending_seqs;
   double rl_translog_summed_close_damage = 0.0;
+  // tstl-sylvanas quick task 260918-atr, stage F1: the per-decision own-credit sidecar
+  // (`<rl_translog_file_str>.attr`, format 1 -- see rl_translog.hpp's ATTR SIDECAR section).
+  // Opened alongside the main stream in open_and_write_header(), appended to once per fight in
+  // record_close() (right after that fight's close row), closed with a footer in write_footer().
+  // Root-owned, same single-writer reason as rl_translog_stream above.
+  std::unique_ptr<io::ofstream> rl_translog_attr_stream;
   // tstl-sylvanas phase 218, plan 218-02 (RIG-01). rl_fight_shape_index=<n>
   // names which declared fight shape (scripts/rl/specs/enhancement.json's
   // episode.fightMix, 1-based) this run was launched under. 0 is the
