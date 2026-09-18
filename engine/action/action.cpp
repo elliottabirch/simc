@@ -2554,8 +2554,28 @@ void action_t::schedule_execute( action_state_t* state )
   // empty or -- if this ran nested inside an ancestor's dispatch -- correctly NOT owned by
   // `this`, and the guard is a no-op either way).
   {
+    // tstl-sylvanas quick task 260918-cbc (Stage A7): a REPEATING action's own self-reschedule
+    // (action_t::execute()'s `if (repeating && !proc) schedule_execute();` tail call, and the
+    // channel-interrupt branch's `action->schedule_execute()` in
+    // action_execute_event_t::execute()) must NEVER park an inherited pending cause, even when
+    // it happens to run nested inside a DIFFERENT action's dispatch frame at the same event-loop
+    // timestamp (same-tick event ordering makes this common and was previously unguarded --
+    // `self_owns_top` alone only covers the case where THIS action's own frame is on top). A
+    // repeating auto-attack's next swing is by definition a fresh AUTO, resolved by
+    // rl_resolve_cause()'s own `repeating && !special` branch on its next execute() -- it is
+    // never a proc of whatever ambient action happens to be mid-dispatch when the reschedule
+    // call fires. Confirmed by RL_DEBUG_TRACE (260918-cbc A7 investigation): a handful of
+    // main_hand swings (4 of 241 in a 1-iteration smoke, seed 4242) were mis-stamped
+    // PROC_OF_CAST/PROC_OF_DOT, carried over from an unrelated action's frame via exactly this
+    // path -- this fix eliminates that specific contagion. NOTE: it does NOT explain the bulk
+    // of main_hand's orphan share (32/241 in the same trace) -- those resolve via
+    // rl_resolve_cause()'s legitimate ORPHAN branch because `this->repeating` itself reads false
+    // for a subset of dispatches on the SAME melee action_t instance/address, a separate,
+    // still-unexplained runtime behaviour not root-caused by this stage (see A7's SUMMARY /
+    // report for the trace evidence and recommended follow-up).
     const bool self_owns_top = !player->rl_cause_stack.empty() && player->rl_cause_stack.back().owner == this;
-    const rl_cause_t rl_pending = ( player->rl_cause_stack.empty() || self_owns_top )
+    const bool skip_parking  = self_owns_top || repeating;
+    const rl_cause_t rl_pending = ( player->rl_cause_stack.empty() || skip_parking )
                                        ? rl_cause_t{}
                                        : rl_credit::promote( player->rl_cause_stack.back().cause );
     if ( state )
