@@ -3589,7 +3589,18 @@ struct shaman_spell_t : public shaman_spell_base_t<spell_t>
       sim->print_debug( "{} accumulate_lightning_rod_damage creating deferred damage event",
         player->name() );
 
-      lr_event = make_event( *sim, [ this ]() {
+      // tstl-sylvanas quick task 260918-cbc (Stage A5.1): capture the currently active cause
+      // HERE, synchronously, while the triggering hit's own dispatch frame is still on the
+      // stack -- the make_event() below fires on a LATER event-loop pass (even at the same
+      // timestamp, it is still a separate event), by which point that frame has already
+      // popped. Without capturing it now, trigger_lightning_rod_damage()'s
+      // execute_on_target() calls would see an empty stack and fall through to ORPHAN despite
+      // a cause genuinely existing at accumulation time.
+      const rl_cause_t lr_cause = player->rl_cause_stack.empty()
+                                      ? rl_cause_t{}
+                                      : rl_credit::promote( player->rl_cause_stack.back().cause );
+      lr_event = make_event( *sim, [ this, lr_cause ]() {
+        rl_cause_scope_t rl_cause_guard( player, lr_cause );
         trigger_lightning_rod_damage();
         lr_event = nullptr;
       } );
