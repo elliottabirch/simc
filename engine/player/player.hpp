@@ -458,7 +458,12 @@ struct player_t : public actor_t
   // The cause stack: pushed around action_t::execute()'s per-target loop
   // and around impact()/the direct-tick assessment in tick(), so a proc
   // fired synchronously inside those scopes inherits the right cause.
-  std::vector<rl_cause_t> rl_cause_stack;
+  // Stage A5 (260918-cbc): also pushed around the three dispatch entry
+  // points (action_execute_event_t::execute(), action_t::do_execute(),
+  // action_t::execute_on_target()) -- each frame's `owner` (rl_cause_frame_t,
+  // rl_credit.hpp) names which action's own dispatch pushed it, nullptr for
+  // a non-dispatch frame (DoT tick, impact/travel boundary).
+  std::vector<rl_cause_frame_t> rl_cause_stack;
   // The cause the next stats_t::add_result() sink should route under --
   // stats_t::add_result() takes no action_state_t, so assess_damage() sets
   // this immediately before calling record_data(state), which is the last

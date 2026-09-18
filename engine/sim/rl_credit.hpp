@@ -40,6 +40,7 @@
 #include <cstdint>
 
 struct player_t;
+struct action_t;
 
 // The event class an action_state_t's stamp carries. A plain enum (not
 // `enum class`) with explicit RL_CAUSE_* names, matching the un-scoped
@@ -68,6 +69,25 @@ struct rl_cause_t
   std::uint8_t cls = RL_CAUSE_ORPHAN;
 };
 
+// One frame of player_t::rl_cause_stack. tstl-sylvanas quick task 260918-cbc (Stage A5):
+// `owner` names the action_t whose dispatch pushed this frame -- nullptr for a frame pushed
+// around something that is not itself an action's own execute() dispatch (a DoT tick, an
+// impact()/travel boundary). action_t::execute() reads `owner` to tell "I AM the dispatch that
+// pushed the frame currently on top" (reuse the already-resolved cause, do not re-resolve or
+// push a second, redundant frame) apart from "someone else's frame is on top" (resolve fresh
+// and push a scope of its own, exactly Stage A4's behaviour). action_t::schedule_execute()'s
+// self-reschedule guard (`repeating && !proc`) uses the same field for the opposite purpose --
+// it must NOT park a pending cause when the top frame's owner IS the rescheduling action itself
+// (that would be the action seeing its OWN dispatch frame and mis-stamping its next swing as a
+// proc of itself). rl_cause_t itself (the seq+class pair carried by action_state_t stamps,
+// rl_credit_route's routing key, and rl_pending_cause) is left untouched -- `owner` is a
+// stack-frame-only concept.
+struct rl_cause_frame_t
+{
+  rl_cause_t cause;
+  const action_t* owner = nullptr;
+};
+
 // RAII guard for player_t::rl_cause_stack. tstl-sylvanas quick task 260918-cbc: originally
 // (Stage A1) a private struct local to action.cpp, pushed for the duration of just
 // action_t::impact()'s OWN function body. Promoted to this header in Stage A4 and its push
@@ -85,10 +105,16 @@ struct rl_cause_t
 // through the guarded scope. Pure bookkeeping: touches no RNG, schedules nothing. Constructor/
 // destructor are defined out-of-line in rl_translog.cpp (needs player_t complete), mirroring
 // rl_credit_route's own placement.
+//
+// Stage A5: promoted from wrapping only action_t::execute()'s own per-target loop / tick()'s /
+// impact()'s bodies to ALSO wrapping the three DISPATCH ENTRY POINTS an execute() call can start
+// from (action_execute_event_t::execute(), action_t::do_execute(), action_t::execute_on_target())
+// -- see those call sites' own comments. `owner` (new in A5) tags which of those, if any, pushed
+// this particular frame.
 struct rl_cause_scope_t
 {
   player_t* p;
-  rl_cause_scope_t( player_t* p_, rl_cause_t cause );
+  rl_cause_scope_t( player_t* p_, rl_cause_t cause, const action_t* owner = nullptr );
   ~rl_cause_scope_t();
 };
 

@@ -45,10 +45,11 @@ void rl_count_proc( player_t* p, rl_proc::id which, double chance, bool success 
 // rl_cause_scope_t's constructor/destructor (tstl-sylvanas quick task 260918-cbc, Stage A4) --
 // declared in rl_credit.hpp, defined here because they need player_t complete (mirroring
 // rl_credit_route's own placement below). Pure bookkeeping: push/pop of the player-scoped
-// cause stack, nothing else.
-rl_cause_scope_t::rl_cause_scope_t( player_t* p_, rl_cause_t cause ) : p( p_ )
+// cause stack, nothing else. Stage A5: takes the owning action_t* (nullptr default) and pushes
+// an rl_cause_frame_t rather than a bare rl_cause_t.
+rl_cause_scope_t::rl_cause_scope_t( player_t* p_, rl_cause_t cause, const action_t* owner ) : p( p_ )
 {
-  p->rl_cause_stack.push_back( cause );
+  p->rl_cause_stack.push_back( rl_cause_frame_t{ cause, owner } );
 }
 
 rl_cause_scope_t::~rl_cause_scope_t()
@@ -466,6 +467,12 @@ void record_close( sim_t* sim )
   // `rl_orphan_damage_by_action` -- prints, never mutates.
   if ( sim->debug || std::getenv( "RL_CREDIT_ORPHAN_CENSUS" ) != nullptr )
   {
+    // Stage A5 (260918-cbc): the cause stack should always be back to depth 0 at a fight's
+    // close row -- every rl_cause_scope_t is a properly nested RAII guard, so a non-zero depth
+    // here means a frame leaked (an exception path that skipped a destructor, or a scope that
+    // outlived its intended lifetime). player_t.hpp's own assert for this is compiled out in
+    // Release; this print is the only signal in a release/RelWithDebInfo build.
+    fmt::print( stderr, "RL_CAUSE_STACK_DEPTH {}\n", p->rl_cause_stack.size() );
     for ( const auto& entry : p->rl_orphan_damage_by_action )
     {
       if ( entry.second > 0.0 )

@@ -1111,18 +1111,34 @@ void dot_t::dot_tick_event_t::execute()
   dot->tick_event = nullptr;
   dot->current_tick++;
 
-  if ( dot->current_action->channeled &&
-       dot->current_action->action_skill < 1.0 &&
-       dot->remains() >= dot->current_action->tick_time( dot->state ) )
+  // tstl-sylvanas quick task 260918-cbc (Stage A5): the DOT_TICK cause frame, wrapping BOTH
+  // dot->tick() call sites below (the skill-check gate and the no-skill-check-required path) --
+  // previously (Stage A1) this guard lived inside action_t::tick()'s own no-tick_action branch,
+  // scoped to only its assess_damage() call; moving it out here covers the tick_action branch
+  // too (tick_action->schedule_execute()'s own deferred dispatch now sees a non-empty stack)
+  // and covers the FULL dot->tick() -> current_action->tick(this) virtual dispatch, not just
+  // one inline assess_damage() call inside the base implementation. The class is ALWAYS
+  // RL_CAUSE_DOT_TICK regardless of what `dot->state->rl_cause_class` currently holds (that
+  // field reflects the APPLYING decision's own class -- CAST, AUTO, ... -- copied down at
+  // apply/refresh time via copy_state(); a tick is a DOT_TICK event no matter which class
+  // applied the dot). `owner` is nullptr -- this is not an action's own execute() dispatch.
   {
-    if ( rng().roll( std::max( 0.0, dot->current_action->action_skill - dot->current_action->player->current.skill_debuff ) ) )
+    rl_cause_scope_t rl_cause_guard(
+        dot->current_action->player, rl_cause_t{ dot->state->rl_cause_seq, RL_CAUSE_DOT_TICK } );
+
+    if ( dot->current_action->channeled &&
+         dot->current_action->action_skill < 1.0 &&
+         dot->remains() >= dot->current_action->tick_time( dot->state ) )
+    {
+      if ( rng().roll( std::max( 0.0, dot->current_action->action_skill - dot->current_action->player->current.skill_debuff ) ) )
+      {
+        dot->tick();
+      }
+    }
+    else // No skill-check required
     {
       dot->tick();
     }
-  }
-  else // No skill-check required
-  {
-    dot->tick();
   }
 
   // Some dots actually cancel themselves mid-tick. If this happens, we presume

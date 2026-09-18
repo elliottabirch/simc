@@ -1073,6 +1073,16 @@ public:
 
   virtual void execute();
 
+  // tstl-sylvanas quick task 260918-cbc (Stage A5): the stamp rule factored out of
+  // action_t::execute() so the three dispatch entry points (action_execute_event_t::execute(),
+  // do_execute(), execute_on_target()) can resolve a cause for the rl_cause_scope_t frame they
+  // push BEFORE calling execute() -- see those call sites and rl_credit.hpp's top-of-file
+  // comment. Branch order: a carried pre_execute_state's own stamp -> a pending cause parked at
+  // schedule_execute() time -> promote(cause stack top) -> foreground CAST -> repeating AUTO ->
+  // ORPHAN. Non-const: consumes (clears) rl_pending_cause when that branch fires. Pure
+  // bookkeeping -- reads existing state, touches no RNG, schedules nothing.
+  rl_cause_t rl_resolve_cause();
+
   virtual void tick(dot_t* d);
 
   virtual void last_tick(dot_t* d);

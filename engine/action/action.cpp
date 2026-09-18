@@ -83,7 +83,15 @@ void do_execute( action_t* action, execute_type type )
       action->player->sequence_add( action, action->target );
     }
 
-    action->execute();
+    // tstl-sylvanas quick task 260918-cbc (Stage A5): dispatch entry point #2 -- see
+    // rl_credit.hpp's rl_cause_scope_t doc comment. do_execute() bypasses schedule_execute()'s
+    // deferred action_execute_event_t entirely (off-gcd / cast-while-casting), so this is the
+    // ONLY dispatch boundary this action ever crosses; resolve and push here, spanning the
+    // whole virtual execute() call (base body plus any override's continuation).
+    {
+      rl_cause_scope_t rl_cause_guard( action->player, action->rl_resolve_cause(), /*owner=*/action );
+      action->execute();
+    }
     action->line_cooldown->start();
 
     // If the ability has a GCD, we need to start it
@@ -334,6 +342,13 @@ struct action_execute_event_t : public player_event_t
       // Action target must follow any potential pre-execute-state target if it differs from the
       // current (default) target of the action.
       action->set_target( target );
+      // tstl-sylvanas quick task 260918-cbc (Stage A5): dispatch entry point #1 -- see
+      // rl_credit.hpp's rl_cause_scope_t doc comment. Resolved AFTER action->pre_execute_state
+      // was assigned above (this event's carried execute_state, if any) so rl_resolve_cause()'s
+      // first branch sees it; the re-resolve schedule_execute() call at the top of this function
+      // (the charge-flip recreate) and the repeating-reschedule inside the channel-interrupt
+      // branch just above both run OUTSIDE this scope, unchanged.
+      rl_cause_scope_t rl_cause_guard( action->player, action->rl_resolve_cause(), /*owner=*/action );
       action->execute();
     }
     else
@@ -1878,6 +1893,52 @@ block_result_e action_t::calculate_block_result( action_state_t* s ) const
   return BLOCK_RESULT_UNBLOCKED;
 }
 
+// action_t::rl_resolve_cause ================================================
+
+// tstl-sylvanas quick task 260918-cbc (Stage A5): the stamp rule, factored out of
+// action_t::execute() (Stage A1-A4 grew it inline) so the three dispatch entry points can call
+// it directly and push their own rl_cause_scope_t BEFORE invoking execute() -- see
+// action.hpp's declaration and rl_credit.hpp's top-of-file comment for the full model. Branch
+// order and semantics are exactly what Stage A4 landed inline; only the packaging moved.
+rl_cause_t action_t::rl_resolve_cause()
+{
+  // The first two branches carry a cause ACROSS the deferred action_execute_event_t boundary
+  // (Stage A4): a proc/secondary ability's schedule_execute() call happens while the
+  // triggering action's own rl_cause_scope_t is still on the stack, but by the time THIS
+  // execute() runs -- on a later event-loop tick -- that scope has already unwound, so the
+  // stack-based branch below would otherwise fall through to ORPHAN despite a cause genuinely
+  // existing at dispatch time. A deferred sub-action must never be re-stamped as a fresh
+  // CAST/AUTO just because the stack happens to be non-empty when it fires (it legitimately
+  // can be, when this event fires INSIDE another action's own scope) -- the carried cause
+  // always wins, hence these two branches run first.
+  if ( pre_execute_state && pre_execute_state->rl_cause_seq >= 0 )
+  {
+    // Already stamped at schedule_execute() time (or copied down from a parent state via
+    // copy_state()) -- promote() is idempotent, so re-applying it here is harmless.
+    return rl_credit::promote(
+        rl_cause_t{ pre_execute_state->rl_cause_seq, pre_execute_state->rl_cause_class } );
+  }
+  if ( rl_pending_cause.seq >= 0 )
+  {
+    rl_cause_t out  = rl_pending_cause;
+    rl_pending_cause = rl_cause_t{};
+    return out;
+  }
+  if ( !player->rl_cause_stack.empty() )
+  {
+    return rl_credit::promote( player->rl_cause_stack.back().cause );
+  }
+  if ( !background && player->last_foreground_action == this )
+  {
+    return rl_cause_t{ static_cast<std::int64_t>( sim->solver_control_seq ), RL_CAUSE_CAST };
+  }
+  if ( repeating && !special )
+  {
+    return rl_cause_t{ static_cast<std::int64_t>( sim->solver_control_seq ), RL_CAUSE_AUTO };
+  }
+  return rl_cause_t{ static_cast<std::int64_t>( sim->solver_control_seq ), RL_CAUSE_ORPHAN };
+}
+
 // action_t::execute ========================================================
 
 void action_t::execute()
@@ -1917,61 +1978,35 @@ void action_t::execute()
   if ( harmful && !player->in_combat )
     player->enter_combat();
 
-  // tstl-sylvanas quick task 260918-cbc (Stage A1/A4): stamp this execute()'s own states with a
-  // cause -- which decision caused this damage and what kind of event it is -- before doing
-  // any of the per-target work below. Pure observer: reads existing state (a carried
-  // pre_execute_state's own stamp, a pending cause parked at schedule_execute() time, the
-  // cause stack, last_foreground_action, repeating/special), touches no RNG, schedules
-  // nothing. See rl_credit.hpp's top-of-file comment for the full model this rule implements.
+  // tstl-sylvanas quick task 260918-cbc: stamp this execute()'s own states with a cause --
+  // which decision caused this damage and what kind of event it is -- before doing any of the
+  // per-target work below. Pure observer: touches no RNG, schedules nothing. See
+  // rl_credit.hpp's top-of-file comment for the full model, and rl_resolve_cause() (Stage A5)
+  // for the branch order this reduces to when there is no owner frame to reuse.
   //
-  // The first two branches carry a cause ACROSS the deferred action_execute_event_t boundary
-  // (Stage A4): a proc/secondary ability's schedule_execute() call happens while the
-  // triggering action's own rl_cause_scope_t is still on the stack, but by the time THIS
-  // execute() runs -- on a later event-loop tick -- that scope has already unwound, so the
-  // stack-based branch below would otherwise fall through to ORPHAN despite a cause genuinely
-  // existing at dispatch time. A deferred sub-action must never be re-stamped as a fresh
-  // CAST/AUTO just because the stack happens to be non-empty when it fires (it legitimately
-  // can be, when this event fires INSIDE another action's own scope) -- the carried cause
-  // always wins, hence these two branches run first.
-  rl_cause_t rl_cause;
-  if ( pre_execute_state && pre_execute_state->rl_cause_seq >= 0 )
-  {
-    // Already stamped at schedule_execute() time (or copied down from a parent state via
-    // copy_state()) -- promote() is idempotent, so re-applying it here is harmless.
-    rl_cause = rl_credit::promote(
-        rl_cause_t{ pre_execute_state->rl_cause_seq, pre_execute_state->rl_cause_class } );
-  }
-  else if ( rl_pending_cause.seq >= 0 )
-  {
-    rl_cause         = rl_pending_cause;
-    rl_pending_cause = rl_cause_t{};
-  }
-  else if ( !player->rl_cause_stack.empty() )
-  {
-    rl_cause = rl_credit::promote( player->rl_cause_stack.back() );
-  }
-  else if ( !background && player->last_foreground_action == this )
-  {
-    rl_cause.seq = static_cast<std::int64_t>( sim->solver_control_seq );
-    rl_cause.cls = RL_CAUSE_CAST;
-  }
-  else if ( repeating && !special )
-  {
-    rl_cause.seq = static_cast<std::int64_t>( sim->solver_control_seq );
-    rl_cause.cls = RL_CAUSE_AUTO;
-  }
-  else
-  {
-    rl_cause.seq = static_cast<std::int64_t>( sim->solver_control_seq );
-    rl_cause.cls = RL_CAUSE_ORPHAN;
-  }
+  // tstl-sylvanas quick task 260918-cbc (Stage A5): if the stack top's frame was pushed by one
+  // of the three dispatch entry points for THIS SAME action (action_execute_event_t::execute(),
+  // do_execute(), execute_on_target() -- see rl_credit.hpp's rl_cause_scope_t doc comment), that
+  // frame already carries the cause those entry points resolved via rl_resolve_cause() before
+  // calling us, and it already spans this entire execute() call (including everything below,
+  // and any override tail that runs after Base::execute() returns to it). Re-resolving here
+  // would be redundant (rl_resolve_cause()'s own stack-branch would just read the same frame
+  // back via promote(), which is idempotent but pointless), and pushing a SECOND, narrower frame
+  // around only the per-target work below would needlessly nest two frames covering the same
+  // action's own dispatch. So: reuse the owner frame's cause with no extra push in that case;
+  // otherwise (a direct execute() call with no entry-point wrapper -- e.g. execute_action's or
+  // impact_action's own direct `->execute()` at this file's other call sites) resolve fresh and
+  // push a scope of our own around the per-target work, exactly Stage A4's behaviour.
+  const bool have_owner_frame =
+      !player->rl_cause_stack.empty() && player->rl_cause_stack.back().owner == this;
+  const rl_cause_t rl_cause = have_owner_frame ? player->rl_cause_stack.back().cause : rl_resolve_cause();
 
-  // Pushed for the duration of the per-target work below (tick_action snapshotting included)
-  // so a proc fired synchronously inside it -- a callback, a resource-gain trigger, a nested
-  // execute() -- inherits `rl_cause` promoted to its PROC_OF_* sibling, by construction.
-  {
-    rl_cause_scope_t rl_cause_guard( player, rl_cause );
-
+  // The per-target work (tick_action snapshotting included) that stamps every action_state_t
+  // this execute() produces with `rl_cause`. Extracted to a lambda so it can run either bare
+  // (an owner frame already covers this scope from outside) or under a freshly pushed
+  // rl_cause_scope_t of our own (no owner frame -- see have_owner_frame above), without
+  // duplicating the body.
+  auto do_per_target_work = [ this, &rl_cause, &num_targets ]() {
     // Handle tick_action initial state snapshotting, primarily for handling STATE_MUL_PERSISTENT
     if ( tick_action )
     {
@@ -2040,6 +2075,19 @@ void action_t::execute()
 
       schedule_travel( s );
     }
+  };
+
+  if ( have_owner_frame )
+  {
+    do_per_target_work();
+  }
+  else
+  {
+    // Pushed for the duration of the per-target work below so a proc fired synchronously
+    // inside it -- a callback, a resource-gain trigger, a nested execute() -- inherits
+    // `rl_cause` promoted to its PROC_OF_* sibling, by construction.
+    rl_cause_scope_t rl_cause_guard( player, rl_cause );
+    do_per_target_work();
   }
 
   if ( player->resource_regeneration == regen_type::DYNAMIC)
@@ -2194,6 +2242,17 @@ void action_t::tick( dot_t* d )
         break;
     }
 
+    // tstl-sylvanas quick task 260918-cbc (Stage A5): stamp tick_state EXPLICITLY, always --
+    // `tick_action->get_state( tick_action->execute_state )` above can hand back a RECYCLED
+    // state that still carries tick_action's own stamp from a PREVIOUS execute() (a stale
+    // seq/class pair), and schedule_execute()'s "only if unstamped" rule
+    // (`state->rl_cause_seq < 0`) would then leave that stale stamp in place instead of
+    // carrying THIS tick's cause across the deferred boundary. d->state was already stamped
+    // DOT_TICK just below/around this call (dot_tick_event_t::execute()'s outer frame) --
+    // inherit its seq, force the class.
+    tick_state->rl_cause_seq   = d->state->rl_cause_seq;
+    tick_state->rl_cause_class = RL_CAUSE_DOT_TICK;
+
     tick_action->schedule_execute( tick_state );
 
     sim->print_log( "{} {} ticks ({} of {}) {}", *player, *this, d->current_tick, d->num_ticks(), *d->target );
@@ -2218,14 +2277,18 @@ void action_t::tick( dot_t* d )
     // tstl-sylvanas quick task 260918-cbc (Stage A1): a DoT tick assessed directly here (no
     // tick_action) is always a DOT_TICK event, whichever class the applying/refreshing
     // decision's own state carried in via copy_state() (CAST, AUTO, ...) -- only the class is
-    // forced, d->state->rl_cause_seq stays that decision's own seq. Pushed for the assessment
-    // so a proc fired synchronously inside it (a periodic-damage trigger) inherits
-    // PROC_OF_DOT.
+    // forced, d->state->rl_cause_seq stays that decision's own seq. `d->state` itself (not just
+    // the stack frame) is stamped here because assess_damage()'s own sinks (record_data's
+    // player->rl_sink_cause assignment, and any callback reading state->rl_cause_class
+    // directly) read the STATE, not the frame.
+    //
+    // Stage A5: the rl_cause_scope_t guard that used to be pushed here, around just this
+    // assess_damage() call, moved OUT to dot_t::dot_tick_event_t::execute() -- it now wraps
+    // BOTH of that function's dot->tick() call sites (the skill-check gate and the
+    // no-skill-check-required path), so a proc fired synchronously from EITHER one inherits
+    // PROC_OF_DOT, not just the second. This call already runs inside that outer frame.
     d->state->rl_cause_class = RL_CAUSE_DOT_TICK;
-    {
-      rl_cause_scope_t rl_cause_guard( player, rl_cause_t{ d->state->rl_cause_seq, d->state->rl_cause_class } );
-      assess_damage( amount_type( d->state, true ), d->state );
-    }
+    assess_damage( amount_type( d->state, true ), d->state );
 
     if ( sim->debug )
       d->state->debug();
@@ -2478,10 +2541,23 @@ void action_t::schedule_execute( action_state_t* state )
   // Otherwise -- schedule_execute() with no state, e.g. an auto-attack rescheduling itself --
   // there's nothing to stamp, so park the cause on this action for its own coming execute()
   // to pick up. Pure bookkeeping: reads the existing stack, touches no RNG, schedules nothing.
+  //
+  // Stage A5: `stack.back().owner != this` guards the whole block. Since Stage A5 wraps the
+  // three dispatch entry points in their OWN frame (owner == the executing action), this
+  // function's own self-reschedule call (`if (repeating && !proc) schedule_execute();`, near
+  // the end of action_t::execute()) now runs INSIDE that same dispatch frame -- without this
+  // guard it would read its OWN frame back off the stack and park PROC_OF_AUTO on itself, so
+  // every swing after the first would be mis-stamped as a proc of its own prior swing instead
+  // of a fresh AUTO. The guard also protects the charge-flip re-resolve schedule_execute() call
+  // and the channel-interrupt-branch repeating reschedule in action_execute_event_t::execute()
+  // (both run before that function's dispatch frame is pushed, so the stack there is either
+  // empty or -- if this ran nested inside an ancestor's dispatch -- correctly NOT owned by
+  // `this`, and the guard is a no-op either way).
   {
-    const rl_cause_t rl_pending = player->rl_cause_stack.empty()
+    const bool self_owns_top = !player->rl_cause_stack.empty() && player->rl_cause_stack.back().owner == this;
+    const rl_cause_t rl_pending = ( player->rl_cause_stack.empty() || self_owns_top )
                                        ? rl_cause_t{}
-                                       : rl_credit::promote( player->rl_cause_stack.back() );
+                                       : rl_credit::promote( player->rl_cause_stack.back().cause );
     if ( state )
     {
       if ( state->rl_cause_seq < 0 && rl_pending.seq >= 0 )
@@ -3299,6 +3375,12 @@ void action_t::reset()
   {
     action_state_t::release( pre_execute_state );
   }
+  // tstl-sylvanas quick task 260918-cbc (Stage A5): a cause parked at schedule_execute() time
+  // (rl_pending_cause) for THIS action's own coming execute() to pick up must not survive past
+  // a reset -- otherwise a cause parked just before a fight ended (iteration N's last
+  // schedule_execute() call, whose deferred execute() never got to fire and consume it) would
+  // leak into iteration N+1's first execute() and mis-stamp it. Pure bookkeeping.
+  rl_pending_cause = rl_cause_t{};
   cooldown->reset_init();
   internal_cooldown->reset_init();
   line_cooldown->reset_init();
@@ -5736,6 +5818,16 @@ void action_t::execute_on_target( player_t* t, double amount )
   if ( amount >= 0.0 )
     base_dd_min = base_dd_max = amount;
 
+  // tstl-sylvanas quick task 260918-cbc (Stage A5): dispatch entry point #3 -- see
+  // rl_credit.hpp's rl_cause_scope_t doc comment. Called both NESTED (a spec override's
+  // post-Base::execute() tail dispatching a sub-hit, e.g. stormstrike_attack_t::execute()'s
+  // mh->execute_on_target/oh->execute_on_target -- rl_resolve_cause() here correctly reads and
+  // promotes the CALLER's still-on-stack frame) and TOP-LEVEL (a buff/callback dispatching an
+  // action directly, e.g. an on-cast proc trigger with no ancestor frame -- rl_resolve_cause()
+  // falls through to the same CAST/AUTO/ORPHAN branches any other un-wrapped direct call would).
+  // Either way this action's own execute() then sees ITS OWN frame on top (owner == this) and
+  // reuses the cause resolved here rather than re-resolving or double-pushing.
+  rl_cause_scope_t rl_cause_guard( player, rl_resolve_cause(), /*owner=*/this );
   execute();
 }
 
