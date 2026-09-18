@@ -7,6 +7,7 @@
 #include "player/stats.hpp"
 #include "player/player.hpp"
 #include "player/pet.hpp"
+#include "sim/rl_credit.hpp"
 #include "sim/sim.hpp"
 #include <memory>
 #include <unordered_map>
@@ -190,16 +191,30 @@ void stats_t::add_result( double act_amount,
   // pet's own; when pets are ALSO reported separately
   // (sim.report_pets_separately) the pet's own accumulator is credited too,
   // mirroring the timeline_dmg block above exactly.
+  // tstl-sylvanas quick task 260918-cbc (Stage A1): route the SAME act_amount this hook
+  // already adds to solver_damage_so_far into the matching credit stream. add_result() takes
+  // no action_state_t, so the cause comes from player->rl_sink_cause -- stashed by
+  // assess_damage() immediately before calling record_data() (the caller of this function),
+  // the last point the real state was in scope. A pet action routes to the OWNER's
+  // accumulator (mirroring this function's own pet->owner rule immediately below), and
+  // assess_damage() already set the owner's own rl_sink_cause to match for exactly this.
   if ( ! player -> is_pet() )
   {
     player -> solver_damage_so_far += act_amount;
+    rl_credit_route( player, player->rl_sink_cause, sim.solver_control_seq, act_amount, /*expected=*/false,
+                      name_str.c_str() );
   }
   else
   {
-    player -> cast_pet() -> owner -> solver_damage_so_far += act_amount;
+    player_t* owner = player -> cast_pet() -> owner;
+    owner -> solver_damage_so_far += act_amount;
+    rl_credit_route( owner, owner->rl_sink_cause, sim.solver_control_seq, act_amount, /*expected=*/false,
+                      name_str.c_str() );
     if ( sim.report_pets_separately )
     {
       player -> solver_damage_so_far += act_amount;
+      rl_credit_route( player, player->rl_sink_cause, sim.solver_control_seq, act_amount, /*expected=*/false,
+                        name_str.c_str() );
     }
   }
 }

@@ -33,6 +33,7 @@
 #include "sim/cooldown.hpp"
 #include "sim/proc.hpp"
 #include "sim/proc_rng.hpp"
+#include "sim/rl_credit.hpp"
 #include "sim/rl_target_select.hpp"
 #include "util/string_view.hpp"
 
@@ -12472,8 +12473,14 @@ void shaman_t::trigger_windfury_weapon( const action_state_t* state, double over
     // there too, same formula, so the two accumulators stay consistent.
     double wf_attack_expected  = expected_windfury_attack_damage( windfury_mh, state->target );
     double unruly_winds_chance = talent.unruly_winds->effectN( 1 ).percent();
-    solver_damage_expected_so_far +=
+    const double wf_expected_amount =
         wf_chance * ( 2.0 * wf_attack_expected + unruly_winds_chance * wf_attack_expected );
+    solver_damage_expected_so_far += wf_expected_amount;
+    // tstl-sylvanas quick task 260918-cbc (Stage A1): the ONLY place windfury damage is priced
+    // into the expected total (see this hook's own top-of-file comment) -- route it under the
+    // impacting melee's own cause, `state` still being in scope here.
+    rl_credit_route( this, rl_cause_t{ state->rl_cause_seq, state->rl_cause_class }, sim->solver_control_seq,
+                      wf_expected_amount, /*expected=*/true );
 
     const bool ok = rng().roll( wf_chance );
     rl_count_proc( this, rl_proc::id::windfury, wf_chance, ok );

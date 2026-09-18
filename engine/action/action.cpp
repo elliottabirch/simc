@@ -2291,6 +2291,15 @@ void action_t::assess_damage( result_amount_type rt, action_state_t* state )
       player->priority_iteration_dmg += state->result_amount;
     }
 
+    // tstl-sylvanas quick task 260918-cbc (Stage A1): stats_t::add_result() (called via
+    // record_data below) takes no action_state_t, so stash the cause here -- the last point
+    // `state` is still in scope -- for the routing done at the realized sink in stats.cpp. A
+    // pet action routes its realized damage to the OWNER's accumulator (stats.cpp's own
+    // pet->owner rule), so the owner's own rl_sink_cause must carry it too.
+    player->rl_sink_cause = rl_cause_t{ state->rl_cause_seq, state->rl_cause_class };
+    if ( player->is_pet() )
+      player->cast_pet()->owner->rl_sink_cause = player->rl_sink_cause;
+
     record_data( state );
     accrue_expected_damage( state );
   }
@@ -2343,16 +2352,25 @@ void action_t::accrue_expected_damage( action_state_t* state )
   double crit_chance = clamp( state->composite_crit_chance(), 0.0, 1.0 );
   double expected_amount = base_noncrit_amount * ( 1.0 + crit_chance * crit_bonus );
 
+  // tstl-sylvanas quick task 260918-cbc (Stage A1): route the SAME expected_amount this hook
+  // already adds to solver_damage_expected_so_far into the matching credit stream, so
+  // sum(streams) stays an identity against it rather than a tolerance. `state` is still in
+  // scope here (unlike stats_t::add_result's realized sink), so no rl_sink_cause detour needed.
+  const rl_cause_t cause{ state->rl_cause_seq, state->rl_cause_class };
   if ( !player->is_pet() )
   {
     player->solver_damage_expected_so_far += expected_amount;
+    rl_credit_route( player, cause, sim->solver_control_seq, expected_amount, /*expected=*/true );
   }
   else
   {
-    player->cast_pet()->owner->solver_damage_expected_so_far += expected_amount;
+    player_t* owner = player->cast_pet()->owner;
+    owner->solver_damage_expected_so_far += expected_amount;
+    rl_credit_route( owner, cause, sim->solver_control_seq, expected_amount, /*expected=*/true );
     if ( sim->report_pets_separately )
     {
       player->solver_damage_expected_so_far += expected_amount;
+      rl_credit_route( player, cause, sim->solver_control_seq, expected_amount, /*expected=*/true );
     }
   }
 }
