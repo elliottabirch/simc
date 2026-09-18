@@ -19,6 +19,7 @@
 #include "util/rng.hpp"
 
 #include <cassert>
+#include <optional>
 
 struct proc_event_t : public event_t
 {
@@ -76,6 +77,24 @@ struct proc_event_t : public event_t
 #endif
   void execute() override
   {
+    // Credit-by-cause (260918-cbc A8): "Detach proc execution from proc triggering" (see
+    // dbc_proc_callback_t::trigger() below) means EVERY generic proc -- item, enchant, set
+    // bonus, raid buff -- rolls synchronously inside the triggering hit's frame but EXECUTES
+    // here on a later, zero-delay tick with an empty player_t::rl_cause_stack. Without this
+    // frame, cb->execute() (and anything it dispatches -- a secondary ability via
+    // schedule_execute(), or a direct atk->execute() call like generic::skyfury's raid-buff
+    // callback) falls through action_t::rl_resolve_cause() to ORPHAN. source_state is already
+    // a CLONE of the triggering state (this constructor, above), and action_state_t::copy_state
+    // already carries rl_cause_seq/rl_cause_class (Stage A1) -- so the cause is sitting right
+    // here. Only pushed when a real cause was stamped (rl_cause_seq >= 0); a heartbeat proc or
+    // any other no-state trigger leaves the stack untouched and stays orphan -- a legitimate
+    // finding, not a bug, per rl_credit.hpp's top-of-file comment.
+    std::optional<rl_cause_scope_t> rl_cause_guard;
+    if ( source_state && source_state->rl_cause_seq >= 0 )
+    {
+      rl_cause_guard.emplace( cb->listener,
+                               rl_credit::promote( rl_cause_t{ source_state->rl_cause_seq, source_state->rl_cause_class } ) );
+    }
     cb->execute( spell, target, source_state );
   }
 };
