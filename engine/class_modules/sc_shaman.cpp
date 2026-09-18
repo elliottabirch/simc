@@ -5631,8 +5631,18 @@ struct stormstrike_base_t : public shaman_attack_t
 
     bool stormblast;
 
-    stormflurry_event_t( stormstrike_base_t* a, player_t* t, timespan_t delay, bool sb ) :
-      event_t( *a->player, delay ), action( a ), target( t ), stormblast( sb )
+    // tstl-sylvanas quick task 260918-cbc (Stage A6.2): the cause active on the ORIGINAL
+    // strike's dispatch, captured synchronously by shaman_t::trigger_stormflurry() while that
+    // strike's own rl_cause_scope_t frame is still on the stack -- this event fires on a LATER
+    // event-loop pass (a ~200ms gaussian delay), by which point that frame has long since
+    // popped. Same pattern as lightning_rod (A5.1) and storm_unleashed_3 (A6.1): the stormflurry
+    // strike is a delayed effect of the strike that triggered it.
+    rl_cause_t rl_captured_cause;
+
+    stormflurry_event_t( stormstrike_base_t* a, player_t* t, timespan_t delay, bool sb,
+                          rl_cause_t rl_cause = rl_cause_t{} ) :
+      event_t( *a->player, delay ), action( a ), target( t ), stormblast( sb ),
+      rl_captured_cause( rl_cause )
     { }
 
     const char* name() const override
@@ -5647,6 +5657,7 @@ struct stormstrike_base_t : public shaman_attack_t
         return;
       }
 
+      rl_cause_scope_t rl_cause_guard( action->player, rl_captured_cause );
       action->trigger_stormflurry( target, stormblast );
       action->proc_stormflurry->occur();
     }
@@ -12644,11 +12655,18 @@ void shaman_t::trigger_stormflurry( const action_state_t* state )
       static_cast<unsigned>( ss->strike_type ), s->stormblast );
   }
 
+  // tstl-sylvanas quick task 260918-cbc (Stage A6.2): capture the currently active cause HERE,
+  // synchronously, while the triggering strike's own dispatch frame is still on the stack --
+  // see stormflurry_event_t's field comment above.
+  const rl_cause_t rl_sf_cause = rl_cause_stack.empty()
+                                      ? rl_cause_t{}
+                                      : rl_credit::promote( rl_cause_stack.back().cause );
+
   // Note, on live, the stormblast does not propagate to the stormflurried strikes, but rather
   // determines the state upon executing the strike
   make_event<stormstrike_t::stormflurry_event_t>( *sim, static_cast<stormstrike_base_t*>( a ),
                                                  state->target, delay,
-                                                 s->stormblast );
+                                                 s->stormblast, rl_sf_cause );
 }
 
 void shaman_t::trigger_imbuement_mastery( const action_state_t* state )
