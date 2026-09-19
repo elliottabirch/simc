@@ -78,6 +78,13 @@ public:
   /// and action_t::reset() in action.cpp. Seeded once per iteration in reset().
   rng::rng_t source_rng_;
 
+  /// Mid-fight re-salt (tstl-sylvanas quick task 260919-frk). Re-derives this action's stream
+  /// from the SAME source_key reset() uses, but with `sim->seed ^ salt` in place of `sim->seed`
+  /// -- see sim.hpp's per_source_rng_resalt_at/per_source_rng_salt doc comment and
+  /// sim_t::resalt_source_rngs(). Does NOT touch anything else reset() touches (cooldowns,
+  /// pending-cause bookkeeping) -- this is a pure RNG-stream reseed, callable mid-iteration.
+  void resalt_source_rng( uint64_t salt );
+
   /// Weapon used for this ability. If set extra weapon damage is calculated.
   weapon_t* weapon;
 

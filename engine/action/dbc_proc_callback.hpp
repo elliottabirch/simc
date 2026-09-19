@@ -80,6 +80,11 @@ struct dbc_proc_callback_t : public action_callback_t
   /// Seeded once per iteration in reset().
   rng::rng_t source_rng_;
 
+  /// Mid-fight re-salt (tstl-sylvanas quick task 260919-frk). See action_t::resalt_source_rng's
+  /// doc comment -- same shape, this class's own source_key. Defined in dbc_proc_callback.cpp,
+  /// called only from sim_t::resalt_source_rngs().
+  void resalt_source_rng( uint64_t salt );
+
   // Proc trigger types, cached/initialized here from special_effect_t to avoid
   // needless spell data lookups in vast majority of cases
   real_ppm_t* rppm;

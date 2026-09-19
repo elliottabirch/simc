@@ -25,12 +25,12 @@ rng::rng_t& proc_rng_t::rng()
   return player->rng();
 }
 
-void proc_rng_t::reseed_source_rng( size_t index_in_list )
+void proc_rng_t::reseed_source_rng( size_t index_in_list, uint64_t extra_salt )
 {
   if ( !player || !player->sim->per_source_rng )
     return;
 
-  source_rng_.seed( rng::per_source_seed( player->sim->seed, player->sim->thread_index,
+  source_rng_.seed( rng::per_source_seed( player->sim->seed ^ extra_salt, player->sim->thread_index,
                                            player->sim->current_iteration,
                                            fmt::format( "{}|procrng|{}|{}|{}", player->name_str, index_in_list,
                                                          static_cast<int>( rng_type_ ), name_str ) ) );

@@ -67,7 +67,13 @@ public:
   /// get_rppm/get_shuffled_rng/get_accumulated_rng/get_threshold_rng/get_simple_proc_rng, in a
   /// fixed profile-driven order, never reorders/shrinks after -- 260918-psr receipt Section 1).
   /// Key: "<player name>|procrng|<index>|<type enum as int>|<name_str>".
-  void reseed_source_rng( size_t index_in_list );
+  ///
+  /// `extra_salt` (tstl-sylvanas quick task 260919-frk, default 0 = byte-identical to the
+  /// original 260918-psr call sites) is XORed into `player->sim->seed` in place of using it
+  /// bare -- see sim.hpp's per_source_rng_resalt_at doc comment and sim_t::resalt_source_rngs().
+  /// A mid-fight resalt calls this a SECOND time within the same iteration with a nonzero salt;
+  /// the ordinary per-iteration call from player_t::reset() above always passes 0.
+  void reseed_source_rng( size_t index_in_list, uint64_t extra_salt = 0 );
 
   std::string_view name() const
   { return name_str; }

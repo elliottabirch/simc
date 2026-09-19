@@ -3453,6 +3453,24 @@ void action_t::reset()
   expr_t::optimize_expression( cancel_if_expr, *sim );
 }
 
+// Mid-fight re-salt (tstl-sylvanas quick task 260919-frk). Same source_key as reset() above,
+// `sim->seed ^ salt` in place of `sim->seed` -- see sim.hpp's per_source_rng_resalt_at doc
+// comment and sim_t::resalt_source_rngs(). Deliberately does NOT re-run any of reset()'s other
+// side effects (cooldowns, pending-cause bookkeeping, if_expr optimization) -- callable
+// mid-iteration, not just at iteration boundaries.
+void action_t::resalt_source_rng( uint64_t salt )
+{
+  if ( !sim->per_source_rng )
+    return;
+
+  auto it = range::find( player->action_list, this );
+  size_t idx = it != player->action_list.end()
+                   ? static_cast<size_t>( std::distance( player->action_list.begin(), it ) )
+                   : player->action_list.size();
+  source_rng_.seed( rng::per_source_seed( sim->seed ^ salt, sim->thread_index, sim->current_iteration,
+                                           fmt::format( "{}|action|{}|{}", player->name_str, idx, name_str ) ) );
+}
+
 void action_t::cancel()
 {
   sim->print_debug( "{} {} is canceled", *player, *this );

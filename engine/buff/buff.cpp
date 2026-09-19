@@ -3192,6 +3192,33 @@ void buff_t::reset()
     internal_cooldown->reset_init();
 }
 
+// Mid-fight re-salt (tstl-sylvanas quick task 260919-frk). Same source_key as reset() above,
+// `sim->seed ^ salt` in place of `sim->seed` -- see sim.hpp's per_source_rng_resalt_at doc
+// comment and sim_t::resalt_source_rngs(). Deliberately does NOT call expire() or any of
+// reset()'s other side effects -- pure RNG-stream reseed, callable mid-iteration.
+void buff_t::resalt_source_rng( uint64_t salt )
+{
+  if ( !sim->per_source_rng )
+    return;
+
+  std::string owner_name = player ? player->name_str : std::string( "sim" );
+  size_t idx;
+  if ( player )
+  {
+    auto it = range::find( player->buff_list, this );
+    idx = it != player->buff_list.end() ? static_cast<size_t>( std::distance( player->buff_list.begin(), it ) )
+                                         : player->buff_list.size();
+  }
+  else
+  {
+    auto it = range::find( sim->buff_list, this );
+    idx = it != sim->buff_list.end() ? static_cast<size_t>( std::distance( sim->buff_list.begin(), it ) )
+                                      : sim->buff_list.size();
+  }
+  source_rng_.seed( rng::per_source_seed( sim->seed ^ salt, sim->thread_index, sim->current_iteration,
+                                           fmt::format( "{}|buff|{}|{}", owner_name, idx, name_str ) ) );
+}
+
 void buff_t::merge( const buff_t& other )
 {
   start_intervals.merge( other.start_intervals );

@@ -60,6 +60,11 @@ public:
   /// sim->per_source_rng is true -- see sim.hpp's per_source_rng doc comment, buff_t::rng() and
   /// buff_t::reset() in buff.cpp. Seeded once per iteration in reset().
   rng::rng_t source_rng_;
+  /// Mid-fight re-salt (tstl-sylvanas quick task 260919-frk). See action_t::resalt_source_rng's
+  /// doc comment -- same shape, this class's own source_key. Defined in buff.cpp, called only
+  /// from sim_t::resalt_source_rngs(). Deliberately does NOT call expire()/reset()'s other
+  /// side effects -- pure RNG-stream reseed, callable mid-iteration.
+  void resalt_source_rng( uint64_t salt );
   std::vector<event_t*> expiration;
   std::vector<event_t*> delay;
   event_t* expiration_delay;

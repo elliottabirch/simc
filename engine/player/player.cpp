@@ -6946,6 +6946,19 @@ void player_t::reset()
   reset_resource_callbacks();
 }
 
+// Mid-fight re-salt (tstl-sylvanas quick task 260919-frk). Same source_key as reset() above,
+// `sim->seed ^ salt` in place of `sim->seed` -- see sim.hpp's per_source_rng_resalt_at doc
+// comment and sim_t::resalt_source_rngs(). Deliberately does NOT re-run any of reset()'s other
+// side effects -- pure RNG-stream reseed, callable mid-iteration.
+void player_t::resalt_source_rng( uint64_t salt )
+{
+  if ( !sim->per_source_rng )
+    return;
+
+  source_rng_.seed( rng::per_source_seed( sim->seed ^ salt, sim->thread_index, sim->current_iteration,
+                                           fmt::format( "{}|player", name_str ) ) );
+}
+
 void player_t::trigger_ready()
 {
   if ( ready_type == READY_POLL )

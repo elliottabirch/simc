@@ -349,6 +349,11 @@ struct player_t : public actor_t
   // player_t::reset() in player.cpp. Seeded once per iteration in reset().
   rng::rng_t source_rng_;
 
+  // Mid-fight re-salt (tstl-sylvanas quick task 260919-frk). See action_t::resalt_source_rng's
+  // doc comment -- same shape, this class's own source_key. Defined in player.cpp, called only
+  // from sim_t::resalt_source_rngs().
+  void resalt_source_rng( uint64_t salt );
+
   // Callbacks
   effect_callbacks_t callbacks;
   auto_dispose< std::vector<special_effect_t*> > special_effects;

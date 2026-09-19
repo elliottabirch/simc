@@ -5,6 +5,8 @@
 
 #include "sim.hpp"
 
+#include "action/action.hpp"
+#include "action/dbc_proc_callback.hpp"
 #include "buff/buff.hpp"
 #include "class_modules/class_module.hpp"
 #include "dbc/dbc.hpp"
@@ -22,6 +24,7 @@
 #include "sim/event.hpp"
 #include "sim/iteration_data_entry.hpp"
 #include "sim/plot.hpp"
+#include "sim/proc_rng.hpp"
 #include "sim/raid_event.hpp"
 #include "sim/reforge_plot.hpp"
 #include "sim/cooldown.hpp"
@@ -1925,6 +1928,61 @@ void sim_t::reset()
 }
 
 /// Start combat.
+// Mid-fight per-source RNG re-salt (tstl-sylvanas quick task 260919-frk). See sim.hpp's
+// per_source_rng_resalt_at doc comment for the full contract. No-op when per_source_rng is off
+// (every per-object resalt_source_rng()/reseed_source_rng() call below independently
+// short-circuits on the same flag, so this early return is redundant defense-in-depth, not the
+// only guard).
+//
+// solver_explore_rng is deliberately NOT reseeded here -- that stream drives the FIFO/
+// solver_control exploration-noise draw (`CFA-DESIGN.md` Section 1.6/1.7(a)'s rule, restated in
+// FRK-DESIGN.md Section 3.3): a probe/forced-action caller is expected to overwrite the chosen
+// action AFTER that draw already happened, keeping the stream in phase across both branches of
+// a comparison. Resalting it here would desync that phase for any caller relying on it.
+void sim_t::resalt_source_rngs( uint64_t salt )
+{
+  if ( !per_source_rng )
+    return;
+
+  // Reseed the shared stream too -- anything not yet migrated to a per-source holder still
+  // draws from this (sim->rng() / sim_t::_rng). Uses the SAME per_source_seed() derivation as
+  // every holder below, with a fixed sentinel source_key so this reseed is itself just another
+  // instance of the same scheme, not a special case.
+  _rng.seed( rng::per_source_seed( seed ^ salt, thread_index, current_iteration, "sim|_rng" ) );
+
+  for ( auto* p : actor_list )
+  {
+    if ( !p )
+      continue;
+
+    p->resalt_source_rng( salt );
+
+    for ( auto* a : p->action_list )
+      if ( a )
+        a->resalt_source_rng( salt );
+
+    for ( auto* b : p->buff_list )
+      if ( b )
+        b->resalt_source_rng( salt );
+
+    for ( auto* cb : p->callbacks.all_callbacks )
+    {
+      if ( auto* proc_cb = dynamic_cast<dbc_proc_callback_t*>( cb ) )
+        proc_cb->resalt_source_rng( salt );
+    }
+
+    for ( size_t idx = 0; idx < p->proc_rng_list.size(); ++idx )
+      p->proc_rng_list[ idx ]->reseed_source_rng( idx, salt );
+  }
+
+  // Sim-scoped raid buffs (buff_t's sim_t-only constructor overloads -- see buff_t::reset()'s
+  // own doc comment) live in sim->buff_list, not any player's, and are not reachable from
+  // actor_list above.
+  for ( auto* b : buff_list )
+    if ( b )
+      b->resalt_source_rng( salt );
+}
+
 void sim_t::combat_begin()
 {
   if ( debug_each )
@@ -1954,6 +2012,19 @@ void sim_t::combat_begin()
   // own doc comment in sim/solver_control.hpp for why this hook (not
   // reset() itself) and exactly which four members it clears.
   solver_control::reset_iteration( this );
+
+  // Mid-fight per-source RNG re-salt (tstl-sylvanas quick task 260919-frk): schedule ONE event
+  // per iteration at per_source_rng_resalt_at (relative to fight start -- current_time() is
+  // 0_ms here, before iterate() begins). See sim.hpp's per_source_rng_resalt_at doc comment.
+  // The init()-time refusal check (see sim_t::init()) already guarantees per_source_rng is true
+  // whenever this branch is taken.
+  if ( per_source_rng_resalt_at >= timespan_t::zero() )
+  {
+    uint64_t resalt_salt = per_source_rng_salt;
+    make_event( *this, per_source_rng_resalt_at, [ this, resalt_salt ]() {
+      resalt_source_rngs( resalt_salt );
+    } );
+  }
 
   // Debug seed needs to be done _after_ sim reset, because deterministic=1 will reseed in
   // sim_t::reset()
@@ -2755,6 +2826,19 @@ void sim_t::init()
     }
   }
   _rng.seed( seed + thread_index );
+
+  // Mid-fight per-source RNG re-salt (tstl-sylvanas quick task 260919-frk): refuse by name if
+  // the resalt is requested but per_source_rng itself is off -- see sim.hpp's
+  // per_source_rng_resalt_at doc comment for why this is a hard error rather than a silent
+  // no-op (every holder's resalt call short-circuits on `!sim->per_source_rng` and would do
+  // nothing, giving the illusion of an effect that never happened).
+  if ( per_source_rng_resalt_at >= timespan_t::zero() && !per_source_rng )
+  {
+    throw sc_invalid_sim_argument(
+        "per_source_rng_resalt_at requires per_source_rng=1 -- refusing a resalt of streams "
+        "that are not per-source in the first place (see sim.hpp's per_source_rng_resalt_at "
+        "doc comment)." );
+  }
 
   if (   queue_lag.stddev == 0_ms )   queue_lag.stddev =   queue_lag.mean * 0.25;
   if (     gcd_lag.stddev == 0_ms )     gcd_lag.stddev =     gcd_lag.mean * 0.25;
@@ -4093,6 +4177,11 @@ void sim_t::create_options()
   // Per-source RNG streams (tstl-sylvanas quick task 260918-psr). See sim.hpp's per_source_rng
   // doc comment. Default false, byte-identical to today's shared-stream behavior.
   add_option( opt_bool( "per_source_rng", per_source_rng ) );
+  // Mid-fight per-source RNG re-salt (tstl-sylvanas quick task 260919-frk). See sim.hpp's
+  // per_source_rng_resalt_at doc comment. Default off (-1s sentinel, salt 0) -- byte-identical
+  // to today's per_source_rng=1 behavior when unset.
+  add_option( opt_timespan( "per_source_rng_resalt_at", per_source_rng_resalt_at ) );
+  add_option( opt_uint64( "per_source_rng_salt", per_source_rng_salt ) );
   add_option( opt_bool( "strict_work_queue", strict_work_queue ) );
   add_option( opt_float( "report_iteration_data", report_iteration_data ) );
   add_option( opt_int( "min_report_iteration_data", min_report_iteration_data ) );

@@ -441,6 +441,23 @@ void dbc_proc_callback_t::reset()
   }
 }
 
+// Mid-fight re-salt (tstl-sylvanas quick task 260919-frk). Same source_key as reset() above,
+// `sim->seed ^ salt` in place of `sim->seed` -- see sim.hpp's per_source_rng_resalt_at doc
+// comment and sim_t::resalt_source_rngs(). Pure RNG-stream reseed, callable mid-iteration.
+void dbc_proc_callback_t::resalt_source_rng( uint64_t salt )
+{
+  if ( !listener->sim->per_source_rng )
+    return;
+
+  auto it = range::find( listener->callbacks.all_callbacks, static_cast<action_callback_t*>( this ) );
+  size_t idx = it != listener->callbacks.all_callbacks.end()
+                   ? static_cast<size_t>( std::distance( listener->callbacks.all_callbacks.begin(), it ) )
+                   : listener->callbacks.all_callbacks.size();
+  source_rng_.seed( rng::per_source_seed(
+      listener->sim->seed ^ salt, listener->sim->thread_index, listener->sim->current_iteration,
+      fmt::format( "{}|proc|{}|{}:{}", listener->name_str, idx, effect.spell_id, effect.name() ) ) );
+}
+
 bool dbc_proc_callback_t::roll( action_t* action )
 {
   if ( rppm )

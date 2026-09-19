@@ -232,6 +232,33 @@ struct sim_t : private sc_thread_t
   // child, so no separate propagation code is needed.
   bool per_source_rng = false;
 
+  // Mid-fight per-source RNG re-salt (tstl-sylvanas quick task 260919-frk). Off by default
+  // (per_source_rng_resalt_at < 0_ms, the sentinel). When per_source_rng_resalt_at >= 0_ms AND
+  // per_source_rng is true, sim_t::combat_begin() schedules ONE event per iteration at that sim
+  // time (relative to fight start) that calls resalt_source_rngs( per_source_rng_salt ) --
+  // walking every per-source RNG holder in the fight (player/action/buff/dbc_proc_callback/
+  // proc_rng, all five families the per_source_rng doc comment above lists) plus the shared
+  // sim_t::_rng, and reseeding each one from the SAME per_source_seed() derivation its own
+  // reset() uses, except with `seed ^ per_source_rng_salt` in place of the bare `seed`. This
+  // makes the resalt a pure, deterministic function of (salt, current_iteration, source_key):
+  // the SAME salt on two otherwise-identical fights reproduces the SAME post-resalt dice from
+  // every source (pairing, within one replay); two DIFFERENT salts diverge from the resalt
+  // point on (independent replays to average over). Setting per_source_rng_resalt_at without
+  // per_source_rng is refused by name at option-validation time in sim_t::init() -- see that
+  // call site -- because a resalt of streams that are not per-source in the first place would
+  // silently no-op every holder and give the illusion of an effect that never happened.
+  // solver_explore_rng (the exploration-noise stream used by the FIFO/solver_control transport)
+  // is deliberately NOT included -- see resalt_source_rngs()'s own comment for why.
+  timespan_t per_source_rng_resalt_at = timespan_t::from_seconds( -1.0 );
+  uint64_t per_source_rng_salt = 0;
+
+  // Walks every per-source RNG holder (see per_source_rng_resalt_at above) and reseeds it from
+  // `seed ^ salt`. Defined in sim.cpp; a no-op (returns immediately) when per_source_rng is
+  // false. Public so a probe script's driving code (or a unit test) can call it directly without
+  // going through the timed-event path, e.g. to resalt at a caller-chosen moment instead of a
+  // fixed sim time.
+  void resalt_source_rngs( uint64_t salt );
+
   // Raid Events
   std::vector<std::unique_ptr<raid_event_t>> raid_events;
   std::string raid_events_str;
