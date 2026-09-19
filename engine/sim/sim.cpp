@@ -292,6 +292,67 @@ bool parse_initial_buff( sim_t* sim, util::string_view, util::string_view value 
   return true;
 }
 
+// parse_rl_iteration_seeds =================================================
+//
+// Iteration-batched scorecard seeding (tstl-sylvanas quick task 260919-scb).
+// rl_iteration_seeds=<comma list>|@<file>. A comma list is a literal token
+// list, e.g. "123,456,789". An "@file" token reads one uint64 seed per
+// non-empty, non-'#'-prefixed line from that path -- this is a convenience
+// for a batch large enough that a comma list on one option line would be
+// unwieldy; it is not exercised by the O1-O4 oracles below, which all pass
+// a short comma list. Values must parse as unsigned 64-bit integers; a
+// malformed token throws by name rather than being silently skipped.
+
+bool parse_rl_iteration_seeds( sim_t* sim, util::string_view, util::string_view value )
+{
+  std::vector<uint64_t> seeds;
+
+  auto parse_token = [&seeds]( util::string_view tok ) {
+    if ( tok.empty() )
+      return;
+    try
+    {
+      seeds.push_back( std::stoull( std::string( tok ) ) );
+    }
+    catch ( const std::exception& )
+    {
+      throw sc_invalid_sim_argument(
+        fmt::format( "rl_iteration_seeds: malformed seed token '{}', expected an unsigned integer", tok ) );
+    }
+  };
+
+  if ( !value.empty() && value[ 0 ] == '@' )
+  {
+    std::string path( value.substr( 1 ) );
+    io::ifstream file;
+    file.open( path );
+    if ( !file.is_open() )
+    {
+      throw sc_invalid_sim_argument(
+        fmt::format( "rl_iteration_seeds: unable to open seed file '{}'", path ) );
+    }
+    std::string line;
+    while ( std::getline( file, line ) )
+    {
+      util::string_view line_sv( line );
+      if ( !line_sv.empty() && line_sv.back() == '\r' )
+        line_sv.remove_suffix( 1 );
+      if ( line_sv.empty() || line_sv[ 0 ] == '#' )
+        continue;
+      parse_token( line_sv );
+    }
+  }
+  else
+  {
+    for ( auto tok : util::string_split<util::string_view>( value, "," ) )
+      parse_token( tok );
+  }
+
+  sim->rl_iteration_seeds = std::move( seeds );
+
+  return true;
+}
+
 // parse_ptr ================================================================
 
 bool parse_ptr( sim_t*             sim,
@@ -1880,7 +1941,21 @@ void sim_t::reset()
 {
   print_debug( "Resetting Simulator" );
 
-  if ( deterministic )
+  // Iteration-batched scorecard seeding (tstl-sylvanas quick task 260919-scb). See sim.hpp's
+  // rl_iteration_seeds doc comment for the identity argument. `current_iteration` has already
+  // been incremented for this fight by the caller (the main iteration loop, before combat() ->
+  // combat_begin() -> reset()), so it is the correct 0-based index into the seed list here.
+  // `_rng.reset()` is REQUIRED, not optional -- it clears the cached second value of the
+  // Box-Muller gaussian pair (rng.hpp's gauss_pair_value/gauss_pair_use); omitting it lets one
+  // stale gaussian leak across the iteration boundary and the identity oracle fails
+  // intermittently, in a way that looks like an engine bug (SCB-DESIGN.md Sec 2.5).
+  if ( !rl_iteration_seeds.empty() )
+  {
+    seed = rl_iteration_seeds[ std::min<size_t>( current_iteration, rl_iteration_seeds.size() - 1 ) ];
+    _rng.seed( seed + thread_index );
+    _rng.reset();
+  }
+  else if ( deterministic )
     seed = rng().reseed();
 
   event_mgr.reset();
@@ -2159,8 +2234,31 @@ void sim_t::combat_end()
     b -> expire();
   }
 
-  if ( iterations == 1 || current_iteration >= 1 )
+  // Iteration-batched scorecard seeding (tstl-sylvanas quick task 260919-scb) companion change:
+  // the warm-up-fight discard below exists for multi-thread statistical warm-up, which does not
+  // apply when every iteration is independently seeded by rl_iteration_seeds -- collect
+  // unconditionally in that case so a K-seed batch measures exactly K fights, not K-1
+  // (SCB-DESIGN.md Sec 2.2/2.5 companion).
+  if ( iterations == 1 || current_iteration >= 1 || !rl_iteration_seeds.empty() )
     datacollection_end();
+
+  // Per-iteration DPS sidecar readout (tstl-sylvanas quick task 260919-scb). No-op when
+  // rl_iteration_out is unset. Uses the same `iteration_dmg / current_time().total_seconds()`
+  // expression datacollection_end() uses for raid_dps, so this readout and extract_dps() read
+  // the identical quantity. Truncated on iteration 0 (the first fight this process runs),
+  // appended thereafter -- safe because rl_iteration_seeds refuses threads > 1 above, so this
+  // sim_t is the sole writer to this path.
+  if ( !rl_iteration_out.empty() )
+  {
+    double dps = current_time() != timespan_t::zero() ? iteration_dmg / current_time().total_seconds() : 0.0;
+    io::ofstream out;
+    out.open( rl_iteration_out, current_iteration == 0 ? ( std::ios::out | std::ios::trunc )
+                                                         : ( std::ios::out | std::ios::app ) );
+    if ( out.is_open() )
+    {
+      out.printf( "%d,%llu,%.17g\n", current_iteration, static_cast<unsigned long long>( seed ), dps );
+    }
+  }
 
   // Flight recorder close row (phase 212, plan 212-01, TLOG-02, D-07/D-08).
   // 212-CR-FIX WR-08: the placement AFTER datacollection_end() is NOT
@@ -2838,6 +2936,31 @@ void sim_t::init()
         "per_source_rng_resalt_at requires per_source_rng=1 -- refusing a resalt of streams "
         "that are not per-source in the first place (see sim.hpp's per_source_rng_resalt_at "
         "doc comment)." );
+  }
+
+  // Iteration-batched scorecard seeding (tstl-sylvanas quick task 260919-scb): three fail-closed
+  // refusals, named by name, before any fight runs. See sim.hpp's rl_iteration_seeds doc comment.
+  if ( !rl_iteration_seeds.empty() )
+  {
+    if ( deterministic )
+    {
+      throw sc_invalid_sim_argument(
+          "rl_iteration_seeds carries deterministic=1 alongside a seed list -- these drive "
+          "different reseed paths in sim_t::reset() and must never coexist." );
+    }
+    if ( threads > 1 )
+    {
+      throw sc_invalid_sim_argument(
+          "rl_iteration_seeds requires threads=1 -- with threads>1 a work queue distributes "
+          "iterations across threads, making the seed[i]->iteration i mapping ambiguous." );
+    }
+    if ( rl_iteration_seeds.size() < static_cast<size_t>( iterations ) )
+    {
+      throw sc_invalid_sim_argument(
+          fmt::format( "rl_iteration_seeds provides {} seed(s) but iterations={} was requested -- "
+                       "refusing to run past the end of the committed seed list.",
+                       rl_iteration_seeds.size(), iterations ) );
+    }
   }
 
   if (   queue_lag.stddev == 0_ms )   queue_lag.stddev =   queue_lag.mean * 0.25;
@@ -4182,6 +4305,10 @@ void sim_t::create_options()
   // to today's per_source_rng=1 behavior when unset.
   add_option( opt_timespan( "per_source_rng_resalt_at", per_source_rng_resalt_at ) );
   add_option( opt_uint64( "per_source_rng_salt", per_source_rng_salt ) );
+  // Iteration-batched scorecard seeding (tstl-sylvanas quick task 260919-scb). See sim.hpp's
+  // rl_iteration_seeds doc comment. Default empty, byte-identical to today's behavior.
+  add_option( opt_func( "rl_iteration_seeds", parse_rl_iteration_seeds ) );
+  add_option( opt_string( "rl_iteration_out", rl_iteration_out ) );
   add_option( opt_bool( "strict_work_queue", strict_work_queue ) );
   add_option( opt_float( "report_iteration_data", report_iteration_data ) );
   add_option( opt_int( "min_report_iteration_data", min_report_iteration_data ) );

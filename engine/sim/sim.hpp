@@ -259,6 +259,27 @@ struct sim_t : private sc_thread_t
   // fixed sim time.
   void resalt_source_rngs( uint64_t salt );
 
+  // Iteration-batched scorecard seeding (tstl-sylvanas quick task 260919-scb). Default empty =
+  // today's behavior, byte-identical. When non-empty, sim_t::reset() (called once per iteration,
+  // from combat_begin(), AFTER current_iteration has already been incremented for that fight --
+  // see the main iteration loop) reseeds the shared `_rng` stream to
+  // `rl_iteration_seeds[min(current_iteration, size-1)] + thread_index` instead of drawing a
+  // chained `deterministic=1` reseed. This makes iteration i of a multi-iteration process
+  // reproduce the fresh single-iteration process launched with seed=rl_iteration_seeds[i] exactly
+  // (measured to 7 significant figures, see SCB-DESIGN.md Sec 2.3) -- there are no draws off the
+  // shared stream between _rng.seed() in init() and the first fight's first roll, and no
+  // cross-iteration state survives reset() for a profile with per_source_rng=0 and an exploration
+  // dial of 0.0 (SCB-DESIGN.md Sec 2.1). Refused by name (sim_t::init()) alongside deterministic=1,
+  // when threads > 1 (the `+ thread_index` fold makes the seed->fight mapping ambiguous once a
+  // work queue distributes iterations), and when the seed list is shorter than `iterations`.
+  std::vector<uint64_t> rl_iteration_seeds;
+  // Per-iteration DPS sidecar for rl_iteration_seeds= above. Default empty = disabled. One line
+  // per iteration, `iteration,seed,dps`, written from combat_end() using the same
+  // `iteration_dmg / current_time().total_seconds()` expression datacollection_end() already uses
+  // for raid_dps. Truncated on iteration 0, appended thereafter -- safe because rl_iteration_seeds
+  // refuses threads > 1, so this sim_t is the sole writer.
+  std::string rl_iteration_out;
+
   // Raid Events
   std::vector<std::unique_ptr<raid_event_t>> raid_events;
   std::string raid_events_str;
