@@ -2034,7 +2034,7 @@ void sim_t::resalt_source_rngs( uint64_t salt )
   // draws from this (sim->rng() / sim_t::_rng). Uses the SAME per_source_seed() derivation as
   // every holder below, with a fixed sentinel source_key so this reseed is itself just another
   // instance of the same scheme, not a special case.
-  _rng.seed( rng::per_source_seed( seed ^ salt, thread_index, current_iteration, "sim|_rng" ) );
+  _rng.seed( rng::per_source_seed( seed ^ salt, thread_index, rng_iteration_index(), "sim|_rng" ) );
 
   for ( auto* p : actor_list )
   {

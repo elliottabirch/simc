@@ -3403,7 +3403,7 @@ void action_t::reset()
     size_t idx = it != player->action_list.end()
                      ? static_cast<size_t>( std::distance( player->action_list.begin(), it ) )
                      : player->action_list.size();
-    source_rng_.seed( rng::per_source_seed( sim->seed, sim->thread_index, sim->current_iteration,
+    source_rng_.seed( rng::per_source_seed( sim->seed, sim->thread_index, sim->rng_iteration_index(),
                                              fmt::format( "{}|action|{}|{}", player->name_str, idx, name_str ) ) );
   }
 
@@ -3467,7 +3467,7 @@ void action_t::resalt_source_rng( uint64_t salt )
   size_t idx = it != player->action_list.end()
                    ? static_cast<size_t>( std::distance( player->action_list.begin(), it ) )
                    : player->action_list.size();
-  source_rng_.seed( rng::per_source_seed( sim->seed ^ salt, sim->thread_index, sim->current_iteration,
+  source_rng_.seed( rng::per_source_seed( sim->seed ^ salt, sim->thread_index, sim->rng_iteration_index(),
                                            fmt::format( "{}|action|{}|{}", player->name_str, idx, name_str ) ) );
 }
 

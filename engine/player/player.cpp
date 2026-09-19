@@ -6794,7 +6794,7 @@ void player_t::reset()
   // comment for the full contract.
   if ( sim->per_source_rng )
   {
-    source_rng_.seed( rng::per_source_seed( sim->seed, sim->thread_index, sim->current_iteration,
+    source_rng_.seed( rng::per_source_seed( sim->seed, sim->thread_index, sim->rng_iteration_index(),
                                              fmt::format( "{}|player", name_str ) ) );
   }
 
@@ -6955,7 +6955,7 @@ void player_t::resalt_source_rng( uint64_t salt )
   if ( !sim->per_source_rng )
     return;
 
-  source_rng_.seed( rng::per_source_seed( sim->seed ^ salt, sim->thread_index, sim->current_iteration,
+  source_rng_.seed( rng::per_source_seed( sim->seed ^ salt, sim->thread_index, sim->rng_iteration_index(),
                                            fmt::format( "{}|player", name_str ) ) );
 }
 

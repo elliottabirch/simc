@@ -259,6 +259,22 @@ struct sim_t : private sc_thread_t
   // fixed sim time.
   void resalt_source_rngs( uint64_t salt );
 
+  // Batch-position-independent iteration index for RNG derivations keyed on (seed, iteration)
+  // (tstl-sylvanas quick task 260919-psb). `current_iteration` is a BATCH-RELATIVE position, not
+  // part of the semantic identity of a committed iteration seed: with rl_iteration_seeds= (below)
+  // installing seed S_i into `seed` before any of this iteration's RNG derivations run (reset()
+  // does that install first), every stream that also folds in `current_iteration` -- per_source_seed()
+  // callers (action/buff/player reset() and resalt) and solver_control's explore-stream reseed --
+  // would still draw DIFFERENT dice for the same committed seed depending on where in the batch it
+  // landed, defeating the exact identity rl_iteration_seeds exists to guarantee. This returns 0 in
+  // that case (the batch's own position degenerates to the position a fresh single-fight process
+  // always sees) and `current_iteration` unchanged otherwise, so behavior with rl_iteration_seeds
+  // empty is byte-identical to before this method existed.
+  int rng_iteration_index() const
+  {
+    return rl_iteration_seeds.empty() ? current_iteration : 0;
+  }
+
   // Iteration-batched scorecard seeding (tstl-sylvanas quick task 260919-scb). Default empty =
   // today's behavior, byte-identical. When non-empty, sim_t::reset() (called once per iteration,
   // from combat_begin(), AFTER current_iteration has already been incremented for that fight --
@@ -272,6 +288,10 @@ struct sim_t : private sc_thread_t
   // dial of 0.0 (SCB-DESIGN.md Sec 2.1). Refused by name (sim_t::init()) alongside deterministic=1,
   // when threads > 1 (the `+ thread_index` fold makes the seed->fight mapping ambiguous once a
   // work queue distributes iterations), and when the seed list is shorter than `iterations`.
+  // As of 260919-psb, this identity guarantee ALSO covers per_source_rng=1 (per_source_seed()
+  // derivations key on rng_iteration_index() above, not the raw batch position) and a nonzero
+  // solver_control exploration dial (solver_explore_rng's per-fight reseed does the same) -- see
+  // rng_iteration_index()'s own comment.
   std::vector<uint64_t> rl_iteration_seeds;
   // Per-iteration DPS sidecar for rl_iteration_seeds= above. Default empty = disabled. One line
   // per iteration, `iteration,seed,dps`, written from combat_end() using the same

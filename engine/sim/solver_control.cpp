@@ -1342,9 +1342,21 @@ void reset_iteration( sim_t* sim )
   // pattern repeated N times. `rng::rng_t::seed()` runs the result through
   // its own 64-bit mixer, so this derivation only needs to spread the
   // input apart, not pre-mix it.
+  //
+  // 260919-psb: the fight-index term uses sim->rng_iteration_index(), not the raw batch position
+  // `sim->current_iteration`, for the same reason per_source_seed() callers do (see that
+  // method's doc comment in sim.hpp). With rl_iteration_seeds= non-empty, `sim->seed` is already
+  // the distinct COMMITTED per-iteration seed S_i by the time this runs -- reset() installs it
+  // before combat_begin() schedules this event -- so the spread this term exists to provide is
+  // already carried by seed itself; folding in the raw batch position on top would make the same
+  // committed seed draw a different exploration sequence depending on where in the batch it
+  // landed, which is exactly the batch-position dependency rl_iteration_seeds exists to remove.
+  // rng_iteration_index() returns 0 in that case (the term drops out, seed alone spreads fights
+  // apart) and current_iteration unchanged otherwise, so behavior with rl_iteration_seeds empty
+  // is byte-identical to before this change.
   constexpr std::uint64_t EXPLORE_SEED_FIGHT_SPREAD = 0x9E3779B97F4A7C15ull;
   const std::uint64_t explore_seed = sim->seed
-      + static_cast<std::uint64_t>( sim->current_iteration ) * EXPLORE_SEED_FIGHT_SPREAD
+      + static_cast<std::uint64_t>( sim->rng_iteration_index() ) * EXPLORE_SEED_FIGHT_SPREAD
       + static_cast<std::uint64_t>( sim->thread_index );
   sim->solver_explore_rng.seed( explore_seed );
 }

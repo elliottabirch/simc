@@ -3166,7 +3166,7 @@ void buff_t::reset()
       idx = it != sim->buff_list.end() ? static_cast<size_t>( std::distance( sim->buff_list.begin(), it ) )
                                         : sim->buff_list.size();
     }
-    source_rng_.seed( rng::per_source_seed( sim->seed, sim->thread_index, sim->current_iteration,
+    source_rng_.seed( rng::per_source_seed( sim->seed, sim->thread_index, sim->rng_iteration_index(),
                                              fmt::format( "{}|buff|{}|{}", owner_name, idx, name_str ) ) );
   }
 
@@ -3215,7 +3215,7 @@ void buff_t::resalt_source_rng( uint64_t salt )
     idx = it != sim->buff_list.end() ? static_cast<size_t>( std::distance( sim->buff_list.begin(), it ) )
                                       : sim->buff_list.size();
   }
-  source_rng_.seed( rng::per_source_seed( sim->seed ^ salt, sim->thread_index, sim->current_iteration,
+  source_rng_.seed( rng::per_source_seed( sim->seed ^ salt, sim->thread_index, sim->rng_iteration_index(),
                                            fmt::format( "{}|buff|{}|{}", owner_name, idx, name_str ) ) );
 }
 
