@@ -436,7 +436,7 @@ void dbc_proc_callback_t::reset()
                      ? static_cast<size_t>( std::distance( listener->callbacks.all_callbacks.begin(), it ) )
                      : listener->callbacks.all_callbacks.size();
     source_rng_.seed( rng::per_source_seed(
-        listener->sim->seed, listener->sim->thread_index, listener->sim->current_iteration,
+        listener->sim->seed, listener->sim->thread_index, listener->sim->rng_iteration_index(),
         fmt::format( "{}|proc|{}|{}:{}", listener->name_str, idx, effect.spell_id, effect.name() ) ) );
   }
 }
@@ -454,7 +454,7 @@ void dbc_proc_callback_t::resalt_source_rng( uint64_t salt )
                    ? static_cast<size_t>( std::distance( listener->callbacks.all_callbacks.begin(), it ) )
                    : listener->callbacks.all_callbacks.size();
   source_rng_.seed( rng::per_source_seed(
-      listener->sim->seed ^ salt, listener->sim->thread_index, listener->sim->current_iteration,
+      listener->sim->seed ^ salt, listener->sim->thread_index, listener->sim->rng_iteration_index(),
       fmt::format( "{}|proc|{}|{}:{}", listener->name_str, idx, effect.spell_id, effect.name() ) ) );
 }
 

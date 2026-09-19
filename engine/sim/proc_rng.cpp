@@ -31,7 +31,7 @@ void proc_rng_t::reseed_source_rng( size_t index_in_list, uint64_t extra_salt )
     return;
 
   source_rng_.seed( rng::per_source_seed( player->sim->seed ^ extra_salt, player->sim->thread_index,
-                                           player->sim->current_iteration,
+                                           player->sim->rng_iteration_index(),
                                            fmt::format( "{}|procrng|{}|{}|{}", player->name_str, index_in_list,
                                                          static_cast<int>( rng_type_ ), name_str ) ) );
 }
