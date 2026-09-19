@@ -19,6 +19,7 @@
 #include "sim/expressions.hpp"
 #include "sim/sim.hpp"
 #include "util/rng.hpp"
+#include <cstdlib>  // TEMPORARY (260919-scb T1) -- getenv() for rl_trace_rng_enabled()
 
 // ==========================================================================
 // Raid Events
@@ -26,6 +27,17 @@
 
 namespace
 {  // UNNAMED NAMESPACE
+
+// TEMPORARY trace instrumentation (tstl-sylvanas quick task 260919-scb, T1 follow-up, see
+// SCB-RECEIPT.md Section 7.4/8). Gated at runtime on RL_TRACE_RNG=1 (checked once, cached) so a
+// normal build/run is a no-op except for one getenv() call the first time this TU is used.
+// Remove this block and its three call sites in adds_event_t::_start() below once the
+// raid-events-shape-specific O1 divergence is closed.
+bool rl_trace_rng_enabled()
+{
+  static const bool enabled = ( std::getenv( "RL_TRACE_RNG" ) != nullptr );
+  return enabled;
+}
 
 struct adds_event_t final : public raid_event_t
 {
@@ -277,8 +289,14 @@ struct adds_event_t final : public raid_event_t
 
   void _start() override
   {
-    adds_to_remove = static_cast<size_t>(
-        util::round( std::max( 0.0, sim->rng().range( count - count_range, count + count_range ) ) ) );
+    if ( rl_trace_rng_enabled() )
+      fmt::print( stderr, "[RL_TRACE_RNG] iter={} seed={} n={} site=start_entry name={}\n",
+                  sim->current_iteration, sim->seed, sim->rng().rl_trace_n(), log_name() );
+    double count_draw = sim->rng().range( count - count_range, count + count_range );
+    if ( rl_trace_rng_enabled() )
+      fmt::print( stderr, "[RL_TRACE_RNG] iter={} seed={} n={} site=adds_count name={} value={}\n",
+                  sim->current_iteration, sim->seed, sim->rng().rl_trace_n(), log_name(), count_draw );
+    adds_to_remove = static_cast<size_t>( util::round( std::max( 0.0, count_draw ) ) );
 
     double x_offset      = 0;
     double y_offset      = 0;
@@ -304,7 +322,13 @@ struct adds_event_t final : public raid_event_t
           double angle_start = spawn_angle_start * ( m_pi / 180 );
           double angle_end   = spawn_angle_end * ( m_pi / 180 );
           double angle       = sim->rng().range( angle_start, angle_end );
+          if ( rl_trace_rng_enabled() )
+            fmt::print( stderr, "[RL_TRACE_RNG] iter={} seed={} n={} site=angle name={} value={}\n",
+                        sim->current_iteration, sim->seed, sim->rng().rl_trace_n(), log_name(), angle );
           double radius      = sim->rng().range( std::fabs( spawn_radius_min ), std::fabs( spawn_radius_max ) );
+          if ( rl_trace_rng_enabled() )
+            fmt::print( stderr, "[RL_TRACE_RNG] iter={} seed={} n={} site=radius name={} value={}\n",
+                        sim->current_iteration, sim->seed, sim->rng().rl_trace_n(), log_name(), radius );
           x_offset           = radius * cos( angle );
           y_offset           = radius * sin( angle );
           offset_computed    = true;

@@ -150,6 +150,16 @@ public:
   /// Uniform distribution in range [0..1)
   double real();
 
+  // TEMPORARY trace instrumentation (tstl-sylvanas quick task 260919-scb, T1 follow-up).
+  // Per-instance draw counter, incremented unconditionally in real() (the single choke point
+  // range()/roll()/gauss()/exponential() all funnel through), reset to 0 alongside the rest of
+  // this instance's state in reset(). Cheap (one integer increment per draw) and always
+  // maintained regardless of RL_TRACE_RNG so the printed value at any call site is exact --
+  // only the PRINTING is gated on the env var, at each call site, not this counter itself.
+  // Remove this block (and its two touch points in real()/reset() below) once the raid-events
+  // divergence traced in SCB-RECEIPT.md Section 7/8 is closed.
+  uint64_t rl_trace_n() const { return rl_trace_n_; }
+
   /// Bernoulli Distribution
   bool roll( double chance );
 
@@ -261,6 +271,8 @@ private:
 #ifdef RNG_STREAM_DEBUG
   uint64_t n = 0U;
 #endif
+  // TEMPORARY (260919-scb T1) -- see rl_trace_n() above.
+  uint64_t rl_trace_n_ = 0U;
 };
 
 /// Reseed using current state
@@ -287,6 +299,7 @@ void basic_rng_t<Engine>::reset()
 #ifdef RNG_STREAM_DEBUG
   n = 0U;
 #endif
+  rl_trace_n_ = 0U;  // TEMPORARY (260919-scb T1)
 }
 
 // ==========================================================================
@@ -299,6 +312,7 @@ inline double basic_rng_t<Engine>::real()
 {
   /// MAGIC! http://en.wikipedia.org/wiki/Double-precision_floating-point_format
   uint64_t ui64 = engine.next();
+  ++rl_trace_n_;  // TEMPORARY (260919-scb T1) -- see rl_trace_n() doc comment
 #ifdef RNG_STREAM_DEBUG
   auto u64raw = ui64;
 #endif

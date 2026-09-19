@@ -1993,7 +1993,18 @@ void sim_t::reset()
     }
   }
 
+  // TEMPORARY checkpoint trace (260919-scb T1 follow-up). See combat_begin()'s matching block
+  // for the full set of checkpoints -- bisects WHERE between reset() and the first raid-event
+  // draw a batch-position-dependent draw count divergence originates.
+  if ( getenv( "RL_TRACE_RNG" ) != nullptr )
+    fmt::print( stderr, "[RL_TRACE_RNG] iter={} seed={} n={} site=reset_after_actor_resets player_list_size={}\n",
+                current_iteration, seed, _rng.rl_trace_n(), player_list.size() );
+
   raid_event_t::reset( this );
+
+  if ( getenv( "RL_TRACE_RNG" ) != nullptr )
+    fmt::print( stderr, "[RL_TRACE_RNG] iter={} seed={} n={} site=reset_after_raid_event_reset player_list_size={}\n",
+                current_iteration, seed, _rng.rl_trace_n(), player_list.size() );
 
   // WR-11 (260902/cr4): rl_target_select's three module globals (decision stamps, the per-decision
   // pick table, the re-resolution counters) are cleared here, once per iteration -- mirrors
@@ -2083,6 +2094,11 @@ void sim_t::combat_begin()
 
   reset();
 
+  // TEMPORARY checkpoint trace (260919-scb T1 follow-up, see SCB-RECEIPT.md Section 7.4/8).
+  if ( getenv( "RL_TRACE_RNG" ) != nullptr )
+    fmt::print( stderr, "[RL_TRACE_RNG] iter={} seed={} n={} site=cb_after_reset player_list_size={}\n",
+                current_iteration, seed, _rng.rl_trace_n(), player_list.size() );
+
   // [214-01 C1] per-fight solver_control state reset -- see the function's
   // own doc comment in sim/solver_control.hpp for why this hook (not
   // reset() itself) and exactly which four members it clears.
@@ -2113,12 +2129,20 @@ void sim_t::combat_begin()
   // Always call begin() to ensure various counters are initialized.
   datacollection_begin();
 
+  if ( getenv( "RL_TRACE_RNG" ) != nullptr )
+    fmt::print( stderr, "[RL_TRACE_RNG] iter={} seed={} n={} site=cb_after_datacollection_begin player_list_size={}\n",
+                current_iteration, seed, _rng.rl_trace_n(), player_list.size() );
+
   // Initialise all actors before (pre)combat.
   for ( auto& t : target_list )
     t->precombat_init();
 
   for ( auto& t : target_list )
     t->combat_begin();
+
+  if ( getenv( "RL_TRACE_RNG" ) != nullptr )
+    fmt::print( stderr, "[RL_TRACE_RNG] iter={} seed={} n={} site=cb_after_target_combat_begin player_list_size={} target_list_size={}\n",
+                current_iteration, seed, _rng.rl_trace_n(), player_list.size(), target_list.size() );
 
   if ( overrides.arcane_intellect )
     auras.arcane_intellect->override_buff();
@@ -2169,6 +2193,10 @@ void sim_t::combat_begin()
     }
   }
 
+  if ( getenv( "RL_TRACE_RNG" ) != nullptr )
+    fmt::print( stderr, "[RL_TRACE_RNG] iter={} seed={} n={} site=cb_after_player_combat_begin player_list_size={} single_actor_batch={}\n",
+                current_iteration, seed, _rng.rl_trace_n(), player_list.size(), single_actor_batch );
+
   if ( requires_regen_event )
     make_event<regen_event_t>( *this, *this );
 
@@ -2193,7 +2221,15 @@ void sim_t::combat_begin()
   if ( !heartbeat_event_callback_function.empty() )
     make_event<heartbeat_event_t>( *this, *this, timespan_t::from_millis( rng().range( 1, 5249 ) ) );
 
+  if ( getenv( "RL_TRACE_RNG" ) != nullptr )
+    fmt::print( stderr, "[RL_TRACE_RNG] iter={} seed={} n={} site=cb_after_heartbeat heartbeat_cb_empty={}\n",
+                current_iteration, seed, _rng.rl_trace_n(), heartbeat_event_callback_function.empty() );
+
   raid_event_t::combat_begin( this );
+
+  if ( getenv( "RL_TRACE_RNG" ) != nullptr )
+    fmt::print( stderr, "[RL_TRACE_RNG] iter={} seed={} n={} site=cb_after_raid_event_combat_begin\n",
+                current_iteration, seed, _rng.rl_trace_n() );
 }
 
 // sim_t::combat_end ========================================================
@@ -2259,6 +2295,14 @@ void sim_t::combat_end()
       out.printf( "%d,%llu,%.17g\n", current_iteration, static_cast<unsigned long long>( seed ), dps );
     }
   }
+
+  // TEMPORARY trace instrumentation (tstl-sylvanas quick task 260919-scb, T1 follow-up, see
+  // SCB-RECEIPT.md Section 7.4/8). Prints the per-instance _rng draw counter at combat end so a
+  // trace diff can see the TOTAL draw count for the whole fight, not just up to the last
+  // raid-event draw -- remove once the raid-events divergence is closed.
+  if ( getenv( "RL_TRACE_RNG" ) != nullptr )
+    fmt::print( stderr, "[RL_TRACE_RNG] iter={} seed={} n={} site=combat_end\n",
+                current_iteration, seed, _rng.rl_trace_n() );
 
   // Flight recorder close row (phase 212, plan 212-01, TLOG-02, D-07/D-08).
   // 212-CR-FIX WR-08: the placement AFTER datacollection_end() is NOT
