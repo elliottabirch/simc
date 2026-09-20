@@ -4291,6 +4291,10 @@ void sim_t::create_options()
   // Default empty, disabled.
   add_option( opt_string( "rl_forward_probe", rl_forward_probe_str ) );
   add_option( opt_string( "rl_forward_probe_out", rl_forward_probe_out_str ) );
+  // 260920-cvf stage B, Task 1. Default 1 = today's exact behavior. See
+  // sim.hpp's rl_forward_probe_repeats doc comment.
+  add_option( opt_int( "rl_forward_probe_repeats", rl_forward_probe_repeats, 1,
+                        std::numeric_limits<int>::max() ) );
   // Flight recorder (phase 212, plan 212-01, TLOG-01/02/03). Mirrors
   // decision_dump=: empty = disabled (default), zero overhead.
   add_option( opt_string( "rl_translog", rl_translog_file_str ) );

@@ -33,6 +33,9 @@
 // "nan"/"inf" and clamps overflow to a finite value on this libstdc++ --
 // verified this session -- so strtof is what makes the non-finite refusal
 // reachable), <fstream> for the probe's plain-text input file.
+// 260920-cvf stage B, Task 1: <chrono> for std::chrono::steady_clock, used
+// only by the rl_forward_probe_repeats timing loop below.
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -464,7 +467,32 @@ int sim_t::main( const std::vector<std::string>& args )
         }
 
         float probe_q[ RL_ACTION_DIM ];
-        rl_policy::forward( *solver_policy_weights, probe_obs, probe_mask, probe_q );
+        // 260920-cvf stage B, Task 1: rl_forward_probe_repeats= (default 1)
+        // repeats the SAME inputs N times in a tight loop and times it with
+        // steady_clock. N=1 is byte-identical to the pre-existing single
+        // call below (out_json always reports the LAST call's Q, same as
+        // today). The stderr readout is the real per-decision cost of the
+        // production forward (LayerNorm included), not a microbenchmark
+        // harness guess.
+        if ( rl_forward_probe_repeats <= 1 )
+        {
+          rl_policy::forward( *solver_policy_weights, probe_obs, probe_mask, probe_q );
+        }
+        else
+        {
+          const auto probe_repeat_start = std::chrono::steady_clock::now();
+          for ( int rep = 0; rep < rl_forward_probe_repeats; ++rep )
+          {
+            rl_policy::forward( *solver_policy_weights, probe_obs, probe_mask, probe_q );
+          }
+          const auto probe_repeat_end = std::chrono::steady_clock::now();
+          const double probe_total_us =
+              std::chrono::duration<double, std::micro>( probe_repeat_end - probe_repeat_start )
+                  .count();
+          fmt::print( stderr, "rl_forward_probe: N={} total_us={:.3f} us_per_forward={:.6f}\n",
+                      rl_forward_probe_repeats, probe_total_us,
+                      probe_total_us / rl_forward_probe_repeats );
+        }
         const int probe_argmax = rl_policy::masked_argmax( probe_q, probe_mask );
 
         // NET-01: hidden_sizes is read through the SAME derived

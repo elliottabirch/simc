@@ -66,6 +66,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -923,40 +924,116 @@ void apply_layer_norm( std::vector<float>& x, const std::vector<float>& gamma, c
   }
 }
 
-// CVF (quick task 260920-cvf): 8-way independent partial-sum dot product. The original
-// dot product below was a single dependent accumulator chain (`acc += w[i]*x[i]`), which the
-// compiler cannot autovectorize -- each FMA must wait for the previous one's result. Splitting
-// into K=8 INDEPENDENT partial sums breaks that dependency chain, so the compiler can issue
-// SIMD FMAs across the 8 lanes in parallel; a scalar tail loop handles n % 8. The 8 partials are
-// combined at the end in a FIXED order -- ((s0+s1)+(s2+s3))+((s4+s5)+(s6+s7)) -- so the result is
-// deterministic regardless of the vectorization width the compiler actually chooses. Same
-// accumulation type (float32) as before: this changes only the SUMMATION ORDER, not precision,
-// and this file's build carries no -ffast-math / reassociation flag that would permit the
-// compiler to reorder float ops on its own. Callers: forward()'s hidden-layer loop, the mlp
-// output layer, and the dueling V/A heads -- every `for (...) acc += ...` dot product in this
-// file's hottest path.
-inline float dot8( const float* w, const float* x, std::uint32_t n )
+// 260920-cvf stage B, Task 2: replaces the 8-way-partial-sum `dot8()` above
+// (CVF stage 1) with a function-scoped-fast-math dot product plus a
+// once-at-load runtime dispatch. `dot8`'s explicit-accumulator form was
+// measured COMPILER-FRAGILE (orchestrator, brain / Ryzen 9 5900X, avx2+fma,
+// `-O3` no `-march`, 20k-rep repeat probe): 1.39x over the original
+// dependent-chain loop at baseline flags, but only 0.87x -- a REGRESSION --
+// once `-march=native` was added, because -march changed how the compiler
+// chose to vectorize the 8 independent accumulators and it chose worse. The
+// actual win measured on the SAME box/probe/inputs came from a different
+// lever entirely: `optimize("fast-math")` scoped to a single function
+// (permission to reassociate a finite-float sum; nothing else in the build
+// gets -ffast-math) plus `target("avx2,fma")` for explicit AVX2/FMA codegen
+// on that one function -- 9.0x (3.56us/forward) over the original loop's
+// 31.8us baseline, vs 4.5x (7.09us) for fast-math alone without avx2/fma.
+// max|dQ| vs the original loop over 200 inputs, gate 1e-5: 4.8e-8
+// (fast-math+avx2), 4.5e-8 (dot8, for comparison) -- both several orders of
+// magnitude inside tolerance. See dot_orig/dot_base/dot_avx2 below for the
+// three bodies and select_dot_fn() for why the dispatch exists.
+//
+// This is the ONE dot product every hot forward() call in this file uses --
+// the hidden-layer loop, the mlp output layer, and both dueling V/A heads
+// (every `for (...) acc += w[i]*x[i]` this file used to write by hand).
+
+// `dot_orig` is the pre-CVF, pre-dot8 form: a single dependent accumulator
+// chain, no attributes, no reassociation permission. Production dispatch
+// (the default, no RL_FORWARD_DOT override) never selects this -- it exists
+// so stage B Task 3's timing probe can reproduce the ORIGINAL baseline
+// number (31.8us/forward measured) against the same binary the AVX2 path
+// ships in, rather than needing a separate build.
+float dot_orig( const float* w, const float* x, std::uint32_t n )
 {
-  float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
-  float s4 = 0.0f, s5 = 0.0f, s6 = 0.0f, s7 = 0.0f;
-  std::uint32_t i = 0;
-  const std::uint32_t n8 = n - ( n % 8 );
-  for ( ; i < n8; i += 8 )
-  {
-    s0 += w[ i + 0 ] * x[ i + 0 ];
-    s1 += w[ i + 1 ] * x[ i + 1 ];
-    s2 += w[ i + 2 ] * x[ i + 2 ];
-    s3 += w[ i + 3 ] * x[ i + 3 ];
-    s4 += w[ i + 4 ] * x[ i + 4 ];
-    s5 += w[ i + 5 ] * x[ i + 5 ];
-    s6 += w[ i + 6 ] * x[ i + 6 ];
-    s7 += w[ i + 7 ] * x[ i + 7 ];
-  }
-  float tail = 0.0f;
-  for ( ; i < n; ++i )
-    tail += w[ i ] * x[ i ];
-  return ( ( s0 + s1 ) + ( s2 + s3 ) ) + ( ( s4 + s5 ) + ( s6 + s7 ) ) + tail;
+  float acc = 0.0f;
+  for ( std::uint32_t i = 0; i < n; ++i )
+    acc += w[ i ] * x[ i ];
+  return acc;
 }
+
+// `optimize("fast-math")` is FUNCTION-SCOPED, not a whole-TU or whole-build
+// flag -- it permits the compiler to reassociate the float multiply-adds in
+// THIS loop only. That reassociation is safe here specifically because the
+// inputs are a bounded RL observation/weight vector that sc_main.cpp's
+// rl_forward_probe already refuses to accept as non-finite upstream of this
+// call (std::isfinite() check on every observation value) -- fast-math's
+// usual hazard (NaN/Inf comparisons silently becoming UB) cannot arise on
+// this path. No other function in the engine's build carries -ffast-math;
+// this attribute changes codegen for this one symbol only. Measured 4.5x
+// over dot_orig on its own (7.09us/forward, same box/probe as above).
+// `noinline` keeps it a single, separately profilable/timeable symbol
+// rather than letting its fast-math-flavored codegen get smeared across
+// whatever calls it.
+__attribute__( ( noinline, optimize( "fast-math" ) ) )
+float dot_base( const float* w, const float* x, std::uint32_t n )
+{
+  float acc = 0.0f;
+  for ( std::uint32_t i = 0; i < n; ++i )
+    acc += w[ i ] * x[ i ];
+  return acc;
+}
+
+// Same reassociation permission as dot_base, PLUS `target("avx2,fma")`:
+// this function specifically is compiled to emit AVX2/FMA vector
+// instructions, regardless of the baseline -march the rest of the TU is
+// built for. Measured 9.0x over dot_orig (3.56us/forward). A binary built
+// for a baseline x86-64 target that called this function UNCONDITIONALLY
+// on a CPU lacking avx2+fma would SIGILL at the first call -- that is
+// exactly why `dot_fn` below never selects this without first checking
+// `__builtin_cpu_supports`.
+__attribute__( ( noinline, optimize( "fast-math" ), target( "avx2,fma" ) ) )
+float dot_avx2( const float* w, const float* x, std::uint32_t n )
+{
+  float acc = 0.0f;
+  for ( std::uint32_t i = 0; i < n; ++i )
+    acc += w[ i ] * x[ i ];
+  return acc;
+}
+
+using dot_fn_t = float ( * )( const float*, const float*, std::uint32_t );
+
+// 260920-cvf stage B, Task 3: RL_FORWARD_DOT={orig,base,avx2} lets the
+// timing probe force a specific body so all three can be measured against
+// the SAME binary/build instead of standing up three separate builds. Any
+// unset/empty/unrecognized value falls through to the production
+// CPU-feature dispatch below -- exactly what ships when nothing forces a
+// choice. getenv() runs ONCE, in this namespace-scope initializer, never in
+// the per-decision hot path.
+dot_fn_t select_dot_fn()
+{
+  if ( const char* forced = std::getenv( "RL_FORWARD_DOT" ) )
+  {
+    if ( std::strcmp( forced, "orig" ) == 0 )
+      return dot_orig;
+    if ( std::strcmp( forced, "base" ) == 0 )
+      return dot_base;
+    if ( std::strcmp( forced, "avx2" ) == 0 )
+      return dot_avx2;
+    // Falls through on any other value, same as unset.
+  }
+  // GCC >= 4.8 implicitly runs __builtin_cpu_init() the first time
+  // __builtin_cpu_supports() is used (verified against this fork's
+  // compiler, GCC 15.2.0) -- no explicit call needed. If a future toolchain
+  // ever requires it, call __builtin_cpu_init() here before the checks.
+  return ( __builtin_cpu_supports( "avx2" ) && __builtin_cpu_supports( "fma" ) )
+             ? dot_avx2
+             : dot_base;
+}
+
+// Namespace-scope initializer: runs once, before forward() can be called --
+// this is the only TU that defines or calls any of the three bodies above,
+// so there is no cross-TU init-order hazard to reason about.
+const dot_fn_t dot_fn = select_dot_fn();
 } // anonymous namespace
 
 void forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ], const std::uint8_t mask[ RL_ACTION_DIM ],
@@ -993,9 +1070,10 @@ void forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ], const std::u
     std::vector<float>& h = w.hidden_scratch[ li ];
     for ( std::uint32_t o = 0; o < l.out_features; ++o )
     {
-      // CVF: 8-way partial-sum dot product (see dot8() above) -- was a single dependent
-      // accumulator chain.
-      h[ o ] = l.bias[ o ] + dot8( &l.weight[ o * l.in_features ], layer_in, l.in_features );
+      // 260920-cvf stage B: fast-math/AVX2-dispatched dot product (see
+      // dot_fn/select_dot_fn() above) -- was dot8(), before that a single
+      // dependent accumulator chain.
+      h[ o ] = l.bias[ o ] + dot_fn( &l.weight[ o * l.in_features ], layer_in, l.in_features );
     }
     if ( l.has_ln )  // P-14: read the PER-LAYER flag, not `body == ln_dueling`
       apply_layer_norm( h, l.gamma, l.beta );
@@ -1009,8 +1087,9 @@ void forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ], const std::u
     const rl_layer& out_layer = w.layers[ n_hidden ];  // the single output layer
     for ( std::uint32_t o = 0; o < out_layer.out_features; ++o )
     {
-      // CVF: 8-way partial-sum dot product (see dot8() above).
-      out_q[ o ] = out_layer.bias[ o ] + dot8( &out_layer.weight[ o * out_layer.in_features ], layer_in, out_layer.in_features );
+      // 260920-cvf stage B: fast-math/AVX2-dispatched dot product (see
+      // dot_fn/select_dot_fn() above).
+      out_q[ o ] = out_layer.bias[ o ] + dot_fn( &out_layer.weight[ o * out_layer.in_features ], layer_in, out_layer.in_features );
     }
     return;
   }
@@ -1021,8 +1100,9 @@ void forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ], const std::u
   const rl_layer& v_head = w.layers[ n_hidden ];
   const rl_layer& a_head = w.layers[ n_hidden + 1 ];
 
-  // CVF: 8-way partial-sum dot product (see dot8() above). v_head.out_features == 1, row 0 only.
-  const float v = v_head.bias[ 0 ] + dot8( v_head.weight.data(), layer_in, v_head.in_features );
+  // 260920-cvf stage B: fast-math/AVX2-dispatched dot product (see
+  // dot_fn/select_dot_fn() above). v_head.out_features == 1, row 0 only.
+  const float v = v_head.bias[ 0 ] + dot_fn( v_head.weight.data(), layer_in, v_head.in_features );
 
   // A head written DIRECTLY into out_q[] -- no separate scratch allocation.
   // a_sum/a_count accumulate inside this SAME loop, guarded by mask[o] --
@@ -1031,8 +1111,9 @@ void forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ], const std::u
   std::uint32_t a_count = 0;
   for ( std::uint32_t o = 0; o < a_head.out_features; ++o )
   {
-    // CVF: 8-way partial-sum dot product (see dot8() above).
-    const float acc = a_head.bias[ o ] + dot8( &a_head.weight[ o * a_head.in_features ], layer_in, a_head.in_features );
+    // 260920-cvf stage B: fast-math/AVX2-dispatched dot product (see
+    // dot_fn/select_dot_fn() above).
+    const float acc = a_head.bias[ o ] + dot_fn( &a_head.weight[ o * a_head.in_features ], layer_in, a_head.in_features );
     out_q[ o ] = acc;
     if ( mask[ o ] )
     {

@@ -808,6 +808,15 @@ struct sim_t : private sc_thread_t
   // mirroring every other probe-style option in this file.
   std::string rl_forward_probe_str;
   std::string rl_forward_probe_out_str;
+  // 260920-cvf stage B, Task 1. Optional repeat count for the forward call
+  // above: default 1 reproduces today's exact behavior byte-for-byte (the
+  // _out file always holds the LAST call's Q, identical to N=1). When > 1,
+  // sc_main.cpp's rl_forward_probe branch calls rl_policy::forward the same
+  // inputs N times in a tight loop, times it with std::chrono::steady_clock,
+  // and prints "rl_forward_probe: N=<N> total_us=<t> us_per_forward=<t/N>"
+  // to stderr -- a real per-decision timing number on the production
+  // forward (LayerNorm included), not a microbenchmark harness guess.
+  int rl_forward_probe_repeats = 1;
   // Verify-vs-training mode (phase 200-04, FORK-01/R-8, D-06/D-07). Empty
   // string and "verify" are equivalent (the default) -- abstain falls
   // through to the APL's own choice. "training" makes an abstain reply a
