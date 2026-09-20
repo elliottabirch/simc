@@ -922,6 +922,41 @@ void apply_layer_norm( std::vector<float>& x, const std::vector<float>& gamma, c
     x[ i ] = static_cast<float>( normalized * static_cast<double>( gamma[ i ] ) + static_cast<double>( beta[ i ] ) );
   }
 }
+
+// CVF (quick task 260920-cvf): 8-way independent partial-sum dot product. The original
+// dot product below was a single dependent accumulator chain (`acc += w[i]*x[i]`), which the
+// compiler cannot autovectorize -- each FMA must wait for the previous one's result. Splitting
+// into K=8 INDEPENDENT partial sums breaks that dependency chain, so the compiler can issue
+// SIMD FMAs across the 8 lanes in parallel; a scalar tail loop handles n % 8. The 8 partials are
+// combined at the end in a FIXED order -- ((s0+s1)+(s2+s3))+((s4+s5)+(s6+s7)) -- so the result is
+// deterministic regardless of the vectorization width the compiler actually chooses. Same
+// accumulation type (float32) as before: this changes only the SUMMATION ORDER, not precision,
+// and this file's build carries no -ffast-math / reassociation flag that would permit the
+// compiler to reorder float ops on its own. Callers: forward()'s hidden-layer loop, the mlp
+// output layer, and the dueling V/A heads -- every `for (...) acc += ...` dot product in this
+// file's hottest path.
+inline float dot8( const float* w, const float* x, std::uint32_t n )
+{
+  float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
+  float s4 = 0.0f, s5 = 0.0f, s6 = 0.0f, s7 = 0.0f;
+  std::uint32_t i = 0;
+  const std::uint32_t n8 = n - ( n % 8 );
+  for ( ; i < n8; i += 8 )
+  {
+    s0 += w[ i + 0 ] * x[ i + 0 ];
+    s1 += w[ i + 1 ] * x[ i + 1 ];
+    s2 += w[ i + 2 ] * x[ i + 2 ];
+    s3 += w[ i + 3 ] * x[ i + 3 ];
+    s4 += w[ i + 4 ] * x[ i + 4 ];
+    s5 += w[ i + 5 ] * x[ i + 5 ];
+    s6 += w[ i + 6 ] * x[ i + 6 ];
+    s7 += w[ i + 7 ] * x[ i + 7 ];
+  }
+  float tail = 0.0f;
+  for ( ; i < n; ++i )
+    tail += w[ i ] * x[ i ];
+  return ( ( s0 + s1 ) + ( s2 + s3 ) ) + ( ( s4 + s5 ) + ( s6 + s7 ) ) + tail;
+}
 } // anonymous namespace
 
 void forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ], const std::uint8_t mask[ RL_ACTION_DIM ],
@@ -958,10 +993,9 @@ void forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ], const std::u
     std::vector<float>& h = w.hidden_scratch[ li ];
     for ( std::uint32_t o = 0; o < l.out_features; ++o )
     {
-      float acc = l.bias[ o ];
-      for ( std::uint32_t i = 0; i < l.in_features; ++i )
-        acc += l.weight[ o * l.in_features + i ] * layer_in[ i ];
-      h[ o ] = acc;
+      // CVF: 8-way partial-sum dot product (see dot8() above) -- was a single dependent
+      // accumulator chain.
+      h[ o ] = l.bias[ o ] + dot8( &l.weight[ o * l.in_features ], layer_in, l.in_features );
     }
     if ( l.has_ln )  // P-14: read the PER-LAYER flag, not `body == ln_dueling`
       apply_layer_norm( h, l.gamma, l.beta );
@@ -975,10 +1009,8 @@ void forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ], const std::u
     const rl_layer& out_layer = w.layers[ n_hidden ];  // the single output layer
     for ( std::uint32_t o = 0; o < out_layer.out_features; ++o )
     {
-      float acc = out_layer.bias[ o ];
-      for ( std::uint32_t i = 0; i < out_layer.in_features; ++i )
-        acc += out_layer.weight[ o * out_layer.in_features + i ] * layer_in[ i ];
-      out_q[ o ] = acc;
+      // CVF: 8-way partial-sum dot product (see dot8() above).
+      out_q[ o ] = out_layer.bias[ o ] + dot8( &out_layer.weight[ o * out_layer.in_features ], layer_in, out_layer.in_features );
     }
     return;
   }
@@ -989,9 +1021,8 @@ void forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ], const std::u
   const rl_layer& v_head = w.layers[ n_hidden ];
   const rl_layer& a_head = w.layers[ n_hidden + 1 ];
 
-  float v = v_head.bias[ 0 ];
-  for ( std::uint32_t i = 0; i < v_head.in_features; ++i )
-    v += v_head.weight[ i ] * layer_in[ i ];  // v_head.out_features == 1, row 0 only
+  // CVF: 8-way partial-sum dot product (see dot8() above). v_head.out_features == 1, row 0 only.
+  const float v = v_head.bias[ 0 ] + dot8( v_head.weight.data(), layer_in, v_head.in_features );
 
   // A head written DIRECTLY into out_q[] -- no separate scratch allocation.
   // a_sum/a_count accumulate inside this SAME loop, guarded by mask[o] --
@@ -1000,9 +1031,8 @@ void forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ], const std::u
   std::uint32_t a_count = 0;
   for ( std::uint32_t o = 0; o < a_head.out_features; ++o )
   {
-    float acc = a_head.bias[ o ];
-    for ( std::uint32_t i = 0; i < a_head.in_features; ++i )
-      acc += a_head.weight[ o * a_head.in_features + i ] * layer_in[ i ];
+    // CVF: 8-way partial-sum dot product (see dot8() above).
+    const float acc = a_head.bias[ o ] + dot8( &a_head.weight[ o * a_head.in_features ], layer_in, a_head.in_features );
     out_q[ o ] = acc;
     if ( mask[ o ] )
     {
