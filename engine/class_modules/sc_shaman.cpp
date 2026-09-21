@@ -5300,6 +5300,29 @@ struct auto_attack_t : public shaman_attack_t
       return false;
     return ( p()->main_hand_attack->execute_event == nullptr );  // not swinging
   }
+
+  // TRF fix (260921-trf-scripted-autoattack-rearm): this starter action only ARMS
+  // main_hand_attack/off_hand_attack (execute() above) -- it never itself swings. But
+  // action_ready() (action.cpp) runs target_ready() against THIS action, not against the swing
+  // it is about to arm, so the starter's own hardcoded range (5, melee_t's default) and harmful
+  // flag gate re-arming even in windows where the swing that will actually execute is
+  // windlash_t (Deeply Rooted Elements / Ascendance / Stormbringer T3 2pc), which carries
+  // range=30 and reaches targets the starter's own range would refuse. Gate on the swing that
+  // will actually be armed, mirroring wind_shear_t's target_ready override above. Distance and
+  // invulnerable clauses are un-loosened -- windlash_t is `harmful` too, so an invulnerable or
+  // genuinely out-of-30yd target is still correctly refused; only the *range* value used by the
+  // distance clause changes, from the starter's 5 to whatever main_hand_attack->range is.
+  // Audit: .planning/quick/260921-tra-trash-route-audit/TRA-AUDIT.md; diagnosis:
+  // ~/scratch/trf/TRF-DIAGNOSIS.md. No behaviour change when main_hand_attack->range == 5 (the
+  // common case, windlash inactive) -- this is a class-local parity fix, not the shape/geometry
+  // fix that actually closes the trash-route scripted-vs-agent gap (see diagnosis, Fix B, out of
+  // scope here).
+  bool target_ready( player_t* candidate_target ) override
+  {
+    if ( p()->main_hand_attack )
+      return p()->main_hand_attack->target_ready( candidate_target );
+    return shaman_attack_t::target_ready( candidate_target );
+  }
 };
 
 // Molten Weapon Dot ============================================================
