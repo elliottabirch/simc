@@ -95,6 +95,12 @@ struct sim_t : private sc_thread_t
   bool cleanup_threads;
   bool initialized;
   bool fixed_time;
+  // 260923-hp (owner rulings 2026-09-23, option A): respawn-on-death health. 0 = off (default, engine
+  // byte-identical). > 0 = every enemy_t (sim->target and the desired_targets clones; never raid_events
+  // adds, which are add_t pets) gets this base health per life, damage-driven health_percentage() /
+  // time_to_percent() despite fixed_time=1, and respawns as a fresh mob on death instead of ending the
+  // iteration. See sc_enemy.cpp enemy_t::respawn().
+  double solver_respawn_health;
   bool save_profiles;
   bool save_profile_with_actions;  // When saving full profiles, include actions or not
   bool save_full_profile;  // save the full profile instead of only active save_e flags

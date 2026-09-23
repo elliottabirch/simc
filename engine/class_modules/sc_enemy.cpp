@@ -40,6 +40,12 @@ struct enemy_t : public player_t
 
   std::vector<buff_t*> buffs_health_decades;
 
+  // 260923-hp: respawn-on-death health model (see sim.hpp solver_respawn_health).
+  timespan_t life_start_time;    // current life began (combat_begin / respawn)
+  double life_dmg_taken_base;    // iteration_dmg_taken when the current life began
+  unsigned respawn_count;        // lives completed this iteration
+  proc_t* respawn_proc;
+
   enemy_t( sim_t* s, util::string_view n, race_e r = RACE_HUMANOID, player_e type = ENEMY )
     : player_t( s, type, n, r ),
       enemy_id( s->target_list.size() ),
@@ -52,7 +58,11 @@ struct enemy_t : public player_t
       waiting_time( timespan_t::from_seconds( 1.0 ) ),
       current_target( 0 ),
       apply_damage_taken_debuff( 0 ),
-      custom_armor_coeff( 0 )
+      custom_armor_coeff( 0 ),
+      life_start_time( timespan_t::zero() ),
+      life_dmg_taken_base( 0.0 ),
+      respawn_count( 0 ),
+      respawn_proc( nullptr )
   {
     s->target_list.push_back( this );
     position_str = "front";
@@ -75,6 +85,7 @@ struct enemy_t : public player_t
   void init_defense() override;
   void create_buffs() override;
   void init_resources( bool force = false ) override;
+  void init_procs() override;
   void init_target() override;
   virtual std::string generate_action_list();
   virtual void generate_heal_raid_event();
@@ -91,6 +102,10 @@ struct enemy_t : public player_t
   virtual void recalculate_health();
   void demise() override;
   double armor_coefficient( int level, tank_dummy_e diff );
+  // 260923-hp: respawn-on-death health model.
+  bool respawns() const { return sim->solver_respawn_health > 0.0; }
+  double life_dmg_taken() const { return iteration_dmg_taken - life_dmg_taken_base; }
+  void respawn();
   std::unique_ptr<expr_t> create_expression( util::string_view expression_str ) override;
 
   bool has_absorb() const override
@@ -1325,6 +1340,31 @@ void enemy_t::init_base_stats()
   if ( !validate_custom_timeline() )
     custom_health_timeline.clear();
 
+  // 260923-hp: respawn-on-death health model refusals. Every branch below is a correctness
+  // requirement -- the respawn model assumes a plain fixed_time fight with no other health
+  // override in play; combining it with any of these would produce an undefined health curve.
+  if ( respawns() )
+  {
+    if ( !std::isfinite( sim->solver_respawn_health ) )
+      throw sc_invalid_sim_argument( "solver_respawn_health must be a finite value." );
+    if ( !sim->fixed_time )
+      throw sc_invalid_sim_argument( "solver_respawn_health requires fixed_time=1." );
+    if ( sim->fight_style == FIGHT_STYLE_DUNGEON_SLICE || sim->fight_style == FIGHT_STYLE_DUNGEON_ROUTE )
+      throw sc_invalid_sim_argument( "solver_respawn_health is incompatible with dungeon fight styles." );
+    if ( !sim->overrides.target_health.empty() )
+      throw sc_invalid_sim_argument( "solver_respawn_health is incompatible with target_health overrides." );
+    if ( fixed_health > 0 )
+      throw sc_invalid_sim_argument( "solver_respawn_health is incompatible with fixed_health." );
+    if ( fixed_health_percentage > 0 )
+      throw sc_invalid_sim_argument( "solver_respawn_health is incompatible with fixed_health_percentage." );
+    if ( initial_health_percentage != 100.0 )
+      throw sc_invalid_sim_argument( "solver_respawn_health is incompatible with initial_health_percentage." );
+    if ( !custom_health_timeline.empty() )
+      throw sc_invalid_sim_argument( "solver_respawn_health is incompatible with a custom health timeline." );
+    if ( sim->enemy_death_pct != 0.0 )
+      throw sc_invalid_sim_argument( "solver_respawn_health is incompatible with enemy_death_pct." );
+  }
+
   // Armor Coefficient, based on level (1054 @ 50; 2500 @ 60-63)
   base.armor_coeff = custom_armor_coeff > 0 ? custom_armor_coeff : armor_coefficient( level(), tank_dummy_e::MYTHIC );
   sim->print_debug( "{} base armor coefficient set to {}.", *this, base.armor_coeff );
@@ -1420,7 +1460,7 @@ void enemy_t::init_resources( bool /* force */ )
 {
   double health_adjust = sim->iteration_time_adjust();
 
-  resources.base[ RESOURCE_HEALTH ] = initial_health * health_adjust;
+  resources.base[ RESOURCE_HEALTH ] = respawns() ? sim->solver_respawn_health : initial_health * health_adjust;
 
   player_t::init_resources( true );
 
@@ -1750,6 +1790,10 @@ void enemy_t::create_pets()
 
 double enemy_t::health_percentage() const
 {
+  // 260923-hp: respawn-on-death health model -- real damage-driven health despite fixed_time=1. See D3.
+  if ( respawns() )
+    return resources.pct( RESOURCE_HEALTH ) * 100;
+
   if ( !custom_health_timeline.empty() )
   {
     double time = sim->current_time() / sim->expected_iteration_time;
@@ -1796,6 +1840,32 @@ double enemy_t::health_percentage() const
 
 timespan_t enemy_t::time_to_percent( double percent ) const
 {
+  // 260923-hp: respawn-on-death health model -- per-life time_to_die/time_to_percent, damage-driven
+  // despite fixed_time=1, capped at the fight clock. See D5.
+  if ( respawns() )
+  {
+    // Adjust time_to_0/time_to_die to point to death_pct, mirroring player.cpp:7959-7960
+    if ( percent == 0.0 )
+      percent = death_pct;
+
+    if ( health_percentage() <= percent )
+      return timespan_t::zero();
+
+    timespan_t fight_left   = std::max( timespan_t::zero(), sim->expected_iteration_time - sim->current_time() );
+    timespan_t life_elapsed = sim->current_time() - life_start_time;
+
+    // Same 1-s guard as player.cpp:7970: not enough per-life data yet, fall back to the fight clock.
+    if ( life_elapsed < timespan_t::from_seconds( 1.0 ) || life_dmg_taken() <= 0.0 )
+      return fight_left;
+
+    double max_health   = resources.max[ RESOURCE_HEALTH ];
+    double est_seconds  = ( resources.current[ RESOURCE_HEALTH ] - percent * 0.01 * max_health ) /
+                           ( life_dmg_taken() / life_elapsed.total_seconds() );
+    timespan_t estimate = timespan_t::from_seconds( est_seconds );
+
+    return std::max( timespan_t::zero(), std::min( estimate, fight_left ) );
+  }
+
   // First check current health, considering fixed_health_percentage and initial_health_percentage
   if ( health_percentage() <= percent )
     return 0_ms;
@@ -1849,6 +1919,11 @@ timespan_t enemy_t::time_to_percent( double percent ) const
 
 void enemy_t::recalculate_health()
 {
+  // 260923-hp: respawn-on-death health uses a fixed per-life pool (sim->solver_respawn_health);
+  // iteration-0 recalibration must never touch it. See D3.
+  if ( respawns() )
+    return;
+
   if ( sim->expected_iteration_time <= timespan_t::zero() || fixed_health > 0 || fixed_health_percentage > 0 )
     return;
 
@@ -2065,6 +2140,14 @@ void enemy_t::combat_begin()
 
   if ( buffs_health_decades.size() )
     buffs_health_decades[ 9 ]->trigger();
+
+  // 260923-hp: reset the per-life clock/damage snapshot for the first life of the iteration. See D5.
+  if ( respawns() )
+  {
+    life_start_time     = sim->current_time();
+    life_dmg_taken_base = iteration_dmg_taken;
+    respawn_count       = 0;
+  }
 }
 
 // enemy_t::combat_end ======================================================
@@ -2079,6 +2162,15 @@ void enemy_t::combat_end()
 
 void enemy_t::demise()
 {
+  // 260923-hp: respawn-on-death health -- a real death mid-fight respawns a fresh mob instead of
+  // ending the iteration. The end-of-fight demise (event_mgr.canceled) falls through to the stock
+  // path below. See D4.
+  if ( respawns() && !current.sleeping && !sim->event_mgr.canceled )
+  {
+    respawn();
+    return;
+  }
+
   if ( this == sim->target )
   {
     if ( sim->current_iteration != 0 || !sim->overrides.target_health.empty() || fixed_health > 0 )
@@ -2087,6 +2179,42 @@ void enemy_t::demise()
   }
 
   player_t::demise();
+}
+
+// enemy_t::init_procs ======================================================
+
+void enemy_t::init_procs()
+{
+  player_t::init_procs();
+
+  // 260923-hp: respawn-on-death health -- track lives completed. See D4/D8.
+  if ( respawns() )
+    respawn_proc = get_proc( "solver_respawn" );
+}
+
+// enemy_t::respawn =========================================================
+
+void enemy_t::respawn()
+{
+  // 260923-hp: the stock death minus the pets -- raid_events adds are pets of the first enemy
+  // (raid_event.cpp:115-118, :273) and player_t::demise() would demise every one of them
+  // (player.cpp:7421-7424). Detach pet_list for the duration of the stock demise()/arise() call so
+  // the boss's own life-cycle never touches its raid-event adds. See D4.
+  std::vector<pet_t*> kept_pets;
+  kept_pets.swap( pet_list );
+  player_t::demise();  // sleeping, list removal, ACTOR_DEMISE retarget, on-kill/on-demise, buffs+dots+actions cancelled
+  pet_list.swap( kept_pets );
+
+  ++respawn_count;
+  if ( respawn_proc )
+    respawn_proc->occur();
+
+  arise();  // full health (init_resources), new actor_spawn_index, ACTOR_ARISE retarget -- same event, no gap
+
+  life_start_time     = sim->current_time();
+  life_dmg_taken_base = iteration_dmg_taken;
+
+  sim->print_log( "{} respawns: life {} begins, health={}", *this, respawn_count + 1, resources.max[ RESOURCE_HEALTH ] );
 }
 
 double enemy_t::armor_coefficient( int level, tank_dummy_e dungeon_content )

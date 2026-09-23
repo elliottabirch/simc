@@ -1200,6 +1200,10 @@ void to_json( const ::report::json::report_configuration_t& report_configuration
   options_root[ "regen_periodicity" ] = sim.regen_periodicity;
   options_root[ "ignite_sampling_delta" ] = sim.ignite_sampling_delta;
   options_root[ "fixed_time" ] = sim.fixed_time;
+  // 260923-hp: echo the parsed value only when respawn-on-death health is active (default-off
+  // guarantee) -- also protects against an OLD binary silently ignoring the option (D1).
+  if ( sim.solver_respawn_health > 0 )
+    options_root[ "solver_respawn_health" ] = sim.solver_respawn_health;
   options_root[ "optimize_expressions" ] = sim.optimize_expressions;
   options_root[ "optimal_raid" ] = sim.optimal_raid;
   options_root[ "log" ] = sim.log;

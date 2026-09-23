@@ -1517,6 +1517,7 @@ sim_t::sim_t()
     cleanup_threads( false ),
     initialized( false ),
     fixed_time( true ),
+    solver_respawn_health( 0.0 ),
     save_profiles( false ),
     save_profile_with_actions( true ),
     save_full_profile( true ),
@@ -4222,6 +4223,7 @@ void sim_t::create_options()
   add_option( opt_func( "process_priority", parse_process_priority ) );
   add_option( opt_timespan( "max_time", max_time, timespan_t::zero(), timespan_t::max() ) );
   add_option( opt_bool( "fixed_time", fixed_time ) );
+  add_option( opt_float( "solver_respawn_health", solver_respawn_health, 0.0, 1.0e12 ) );
   add_option( opt_float( "vary_combat_length", vary_combat_length, 0.0, 1.0 ) );
   add_option( opt_func( "ptr", parse_ptr ) );
   add_option( opt_int( "threads", threads ) );
