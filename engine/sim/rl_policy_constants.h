@@ -104,7 +104,7 @@ inline constexpr std::size_t RL_ACTION_DIM = 16;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
-inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:ba75d2c0fbfb3bb94b88ed3855cd1650f3a702ef5268b1553165d2ec7c28ca1f";
+inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:ed933e47ff7982d70de1c3b2141c0b95889bcf85ff54a028f95a389c700580f9";
 inline constexpr const char* RL_MASK_RULES_SHA = "3f930294d36b217dca01fc51600c0da9d0568e20152fb53c588b6e8ddccf7662";
 inline constexpr const char* RL_ACTION_SPACE_SHA = "5ee0d827b3a19bb2b38bf36f38901cacd7c5f0d002dd99ce0a8b57c0e8d65b77";
 
@@ -755,7 +755,7 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_TARGET_FACTS_MEMBERS[] = {
 
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_SHAPES_LEAVES_0[] = {
     { "enemies_hit", rl_kind::k_seconds, 0.0, false, 1.0, true, 8.0, nullptr, 0, false },
-    { "summed_remaining_life", rl_kind::k_seconds, 0.0, false, 1.0, true, 3600.0, nullptr, 0, false },
+    { "summed_remaining_life", rl_kind::k_seconds, 0.0, false, 1.0, true, 360.0, nullptr, 0, false },
     { "long_lived_count", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
 };
 inline constexpr rl_obs_member RL_OBS_FAMILY_SHAPES_MEMBERS[] = {

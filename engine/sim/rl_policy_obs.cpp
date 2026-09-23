@@ -323,7 +323,11 @@ shape_hit_result_t compute_crash_lightning_shape( player_t* p )
       continue;
     ++r.enemies_hit;
     const double ttd = std::min( t->time_to_percent( 0 ).total_seconds(), 600.0 );  // WR-10 clip
-    r.summed_remaining_life += ttd;
+    // 260923-lrc OWNER RULING A (2026-09-23, via session tstl-sylvanas-ac): each per-enemy
+    // remaining-life term is capped at 60s INSIDE the sum, so the sum saturates at six
+    // enemies x 60s = 360 (census clipDiv 3600 -> 360) instead of scaling like an uncapped
+    // 600s-per-enemy clock.
+    r.summed_remaining_life += std::min( ttd, 60.0 );
     if ( ttd > rl_target_select::DYING_WITHIN_LATER_SECONDS )
       ++r.long_lived_count;
   }
@@ -343,7 +347,7 @@ shape_hit_result_t compute_sundering_shape( player_t* p )
       continue;
     ++r.enemies_hit;
     const double ttd = std::min( t->time_to_percent( 0 ).total_seconds(), 600.0 );  // WR-10 clip
-    r.summed_remaining_life += ttd;
+    r.summed_remaining_life += std::min( ttd, 60.0 );  // 260923-lrc OWNER RULING A
     if ( ttd > rl_target_select::DYING_WITHIN_LATER_SECONDS )
       ++r.long_lived_count;
   }
