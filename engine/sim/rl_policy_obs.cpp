@@ -467,6 +467,9 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground, bool is_d
     b.present = true;
     b.stacks = static_cast<double>( buff->check() );
     b.has_stacks = true;
+    // 260922-mfh (D7): engine-truth cap, read once here beside stacks -- never a literal.
+    b.max_stacks = static_cast<double>( buff->max_stack() );
+    b.has_max_stacks = true;
     // remains (quick task 260826-38t, D-2R slot 6) -- same source and same
     // permanent-sentinel convention decision_dump.cpp's write_buff_remains
     // uses: timespan_t::min() means "no scheduled expiry", encoded here as
@@ -3859,6 +3862,20 @@ void build_mask( const rl_state_t& s, std::uint8_t out_mask[ RL_ACTION_DIM ] )
       {
         out_mask[ i ] = 0;
         continue;
+      }
+      // 260922-mfh (D7): a wait illegal at a named buff's engine-truth max_stack() cap --
+      // checked BEFORE the none-anchor early continue below so the rule is general across
+      // every wait_anchor kind, mirroring mask.py's legal() ordering exactly (registry field
+      // "illegalAtBuffCap", non-null only for wait_maelstrom today). A buff at 0 stacks is
+      // absent from s.buffs, so find_buff() returns null and the wait stays legal -- correct.
+      if ( a.illegal_at_buff_cap != nullptr )
+      {
+        const buff_reading* cap = s.find_buff( a.illegal_at_buff_cap );
+        if ( cap != nullptr && cap->has_stacks && cap->has_max_stacks && cap->stacks >= cap->max_stacks )
+        {
+          out_mask[ i ] = 0;
+          continue;
+        }
       }
       if ( a.wait_anchor.kind == rl_wait_anchor_kind::none )
       {

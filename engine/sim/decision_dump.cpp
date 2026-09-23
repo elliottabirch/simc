@@ -517,6 +517,10 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
     first_buff = false;
     out << "\"" << json_escape( buff->name() ) << "\":{";
     out << "\"stacks\":" << buff->check();
+    // 260922-mfh (D7): additive key -- engine-truth stack cap, mirroring rl_policy_obs.cpp's
+    // read_state() buff_reading::max_stacks so mask.py's dump-driven mirror of the
+    // wait-illegal-at-cap rule can read the real max instead of a literal.
+    out << ",\"max_stacks\":" << buff->max_stack();
     out << ",\"remains\":";
     write_buff_remains( out, buff->remains() );
     out << "}";

@@ -72,6 +72,13 @@ struct buff_reading
   bool   has_stacks = false;
   double remains    = 0.0;  bool has_remains = false;   // quick task 260826-38t, D-2R slot 6
   bool   permanent = false;          // leaf null + sibling "permanent": true (obs.py:132-145)
+  // 260922-mfh (D7): engine-truth stack cap, read from buff->max_stack() -- NEVER a literal --
+  // so build_mask's wait-illegal-at-cap rule (rl_policy_obs.cpp) can compare against the real,
+  // possibly-talented maximum instead of guessing. has_max_stacks is set true unconditionally
+  // alongside has_stacks in read_state() (every live buff row on this walk has a well-defined
+  // max_stack(), never absent) -- kept as an explicit flag anyway, same discipline every other
+  // optional field on this POD follows.
+  double max_stacks = 0.0;  bool has_max_stacks = false;
 };
 
 struct cooldown_reading
