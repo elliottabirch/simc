@@ -3730,26 +3730,10 @@ anchored_wait_reading read_anchored_wait( const rl_state_t& s, const rl_wait_anc
   anchored_wait_reading out;
   switch ( anchor.kind )
   {
-    case rl_wait_anchor_kind::cooldown:
-    {
-      out.source = std::string( "cooldown:" ) + ( anchor.cooldown_row ? anchor.cooldown_row : "" );
-      const cooldown_reading* row = s.find_cooldown( anchor.cooldown_row );
-      if ( row != nullptr )
-      {
-        // Charge-based (max_charges > 1): prefer the RECHARGE clock.
-        // Single-charge: the REMAINING clock. Same two clocks cd_ready_now
-        // above already reads.
-        const bool charge_based = row->max_charges > 1;
-        const bool has_val = charge_based ? row->has_recharge_time : row->has_remains;
-        const double val = charge_based ? row->recharge_time : row->remains;
-        if ( has_val && val > 0.0 )
-        {
-          out.raw = val;
-          out.has_raw = true;
-        }
-      }
-      break;
-    }
+    // 260922-mfh (D2): `cooldown` and `gcd` anchor kinds DELETED -- no live action ever
+    // declares them (rl_policy_constants.h's own comment on rl_wait_anchor_kind). The dead
+    // `cooldown`/`gcd` cases that used to live here (rl_policy_obs.cpp:3730-3749/3783-3792
+    // pre-260922-mfh) are removed rather than kept as unreachable code.
     case rl_wait_anchor_kind::swing:
     {
       const bool mh = ( anchor.hand == rl_swing_hand::mh );
@@ -3779,16 +3763,6 @@ anchored_wait_reading read_anchored_wait( const rl_state_t& s, const rl_wait_anc
            ( !out.has_raw || s.swing_oh_remains < out.raw ) )
       {
         out.raw = s.swing_oh_remains;
-        out.has_raw = true;
-      }
-      break;
-    }
-    case rl_wait_anchor_kind::gcd:
-    {
-      out.source = "gcd";
-      if ( s.has_gcd_remains && s.gcd_remains > 0.0 )
-      {
-        out.raw = s.gcd_remains;
         out.has_raw = true;
       }
       break;
