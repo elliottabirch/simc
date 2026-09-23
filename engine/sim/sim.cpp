@@ -1550,9 +1550,14 @@ sim_t::sim_t()
     healing( 0 ),
     global_spawn_index( 0 ),
     max_player_level( -1 ),
-    queue_lag( 5_ms, 0_ms ),
-    gcd_lag( 150_ms, 0_ms ),
-    channel_lag( 250_ms, 0_ms ),
+    // 260923-lag: stddev defaults use timespan_t::min() as an "unset" sentinel (same pattern
+    // world_lag already used below) so an explicit *_lag_stddev=0 option is honoured instead of
+    // being silently re-derived from mean at init() -- see the sentinel checks a few hundred
+    // lines down (queue_lag.stddev < 0_ms, etc.) and rng.hpp gauss(): a stddev==0 truncated_gauss_t
+    // returns mean deterministically without consuming RNG.
+    queue_lag( 5_ms, timespan_t::min() ),
+    gcd_lag( 150_ms, timespan_t::min() ),
+    channel_lag( 250_ms, timespan_t::min() ),
     queue_gcd_reduction( 100_ms ),
     default_cooldown_tolerance( 250_ms ),
     strict_gcd_queue( false ),
@@ -3008,9 +3013,9 @@ void sim_t::init()
     }
   }
 
-  if (   queue_lag.stddev == 0_ms )   queue_lag.stddev =   queue_lag.mean * 0.25;
-  if (     gcd_lag.stddev == 0_ms )     gcd_lag.stddev =     gcd_lag.mean * 0.25;
-  if ( channel_lag.stddev == 0_ms ) channel_lag.stddev = channel_lag.mean * 0.25;
+  if (   queue_lag.stddev  < 0_ms )   queue_lag.stddev =   queue_lag.mean * 0.25;
+  if (     gcd_lag.stddev  < 0_ms )     gcd_lag.stddev =     gcd_lag.mean * 0.25;
+  if ( channel_lag.stddev  < 0_ms ) channel_lag.stddev = channel_lag.mean * 0.25;
   if (   world_lag.stddev  < 0_ms )   world_lag.stddev =   world_lag.mean * 0.1;
 
   confidence_estimator = rng::stdnormal_inv( 1.0 - ( 1.0 - confidence ) / 2.0 );
