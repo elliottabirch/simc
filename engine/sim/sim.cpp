@@ -5160,47 +5160,17 @@ void sim_t::setup( sim_control_t* c )
                        profileset_map.size() ) );
     }
 
-    // 220-08 WR-10: the RL observation's per-action hit_damage leaves call
-    // action_t::calculate_direct_amount(), which ends with
-    // `if ( !sim->average_range ) amount = floor( amount + rng().real() );`
-    // -- an RNG draw. average_range defaults true, but it is a plain sim
-    // option a profile or episode emitter can flip for variance modelling;
-    // if it does, every decision silently consumes extra RNG draws the
-    // APL-driven baseline arm never does, and reruns at the same seed stop
-    // matching pre-220 results for a reason that has nothing to do with the
-    // policy. Refuse loudly rather than depend on the default.
-    if ( !average_range )
-    {
-      throw sc_runtime_error(
-          "solver_policy= requires average_range=1: the RL observation's hit_damage leaves call "
-          "calculate_direct_amount(), which draws from the sim RNG when average_range=0, making the "
-          "observation path no longer read-only." );
-    }
   }
 
-  // 260902/FORK-03 (D-11 post-research ruling, Research Open Question 3):
-  // the SAME defect class as the solver_policy= refusal just above, but on
-  // the BARE decision_dump= path -- decision_dump::record() has called the
-  // observation build's hit_damage leaves (rl_policy_obs.cpp's
-  // get_shared_action_leaves) since the observation columns were added to
-  // the dump (260901-od1), and those leaves end in
-  // action_t::calculate_direct_amount(), which draws from the sim RNG when
-  // average_range=0 -- independent of, and not fixed by, this same task's
-  // target-cache read-only fix (that fix stops the leaves from FORCING a
-  // target-list resolve; it does not touch calculate_direct_amount's own
-  // average_range branch). A run combining a dump line with
-  // average_range=0 would silently make even a bare, solver_policy=-less
-  // dump non-read-only. Refuse loudly rather than depend on the default,
-  // exactly as the solver_policy= case above does -- this check is
-  // independent of that one so it also fires when decision_dump= is used
-  // WITHOUT solver_policy=.
-  if ( !decision_dump_file_str.empty() && !average_range )
-  {
-    throw sc_runtime_error(
-        "decision_dump= requires average_range=1: the RL observation's hit_damage leaves call "
-        "calculate_direct_amount(), which draws from the sim RNG when average_range=0, making the "
-        "dump's observation columns no longer read-only." );
-  }
+  // 260923-lrc (PLAN.md D11, RESEARCH-DAMAGE-REMOVAL.md §2(c)/§7 Q3): both the solver_policy=
+  // and the bare decision_dump= average_range=1 refusals (220-08 WR-10; 260902/FORK-03 D-11) are
+  // REMOVED -- their stated sole reason, the RL observation's per-action hit_damage leaves
+  // calling action_t::calculate_direct_amount() (an RNG draw when average_range=0), no longer
+  // exists: those leaves were deleted from the registry and their C++ path deleted alongside
+  // them (rl_policy_obs.cpp's get_shared_action_leaves no longer calls calculate_direct_amount()
+  // at all -- confirmed by a scoped grep: the symbol appears nowhere under engine/sim/rl_* or
+  // decision_dump.cpp). average_range=0 with solver_policy=/decision_dump= is no longer a
+  // read-only-observation hazard.
 
   // Flight recorder clamp (phase 212, plan 212-01, TLOG-01/02/03). Same
   // shape as solver_control='s and solver_policy='s clamps just above --

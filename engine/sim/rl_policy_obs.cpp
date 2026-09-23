@@ -220,6 +220,14 @@ fight_wide_aggregates_t compute_fight_wide_aggregates( player_t* p )
     if ( fs && fs->is_ticking() )
       ++agg.flame_shock_carrier_count;
 
+    // 260923-lrc (PLAN.md D1-D3): walks BUFFS (not dots) over the non-sleeping list -- the same
+    // enemy set trigger_lightning_rod_damage splashes damage to (sc_shaman.cpp:3626). check() > 0,
+    // never up() (mutates benefit bookkeeping); buff_t::find is the non-creating scan, same idiom
+    // rl_target_select.cpp's own per-target reader already uses.
+    buff_t* lr = buff_t::find( t, "lightning_rod", p );
+    if ( lr && lr->check() > 0 )
+      ++agg.lightning_rod_carrier_count;
+
     const double ttd = std::min( t->time_to_percent( 0 ).total_seconds(), 600.0 );
     if ( !agg.has_soonest_time_to_die || ttd < agg.soonest_time_to_die )
     {
@@ -889,6 +897,8 @@ enum class direct_id
   fw_enemies_in_front, fw_flame_shock_carrier_count, fw_soonest_time_to_die,
   fw_longest_time_to_die, fw_dying_within_5s, fw_dying_within_15s, fw_nearest_enemy_distance,
   fw_immunity_in, fw_immunity_remaining,
+  // 260923-lrc (PLAN.md D1-D3): the new lightning_rod_carrier_count aggregate.
+  fw_lightning_rod_carrier_count,
   // 260914-rbp Task 1 (R5/R7/R9, HIT-INPUTS-DESIGN.md §2, rulings §B): the seven per-ability
   // "how many targets will this hit" scalars -- geometry only, never SimC's own target_list()/
   // chain resolver (memo §B.3's HARD constraint). Every one reads 0 when no pick is stamped for
@@ -934,12 +944,17 @@ enum class cooldown_leaf_kind { remains, charges, charges_fractional, recharge_t
 // (on the action OR the player, per resolve_action_leaf's own comment) --
 // the resolved expr_t lives in slot_table::owned_expressions exactly like
 // every other expression-kind binding in this file, no new ownership
-// mechanism needed. The three `shared_*` kinds are OBS-07's cost-split
-// mechanism: hit_damage/crit_pct_current/persistent_multiplier for the SAME
+// mechanism needed. The `shared_*` kinds are OBS-07's cost-split
+// mechanism: crit_pct_current/persistent_multiplier/da_multiplier for the SAME
 // action share ONE `action_state_t*` (owned in
 // slot_table::owned_action_states, allocated once at bind, snapshotted once
 // per action per DECISION in build_obs -- never per leaf, never per bind).
-// The two `dot_molten_weapon_*` kinds are lava_lash's Molten Weapon residual
+// 260923-lrc (PLAN.md D11): shared_hit_damage REMOVED -- the eight
+// action_leaves.*.hit_damage census leaves it served are gone from the
+// registry (R7-4: the live addon can never read a damage amount), and it
+// was the only caller of calculate_direct_amount()/target_mitigation() under
+// engine/sim/rl_*. The two `dot_molten_weapon_*` kinds are lava_lash's
+// Molten Weapon residual
 // (220-RESEARCH.md's own citation: "per-enemy dot_list, same as
 // enemy_slots") -- read fresh off the CURRENT target's dot_list each
 // decision (never cached at bind time: the current target, and therefore
@@ -947,7 +962,7 @@ enum class cooldown_leaf_kind { remains, charges, charges_fractional, recharge_t
 enum class action_leaf_kind
 {
   plain_expression,
-  shared_hit_damage, shared_crit_pct_current, shared_persistent_multiplier, shared_da_multiplier,
+  shared_crit_pct_current, shared_persistent_multiplier, shared_da_multiplier,
   dot_molten_weapon_ticking, dot_molten_weapon_remains
   // 228-11 (Q19, D-A/R-D): spell_targets_count REMOVED -- the deterministic geometry leaf
   // (232-12, LO-01: target_fact.chain_lightning.neighbours_within_radius, the single column
@@ -1046,7 +1061,8 @@ struct slot_table
   // non-owning raw pointer into this vector, never re-created per decision.
   std::vector<std::unique_ptr<expr_t>> owned_expressions;
   // 220-06 Task 3 (OBS-07): ONE action_state_t* per action that declares any
-  // of hit_damage/crit_pct_current/persistent_multiplier, allocated once at
+  // of crit_pct_current/persistent_multiplier/da_multiplier (hit_damage
+  // REMOVED 260923-lrc, see action_leaf_kind's own note above), allocated once at
   // bind time via action_t::get_state() (a plain `new`, safe to `delete` --
   // action_state_expr_t's own destructor does exactly that, see
   // action.cpp:3199-3202) and reused every decision -- never reallocated,
@@ -1420,6 +1436,7 @@ slot_binding resolve_scalar_leaf( const rl_leaf_desc& leaf )
   else if ( std::strcmp( leaf.leaf, "nearest_enemy_distance" ) == 0 )      fw_id = direct_id::fw_nearest_enemy_distance;
   else if ( std::strcmp( leaf.leaf, "immunity_in" ) == 0 )                 fw_id = direct_id::fw_immunity_in;
   else if ( std::strcmp( leaf.leaf, "immunity_remaining" ) == 0 )          fw_id = direct_id::fw_immunity_remaining;
+  else if ( std::strcmp( leaf.leaf, "lightning_rod_carrier_count" ) == 0 ) fw_id = direct_id::fw_lightning_rod_carrier_count;
   else                                                                     fw_matched = false;
   if ( fw_matched )
   {
@@ -1901,9 +1918,9 @@ enemy_handle_cache& get_enemy_handle_cache( const player_t* p, player_t* t )
 // ---------------------------------------------------------------------------
 
 // OBS-07's cost-split mechanism: ONE `action_state_t*` per action that
-// declares any of hit_damage/crit_pct_current/persistent_multiplier,
-// allocated once at bind time (never per decision) and shared by all three
-// leaves of that SAME action.
+// declares any of crit_pct_current/persistent_multiplier/da_multiplier
+// (hit_damage REMOVED 260923-lrc, PLAN.md D11), allocated once at bind time
+// (never per decision) and shared by every remaining leaf of that SAME action.
 action_state_t* get_or_create_shared_action_state( action_t* a, slot_table& table )
 {
   for ( auto& s : table.owned_action_states )
@@ -1937,10 +1954,10 @@ slot_binding resolve_action_leaf( player_t* p, const std::string& engine_token, 
 
   const std::string leaf_name = leaf.leaf;
 
-  // The four shared-snapshot leaves (OBS-07, Task 3 step 2; `multiplier`
-  // added 221-07) -- see build_obs' own dispatch for the derivation
-  // arithmetic.
-  if ( leaf_name == "hit_damage" || leaf_name == "crit_pct_current" ||
+  // The three shared-snapshot leaves (OBS-07, Task 3 step 2; `multiplier`
+  // added 221-07; `hit_damage` REMOVED 260923-lrc, PLAN.md D11) -- see
+  // build_obs' own dispatch for the derivation arithmetic.
+  if ( leaf_name == "crit_pct_current" ||
        leaf_name == "persistent_multiplier" || leaf_name == "multiplier" )
   {
     // 221-07 WR-01: `a->create_expression("multiplier")` is NOT usable for
@@ -2006,8 +2023,7 @@ slot_binding resolve_action_leaf( player_t* p, const std::string& engine_token, 
     b.kind = slot_binding_kind::action_expression;
     b.bound_action = damage_action;
     b.shared_action_state = get_or_create_shared_action_state( damage_action, table );
-    b.action_leaf = ( leaf_name == "hit_damage" ) ? action_leaf_kind::shared_hit_damage
-                   : ( leaf_name == "crit_pct_current" ) ? action_leaf_kind::shared_crit_pct_current
+    b.action_leaf = ( leaf_name == "crit_pct_current" ) ? action_leaf_kind::shared_crit_pct_current
                    : ( leaf_name == "persistent_multiplier" ) ? action_leaf_kind::shared_persistent_multiplier
                    : action_leaf_kind::shared_da_multiplier;
     return b;
@@ -2680,16 +2696,17 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
   };
 
   // 220-06 Task 3 (OBS-07): the shared-snapshot cache for
-  // hit_damage/crit_pct_current/persistent_multiplier/da_multiplier (4th
-  // slot added 221-07 WR-01 -- see resolve_action_leaf's own comment for why
-  // `multiplier` could not stay on the generic create_expression path),
-  // keyed by the SAME `action_state_t*` slot_table already owns per action
-  // -- computed at most ONCE per action per decision, local to this call (a
-  // plain local unordered_map, never persisted across decisions: the state
-  // pointer itself is stable across decisions, but the VALUES it derives
-  // are not).
-  std::unordered_map<action_state_t*, std::array<double, 4>> shared_action_leaf_cache;
-  auto get_shared_action_leaves = [ & ]( action_t* a, action_state_t* state ) -> const std::array<double, 4>&
+  // crit_pct_current/persistent_multiplier/da_multiplier (3rd slot,
+  // `multiplier`, added 221-07 WR-01 -- see resolve_action_leaf's own
+  // comment for why `multiplier` could not stay on the generic
+  // create_expression path; hit_damage REMOVED 260923-lrc, PLAN.md D11 --
+  // shrunk 4 -> 3), keyed by the SAME `action_state_t*` slot_table already
+  // owns per action -- computed at most ONCE per action per decision, local
+  // to this call (a plain local unordered_map, never persisted across
+  // decisions: the state pointer itself is stable across decisions, but the
+  // VALUES it derives are not).
+  std::unordered_map<action_state_t*, std::array<double, 3>> shared_action_leaf_cache;
+  auto get_shared_action_leaves = [ & ]( action_t* a, action_state_t* state ) -> const std::array<double, 3>&
   {
     auto found = shared_action_leaf_cache.find( state );
     if ( found != shared_action_leaf_cache.end() )
@@ -2789,37 +2806,22 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
 
     a->snapshot_state( state, result_amount_type::NONE );
 
-    double hit_damage = a->calculate_direct_amount( state );
-    state->result_amount = hit_damage;
-    if ( state->target != nullptr )
-      state->target->target_mitigation( a->get_school(), result_amount_type::DMG_DIRECT, state );
-    hit_damage = state->result_amount;
-
-    // 232-04 (OBS-02, R-T): the pre-cast hit_damage snapshot -- same stamp-vs-read-back split as
-    // the is_current_target snapshot above, gated on the SAME `s.is_decision_boundary` (captured
-    // by this lambda via `[&]`). 232-12 (ME-07): NOT Tempest-specific -- every registry action
-    // declaring a `hit_damage` leaf (eight today: chain_lightning, crash_lightning, lava_lash,
-    // lightning_bolt, stormstrike, tempest, voltaic_blaze, windstrike) gets identical pre-cast
-    // fidelity through this same path, keyed per `action_t*`.
-    if ( s.is_decision_boundary )
-    {
-      rl_target_select::stamp_target_fact_hit_damage( a, hit_damage );
-    }
-    else
-    {
-      bool snap_found = false;
-      const rl_target_select::target_fact_snapshot snap =
-          rl_target_select::lookup_target_fact_snapshot( a, &snap_found );
-      if ( snap_found && snap.has_hit_damage )
-        hit_damage = snap.hit_damage;
-    }
-
+    // 260923-lrc (PLAN.md D11): the calculate_direct_amount()/target_mitigation() hit_damage
+    // computation, and its stamp_target_fact_hit_damage()/lookup_target_fact_snapshot()
+    // pre-cast-snapshot pair (232-04 OBS-02, R-T), are REMOVED -- they served only the eight
+    // now-deleted action_leaves.*.hit_damage census leaves (R7-4: the live addon can never read
+    // a damage amount), and this was the only calculate_direct_amount() call under engine/sim/
+    // rl_*. crit_pct_current/persistent_multiplier/da_multiplier need no RNG-drawing amount
+    // computation -- they read straight off the `state` this same snapshot_state() call above
+    // already prepared (composite_crit_chance()/composite_persistent_multiplier()/
+    // composite_da_multiplier() are all deterministic composite-stat virtuals, no
+    // calculate_direct_amount() involved).
     const double crit_pct_current = std::min( 100.0, state->composite_crit_chance() * 100.0 );
     const double persistent_multiplier = a->composite_persistent_multiplier( state );
     const double da_multiplier = a->composite_da_multiplier( state );
 
     auto& entry = shared_action_leaf_cache[ state ];
-    entry = { hit_damage, crit_pct_current, persistent_multiplier, da_multiplier };
+    entry = { crit_pct_current, persistent_multiplier, da_multiplier };
     return entry;
   };
 
@@ -3223,6 +3225,13 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
               raw = s.has_immunity_remaining ? s.immunity_remaining : 0.0;
               status = lookup_status::present;
               break;
+            case direct_id::fw_lightning_rod_carrier_count:
+              // 260923-lrc (PLAN.md D1-D3): compute_fight_wide_aggregates()'s own new
+              // lightning_rod_carrier_count field, cached once above (get_fw_agg(), same D-12
+              // "read once, use twice" discipline every other fw_* case here follows).
+              raw = static_cast<double>( get_fw_agg().lightning_rod_carrier_count );
+              status = lookup_status::present;
+              break;
 
             // 260914-rbp Task 1 Step 2 (R1, rulings §B): direct_id::cl_stack_window's and
             // direct_id::cl_strikes_in_window's own build_obs cases (stacks*newest-remains and
@@ -3388,7 +3397,6 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
         {
           switch ( b.action_leaf )
           {
-            case action_leaf_kind::shared_hit_damage:
             case action_leaf_kind::shared_crit_pct_current:
             case action_leaf_kind::shared_persistent_multiplier:
             case action_leaf_kind::shared_da_multiplier:
@@ -3398,12 +3406,13 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
                 status = lookup_status::absent;
                 break;
               }
-              const std::array<double, 4>& vals =
+              // 260923-lrc (PLAN.md D11): vals[] shrunk 4 -> 3, hit_damage's slot 0 removed --
+              // every remaining index shifted down by one.
+              const std::array<double, 3>& vals =
                   get_shared_action_leaves( b.bound_action, b.shared_action_state );
-              raw = ( b.action_leaf == action_leaf_kind::shared_hit_damage ) ? vals[ 0 ]
-                  : ( b.action_leaf == action_leaf_kind::shared_crit_pct_current ) ? vals[ 1 ]
-                  : ( b.action_leaf == action_leaf_kind::shared_persistent_multiplier ) ? vals[ 2 ]
-                  : vals[ 3 ];
+              raw = ( b.action_leaf == action_leaf_kind::shared_crit_pct_current ) ? vals[ 0 ]
+                  : ( b.action_leaf == action_leaf_kind::shared_persistent_multiplier ) ? vals[ 1 ]
+                  : vals[ 2 ];
               status = lookup_status::present;
               break;
             }

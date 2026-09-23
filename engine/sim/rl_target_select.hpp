@@ -262,20 +262,20 @@ struct candidate_block
 // rl_translog::record_decision, never fabricate one.
 candidate_block lookup_candidate_block( const action_t* resolved, bool* out_found );
 
-// 232-04 (OBS-02, R-T): the pre-cast snapshot for the two decision-instant values
+// 232-04 (OBS-02, R-T): the pre-cast snapshot for the decision-instant value
 // `decision_dump.cpp`'s own diagnostic build_obs() call would otherwise recompute AFTER
 // `accept_cast`'s retarget/turn has already mutated `p->target`/facing -- `is_current_target`
-// (all eight targeted actions) and Tempest's own `hit_damage`. Filled from
-// `rl_policy_obs.cpp`'s build_obs(), gated on `rl_state_t::is_decision_boundary` so that later,
-// non-boundary call can never overwrite a real decision's capture (mirrors `g_pick_table`'s own
-// stamp discipline). `has_is_current_target`/`has_hit_damage` are independent: most targeted
-// actions only ever populate the first.
+// (all eight targeted actions). Filled from `rl_policy_obs.cpp`'s build_obs(), gated on
+// `rl_state_t::is_decision_boundary` so that later, non-boundary call can never overwrite a
+// real decision's capture (mirrors `g_pick_table`'s own stamp discipline).
+// 260923-lrc (PLAN.md D11): has_hit_damage/hit_damage REMOVED -- they served the eight now-
+// deleted action_leaves.*.hit_damage census leaves (R7-4: the live addon can never read a
+// damage amount); stamp_target_fact_hit_damage() is REMOVED alongside them (it was the sole
+// caller of calculate_direct_amount() under engine/sim/rl_*, rl_policy_obs.cpp).
 struct target_fact_snapshot
 {
   bool   has_is_current_target = false;
   bool   is_current_target     = false;
-  bool   has_hit_damage        = false;
-  double hit_damage            = 0.0;
 };
 
 // Stamps `resolved`'s pre-cast is_current_target for the CURRENT decision. Called ONLY from
@@ -283,15 +283,10 @@ struct target_fact_snapshot
 // own doc comment above for why a non-boundary call must never reach this function.
 void stamp_target_fact_is_current_target( const action_t* resolved, bool is_current_target );
 
-// Same contract as stamp_target_fact_is_current_target, for the `hit_damage` leaf -- 232-12
-// (ME-07): NOT Tempest-specific; every registry action declaring a `hit_damage` leaf (eight
-// today) shares this same stamping function.
-void stamp_target_fact_hit_damage( const action_t* resolved, double hit_damage );
-
 // Reads the snapshot stamped for `resolved` at the CURRENT decision. `*out_found` is false when
 // the stamp is stale or absent -- the caller (decision_dump.cpp) MUST then compute fresh and flag
 // the row (`target_fact_dump_time_compute`), never fabricate a value (T-232-14). The returned
-// struct's own has_is_current_target/has_hit_damage flags are independent of `*out_found`, so a
+// struct's own has_is_current_target flag is independent of `*out_found`, so a
 // found-but-partial slot reports each half honestly.
 target_fact_snapshot lookup_target_fact_snapshot( const action_t* resolved, bool* out_found );
 

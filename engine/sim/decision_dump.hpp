@@ -183,7 +183,9 @@ std::string boundary_name( execute_type et );
 // `action_gate_dump_time_compute` above, on the `targeted_picks`/
 // `candidate_facts` rows: `record()` is NEVER the decision boundary (this
 // file's own CR-02 comment, `write_state_fields`'s doc comment below), so a
-// targeted action's `is_current_target`/Tempest's `hit_damage`, recomputed
+// targeted action's `is_current_target` (260923-lrc, PLAN.md D11: the
+// `hit_damage` half of this snapshot is REMOVED -- see rl_target_select.hpp's
+// own target_fact_snapshot note), recomputed
 // straight off `build_enemy_fact()` at dump time, would read POST-
 // `accept_cast`-retarget/turn state instead of the value the decision was
 // actually made from. Both JSON emit sites first consult

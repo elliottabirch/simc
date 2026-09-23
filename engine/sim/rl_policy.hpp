@@ -239,6 +239,19 @@ struct fight_wide_aggregates_t
   int    flame_shock_carrier_count  = 0;   // NEW counter -- walks DOTS over non-sleeping enemies,
                                             // never buff_list (the existing enemy_debuff_counts
                                             // counter can never see a dot -- P-5).
+  int    lightning_rod_carrier_count = 0;  // 260923-lrc (PLAN.md D1-D3): walks BUFFS (not dots)
+                                            // over non-sleeping enemies -- buff_t::find(t,
+                                            // "lightning_rod", p) with check() > 0, mirroring
+                                            // flame_shock_carrier_count's stateless walk one line
+                                            // above but over the buff list instead of the dot
+                                            // list. Same enemy set (target_non_sleeping_list)
+                                            // trigger_lightning_rod_damage splashes damage to
+                                            // (sc_shaman.cpp:3626), so this count equals the
+                                            // number of targets the NEXT Lightning Rod pulse will
+                                            // hit. NOT the existing enemy_debuff_counts counter
+                                            // (add-blind, walks target_list -- misses raid-event
+                                            // adds entirely, see compute_fight_wide_aggregates'
+                                            // own note); NOT up() (mutates benefit bookkeeping).
   bool   has_soonest_time_to_die    = false;
   double soonest_time_to_die        = 0.0;
   bool   has_longest_time_to_die    = false;

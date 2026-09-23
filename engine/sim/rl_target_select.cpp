@@ -79,7 +79,7 @@ struct candidate_block_slot
 std::unordered_map<const action_t*, candidate_block_slot> g_candidate_block_table;
 
 // 232-04 (OBS-02, R-T): the pre-cast snapshot table -- captures, per targeted action's CURRENT
-// decision, the is_current_target / Tempest hit_damage values `build_obs()`'s own REAL-decision
+// decision, the is_current_target value `build_obs()`'s own REAL-decision
 // call (solver_control.cpp, `rl_state_t::is_decision_boundary == true`) computed BEFORE
 // `accept_cast`'s retarget/turn can mutate `p->target`/facing. `decision_dump.cpp`'s own later
 // diagnostic `build_obs()` call for the SAME decision (`is_decision_boundary == false`, that
@@ -87,17 +87,14 @@ std::unordered_map<const action_t*, candidate_block_slot> g_candidate_block_tabl
 // back instead of recomputing against state the cast already mutated -- the
 // `action_gate_dump_time_compute` precedent, applied to per-target facts. Keyed on the resolved
 // `action_t*` exactly like `g_pick_table`/`g_candidate_block_table` above, same `has_stamp`/
-// `stamp` read-back discipline (T-232-15). `has_is_current_target`/`has_hit_damage` are
-// independent -- most targeted actions only ever get the first (232-12, ME-07: every registry
-// action declaring a `hit_damage` leaf -- eight today, `action_leaves.{chain_lightning,
-// crash_lightning, lava_lash, lightning_bolt, stormstrike, tempest, voltaic_blaze,
-// windstrike}.hit_damage` -- gets `has_hit_damage` too, not only Tempest).
+// `stamp` read-back discipline (T-232-15).
+// 260923-lrc (PLAN.md D11): has_hit_damage/hit_damage REMOVED -- they served the eight now-
+// deleted action_leaves.*.hit_damage census leaves (R7-4: the live addon can never read a
+// damage amount); stamp_target_fact_hit_damage() is REMOVED alongside them.
 struct target_fact_snapshot_slot
 {
   bool          has_is_current_target = false;
   bool          is_current_target     = false;
-  bool          has_hit_damage        = false;
-  double        hit_damage            = 0.0;
   std::uint64_t stamp                 = 0;
   bool          has_stamp             = false;
 };
@@ -1094,27 +1091,16 @@ void stamp_target_fact_is_current_target( const action_t* resolved, bool is_curr
   slot.has_stamp               = true;
 }
 
-// Same contract as stamp_target_fact_is_current_target, for the `hit_damage` leaf
-// (`action_leaf_kind::shared_hit_damage`) -- 232-12 (ME-07): NOT Tempest-specific; every registry
-// action declaring a `hit_damage` leaf gets stamped through this same function (eight today).
-void stamp_target_fact_hit_damage( const action_t* resolved, double hit_damage )
-{
-  if ( !resolved )
-    return;
-  auto& slot = g_target_fact_snapshot_table[ resolved ];
-  slot.hit_damage     = hit_damage;
-  slot.has_hit_damage = true;
-  slot.stamp           = current_decision_stamp( resolved->player );
-  slot.has_stamp        = true;
-}
+// 260923-lrc (PLAN.md D11): stamp_target_fact_hit_damage() REMOVED -- it served the eight now-
+// deleted action_leaves.*.hit_damage census leaves (R7-4: the live addon can never read a damage
+// amount); it was the sole caller into calculate_direct_amount()/target_mitigation() under
+// engine/sim/rl_* (rl_policy_obs.cpp).
 
 // Reads the snapshot stamped for `resolved` at the CURRENT decision. `*out_found` is false when
 // the stamp is stale or absent (the SAME has_stamp/stamp==current guard lookup_pick/
 // lookup_candidate_block already use, T-232-15) -- the caller (decision_dump.cpp) MUST then
 // compute fresh and flag the row (target_fact_dump_time_compute), never fabricate a value
-// (T-232-14). `has_is_current_target`/`has_hit_damage` on the returned struct are independent of
-// `*out_found` -- a found-but-partial slot (e.g. is_current_target stamped, hit_damage never
-// requested for this action) reports each half honestly.
+// (T-232-14).
 target_fact_snapshot lookup_target_fact_snapshot( const action_t* resolved, bool* out_found )
 {
   auto it = g_target_fact_snapshot_table.find( resolved );
@@ -1137,8 +1123,6 @@ target_fact_snapshot lookup_target_fact_snapshot( const action_t* resolved, bool
   target_fact_snapshot out;
   out.has_is_current_target = it->second.has_is_current_target;
   out.is_current_target      = it->second.is_current_target;
-  out.has_hit_damage         = it->second.has_hit_damage;
-  out.hit_damage             = it->second.hit_damage;
   return out;
 }
 

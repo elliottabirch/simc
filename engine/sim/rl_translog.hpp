@@ -297,7 +297,16 @@ inline constexpr std::uint32_t FORMAT_VERSION = 10u;  // 260918-cbc: credit-by-c
 // compile (tstl 220-03, OBS-06; formula updated 260901-pb1 Task 3 for version 5, updated again
 // 228-09 for version 6, updated again 230-04 for version 7, updated again 260917-pcn for
 // version 9 -- see top-of-file comment).
-inline constexpr std::uint32_t RECORD_SIZE = 2296u;  // 260922-mfh: 2312 -> 2296 -- RL_OBS_DIM
+inline constexpr std::uint32_t RECORD_SIZE = 2272u;  // 260923-lrc (PLAN.md D10-D13): 2296 -> 2272
+                                                       // -- RL_OBS_DIM moves 313 -> 306 (eight
+                                                       // action_leaves.*.hit_damage census leaves
+                                                       // removed, one lightning_rod_carrier_count
+                                                       // scalar added). roundup8(45 + 4*306 +
+                                                       // 4*8*23 + 4) = roundup8(2009) = 2016,
+                                                       // + 160 proc block + 96 credit block = 2272.
+                                                       // Confirmed by the static_assert immediately
+                                                       // below, not hand-verified.
+                                                       // 260922-mfh: 2312 -> 2296 -- RL_OBS_DIM
                                                        // moves 317 -> 313 (the legality family
                                                        // shrinks by 4 slots, one per removed
                                                        // wait_cd_* action, D1/D2). roundup8(45 +
@@ -345,10 +354,10 @@ inline constexpr std::uint32_t PROC_BLOCK_OFFSET =
         4u * static_cast<std::uint32_t>( RL_TARGET_SLOTS ) * static_cast<std::uint32_t>( RL_TARGET_FEATURES ) +
         4u + 7u ) / 8u ) * 8u;
 inline constexpr std::uint32_t PROC_BLOCK_SIZE = 8u * rl_proc::COUNT;
-static_assert( PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE == 2200u,
+static_assert( PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE == 2176u,
                "PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE must equal the version-9 row size at the "
-               "260922-mfh (D1/D2) obs width (2200) -- CREDIT_BLOCK_OFFSET below is pinned to "
-               "that exact value" );
+               "260923-lrc (PLAN.md D10-D13) obs width (2176) -- CREDIT_BLOCK_OFFSET below is "
+               "pinned to that exact value" );
 // 260918-cbc: the version-9 row size (unchanged formula) is where the new credit-by-cause
 // block starts; CREDIT_BLOCK_SIZE is the block's own byte count (two double[STREAM_COUNT]
 // arrays -- see rl_credit.hpp's rl_credit_streams_t). Declared after PROC_BLOCK_SIZE so the

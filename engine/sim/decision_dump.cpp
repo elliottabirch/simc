@@ -978,12 +978,12 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
           << ",\"rune_of_unleashed_fire_lingering_remaining\":" << fact.rune_of_unleashed_fire_lingering_remaining
           << ",\"neighbours_within_radius\":" << fact.neighbours_within_radius
           << ",\"is_current_target\":" << ( is_current_target_value ? "true" : "false" );
-      // 232-04 (OBS-02, R-T): 232-12 (ME-07) -- NOT Tempest-specific; every registry action
-      // declaring a `hit_damage` leaf (eight today) can carry this key -- emitted only when the
-      // snapshot actually carries one, additive (never a compatibility alias for a pre-existing
-      // key, plan 232-05 repoints selector_parity.py at these emitted keys directly).
-      if ( snap_found && snap.has_hit_damage )
-        out << ",\"hit_damage\":" << snap.hit_damage;
+      // 260923-lrc (PLAN.md D11): the additive `"hit_damage"` key (232-04 OBS-02, R-T; 232-12
+      // ME-07) is REMOVED -- it served the eight now-deleted action_leaves.*.hit_damage census
+      // leaves (R7-4: the live addon can never read a damage amount).
+      // selector_parity.selftest.py:201's end marker is re-anchored on the next
+      // `row_used_dump_time_compute` check below (260923-lrc) -- see that test's own updated
+      // comment.
       if ( row_used_dump_time_compute )
         out << ",\"target_fact_dump_time_compute\":true";
       // RULE-02 (232-06, R-Z) / HI-04 (232-13): the Chain Lightning hop-count stash's own
@@ -1152,10 +1152,10 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
             << fact.rune_of_unleashed_fire_lingering_remaining
             << "}";
       }
-      if ( snap_found && snap.has_hit_damage )
-        out << "],\"hit_damage\":" << snap.hit_damage;
-      else
-        out << "]";
+      // 260923-lrc (PLAN.md D11): the additive `"hit_damage"` key after `candidate_facts` is
+      // REMOVED -- it served the eight now-deleted action_leaves.*.hit_damage census leaves
+      // (R7-4: the live addon can never read a damage amount).
+      out << "]";
       if ( row_used_dump_time_compute )
         out << ",\"target_fact_dump_time_compute\":true";
       out << "}";
@@ -1217,6 +1217,7 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
     out << ",\"enemies_within_40yd\":" << agg.enemies_within_40yd;
     out << ",\"enemies_in_front\":" << agg.enemies_in_front;
     out << ",\"flame_shock_carrier_count\":" << agg.flame_shock_carrier_count;
+    out << ",\"lightning_rod_carrier_count\":" << agg.lightning_rod_carrier_count;
     out << ",\"soonest_time_to_die\":";
     if ( agg.has_soonest_time_to_die ) out << agg.soonest_time_to_die; else out << "null";
     out << ",\"longest_time_to_die\":";
