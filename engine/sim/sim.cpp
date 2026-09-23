@@ -42,6 +42,7 @@
 #include "util/xml.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <random>
 #include <sstream>
@@ -3895,13 +3896,12 @@ bool sim_t::execute()
       std::fflush( stderr );
     }
 
-    // Quick task tj1 (2026-09-01, timing-jitter exploration). Fail-safe
-    // override-count readout -- see sim.hpp's solver_hold_until_override_
-    // count doc comment. stderr-only, mirrors rl_obs_timing's own
-    // no-op-when-off/no-op-when-zero shape immediately above.
-    if ( !solver_hold_until_release_s.empty() && solver_hold_until_override_count > 0 )
+    // 260922-mfh (D5): replaces tj1's solver_hold_until= readout. Fail-safe override-count
+    // readout -- see sim.hpp's solver_hold_windows_override_count doc comment. stderr-only,
+    // mirrors rl_obs_timing's own no-op-when-off/no-op-when-zero shape immediately above.
+    if ( !solver_hold_windows.empty() && solver_hold_windows_override_count > 0 )
     {
-      fmt::print( stderr, "solver_hold_until: override_count={}\n", solver_hold_until_override_count );
+      fmt::print( stderr, "solver_hold_windows: override_count={}\n", solver_hold_windows_override_count );
       std::fflush( stderr );
     }
   }
@@ -4293,10 +4293,10 @@ void sim_t::create_options()
   // In-process RL transport (phase 210, plan 210-04, XPORT-01). Validated
   // below, in its own fail-closed block beside solver_control_str's.
   add_option( opt_string( "solver_policy", solver_policy_str ) );
-  // Quick task tj1 (2026-09-01, timing-jitter exploration). Parsed and
-  // validated below, in its own fail-closed block beside solver_policy_
-  // str's -- see sim.hpp's solver_hold_until_str doc comment.
-  add_option( opt_string( "solver_hold_until", solver_hold_until_str ) );
+  // 260922-mfh (D5): replaces tj1's solver_hold_until=. Parsed and validated below, in its own
+  // fail-closed block beside solver_policy_str's -- see sim.hpp's solver_hold_windows_str doc
+  // comment.
+  add_option( opt_string( "solver_hold_windows", solver_hold_windows_str ) );
   // rl_forward_probe sim option (Phase 222, plan 222-04, NET-02's
   // cross-path receipt). See sim.hpp's rl_forward_probe_str doc comment.
   // Default empty, disabled.
@@ -4976,92 +4976,110 @@ void sim_t::setup( sim_control_t* c )
         std::make_shared<rl_policy::rl_weights_t>( rl_policy::load_rlw1( solver_policy_str ) );
   }
 
-  // Quick task tj1 (2026-09-01, timing-jitter exploration). Own fail-closed
-  // block, deliberately placed immediately AFTER solver_policy_str's own
-  // block above (whose weights-load refusal must fire first if BOTH are
-  // wrong) and BEFORE the solver_control_mode/solver_control_str notices
-  // below, matching solver_policy_str's own "validate this option's own
-  // block before falling through to unrelated notices" ordering.
-  if ( !solver_hold_until_str.empty() )
+  // 260922-mfh (D5): replaces tj1's solver_hold_until= block (deleted entirely, not kept as a
+  // named-unknown-option refusal -- SimC's own option parser refuses any unrecognized token by
+  // name already). Own fail-closed block, deliberately placed immediately AFTER
+  // solver_policy_str's own block above (whose weights-load refusal must fire first if BOTH are
+  // wrong) and BEFORE the solver_control_mode/solver_control_str notices below, matching
+  // solver_policy_str's own "validate this option's own block before falling through to
+  // unrelated notices" ordering.
+  if ( !solver_hold_windows_str.empty() )
   {
-    // Refusal 1: meaningless without solver_policy= -- there is no
-    // in-process mask to hold for the FIFO transport (solver_control=) or
-    // for no transport at all.
+    // Refusal 1: meaningless without solver_policy= -- there is no in-process mask to restrict
+    // selection for the FIFO transport (solver_control=) or for no transport at all.
     if ( solver_policy_str.empty() )
     {
       throw sc_runtime_error(
-          "solver_hold_until= requires solver_policy= (it masks the in-process transport's own "
-          "action legality mask in solver_control::choose(); it has no meaning for solver_control= "
-          "(FIFO, no in-process mask) or with neither transport set)." );
+          "solver_hold_windows= requires solver_policy= (it restricts the in-process transport's "
+          "own action SELECTION in solver_control::choose(); it has no meaning for "
+          "solver_control= (FIFO, no in-process mask) or with neither transport set)." );
     }
 
-    // Refusal 2: format. 'idx:sec,idx:sec,...' -- integer index, numeric
-    // seconds, no repeated index, index in range, seconds >= 0. All
-    // violations are named with the OFFENDING ENTRY and the FULL declared
-    // string, mirroring solver_control_mode_str's own named-refusal style
-    // immediately above.
-    solver_hold_until_release_s.assign( RL_ACTION_DIM, -1.0 );
-    std::stringstream pairs_ss( solver_hold_until_str );
-    std::string pair;
-    while ( std::getline( pairs_ss, pair, ',' ) )
+    // Refusal 2: format. 'idx:start:end,idx:start:end,...' -- integer index, two numeric
+    // second values, exactly two colons per entry. All violations are named with the
+    // OFFENDING ENTRY and the FULL declared string, mirroring solver_control_mode_str's own
+    // named-refusal style above (and tj1's own style this block replaces).
+    std::stringstream entries_ss( solver_hold_windows_str );
+    std::string entry;
+    while ( std::getline( entries_ss, entry, ',' ) )
     {
-      const auto colon = pair.find( ':' );
-      if ( colon == std::string::npos || colon == 0 || colon == pair.size() - 1 )
+      const auto first_colon = entry.find( ':' );
+      const auto second_colon =
+          ( first_colon == std::string::npos ) ? std::string::npos : entry.find( ':', first_colon + 1 );
+      if ( first_colon == std::string::npos || second_colon == std::string::npos ||
+           first_colon == 0 || second_colon == first_colon + 1 || second_colon == entry.size() - 1 ||
+           entry.find( ':', second_colon + 1 ) != std::string::npos )
       {
         throw sc_runtime_error( fmt::format(
-            "solver_hold_until=: malformed entry '{}' (expected 'actionIndex:seconds') in '{}'.",
-            pair, solver_hold_until_str ) );
+            "solver_hold_windows=: malformed entry '{}' (expected "
+            "'actionIndex:startSeconds:endSeconds') in '{}'.",
+            entry, solver_hold_windows_str ) );
       }
-      const std::string idx_str = pair.substr( 0, colon );
-      const std::string sec_str = pair.substr( colon + 1 );
+      const std::string idx_str = entry.substr( 0, first_colon );
+      const std::string start_str = entry.substr( first_colon + 1, second_colon - first_colon - 1 );
+      const std::string end_str = entry.substr( second_colon + 1 );
       int idx = -1;
-      double sec = -1.0;
+      double start_s = -1.0, end_s = -1.0;
       try
       {
-        std::size_t idx_pos = 0, sec_pos = 0;
+        std::size_t idx_pos = 0, start_pos = 0, end_pos = 0;
         idx = std::stoi( idx_str, &idx_pos );
-        sec = std::stod( sec_str, &sec_pos );
-        if ( idx_pos != idx_str.size() || sec_pos != sec_str.size() )
+        start_s = std::stod( start_str, &start_pos );
+        end_s = std::stod( end_str, &end_pos );
+        if ( idx_pos != idx_str.size() || start_pos != start_str.size() || end_pos != end_str.size() )
           throw std::invalid_argument( "trailing characters" );
       }
       catch ( const std::exception& )
       {
         throw sc_runtime_error( fmt::format(
-            "solver_hold_until=: malformed entry '{}' (expected an integer index and a numeric "
-            "seconds value) in '{}'.", pair, solver_hold_until_str ) );
+            "solver_hold_windows=: malformed entry '{}' (expected an integer index and two "
+            "numeric second values) in '{}'.", entry, solver_hold_windows_str ) );
       }
       if ( idx < 0 || static_cast<std::size_t>( idx ) >= RL_ACTION_DIM )
       {
         throw sc_runtime_error( fmt::format(
-            "solver_hold_until=: action index {} out of range [0, {}) in '{}'.",
-            idx, RL_ACTION_DIM, solver_hold_until_str ) );
+            "solver_hold_windows=: action index {} out of range [0, {}) in '{}'.",
+            idx, RL_ACTION_DIM, solver_hold_windows_str ) );
       }
-      if ( sec < 0.0 )
+      // Refusal (new, D5/RESEARCH-FORK §2.2 step 4): hold windows apply to cast actions only.
+      // A wait-kind idx (incl. wait_next_event, the always-legal foreground sink -- see
+      // solver_control.cpp's own comment on why that guarantee matters) is refused by name
+      // rather than silently accepted and never actually restricting anything meaningful.
+      if ( RL_ACTIONS[ static_cast<std::size_t>( idx ) ].kind == rl_action_kind::wait )
       {
         throw sc_runtime_error( fmt::format(
-            "solver_hold_until=: release seconds must be >= 0, got {} for index {} in '{}'.",
-            sec, idx, solver_hold_until_str ) );
+            "solver_hold_windows=: action index {} ('{}') is a wait action -- hold windows "
+            "apply to cast actions only; wait actions (incl. wait_next_event, the always-legal "
+            "foreground sink) cannot be held, in '{}'.",
+            idx, RL_ACTIONS[ static_cast<std::size_t>( idx ) ].label, solver_hold_windows_str ) );
       }
-      if ( solver_hold_until_release_s[ static_cast<std::size_t>( idx ) ] >= 0.0 )
+      if ( !std::isfinite( start_s ) || !std::isfinite( end_s ) || start_s < 0.0 )
       {
         throw sc_runtime_error( fmt::format(
-            "solver_hold_until=: action index {} appears more than once in '{}'.",
-            idx, solver_hold_until_str ) );
+            "solver_hold_windows=: start seconds must be finite and >= 0, got {} for index {} "
+            "in '{}'.", start_s, idx, solver_hold_windows_str ) );
       }
-      solver_hold_until_release_s[ static_cast<std::size_t>( idx ) ] = sec;
+      if ( !( end_s > start_s ) )
+      {
+        throw sc_runtime_error( fmt::format(
+            "solver_hold_windows=: end seconds ({}) must be greater than start seconds ({}) for "
+            "index {} in '{}'.", end_s, start_s, idx, solver_hold_windows_str ) );
+      }
+      // D5: overlapping windows on the same index are ALLOWED (union semantics) -- no overlap
+      // refusal, unlike tj1's repeated-index refusal this option replaces.
+      solver_hold_windows.push_back(
+          { static_cast<std::uint32_t>( idx ), start_s, end_s } );
     }
-    if ( std::all_of( solver_hold_until_release_s.begin(), solver_hold_until_release_s.end(),
-                       []( double v ) { return v < 0.0; } ) )
+    if ( solver_hold_windows.empty() )
     {
-      // An accepted-but-empty declared string ('' is already caught by the
-      // outer !empty() guard above) cannot reach here through the comma
-      // split -- std::getline on an all-whitespace/empty stream yields zero
-      // iterations, leaving every entry at its -1.0 sentinel. Refuse by
-      // name rather than silently behaving as "disabled": the caller wrote
-      // a non-empty solver_hold_until= that named nothing.
+      // An accepted-but-empty declared string ('' is already caught by the outer !empty()
+      // guard above) cannot reach here through the comma split -- std::getline on an
+      // all-whitespace/empty stream yields zero iterations. Refuse by name rather than
+      // silently behaving as "disabled": the caller wrote a non-empty solver_hold_windows=
+      // that named nothing.
       throw sc_runtime_error( fmt::format(
-          "solver_hold_until='{}' declared no valid actionIndex:seconds entries.",
-          solver_hold_until_str ) );
+          "solver_hold_windows='{}' declared no valid actionIndex:startSeconds:endSeconds "
+          "entries.", solver_hold_windows_str ) );
     }
   }
 

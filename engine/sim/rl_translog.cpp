@@ -374,7 +374,7 @@ void open_and_write_header( sim_t* sim )
 void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float obs[ RL_OBS_DIM ],
                        const std::uint8_t mask[ RL_ACTION_DIM ], int action_index, float q_margin,
                        float top_q, std::uint16_t chosen_target_actor_index, bool wait_floored,
-                       bool exploratory,
+                       bool exploratory, bool held,
                        const float* candidate_features, std::uint16_t candidate_mask,
                        std::uint8_t candidate_count, std::uint8_t chosen_candidate_slot )
 {
@@ -439,8 +439,13 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float ob
   // OR'd in whenever the random-action branch fired, regardless of
   // whether the drawn index happened to equal the greedy one (the bit
   // means "a random action fired", never "the action differed").
+  // 260922-mfh (D4): bit 5 (FLAG_HELD) OR'd in whenever an active solver_hold_windows= window
+  // cleared at least one naturally-legal action at this decision -- see solver_control.cpp's
+  // row_held and this file's own top-of-file FLAG_HELD comment. `r.mask` above is always the
+  // NATURAL mask (D3); this bit is the only place a hold is visible in the row at all.
   r.flags = static_cast<std::uint8_t>( ( wait_floored ? FLAG_WAIT_FLOORED : 0 ) |
-                                        ( exploratory ? FLAG_EXPLORATORY : 0 ) );
+                                        ( exploratory ? FLAG_EXPLORATORY : 0 ) |
+                                        ( held ? FLAG_HELD : 0 ) );
   r.thread = static_cast<std::uint8_t>( sim->thread_index );
   r.kind = KIND_DECISION;
   r.reserved = 0;

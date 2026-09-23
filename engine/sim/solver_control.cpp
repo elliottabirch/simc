@@ -889,54 +889,6 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
         mask[ i ] = static_cast<std::uint8_t>( mask[ i ] & ( ( allowed >> static_cast<std::uint32_t>( i ) ) & 1u ) );
     }
 
-    // Quick task tj1 (2026-09-01, timing-jitter exploration). Per-episode
-    // cooldown-timing hold, ANDed in AFTER the allow-list AND immediately
-    // above and BEFORE the all-illegal refusal immediately below -- so the
-    // refusal's own "post-AND" framing already covers this AND too, and a
-    // hold that would manufacture an all-illegal mask is caught by the
-    // SAME fail-safe shape 222-07 built for the allow-list AND, not a
-    // second bespoke one. Disabled (the common case, and every non-tj1
-    // caller): solver_hold_until_release_s is empty, one .empty() check,
-    // zero further cost.
-    if ( !sim->solver_hold_until_release_s.empty() )
-    {
-      // Scratch copy so the fail-safe below can fall back to the pre-hold
-      // mask (post allow-list AND) without re-deriving it.
-      std::uint8_t held_mask[ RL_ACTION_DIM ];
-      std::memcpy( held_mask, mask, sizeof( mask ) );
-      bool any_hold_applied = false;
-      const double now_s = sim->current_time().total_seconds();
-      for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
-      {
-        const double release_s = sim->solver_hold_until_release_s[ i ];
-        if ( release_s >= 0.0 && now_s < release_s )
-        {
-          held_mask[ i ] = 0;
-          any_hold_applied = true;
-        }
-      }
-      if ( any_hold_applied )
-      {
-        bool held_any_legal = false;
-        for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
-          held_any_legal = held_any_legal || ( held_mask[ i ] != 0 );
-        if ( held_any_legal )
-        {
-          std::memcpy( mask, held_mask, sizeof( mask ) );
-        }
-        else
-        {
-          // Fail-safe (tj1 design doc, explicit requirement): never let the
-          // hold manufacture an empty mask. Ignore the hold for THIS
-          // decision only -- `mask` stands exactly as the allow-list AND
-          // above left it -- and count the override so a training run can
-          // report how often its declared hold set collided with the
-          // engine's own legality gate.
-          ++sim->solver_hold_until_override_count;
-        }
-      }
-    }
-
     // 222-07 (CR-04): the allow-list AND above can manufacture an
     // all-illegal mask that build_mask's own upstream refusal already
     // passed -- 222-RESEARCH.md's Pitfall 16 names this exactly ("a
@@ -991,7 +943,60 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     float q[ RL_ACTION_DIM ];
     rl_policy::forward( *sim->solver_policy_weights, obs, mask, q );
 
-    const int greedy_idx = rl_policy::masked_argmax( q, mask );
+    // 260922-mfh (D3): hold windows restrict SELECTION ONLY -- they must never touch the
+    // `mask` that build_obs/forward above, the q_margin/top_q diagnostics below, and BOTH
+    // record_decision calls below all read. This REPLACES tj1's semantics (which ANDed the
+    // hold into `mask` itself, upstream of build_obs) -- PLAN.md's D3 requires the agent to
+    // SEE every naturally-legal action and the learner's bootstrap target to be the max over
+    // what was REALLY pressable (the correct off-policy target for the unheld greedy policy).
+    // `select_mask` is derived here, read ONLY by masked_argmax and the exploration draw
+    // immediately below. Disabled (the common case): sim->solver_hold_windows is empty, one
+    // .empty() check, a single memcpy, zero further cost.
+    std::uint8_t select_mask[ RL_ACTION_DIM ];
+    std::memcpy( select_mask, mask, sizeof( mask ) );
+    // 260922-mfh (D4): set true when an active window cleared at least one naturally-legal
+    // action at this decision -- OR'd into the row's own FLAG_HELD bit by both record_decision
+    // calls below (never "a window was declared", which would also fire on a decision no
+    // window actually reached).
+    bool row_held = false;
+    if ( !sim->solver_hold_windows.empty() )
+    {
+      std::uint8_t held_mask[ RL_ACTION_DIM ];
+      std::memcpy( held_mask, mask, sizeof( mask ) );
+      bool any_hold_applied = false;
+      const double now_s = sim->current_time().total_seconds();
+      for ( const auto& w : sim->solver_hold_windows )
+      {
+        if ( w.start_s <= now_s && now_s < w.end_s && held_mask[ w.action_idx ] )
+        {
+          held_mask[ w.action_idx ] = 0;
+          any_hold_applied = true;
+        }
+      }
+      if ( any_hold_applied )
+      {
+        bool held_any_legal = false;
+        for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+          held_any_legal = held_any_legal || ( held_mask[ i ] != 0 );
+        if ( held_any_legal )
+        {
+          std::memcpy( select_mask, held_mask, sizeof( select_mask ) );
+          row_held = true;
+        }
+        else
+        {
+          // Fail-safe (same shape as tj1's): never let holds manufacture an empty
+          // select_mask. Ignore the holds for THIS decision only -- select_mask stands
+          // exactly as the natural `mask` copy above left it, so masked_argmax/exploration
+          // below fall back to the full naturally-legal set -- and count the override so a
+          // training run can report how often its declared windows collided with the
+          // engine's own legality gate. row_held stays false: nothing was actually held.
+          ++sim->solver_hold_windows_override_count;
+        }
+      }
+    }
+
+    const int greedy_idx = rl_policy::masked_argmax( q, select_mask );
     int idx = greedy_idx;
     bool exploratory = false;
 
@@ -1008,35 +1013,54 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // ZERO draws, which is what keeps every scoring run and every pre-213
     // run byte-identical to what it was, mirroring the Python side's own
     // zero guard.
+    //
+    // 260922-mfh (D8): two-stage draw -- the whole `wait` family counts as ONE option beside
+    // each legal cast (P(wait) = 1/(n_legal_casts+1), then uniform within waits), matching the
+    // owner's own framing in the folded todo rather than a literal 50/50 cast-vs-wait roll.
+    // Reads `select_mask` (D3), so a held cast can never be drawn here either. The all-illegal
+    // case cannot reach here (222-07/CR-04 correction, extended to select_mask by the fail-safe
+    // above): the refusal upstream already protocol_abort()s on an all-illegal natural `mask`,
+    // and the fail-safe above falls back to that same natural mask whenever holding it empty
+    // would leave nothing selectable -- so select_mask always has at least one legal entry.
     const float exploration = sim->solver_policy_weights->exploration;
     if ( exploration > 0.0f )
     {
       // ONE draw decides whether to explore at all.
       if ( sim->solver_explore_rng.real() < exploration )
       {
-        // Collect the SAME legality list the greedy pick just read above --
-        // never a freshly built one -- and draw uniformly among the legal
-        // indices. The all-illegal case cannot reach here (222-07/CR-04
-        // correction): the refusal added immediately after the allow-list
-        // AND, above, already protocol_abort()s before forward() or
-        // masked_argmax() ever run, so at least one mask[i] is guaranteed
-        // non-zero here and legal_indices is never empty. (masked_argmax()
-        // itself does NOT fall back to index 0 on an all-illegal row -- see
-        // its own definition below -- which is exactly why the refusal
-        // lives upstream of it rather than being left to it.) This block
-        // therefore still must not invent a second answer for the
-        // degenerate case; there is no degenerate case left to answer for.
-        std::vector<int> legal_indices;
+        int legal_casts[ RL_ACTION_DIM ];
+        std::size_t n_casts = 0;
+        int legal_waits[ RL_ACTION_DIM ];
+        std::size_t n_waits = 0;
         for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
         {
-          if ( mask[ i ] )
-            legal_indices.push_back( static_cast<int>( i ) );
+          if ( !select_mask[ i ] )
+            continue;
+          if ( RL_ACTIONS[ i ].kind == rl_action_kind::wait )
+            legal_waits[ n_waits++ ] = static_cast<int>( i );
+          else
+            legal_casts[ n_casts++ ] = static_cast<int>( i );
         }
-        if ( !legal_indices.empty() )
+        const std::size_t n_options = n_casts + ( n_waits > 0 ? 1u : 0u );
+        if ( n_options > 0 )
         {
-          const int pick = static_cast<int>(
-              sim->solver_explore_rng.range( 0.0, static_cast<double>( legal_indices.size() ) ) );
-          idx = legal_indices[ static_cast<std::size_t>( pick ) ];
+          std::size_t pick = static_cast<std::size_t>(
+              sim->solver_explore_rng.range( 0.0, static_cast<double>( n_options ) ) );
+          if ( pick >= n_options )
+            pick = n_options - 1;   // defensive clamp for range()'s upper edge
+          if ( pick < n_casts )
+          {
+            idx = legal_casts[ pick ];
+          }
+          else
+          {
+            // Stage 2: uniform within the wait family.
+            std::size_t w = static_cast<std::size_t>(
+                sim->solver_explore_rng.range( 0.0, static_cast<double>( n_waits ) ) );
+            if ( w >= n_waits )
+              w = n_waits - 1;
+            idx = legal_waits[ w ];
+          }
           // Set whenever the random branch fired, even when the drawn
           // index happens to equal the greedy one -- the bit means "a
           // random action fired", not "the action differed". Phase
@@ -1215,7 +1239,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       }
       rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, top_q,
                                      chosen_target_actor_index, false,
-                                     exploratory || candidate_exploratory,
+                                     exploratory || candidate_exploratory, row_held,
                                      candidate_block_features, candidate_block_mask,
                                      candidate_block_count, candidate_block_chosen_slot );
       // 212-CR-FIX WR-06: accept_cast() can refuse a not-ready action via
@@ -1282,7 +1306,8 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // unset. 228-09 (D-23/TGT-08): a wait has no action to pick a target
     // for -- always the sentinel.
     rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, top_q,
-                                   rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK, wr.floored, exploratory );
+                                   rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK, wr.floored, exploratory,
+                                   row_held );
     // 212-CR-FIX WR-06: same reasoning as the cast branch above -- flush on
     // an abort out of accept_wait() so the decision row already appended
     // survives it.

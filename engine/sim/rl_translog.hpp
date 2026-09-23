@@ -297,7 +297,15 @@ inline constexpr std::uint32_t FORMAT_VERSION = 10u;  // 260918-cbc: credit-by-c
 // compile (tstl 220-03, OBS-06; formula updated 260901-pb1 Task 3 for version 5, updated again
 // 228-09 for version 6, updated again 230-04 for version 7, updated again 260917-pcn for
 // version 9 -- see top-of-file comment).
-inline constexpr std::uint32_t RECORD_SIZE = 2312u;  // 260915-sti Task 1 (D-317):
+inline constexpr std::uint32_t RECORD_SIZE = 2296u;  // 260922-mfh: 2312 -> 2296 -- RL_OBS_DIM
+                                                       // moves 317 -> 313 (the legality family
+                                                       // shrinks by 4 slots, one per removed
+                                                       // wait_cd_* action, D1/D2). roundup8(45 +
+                                                       // 4*313 + 4*8*23 + 4) = roundup8(2037) =
+                                                       // 2040, + 160 proc block + 96 credit block
+                                                       // = 2296. Confirmed by the static_assert
+                                                       // immediately below, not hand-verified.
+                                                       // 260915-sti Task 1 (D-317):
                                                        // 2016 -> 2056 -- roundup8(45 + 4*317 +
                                                        // 4*8*23 + 4) = roundup8(2053) = 2056.
                                                        // RL_OBS_DIM moves 306 -> 317 (11 new stat/
@@ -337,9 +345,10 @@ inline constexpr std::uint32_t PROC_BLOCK_OFFSET =
         4u * static_cast<std::uint32_t>( RL_TARGET_SLOTS ) * static_cast<std::uint32_t>( RL_TARGET_FEATURES ) +
         4u + 7u ) / 8u ) * 8u;
 inline constexpr std::uint32_t PROC_BLOCK_SIZE = 8u * rl_proc::COUNT;
-static_assert( PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE == 2216u,
-               "PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE must equal the version-9 row size (2216) -- "
-               "CREDIT_BLOCK_OFFSET below is pinned to that exact value" );
+static_assert( PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE == 2200u,
+               "PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE must equal the version-9 row size at the "
+               "260922-mfh (D1/D2) obs width (2200) -- CREDIT_BLOCK_OFFSET below is pinned to "
+               "that exact value" );
 // 260918-cbc: the version-9 row size (unchanged formula) is where the new credit-by-cause
 // block starts; CREDIT_BLOCK_SIZE is the block's own byte count (two double[STREAM_COUNT]
 // arrays -- see rl_credit.hpp's rl_credit_streams_t). Declared after PROC_BLOCK_SIZE so the
@@ -394,6 +403,12 @@ inline constexpr std::uint32_t FOOTER_SOURCE_PER_FIGHT_ACCUMULATOR = 1u;
 //    best one. It has no writer until Phase 213 lands the dice roll in
 //    C++ -- Phase 210 currently REFUSES to load a weights blob that asks
 //    for any randomness at all.
+//  - bit 5 (FLAG_HELD, 260922-mfh D4) marks a decision where an active
+//    solver_hold_windows= window cleared at least one naturally-legal
+//    action from the SELECTABLE set (see solver_control.cpp's
+//    select_mask/row_held). The row's own `mask` field (below) is always
+//    the NATURAL mask (D3) -- this bit is the only place a hold is
+//    visible in the recorded row at all.
 // Reserving the bit positions now costs nothing; retrofitting one later is
 // a version bump.
 inline constexpr std::uint8_t FLAG_TERMINATED = 1u << 0;
@@ -401,6 +416,7 @@ inline constexpr std::uint8_t FLAG_TRUNCATED = 1u << 1;
 inline constexpr std::uint8_t FLAG_WAIT_FLOORED = 1u << 2;
 inline constexpr std::uint8_t FLAG_EXPLORATORY = 1u << 3;
 inline constexpr std::uint8_t FLAG_COLLECTED = 1u << 4;
+inline constexpr std::uint8_t FLAG_HELD = 1u << 5;   // 260922-mfh (D4)
 
 // ---- Row layouts (212-RESEARCH M-1, ruling 212-G1, AS RELAID for version 2
 // by quick task 260826-38t, AS RELAID AGAIN for version 3 by this session's
@@ -1008,6 +1024,11 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq,
                        int action_index, float q_margin, float top_q,
                        std::uint16_t chosen_target_actor_index, bool wait_floored,
                        bool exploratory,
+                       // 260922-mfh (D4): true when an active solver_hold_windows= window
+                       // cleared at least one naturally-legal action at THIS decision -- OR'd
+                       // into the row's FLAG_HELD bit. `mask` above stays the natural mask
+                       // regardless (D3); this is the only place a hold is recorded at all.
+                       bool held,
                        const float* candidate_features = nullptr, std::uint16_t candidate_mask = 0,
                        std::uint8_t candidate_count = 0,
                        std::uint8_t chosen_candidate_slot = CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK );

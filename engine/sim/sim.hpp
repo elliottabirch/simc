@@ -765,35 +765,37 @@ struct sim_t : private sc_thread_t
   // null when disabled. std::shared_ptr, not std::unique_ptr -- see the
   // rl_policy forward declaration above for why.
   std::shared_ptr<rl_policy::rl_weights_t> solver_policy_weights;
-  // Quick task tj1 (2026-09-01, timing-jitter exploration). solver_hold_
-  // until=<idx>:<sec>,<idx>:<sec>,... masks action `idx` out of the legal
-  // set solver_control::choose()'s in-process block builds, until sim time
-  // reaches `sec` seconds -- giving a training-collection episode a way to
-  // hold a major cooldown past its default engine timing so the learner can
-  // discover WHETHER a later release scores better, without any rule ever
-  // being encoded about WHEN is right. Meaningful ONLY together with
-  // solver_policy_str (refused in sim.cpp otherwise -- solver_control_str's
-  // FIFO transport has no in-process mask to hold). Empty string (default,
-  // or the option simply absent) leaves solver_hold_until_release_s empty,
-  // which choose() treats as "disabled" via one .empty() check -- byte-
-  // identical behavior to a run built before this option existed.
-  std::string solver_hold_until_str;
-  // Parsed ONCE in setup() from solver_hold_until_str: RL_ACTION_DIM-wide
-  // when non-empty (empty vector = disabled), release-second per action
-  // index, -1.0 = "no hold declared for this index". solver_control.cpp
-  // reads this read-only, once per decision -- it never re-parses the
-  // string.
-  std::vector<double> solver_hold_until_release_s;
-  // Fail-safe counter (tj1 design doc): incremented every time applying the
-  // hold would have left EVERY action illegal for a decision -- the hold is
-  // ignored for THAT ONE decision (the pre-hold, post-allow-list mask
-  // stands unchanged) rather than ever manufacturing an all-illegal mask or
-  // FATALing. Not atomic: solver_policy_str's own clamp (sim.cpp) already
-  // forces threads=1 whenever this can be non-empty, so choose() has
-  // exactly one writer for the run's lifetime, the same reasoning
-  // rl_obs_ns's own doc comment gives for skipping a mutex there. Read once
-  // at run end for the stderr readout (sim.cpp's execute()).
-  std::uint64_t solver_hold_until_override_count = 0;
+  // 260922-mfh (D5): replaces tj1's solver_hold_until= (deleted at every layer -- the old
+  // start-of-fight-only form is not kept). solver_hold_windows=<idx>:<start_s>:<end_s>[,...]
+  // masks action `idx` out of SELECTION ONLY (never the mask build_obs/forward/diagnostics/the
+  // translog row see -- D3, see solver_control.cpp's own top-of-block comment) during each
+  // half-open window [start_s, end_s) measured from fight start. Several windows may name the
+  // same idx and MAY OVERLAP (union semantics, D5 -- no overlap refusal, unlike tj1's repeated-
+  // index refusal). Meaningful ONLY together with solver_policy_str (refused in sim.cpp
+  // otherwise). Empty string (default, or the option simply absent) leaves solver_hold_windows
+  // empty, which choose() treats as "disabled" via one .empty() check -- byte-identical
+  // behavior to a run built before this option existed.
+  std::string solver_hold_windows_str;
+  // A flat vector beats a per-action vector-of-vectors here: a handful of windows per run, one
+  // linear scan per decision, no allocation per decision.
+  struct solver_hold_window_t
+  {
+    std::uint32_t action_idx;
+    double        start_s;
+    double        end_s;
+  };
+  // Parsed ONCE in setup() from solver_hold_windows_str (empty = disabled). solver_control.cpp
+  // reads this read-only, once per decision -- it never re-parses the string.
+  std::vector<solver_hold_window_t> solver_hold_windows;
+  // Fail-safe counter: incremented every time applying the active windows would have left
+  // EVERY selectable action illegal for a decision -- the hold is ignored for THAT ONE
+  // decision (select_mask falls back to the natural, unheld mask) rather than ever
+  // manufacturing an all-illegal select_mask or FATALing. Not atomic: solver_policy_str's own
+  // clamp (sim.cpp) already forces threads=1 whenever this can be non-empty, so choose() has
+  // exactly one writer for the run's lifetime, the same reasoning rl_obs_ns's own doc comment
+  // gives for skipping a mutex there. Read once at run end for the stderr readout (sim.cpp's
+  // execute()).
+  std::uint64_t solver_hold_windows_override_count = 0;
   // rl_forward_probe sim option (tstl-sylvanas Phase 222, plan 222-04,
   // NET-02's cross-path receipt). Loads a solver_policy= blob (weights are
   // already loaded+validated in setup() above, same as solver_policy=
