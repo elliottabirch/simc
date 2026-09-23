@@ -1,4 +1,4 @@
-SimulationCraft 1210-01 for World of Warcraft 12.1.0.69382 PTR
+SimulationCraft 1210-01 for World of Warcraft 12.1.5.69952 PTR
 Name             : Vanguard (id=71) [Spell Family (4), Passive] 
 Class            : Protection Warrior
 School           : Physical
@@ -546,7 +546,7 @@ Cooldown         : 6 seconds
 Labels           : 16: Class Spells
                  : 25: Warrior Spells
                  : 292
-Affecting Spells : Recklessness (1719 effect#7), Sudden Death (52437 effects: #1, #2, #3), Warrior (137047 effects: #1, #2), Protection Warrior (137048 effect#11), Arms Warrior (137049 effect#13), Precise Strikes (209493 effects: #1, #2), Stone Heart (225947 effects: #1, #2), Precise Strikes (248195 effect#1), Sudden Death (280776 effect#1), Improved Execute (316402 effects: #1, #2, #3), Improved Execute (316405 effect#1), Sharpened Blades (383341 effects: #1, #2), Critical Thinking (389306 effect#1), Cruel Strikes (392777 effect#2), Improved Execute (397708 effect#1), Slayer's Malice (444779 effects: #1, #2), Arms Warrior (1256919 effect#4), Fury Warrior (1257520 effect#5), Executioner's Wrath (1265570 effect#1), Devastating Focus (1277983 effect#1)
+Affecting Spells : Recklessness (1719 effect#7), Sudden Death (52437 effects: #1, #2, #3), Warrior (137047 effects: #1, #2), Protection Warrior (137048 effect#11), Arms Warrior (137049 effect#13), Precise Strikes (209493 effects: #1, #2), Stone Heart (225947 effects: #1, #2), Precise Strikes (248195 effect#1), Sudden Death (280776 effect#1), Improved Execute (316402 effects: #1, #2, #3), Improved Execute (316405 effect#1), Sharpened Blades (383341 effects: #1, #2), Critical Thinking (389306 effect#1), Cruel Strikes (392777 effect#2), Improved Execute (397708 effect#1), Practiced Strikes (429647 effect#7), Slayer's Malice (444779 effects: #1, #2), Arms Warrior (1256919 effect#4), Fury Warrior (1257520 effect#5), Executioner's Wrath (1265570 effect#1), Devastating Focus (1277983 effect#1)
 Triggered By     : Sudden Death (280776)
 Family Flags     : 8, 18, 29, 59, 78
 Attributes       : Is Ability (4), Not Shapeshifted (16), Do Not Sheath (18), Initiates Combat (Enables Auto-Attack) (41), Discount Power On Miss (59), Chain From Caster (76), Requires Main-Hand Weapon (106), Combat Feedback When Usable (137), Spellcast Override In Spellbook (310), Enforce Facing on Primary Target Only (351), Allow Class Ability Procs (416), Prevent Jumping During Precast (448)
@@ -622,7 +622,7 @@ Effects          :
 #1 (id=2307)     : Dummy (3)
                    Base Value: 0 | Scaled Value: 0 (delta=1) | Radius: 3 - 8 yards | Target: at Area (87)
 #2 (id=475719)   : Jump Charge (254)
-                   Base Value: 5 | Scaled Value: 5 | Misc Value: 17 | Target: at Area (87)
+                   Base Value: 5 | Scaled Value: 5 | Misc Value: 1912 | Target: at Area (87)
 Description      : Leap through the air toward a target location, slamming down with destructive force to deal $52174s1 Physical damage to all enemies within $52174a1 yards$?c3[ and resetting the remaining cooldown on Taunt][].
 Variables        : $base=${1+0.5*$AP}
 $damage=$?a2457[${1+0.5*$AP*1.1}][${$<base>}]
@@ -663,7 +663,7 @@ Labels           : 16: Class Spells
                  : 25: Warrior Spells
                  : 292
                  : 881
-Affecting Spells : Demoralizing Shout (1160 effect#3), Recklessness (1719 effect#4), Revenge! (5302 effects: #1, #2), Mastery: Unshackled Fury (76856 effects: #1, #2), Avatar (107574 effects: #1, #4), Warrior (137047 effects: #1, #2), Protection Warrior (137048 effects: #1, #2), Arms Warrior (137049 effects: #1, #2), Fury Warrior (137050 effects: #1, #2), Colossus Smash (208086 effect#1), Callous Reprisal (278760 effect#2), Glory (325787 effect#1), Will of the Berserker (335597 effect#1), Seismic Reverberation (335759 effect#1), One-Handed Weapon Specialization (382895 effects: #1, #2), Two-Handed Weapon Specialization (382896 effects: #1, #2), Dual Wield Specialization (382900 effects: #1, #2), Barbaric Training (383082 effects: #7, #8), Impale (383430 effect#1), Battle Stance (386164 effect#4), Rend (388539 effect#2), Vanguard's Determination (394056 effects: #1, #3), Strike Vulnerabilities (394173 effects: #1, #2), Martial Expert (429638 effect#1), Mountain of Muscle and Scars (429642 effects: #1, #2), Practiced Strikes (429647 effect#4), Thorim's Might (436152 effect#2), Colossal Might (440989 effect#4), Overwhelmed (445836 effect#1), Wrecked (447513 effects: #2, #3), Brutal Follow-Up (455501 effect#1), Luck of the Draw! (1218163 effects: #1, #4), Arms Warrior (1256919 effects: #1, #2), Protection Warrior (1256935 effects: #1, #2), Fury Warrior (1257520 effects: #1, #2), Mastery: Master of Arms (1258398 effects: #1, #2), Master Tactician (1261216 effects: #1, #2), Warrior Protection 12.0 Class Set 4pc (1264880 effect#1), Devastating Focus (1277983 effect#1), Warrior - Midnight PrePatch - 11.2 Class Set 2pc (1283642 effects: #1, #2), Warrior - Midnight PrePatch - 11.2 Class Set 4pc (1283643 effects: #1, #2)
+Affecting Spells : Demoralizing Shout (1160 effect#3), Recklessness (1719 effect#4), Revenge! (5302 effects: #1, #2), Mastery: Unshackled Fury (76856 effects: #1, #2), Avatar (107574 effects: #1, #4), Warrior (137047 effects: #1, #2), Protection Warrior (137048 effects: #1, #2), Arms Warrior (137049 effects: #1, #2), Fury Warrior (137050 effects: #1, #2), Colossus Smash (208086 effect#1), Callous Reprisal (278760 effect#2), Glory (325787 effect#1), Will of the Berserker (335597 effect#1), Seismic Reverberation (335759 effect#1), One-Handed Weapon Specialization (382895 effects: #1, #2), Two-Handed Weapon Specialization (382896 effects: #1, #2), Dual Wield Specialization (382900 effects: #1, #2), Barbaric Training (383082 effects: #7, #8), Impale (383430 effect#1), Battle Stance (386164 effect#4), Rend (388539 effect#2), Vanguard's Determination (394056 effects: #1, #3), Strike Vulnerabilities (394173 effects: #1, #2), Martial Expert (429638 effect#1), Mountain of Muscle and Scars (429642 effects: #1, #2), Practiced Strikes (429647 effects: #4, #6), Thorim's Might (436152 effect#2), Colossal Might (440989 effect#4), Overwhelmed (445836 effect#1), Wrecked (447513 effects: #2, #3), Brutal Follow-Up (455501 effect#1), Luck of the Draw! (1218163 effects: #1, #4), Arms Warrior (1256919 effects: #1, #2), Protection Warrior (1256935 effects: #1, #2), Fury Warrior (1257520 effects: #1, #2), Mastery: Master of Arms (1258398 effects: #1, #2), Master Tactician (1261216 effects: #1, #2), Warrior Protection 12.0 Class Set 4pc (1264880 effect#1), Devastating Focus (1277983 effect#1), Warrior - Midnight PrePatch - 11.2 Class Set 2pc (1283642 effects: #1, #2), Warrior - Midnight PrePatch - 11.2 Class Set 4pc (1283643 effects: #1, #2)
 Family Flags     : 8, 9, 10, 18
 Attributes       : Is Ability (4), Not Shapeshifted (16), Do Not Sheath (18), Initiates Combat (Enables Auto-Attack) (41), Requires Main-Hand Weapon (106), Allow Class Ability Procs (416)
 Effects          :
@@ -770,7 +770,7 @@ Labels           : 16: Class Spells
                  : 25: Warrior Spells
                  : 292
                  : 948
-                 : 1387
+                 : 1387: Avoid CC Targets
 Mechanic         : Snare
 Affecting Spells : Warrior (137047 effect#2), Battlefield Commander (424742 effect#3), Resonant Voice (1243660 effect#1)
 Family Flags     : 8, 70, 71
@@ -1991,7 +1991,7 @@ Labels           : 16: Class Spells
                  : 292
                  : 3875
 Proc Chance      : 101%
-Triggered By     : Bloody Screech (24423), Monstrous Bite (54680), Deadly Sting (160060), Infected Bite (263853), Savage Rend (263854), Ravage (263857), Toxic Sting (263858)
+Triggered By     : Bloody Screech (24423), Monstrous Bite (54680), Gruesome Bite (160018), Deadly Sting (160060), Infected Bite (263853), Savage Rend (263854), Gnaw (263856), Ravage (263857), Toxic Sting (263858), Gore (263861), Acid Bite (263863), Grievous Bite (279362)
 Attributes       : Is Ability (4), Not Shapeshifted (16), Do Not Sheath (18), Initiates Combat (Enables Auto-Attack) (41), Discount Power On Miss (59), Requires Main-Hand Weapon (106), Aura Points On Client (268), Not In Spellbook Until Learned (269), Allow Class Ability Procs (416)
 Effects          :
 #1 (id=129901)   : Apply Aura (6) | Modify Healing Received% (118)
@@ -2387,7 +2387,7 @@ Effects          :
                    Base Value: 0 | Scaled Value: 0 | Misc Value 2: 3927 (Label) | Target: Self (1)
                    Affected Spells (Label): Lightning Strike Ground Current (460670)
 #11 (id=261032)  : Apply Aura (6) | Add Percent Modifier (108): Spell Direct Amount (0)
-                   Base Value: 20 | Scaled Value: 20 | Target: Self (1)
+                   Base Value: 56 | Scaled Value: 56 | Target: Self (1)
                    Affected Spells: Execute (5308), Execute (163201), Execute Off-Hand (163558), Execute (260798), Execute (280735), Execute (280849), Execute (281000), Condemn (317349), Condemn (317483), Condemn (317485), Condemn (317488), Condemn Off-Hand (317489), Condemn (330325), Condemn (330334), Arms Execute FX Test (463815), Fury Execute FX Test (463816), Fury Execute Off-Hand FX Test (463817)
                    Family Flags: 29
 #12 (id=261033)  : Apply Aura (6) | Apply Percent Modifier w/ Label (218): Spell Direct Amount (0)
@@ -2465,19 +2465,19 @@ Labels           : 16: Class Spells
 Attributes       : Is Ability (4), Passive (6), Do Not Display (Spellbook, Aura Icon, Combat Log) (7), Do Not Log (8), Allow Class Ability Procs (416)
 Effects          :
 #1 (id=179734)   : Apply Aura (6) | Add Percent Modifier (108): Spell Direct Amount (0)
-                   Base Value: 15 | Scaled Value: 15 | Target: Self (1)
+                   Base Value: 22 | Scaled Value: 22 | Target: Self (1)
                    Affected Spells: Rend (772), Cleave (845), Slam (1464), Hamstring (1715), Thunder Clap (6343), Revenge (6572), Overpower (7384), Mortal Strike (12294), Devastate (20243), Bloodthirst (23881), Shield Slam (23922), Victory Rush (34428), Whirlwind Off-Hand (44949), Shockwave (46968), Bladestorm (50622), Heroic Leap (52174), Heroic Throw (57755), Shattering Throw (64382), Raging Blow (85384), Bladestorm Off-Hand (95738), Raging Blow (96103), Storm Bolt (107570), Bloodbath (113344), Charge (126664), Ravager (156287), Execute Off-Hand (163558), Colossus Smash (167105), Rampage (184707), Rampage (184709), Whirlwind (199658), Whirlwind (199667), Whirlwind (199850), Whirlwind Off-Hand (199851), Whirlwind (199852), Rampage (201363), Rampage (201364), Impending Victory (202168), Rampage (218617), Devastator (236282), Execute (260798), Deep Wounds (262115), Warbreaker (262161), Seismic Wave (278497), Iron Fortress (279142), Execute (280849), Reckless Flurry (283810), Gushing Wound (288091), Spear of Bastion (307871), Dreadnaught (315961), Condemn (317483), Condemn (317488), Condemn Off-Hand (317489), Ancient Aftershock (325886), Ancient Aftershock (326062), Repulsive Pennant (333860), Bloodbath (335096), Crushing Blow (335098), Crushing Blow (335100), Mortal Strike (339385), Whirlwind (347360), Whirlwind Off-Hand (347362), Whirlwind (347363), Nature's Fury (354163), Champion's Spear (376080), Fatal Mark (383706), Annihilator (383915), Wrecking Throw (384110), Gushing Wound (385042), Odyn's Fury (385059), Odyn's Fury (385060), Odyn's Fury Off-Hand (385061), Odyn's Fury (385062), Whirlwind (385228), Whirlwind (385233), Whirlwind Off-Hand (385234), Tough as Nails (385890), Shield Charge (385954), Rend (388539), Shattering Throw (394352), Wrecking Throw (394354), Earthen Smash (410219), Whirlwind (411547), Crushing Advance (411703), Thunder Blast (435222), Lightning Strike (435791), Demolish (440884), Demolish (440886), Demolish (440888), Slayer's Strike (445579), Reap the Storm (446005), Cleave (458459), Lightning Strike Ground Current (460670), Arms Execute FX Test (463815), Fury Execute FX Test (463816), Fury Execute Off-Hand FX Test (463817), Revenge (1215174), Heroic Strike (1269383), Phalanx (1270116), Champion's Leap (1271985), Rampaging Ruin (1299944), Concussive Slam (1300660), Bloody Rebuke (1300690)
                    Family Flags: 9
 #2 (id=191010)   : Apply Aura (6) | Add Percent Modifier (108): Spell Periodic Amount (22)
-                   Base Value: 15 | Scaled Value: 15 | Misc Value: 22 | Target: Self (1)
+                   Base Value: 22 | Scaled Value: 22 | Misc Value: 22 | Target: Self (1)
                    Affected Spells: Rend (772), Cleave (845), Slam (1464), Hamstring (1715), Thunder Clap (6343), Revenge (6572), Overpower (7384), Mortal Strike (12294), Devastate (20243), Bloodthirst (23881), Shield Slam (23922), Victory Rush (34428), Whirlwind Off-Hand (44949), Shockwave (46968), Bladestorm (50622), Heroic Leap (52174), Heroic Throw (57755), Shattering Throw (64382), Raging Blow (85384), Bladestorm Off-Hand (95738), Raging Blow (96103), Storm Bolt (107570), Bloodbath (113344), Charge (126664), Ravager (156287), Execute Off-Hand (163558), Colossus Smash (167105), Rampage (184707), Rampage (184709), Whirlwind (199658), Whirlwind (199667), Whirlwind (199850), Whirlwind Off-Hand (199851), Whirlwind (199852), Rampage (201363), Rampage (201364), Impending Victory (202168), Rampage (218617), Devastator (236282), Execute (260798), Deep Wounds (262115), Warbreaker (262161), Seismic Wave (278497), Iron Fortress (279142), Execute (280849), Reckless Flurry (283810), Gushing Wound (288091), Spear of Bastion (307871), Dreadnaught (315961), Condemn (317483), Condemn (317488), Condemn Off-Hand (317489), Ancient Aftershock (325886), Ancient Aftershock (326062), Repulsive Pennant (333860), Bloodbath (335096), Crushing Blow (335098), Crushing Blow (335100), Mortal Strike (339385), Whirlwind (347360), Whirlwind Off-Hand (347362), Whirlwind (347363), Nature's Fury (354163), Champion's Spear (376080), Fatal Mark (383706), Annihilator (383915), Wrecking Throw (384110), Gushing Wound (385042), Odyn's Fury (385059), Odyn's Fury (385060), Odyn's Fury Off-Hand (385061), Odyn's Fury (385062), Whirlwind (385228), Whirlwind (385233), Whirlwind Off-Hand (385234), Tough as Nails (385890), Shield Charge (385954), Rend (388539), Shattering Throw (394352), Wrecking Throw (394354), Earthen Smash (410219), Whirlwind (411547), Crushing Advance (411703), Thunder Blast (435222), Lightning Strike (435791), Demolish (440884), Demolish (440886), Demolish (440888), Slayer's Strike (445579), Reap the Storm (446005), Cleave (458459), Lightning Strike Ground Current (460670), Arms Execute FX Test (463815), Fury Execute FX Test (463816), Fury Execute Off-Hand FX Test (463817), Revenge (1215174), Heroic Strike (1269383), Phalanx (1270116), Champion's Leap (1271985), Rampaging Ruin (1299944), Concussive Slam (1300660), Bloody Rebuke (1300690)
                    Family Flags: 9
 #3 (id=191011)   : Apply Aura (6) | Modify Pet Damage Done% (429)
-                   Base Value: 15 | Scaled Value: 15 | Target: Self (1)
+                   Base Value: 22 | Scaled Value: 22 | Target: Self (1)
 #4 (id=191012)   : Apply Aura (6) | Modify Guardian Damage Done% (531)
-                   Base Value: 15 | Scaled Value: 15 | Target: Self (1)
+                   Base Value: 22 | Scaled Value: 22 | Target: Self (1)
 #5 (id=191013)   : Apply Aura (6) | Modify Auto Attack Damage Done% (344)
-                   Base Value: 130 | Scaled Value: 130 | Target: Self (1)
+                   Base Value: 144 | Scaled Value: 144 | Target: Self (1)
 #6 (id=831458)   : Apply Aura (6) | Modify Rage Generated From Auto Attacks (213)
                    Base Value: 0 | Scaled Value: 0 | Target: Self (1)
 #7 (id=877674)   : Apply Aura (6) | Hasted Cooldown Duration (Category) (457)
@@ -2633,7 +2633,9 @@ Name             : Execute (id=163201) [Spell Family (4)]
 Class            : Warrior
 School           : Physical
 Spell Type       : Melee
-Resource         : 20 - 40 Rage (1) (id=9491)
+Resource         : 20 - 40 Rage (1) (id=9491) w/ Arms Warrior (id=137049)
+Resource         : 20 - 40 Rage (1) (id=314870) w/ Protection Warrior (id=137048)
+Resource         : 20 - 40 Rage (1) (id=314872) w/ Initial Warrior (id=325446)
 Spell Level      : 10
 Range            : 5 yards
 GCD              : 1.5 seconds
@@ -2642,7 +2644,7 @@ Cooldown         : 6 seconds
 Labels           : 16: Class Spells
                  : 25: Warrior Spells
                  : 292
-Affecting Spells : Recklessness (1719 effect#7), Sudden Death (52437 effects: #1, #2, #3), Warrior (137047 effects: #1, #2), Protection Warrior (137048 effect#11), Arms Warrior (137049 effect#13), Precise Strikes (209493 effects: #1, #2), Stone Heart (225947 effects: #1, #2), Precise Strikes (248195 effect#1), Sudden Death (280776 effect#1), Improved Execute (316402 effects: #1, #2, #3), Improved Execute (316405 effect#1), Sharpened Blades (383341 effects: #1, #2), Critical Thinking (389306 effect#1), Cruel Strikes (392777 effect#2), Improved Execute (397708 effect#1), Slayer's Malice (444779 effects: #1, #2), Arms Warrior (1256919 effect#4), Fury Warrior (1257520 effect#5), Executioner's Wrath (1265570 effect#1), Devastating Focus (1277983 effect#1)
+Affecting Spells : Recklessness (1719 effect#7), Sudden Death (52437 effects: #1, #2, #3), Warrior (137047 effects: #1, #2), Protection Warrior (137048 effect#11), Arms Warrior (137049 effect#13), Precise Strikes (209493 effects: #1, #2), Stone Heart (225947 effects: #1, #2), Precise Strikes (248195 effect#1), Sudden Death (280776 effect#1), Improved Execute (316402 effects: #1, #2, #3), Improved Execute (316405 effect#1), Sharpened Blades (383341 effects: #1, #2), Critical Thinking (389306 effect#1), Cruel Strikes (392777 effect#2), Improved Execute (397708 effect#1), Practiced Strikes (429647 effect#7), Slayer's Malice (444779 effects: #1, #2), Arms Warrior (1256919 effect#4), Fury Warrior (1257520 effect#5), Executioner's Wrath (1265570 effect#1), Devastating Focus (1277983 effect#1)
 Triggered By     : Sudden Death (52437)
 Family Flags     : 8, 18, 29, 59, 78
 Attributes       : Is Ability (4), Not Shapeshifted (16), Do Not Sheath (18), Initiates Combat (Enables Auto-Attack) (41), Discount Power On Miss (59), Requires Main-Hand Weapon (106), Combat Feedback When Usable (137), Allow Class Ability Procs (416), Prevent Jumping During Precast (448)
@@ -4547,7 +4549,7 @@ Labels           : 16: Class Spells
                  : 690: Major Cooldowns
 Affecting Spells : Recklessness (1719 effects: #7, #8), Warrior (137047 effect#2), Fury Warrior (137050 effect#8), Unrelenting Onslaught (444780 effect#4), Arms Warrior (1256919 effect#3), Fury Warrior (1257520 effect#3)
 Family Flags     : 8, 46
-Attributes       : Is Ability (4), Not Shapeshifted (16), Do Not Sheath (18), No Immunities (29), No Skill Increase (36), Initiates Combat (Enables Auto-Attack) (41), No Threat (42), Immunity Purges Effect (47), Requires Main-Hand Weapon (106), Extra Initial Period (169), Spell Haste Affects Periodic (173), Not In Spellbook Until Learned (269), Haste Affects Duration (273), Allow Defense While Channeling (338), Allow Class Ability Procs (416)
+Attributes       : Is Ability (4), Not Shapeshifted (16), Do Not Sheath (18), No Immunities (29), No Skill Increase (36), Initiates Combat (Enables Auto-Attack) (41), No Threat (42), Immunity Purges Effect (47), Requires Main-Hand Weapon (106), Extra Initial Period (169), Spell Haste Affects Periodic (173), Not In Spellbook Until Learned (269), Haste Affects Duration (273), Allow Defense While Channeling (338), Allow Class Ability Procs (416), Important Spell (491)
 Effects          :
 #1 (id=342669)   : Apply Aura (6) | Periodic Trigger Spell (23): Bladestorm every 1 seconds
                    Base Value: 8 | Scaled Value: 8 | Trigger Spell: 50622 | Target: Self (1)
@@ -5990,7 +5992,7 @@ Cooldown         : 4.5 seconds
 Labels           : 16: Class Spells
                  : 25: Warrior Spells
                  : 292
-Affecting Spells : Recklessness (1719 effect#7), Sudden Death (52437 effects: #1, #2, #3), Warrior (137047 effects: #1, #2), Protection Warrior (137048 effect#11), Arms Warrior (137049 effect#13), Precise Strikes (209493 effects: #1, #2), Stone Heart (225947 effects: #1, #2), Precise Strikes (248195 effect#1), Sudden Death (280776 effect#1), Improved Execute (316402 effects: #1, #2, #3), Improved Execute (316405 effect#1), Sharpened Blades (383341 effects: #1, #2), Critical Thinking (389306 effect#1), Cruel Strikes (392777 effect#2), Improved Execute (397708 effect#1), Slayer's Malice (444779 effects: #1, #2), Arms Warrior (1256919 effect#4), Fury Warrior (1257520 effect#5), Executioner's Wrath (1265570 effect#1), Devastating Focus (1277983 effect#1)
+Affecting Spells : Recklessness (1719 effect#7), Sudden Death (52437 effects: #1, #2, #3), Warrior (137047 effects: #1, #2), Protection Warrior (137048 effect#11), Arms Warrior (137049 effect#13), Precise Strikes (209493 effects: #1, #2), Stone Heart (225947 effects: #1, #2), Precise Strikes (248195 effect#1), Sudden Death (280776 effect#1), Improved Execute (316402 effects: #1, #2, #3), Improved Execute (316405 effect#1), Sharpened Blades (383341 effects: #1, #2), Critical Thinking (389306 effect#1), Cruel Strikes (392777 effect#2), Improved Execute (397708 effect#1), Practiced Strikes (429647 effect#7), Slayer's Malice (444779 effects: #1, #2), Arms Warrior (1256919 effect#4), Fury Warrior (1257520 effect#5), Executioner's Wrath (1265570 effect#1), Devastating Focus (1277983 effect#1)
 Triggered By     : Sudden Death (280776)
 Family Flags     : 8, 18, 29, 59, 82
 Attributes       : Is Ability (4), Not Shapeshifted (16), Do Not Sheath (18), Initiates Combat (Enables Auto-Attack) (41), Discount Power On Miss (59), Chain From Caster (76), Requires Main-Hand Weapon (106), Combat Feedback When Usable (137), Spellcast Override In Spellbook (310), Enforce Facing on Primary Target Only (351), Allow Class Ability Procs (416), Prevent Jumping During Precast (448)
@@ -6084,7 +6086,8 @@ Name             : Execute (id=281000) [Spell Family (4)]
 Class            : Warrior
 School           : Physical
 Spell Type       : Melee
-Resource         : 20 - 40 Rage (1) (id=191875)
+Resource         : 20 - 40 Rage (1) (id=191875) w/ Arms Warrior (id=137049)
+Resource         : 20 - 40 Rage (1) (id=314871) w/ Protection Warrior (id=137048)
 Spell Level      : 8
 Range            : 5 yards
 GCD              : 1.5 seconds
@@ -6093,7 +6096,7 @@ Cooldown         : 6 seconds
 Labels           : 16: Class Spells
                  : 25: Warrior Spells
                  : 292
-Affecting Spells : Recklessness (1719 effect#7), Sudden Death (52437 effects: #1, #2, #3), Warrior (137047 effects: #1, #2), Protection Warrior (137048 effect#11), Arms Warrior (137049 effect#13), Precise Strikes (209493 effects: #1, #2), Stone Heart (225947 effects: #1, #2), Precise Strikes (248195 effect#1), Sudden Death (280776 effect#1), Improved Execute (316402 effects: #1, #2, #3), Improved Execute (316405 effect#1), Sharpened Blades (383341 effects: #1, #2), Critical Thinking (389306 effect#1), Cruel Strikes (392777 effect#2), Improved Execute (397708 effect#1), Slayer's Malice (444779 effects: #1, #2), Arms Warrior (1256919 effect#4), Fury Warrior (1257520 effect#5), Executioner's Wrath (1265570 effect#1), Devastating Focus (1277983 effect#1)
+Affecting Spells : Recklessness (1719 effect#7), Sudden Death (52437 effects: #1, #2, #3), Warrior (137047 effects: #1, #2), Protection Warrior (137048 effect#11), Arms Warrior (137049 effect#13), Precise Strikes (209493 effects: #1, #2), Stone Heart (225947 effects: #1, #2), Precise Strikes (248195 effect#1), Sudden Death (280776 effect#1), Improved Execute (316402 effects: #1, #2, #3), Improved Execute (316405 effect#1), Sharpened Blades (383341 effects: #1, #2), Critical Thinking (389306 effect#1), Cruel Strikes (392777 effect#2), Improved Execute (397708 effect#1), Practiced Strikes (429647 effect#7), Slayer's Malice (444779 effects: #1, #2), Arms Warrior (1256919 effect#4), Fury Warrior (1257520 effect#5), Executioner's Wrath (1265570 effect#1), Devastating Focus (1277983 effect#1)
 Triggered By     : Sudden Death (52437)
 Family Flags     : 8, 18, 29, 59, 82
 Attributes       : Is Ability (4), Not Shapeshifted (16), Do Not Sheath (18), Initiates Combat (Enables Auto-Attack) (41), Discount Power On Miss (59), Requires Main-Hand Weapon (106), Combat Feedback When Usable (137), Allow Class Ability Procs (416), Prevent Jumping During Precast (448)
@@ -6743,7 +6746,7 @@ Labels           : 16: Class Spells
                  : 25: Warrior Spells
                  : 292
                  : 976: Covenant Spells
-Affecting Spells : Recklessness (1719 effect#7), Sudden Death (52437 effects: #1, #2, #3), Warrior (137047 effects: #1, #2), Protection Warrior (137048 effect#11), Arms Warrior (137049 effect#13), Precise Strikes (209493 effects: #1, #2), Stone Heart (225947 effects: #1, #2), Precise Strikes (248195 effect#1), Sudden Death (280776 effect#1), Improved Execute (316402 effects: #1, #2, #3), Improved Execute (316405 effect#1), Sharpened Blades (383341 effects: #1, #2), Critical Thinking (389306 effect#1), Cruel Strikes (392777 effect#2), Improved Execute (397708 effect#1), Slayer's Malice (444779 effects: #1, #2), Arms Warrior (1256919 effect#4), Fury Warrior (1257520 effect#5), Executioner's Wrath (1265570 effect#1), Devastating Focus (1277983 effect#1)
+Affecting Spells : Recklessness (1719 effect#7), Sudden Death (52437 effects: #1, #2, #3), Warrior (137047 effects: #1, #2), Protection Warrior (137048 effect#11), Arms Warrior (137049 effect#13), Precise Strikes (209493 effects: #1, #2), Stone Heart (225947 effects: #1, #2), Precise Strikes (248195 effect#1), Sudden Death (280776 effect#1), Improved Execute (316402 effects: #1, #2, #3), Improved Execute (316405 effect#1), Sharpened Blades (383341 effects: #1, #2), Critical Thinking (389306 effect#1), Cruel Strikes (392777 effect#2), Improved Execute (397708 effect#1), Practiced Strikes (429647 effect#7), Slayer's Malice (444779 effects: #1, #2), Arms Warrior (1256919 effect#4), Fury Warrior (1257520 effect#5), Executioner's Wrath (1265570 effect#1), Devastating Focus (1277983 effect#1)
 Family Flags     : 8, 18, 29, 56, 59
 Attributes       : Is Ability (4), Not Shapeshifted (16), Do Not Sheath (18), Initiates Combat (Enables Auto-Attack) (41), Discount Power On Miss (59), Requires Main-Hand Weapon (106), Combat Feedback When Usable (137), Not In Spellbook Until Learned (269), Spellcast Override In Spellbook (310), Allow Class Ability Procs (416)
 Effects          :
@@ -6793,7 +6796,7 @@ Labels           : 16: Class Spells
                  : 25: Warrior Spells
                  : 292
                  : 976: Covenant Spells
-Affecting Spells : Recklessness (1719 effect#7), Sudden Death (52437 effects: #1, #2, #3), Warrior (137047 effects: #1, #2), Protection Warrior (137048 effect#11), Arms Warrior (137049 effect#13), Precise Strikes (209493 effects: #1, #2), Stone Heart (225947 effects: #1, #2), Precise Strikes (248195 effect#1), Sudden Death (280776 effect#1), Improved Execute (316402 effects: #1, #2, #3), Improved Execute (316405 effect#1), Sharpened Blades (383341 effects: #1, #2), Critical Thinking (389306 effect#1), Cruel Strikes (392777 effect#2), Improved Execute (397708 effect#1), Slayer's Malice (444779 effects: #1, #2), Arms Warrior (1256919 effect#4), Fury Warrior (1257520 effect#5), Executioner's Wrath (1265570 effect#1), Devastating Focus (1277983 effect#1)
+Affecting Spells : Recklessness (1719 effect#7), Sudden Death (52437 effects: #1, #2, #3), Warrior (137047 effects: #1, #2), Protection Warrior (137048 effect#11), Arms Warrior (137049 effect#13), Precise Strikes (209493 effects: #1, #2), Stone Heart (225947 effects: #1, #2), Precise Strikes (248195 effect#1), Sudden Death (280776 effect#1), Improved Execute (316402 effects: #1, #2, #3), Improved Execute (316405 effect#1), Sharpened Blades (383341 effects: #1, #2), Critical Thinking (389306 effect#1), Cruel Strikes (392777 effect#2), Improved Execute (397708 effect#1), Practiced Strikes (429647 effect#7), Slayer's Malice (444779 effects: #1, #2), Arms Warrior (1256919 effect#4), Fury Warrior (1257520 effect#5), Executioner's Wrath (1265570 effect#1), Devastating Focus (1277983 effect#1)
 Family Flags     : 8, 18, 29, 56, 59
 Attributes       : Is Ability (4), Not Shapeshifted (16), Do Not Sheath (18), Initiates Combat (Enables Auto-Attack) (41), Discount Power On Miss (59), Chain From Caster (76), Requires Main-Hand Weapon (106), Combat Feedback When Usable (137), Not In Spellbook Until Learned (269), Spellcast Override In Spellbook (310), Enforce Facing on Primary Target Only (351), Allow Class Ability Procs (416)
 Effects          :
@@ -6951,6 +6954,18 @@ $?$w8!=0[
 Strength increased by $w8%.][]$?$w9!=0[
 Critical strike chance increased by $w9%.][]
 Variables        : $rage=$?c1[${4}]?c2[${6}][${4}]
+
+Name             : Initial Warrior (id=325446) [Spell Family (4), Passive, Hidden] 
+Class            : Unknown Warrior (1446)
+School           : Physical
+Spell Type       : None
+Labels           : 16: Class Spells
+                 : 25: Warrior Spells
+                 : 292
+Attributes       : Is Ability (4), Passive (6), Do Not Display (Spellbook, Aura Icon, Combat Log) (7), Do Not Log (8), Allow Class Ability Procs (416)
+Effects          :
+#1 (id=815734)   : Apply Aura (6) | Modify Rage Generated From Auto Attacks (213)
+                   Base Value: 250 | Scaled Value: 250 | Target: Self (1)
 
 Name             : Glory (desc=Necrolord) (id=325787) [Spell Family (4)] 
 Class            : Warrior
@@ -7154,7 +7169,7 @@ Labels           : 16: Class Spells
                  : 25: Warrior Spells
                  : 292
                  : 976: Covenant Spells
-Affecting Spells : Recklessness (1719 effect#7), Sudden Death (52437 effects: #1, #2, #3), Warrior (137047 effects: #1, #2), Protection Warrior (137048 effect#11), Arms Warrior (137049 effect#13), Precise Strikes (209493 effects: #1, #2), Bladestorm (222634 effect#3), Stone Heart (225947 effects: #1, #2), Precise Strikes (248195 effect#1), Sudden Death (280776 effect#1), Improved Execute (316402 effects: #1, #2, #3), Improved Execute (316405 effect#1), Sharpened Blades (383341 effects: #1, #2), Critical Thinking (389306 effect#1), Cruel Strikes (392777 effect#2), Improved Execute (397708 effect#1), Slayer's Malice (444779 effects: #1, #2), Arms Warrior (1256919 effect#4), Fury Warrior (1257520 effect#5), Executioner's Wrath (1265570 effect#1), Devastating Focus (1277983 effect#1)
+Affecting Spells : Recklessness (1719 effect#7), Sudden Death (52437 effects: #1, #2, #3), Warrior (137047 effects: #1, #2), Protection Warrior (137048 effect#11), Arms Warrior (137049 effect#13), Precise Strikes (209493 effects: #1, #2), Bladestorm (222634 effect#3), Stone Heart (225947 effects: #1, #2), Precise Strikes (248195 effect#1), Sudden Death (280776 effect#1), Improved Execute (316402 effects: #1, #2, #3), Improved Execute (316405 effect#1), Sharpened Blades (383341 effects: #1, #2), Critical Thinking (389306 effect#1), Cruel Strikes (392777 effect#2), Improved Execute (397708 effect#1), Practiced Strikes (429647 effect#7), Slayer's Malice (444779 effects: #1, #2), Arms Warrior (1256919 effect#4), Fury Warrior (1257520 effect#5), Executioner's Wrath (1265570 effect#1), Devastating Focus (1277983 effect#1)
 Family Flags     : 8, 18, 29, 56, 59, 84
 Attributes       : Is Ability (4), Not Shapeshifted (16), Do Not Sheath (18), Initiates Combat (Enables Auto-Attack) (41), Discount Power On Miss (59), Chain From Caster (76), Requires Main-Hand Weapon (106), Combat Feedback When Usable (137), Not In Spellbook Until Learned (269), Spellcast Override In Spellbook (310), Enforce Facing on Primary Target Only (351), Allow Class Ability Procs (416)
 Effects          :
@@ -7187,7 +7202,7 @@ Labels           : 16: Class Spells
                  : 25: Warrior Spells
                  : 292
                  : 976: Covenant Spells
-Affecting Spells : Recklessness (1719 effect#7), Sudden Death (52437 effects: #1, #2, #3), Warrior (137047 effects: #1, #2), Protection Warrior (137048 effect#11), Arms Warrior (137049 effect#13), Precise Strikes (209493 effects: #1, #2), Bladestorm (222634 effect#3), Stone Heart (225947 effects: #1, #2), Precise Strikes (248195 effect#1), Sudden Death (280776 effect#1), Improved Execute (316402 effects: #1, #2, #3), Improved Execute (316405 effect#1), Sharpened Blades (383341 effects: #1, #2), Critical Thinking (389306 effect#1), Cruel Strikes (392777 effect#2), Improved Execute (397708 effect#1), Slayer's Malice (444779 effects: #1, #2), Arms Warrior (1256919 effect#4), Fury Warrior (1257520 effect#5), Executioner's Wrath (1265570 effect#1), Devastating Focus (1277983 effect#1)
+Affecting Spells : Recklessness (1719 effect#7), Sudden Death (52437 effects: #1, #2, #3), Warrior (137047 effects: #1, #2), Protection Warrior (137048 effect#11), Arms Warrior (137049 effect#13), Precise Strikes (209493 effects: #1, #2), Bladestorm (222634 effect#3), Stone Heart (225947 effects: #1, #2), Precise Strikes (248195 effect#1), Sudden Death (280776 effect#1), Improved Execute (316402 effects: #1, #2, #3), Improved Execute (316405 effect#1), Sharpened Blades (383341 effects: #1, #2), Critical Thinking (389306 effect#1), Cruel Strikes (392777 effect#2), Improved Execute (397708 effect#1), Practiced Strikes (429647 effect#7), Slayer's Malice (444779 effects: #1, #2), Arms Warrior (1256919 effect#4), Fury Warrior (1257520 effect#5), Executioner's Wrath (1265570 effect#1), Devastating Focus (1277983 effect#1)
 Family Flags     : 8, 18, 29, 56, 59, 84
 Attributes       : Is Ability (4), Not Shapeshifted (16), Do Not Sheath (18), Initiates Combat (Enables Auto-Attack) (41), Discount Power On Miss (59), Requires Main-Hand Weapon (106), Combat Feedback When Usable (137), Not In Spellbook Until Learned (269), Spellcast Override In Spellbook (310), Allow Class Ability Procs (416)
 Effects          :
@@ -12088,13 +12103,21 @@ Effects          :
                    Base Value: 40 | Scaled Value: 40 | Misc Value: 23 | Target: Self (1)
                    Affected Spells: Shield Slam (23922)
                    Family Flags: 41
+#6 (id=1352765)  : Apply Aura (6) | Add Flat Modifier (107): Spell Resource Cost 1 (14)
+                   Base Value: -100 | Scaled Value: -100 | Misc Value: 14 | Target: Self (1)
+                   Affected Spells: Revenge (6572), Revenge (1215174)
+                   Family Flags: 10
+#7 (id=1352771)  : Apply Aura (6) | Add Flat Modifier (107): Spell Resource Cost 2 (34)
+                   Base Value: -100 | Scaled Value: -100 | Misc Value: 34 | Target: Self (1)
+                   Affected Spells: Execute (5308), Execute (163201), Execute (280735), Execute (281000), Condemn (317349), Condemn (317485), Condemn (330325), Condemn (330334)
+                   Family Flags: 59
 Description      : $?c1[Mortal Strike and Slam damage increased by $s1%.
 
 Cleave and Whirlwind damage increased by $s2%][Shield Slam damage increased by $s3%.
 
 Revenge and Thunder Clap damage increased by $s4%].$?c3[
 
-Shield Slam generates an additional ${$s5/10} Rage.][]
+Shield Slam generates an additional ${$s5/10} Rage. Revenge and Execute Rage cost reduced by ${$s6/-10}.][]
 
 Name             : Precise Might (id=431548) [Spell Family (4), Passive, Hidden] 
 Talent Entry     : Colossus (Arms, Protection) [tree=hero, row=4, col=2, max_rank=1, req_points=0]
@@ -12113,7 +12136,7 @@ Effects          :
 Description      : $?c1[Mortal Strike][Shield Slam] critical strikes grant an additional stack of Colossal Might.
 
 Name             : Lightning Strikes (id=434969) [Spell Family (4), Passive] 
-Talent Entry     : Mountain Thane (Fury, Protection) [tree=hero, row=1, col=3, max_rank=1, req_points=0]
+Talent Entry     : Mountain Thane (Fury, Protection) [free=(Fury, Protection), tree=hero, row=1, col=3, max_rank=1, req_points=0]
 Class            : Warrior
 School           : Physical
 Spell Type       : None
@@ -12270,7 +12293,7 @@ Family Flags     : 9
 Attributes       : Do Not Sheath (18), No Reflection (39), Do Not Display Range (126), Always Show Ground Texture (190), Aura Points On Client (268), Allow Class Ability Procs (416)
 Effects          :
 #1 (id=1126722)  : School Damage (2): nature
-                   Base Value: 0 | Scaled Value: 0 (delta=0.05) | AP Coefficient: 1.551 | Target: Targeted Enemy (6)
+                   Base Value: 0 | Scaled Value: 0 (delta=0.05) | AP Coefficient: 2.3265 | PvP Coefficient: 0.5 | Target: Targeted Enemy (6)
 #2 (id=1126723)  : Energize Power (30)
                    Base Value: 0 | Scaled Value: 0 | Resource: rage | Target: Self (1)
                    Modified By: Thorim's Might (436152 effect#1)
@@ -12353,7 +12376,7 @@ Effects          :
 Description      : Your attacks trigger Lightning Strikes $s1% more often.
 
 Name             : Demolish (id=436358) [Spell Family (4)] 
-Talent Entry     : Colossus (Arms, Protection) [tree=hero, row=1, col=3, max_rank=1, req_points=0]
+Talent Entry     : Colossus (Arms, Protection) [free=(Arms, Protection), tree=hero, row=1, col=3, max_rank=1, req_points=0]
 Class            : Warrior
 School           : Physical
 Spell Type       : None
@@ -12886,7 +12909,7 @@ Effects          :
 Description      : $@spelldesc6544
 
 Name             : Slayer's Dominance (id=444767) [Spell Family (4), Passive, Hidden] 
-Talent Entry     : Slayer (Arms, Fury) [tree=hero, row=1, col=3, max_rank=1, req_points=0]
+Talent Entry     : Slayer (Arms, Fury) [free=(Arms, Fury), tree=hero, row=1, col=3, max_rank=1, req_points=0]
 Class            : Warrior
 School           : Physical
 Spell Type       : None
@@ -13263,7 +13286,7 @@ Labels           : 16: Class Spells
                  : 292
 Affecting Spells : Recklessness (1719 effects: #7, #8), Warrior (137047 effect#2), Fury Warrior (137050 effect#8), Unrelenting Onslaught (444780 effect#4), Arms Warrior (1256919 effect#3), Fury Warrior (1257520 effect#3)
 Family Flags     : 8, 46
-Attributes       : Is Ability (4), Not Shapeshifted (16), Do Not Sheath (18), No Immunities (29), No Skill Increase (36), Initiates Combat (Enables Auto-Attack) (41), No Threat (42), Immunity Purges Effect (47), Requires Main-Hand Weapon (106), Extra Initial Period (169), Spell Haste Affects Periodic (173), Not In Spellbook Until Learned (269), Haste Affects Duration (273), Allow Defense While Channeling (338), Allow Class Ability Procs (416), Periodic Refresh Extends Duration (436)
+Attributes       : Is Ability (4), Not Shapeshifted (16), Do Not Sheath (18), No Immunities (29), No Skill Increase (36), Initiates Combat (Enables Auto-Attack) (41), No Threat (42), Immunity Purges Effect (47), Requires Main-Hand Weapon (106), Extra Initial Period (169), Spell Haste Affects Periodic (173), Not In Spellbook Until Learned (269), Haste Affects Duration (273), Allow Defense While Channeling (338), Allow Class Ability Procs (416), Periodic Refresh Extends Duration (436), Important Spell (491)
 Effects          :
 #1 (id=1143207)  : Apply Aura (6) | Periodic Trigger Spell (23): Bladestorm every 1 seconds
                    Base Value: 8 | Scaled Value: 8 | Trigger Spell: 50622 | Target: Self (1)
@@ -13413,7 +13436,7 @@ Labels           : 16: Class Spells
 Attributes       : Passive (6), Not In Spellbook (143), Do Not Log on Learn (355)
 Effects          :
 #1 (id=1153689)  : Apply Aura (6) | Apply Flat Modifier w/ Label (219): Spell Effect 3 (23)
-                   Base Value: -6 | Scaled Value: -6 | Misc Value: 23 | Misc Value 2: 2796 (Label) | Target: Self (1)
+                   Base Value: -8 | Scaled Value: -8 | Misc Value: 23 | Misc Value 2: 2796 (Label) | Target: Self (1)
                    Affected Spells (Label): Defensive Stance (386208)
 Description      : Defensive Stance additionally reduces magic damage you take by $s1%.
 
@@ -13948,7 +13971,7 @@ Family Flags     : 9
 Attributes       : Do Not Sheath (18), No Reflection (39), Do Not Display Range (126), Always AOE Line of Sight (186), Aura Points On Client (268), Allow Class Ability Procs (416)
 Effects          :
 #1 (id=1168536)  : School Damage (2): nature
-                   Base Value: 0 | Scaled Value: 0 (delta=0.05) | AP Coefficient: 1.11787 | Radius: 0 - 8 yards | Target: At Enemy (53) -> at Enemy in Area (16)
+                   Base Value: 0 | Scaled Value: 0 (delta=0.05) | AP Coefficient: 1.67681 | PvP Coefficient: 0.5 | Radius: 0 - 8 yards | Target: At Enemy (53) -> at Enemy in Area (16)
 #2 (id=1168735)  : Dummy (3)
                    Base Value: 5 | Scaled Value: 5
 Description      : $@spelldesc436148
@@ -14133,7 +14156,7 @@ Labels           : 16: Class Spells
                  : 25: Warrior Spells
                  : 292
                  : 1778
-Affecting Spells : Demoralizing Shout (1160 effect#3), Recklessness (1719 effect#4), Revenge! (5302 effects: #1, #2), Mastery: Unshackled Fury (76856 effects: #1, #2), Avatar (107574 effects: #1, #4), Protection Warrior (137048 effects: #1, #2), Arms Warrior (137049 effects: #1, #2), Fury Warrior (137050 effects: #1, #2), Colossus Smash (208086 effect#1), Callous Reprisal (278760 effect#2), Glory (325787 effect#1), Will of the Berserker (335597 effect#1), Seismic Reverberation (335759 effect#1), One-Handed Weapon Specialization (382895 effects: #1, #2), Two-Handed Weapon Specialization (382896 effects: #1, #2), Dual Wield Specialization (382900 effects: #1, #2), Barbaric Training (383082 effects: #7, #8), Impale (383430 effect#1), Battle Stance (386164 effect#4), Rend (388539 effect#2), Vanguard's Determination (394056 effects: #1, #3), Strike Vulnerabilities (394173 effects: #1, #2), Martial Expert (429638 effect#1), Mountain of Muscle and Scars (429642 effects: #1, #2), Practiced Strikes (429647 effect#4), Thorim's Might (436152 effect#2), Colossal Might (440989 effect#4), Overwhelmed (445836 effect#1), Wrecked (447513 effects: #2, #3), Brutal Follow-Up (455501 effect#1), Luck of the Draw! (1218163 effects: #1, #4), Arms Warrior (1256919 effects: #1, #2), Protection Warrior (1256935 effects: #1, #2), Fury Warrior (1257520 effects: #1, #2), Mastery: Master of Arms (1258398 effects: #1, #2), Master Tactician (1261216 effects: #1, #2), Warrior Protection 12.0 Class Set 4pc (1264880 effect#1), Devastating Focus (1277983 effect#1), Warrior - Midnight PrePatch - 11.2 Class Set 2pc (1283642 effects: #1, #2), Warrior - Midnight PrePatch - 11.2 Class Set 4pc (1283643 effects: #1, #2)
+Affecting Spells : Demoralizing Shout (1160 effect#3), Recklessness (1719 effect#4), Revenge! (5302 effects: #1, #2), Mastery: Unshackled Fury (76856 effects: #1, #2), Avatar (107574 effects: #1, #4), Protection Warrior (137048 effects: #1, #2), Arms Warrior (137049 effects: #1, #2), Fury Warrior (137050 effects: #1, #2), Colossus Smash (208086 effect#1), Callous Reprisal (278760 effect#2), Glory (325787 effect#1), Will of the Berserker (335597 effect#1), Seismic Reverberation (335759 effect#1), One-Handed Weapon Specialization (382895 effects: #1, #2), Two-Handed Weapon Specialization (382896 effects: #1, #2), Dual Wield Specialization (382900 effects: #1, #2), Barbaric Training (383082 effects: #7, #8), Impale (383430 effect#1), Battle Stance (386164 effect#4), Rend (388539 effect#2), Vanguard's Determination (394056 effects: #1, #3), Strike Vulnerabilities (394173 effects: #1, #2), Martial Expert (429638 effect#1), Mountain of Muscle and Scars (429642 effects: #1, #2), Practiced Strikes (429647 effects: #4, #6), Thorim's Might (436152 effect#2), Colossal Might (440989 effect#4), Overwhelmed (445836 effect#1), Wrecked (447513 effects: #2, #3), Brutal Follow-Up (455501 effect#1), Luck of the Draw! (1218163 effects: #1, #4), Arms Warrior (1256919 effects: #1, #2), Protection Warrior (1256935 effects: #1, #2), Fury Warrior (1257520 effects: #1, #2), Mastery: Master of Arms (1258398 effects: #1, #2), Master Tactician (1261216 effects: #1, #2), Warrior Protection 12.0 Class Set 4pc (1264880 effect#1), Devastating Focus (1277983 effect#1), Warrior - Midnight PrePatch - 11.2 Class Set 2pc (1283642 effects: #1, #2), Warrior - Midnight PrePatch - 11.2 Class Set 4pc (1283643 effects: #1, #2)
 Family Flags     : 9, 10
 Attributes       : Is Ability (4), Not Shapeshifted (16), Do Not Sheath (18), Initiates Combat (Enables Auto-Attack) (41), Requires Main-Hand Weapon (106), Allow Class Ability Procs (416)
 Effects          :
@@ -14804,7 +14827,7 @@ Family Flags     : 48
 Attributes       : Is Ability (4), Not Shapeshifted (16), Do Not Sheath (18), No Immunities (29), No Threat (42), Exclude Caster (51), Allow Low Level Buff (67), Only On Player (104), Vehicle Immunity Category (218), Allow Class Ability Procs (416), Prevent Jumping During Precast (448)
 Effects          :
 #1 (id=1244644)  : Charge to Destination (149)
-                   Base Value: 0 | Scaled Value: 0 | Misc Value 2: 50201 | Trigger Spell: 1244091 | Radius: 3 yards | Target: At Ally in Area (31)
+                   Base Value: 0 | Scaled Value: 0 | Misc Value 2: 190748 | Trigger Spell: 1244091 | Radius: 3 yards | Target: At Ally in Area (31)
 Description      : Run at high speed toward a target location near your allies, taking $1244091s1% of all damage dealt to allies within $a1 yards for $1244091d or until you take at least ${($1244091s3/100)*$MHP} damage from this effect.
 
 Name             : Interpose (id=1244091) [Spell Family (4)] 
@@ -14843,7 +14866,7 @@ Labels           : 16: Class Spells
                  : 25: Warrior Spells
                  : 292
                  : 948
-                 : 1387
+                 : 1387: Avoid CC Targets
 Affecting Spells : Warrior (137047 effect#2), Battlefield Commander (424742 effect#3), Resonant Voice (1243660 effect#1)
 Triggered By     : Piercing Howl (12323)
 Family Flags     : 8, 70, 71
@@ -14886,11 +14909,21 @@ Effects          :
                    Affected Spells: Rend (772), Rend (388539)
                    Family Flags: 5
 #7 (id=1317304)  : Apply Aura (6) | Modify Percent PVP Multiplier (647): Direct Amount (0)
-                   Base Value: -15 | Scaled Value: -15 | Target: Self (1)
+                   Base Value: 0 | Scaled Value: 0 | Target: Self (1)
                    Affected Spells: Demolish (436358), Demolish (440884), Demolish (440886), Demolish (440888)
                    Family Flags: 126
 #8 (id=1346966)  : Apply Aura (6) | Modify Percent PVP Multiplier by Label (649): Modify Effect 1 (5)
                    Base Value: -50 | Scaled Value: -50 | Misc Value: 5 | Misc Value 2: 4007 (Label) | Target: Self (1)
+#9 (id=1351503)  : Apply Aura (6) | Modify Percent PVP Multiplier by Label (649): Direct Amount (0)
+                   Base Value: 5 | Scaled Value: 5 | Misc Value 2: 3450 (Label) | Target: Self (1)
+#10 (id=1351508) : Apply Aura (6) | Modify Flat PVP Multiplier by Label (648): Modify Effect 1 (5)
+                   Base Value: -15 | Scaled Value: -15 | Misc Value: 5 | Misc Value 2: 2670 (Label) | Target: Self (1)
+#11 (id=1352907) : Apply Aura (6) | Apply Flat Modifier w/ Label (219): Spell Effect 2 (12)
+                   Base Value: 10000 | Scaled Value: 10000 | Misc Value: 12 | Misc Value 2: 7157 (Label) | Target: Self (1)
+#12 (id=1357274) : Apply Aura (6) | Modify Flat PVP Multiplier by Label (648): Modify Effect 1 (5)
+                   Base Value: 15 | Scaled Value: 15 | Misc Value: 5 | Misc Value 2: 7268 (Label) | Target: Self (1)
+#13 (id=1357277) : Apply Aura (6) | Modify Percent PVP Multiplier by Label (649): Modify Effect 2 (6)
+                   Base Value: 67 | Scaled Value: 67 | Misc Value: 6 | Misc Value 2: 3306 (Label) | Target: Self (1)
 
 Name             : Protection Warrior (id=1256935) [Spell Family (4), Passive, Hidden] 
 Class            : Protection Warrior
@@ -14937,6 +14970,8 @@ Effects          :
                    Base Value: 20 | Scaled Value: 20 | Target: Self (1)
                    Affected Spells: Execute (5308), Execute (163201), Execute Off-Hand (163558), Execute (260798), Execute (280735), Execute (280849), Execute (281000), Condemn (317349), Condemn (317483), Condemn (317485), Condemn (317488), Condemn Off-Hand (317489), Condemn (330325), Condemn (330334), Arms Execute FX Test (463815), Fury Execute FX Test (463816), Fury Execute Off-Hand FX Test (463817)
                    Family Flags: 29
+#6 (id=1352908)  : Apply Aura (6) | Apply Flat Modifier w/ Label (219): Spell Effect 2 (12)
+                   Base Value: 10000 | Scaled Value: 10000 | Misc Value: 12 | Misc Value 2: 7157 (Label) | Target: Self (1)
 
 Name             : Protection Warrior (id=1258163) [Spell Family (4), Passive, Hidden] 
 Class            : Protection Warrior
@@ -15939,11 +15974,12 @@ Stacks           : 1 initial, 1 maximum
 Proc Chance      : 101%
 Proc Flags       : Yellow Melee
 Triggered By     : Master of Warfare (1269314)
-Attributes       : No Aura Icon (60), Can Proc From Procs (122), Aura Points On Client (268), Allow Class Ability Procs (416)
+Attributes       : Can Proc From Procs (122), Aura Points On Client (268), Allow Class Ability Procs (416), Do Not Display Cast Time (441)
 Effects          :
 #1 (id=1281192)  : Apply Aura (6) | Override Action Spell (Misc w/ Base) (332): Heroic Strike overrides Slam
                    Base Value: 1269383 | Scaled Value: 1269383 | Misc Value: 1464 | Misc Value 2: 2 | Target: Self (1)
-Description      : $@spelldesc1269314
+Description      : Slam has been upgraded to Heroic Strike.
+Tooltip          : Slam has been upgraded to Heroic Strike.
 
 Name             : Master of Warfare (id=1269394) [Spell Family (4)] 
 Class            : Warrior
@@ -16126,6 +16162,7 @@ Duration         : 8 seconds
 Labels           : 16: Class Spells
                  : 25: Warrior Spells
                  : 292
+                 : 7268
 Triggered By     : Cut to the Bone (1270709)
 Attributes       : Aura Points On Client (268), Allow Class Ability Procs (416)
 Effects          :
@@ -16719,7 +16756,7 @@ Effects          :
                    Affected Spells: Bloodthirst (23881), Bloodbath (335096)
                    Family Flags: 42
 #2 (id=1325437)  : Apply Aura (6) | Dummy (4)
-                   Base Value: 5 | Scaled Value: 5 | Target: Self (1)
+                   Base Value: 3 | Scaled Value: 3 | Target: Self (1)
 #3 (id=1325438)  : Apply Aura (6) | Dummy (4)
                    Base Value: 2 | Scaled Value: 2 | Target: Self (1)
 Description      : Bloodthirst damage increased by $s1%. During Recklessness Bloodthirst increases the critical strike bonus of Recklessness by $s2%, up to ${$s2*$s3}%.

@@ -465,7 +465,7 @@ class RealPPMModifierGenerator(DataGenerator):
                      continue
 
                 for data in rppm.children('SpellProcsPerMinuteMod'):
-                    output_data.append((spell_id, data.id_chr_spec, data.unk_1, data.coefficient))
+                    output_data.append((spell_id, data.param, data.type, data.coefficient))
 
         self.output_header(
                 header = 'RPPM Modifiers',
@@ -510,10 +510,6 @@ class SpecializationEnumGenerator(DataGenerator):
                 enum_ids[spec_data.class_id].append( None )
 
             enum_ids[spec_data.class_id][spec_data.index] = { 'id': spec_id, 'name': spec_name }
-
-        # manually add augmentation evoker to live specialization enums
-        if self._options.build.patch_level() < dbc.WowVersion( 10, 1, 5, 49516 ).patch_level():
-            enum_ids[13][2] = { 'id': 1473, 'name': 'EVOKER_AUGMENTATION' }
 
         return enum_ids
 
@@ -1531,7 +1527,41 @@ class SpellDataGenerator(DataGenerator):
          1266182, 1266184, 1266197, # Lost Idol of the Hash'ey
          1229746, # Arcanoweave embellishment buff
          1259130, # Primal Spore Binding embellishment heal
-         1232321, 1232324, 1219182, 1232086, 1232087, 1232313, 1232318, 1232325, 1232490, 1232491, 1232493, 1232498, 1232582, 1232585, 1233400, 1233401, 1233403, 1233404, 1233406, 1219183, 1219184, 1219185, 1232089, 1232091, 1232316, 1232317, 1232320, 1232492, 1232496, 1232500, 1232501, 1232584, 1233402, 1233405, 1233407, 1233408, 1305151, # Midnight Food Buffs
+         # Midnight Food Buffs
+         1219182, # fel-kissed filet
+         1219183, # arcano cutlets
+         1219184, # void-kissed fish rolls
+         1219185, # warped wise wings
+         1232089, # quel'dorei medley
+         1232091, # blooming feast
+         1232313, # portable snack
+         1232316, # farstrider rations
+         1232317, # quick sandwich
+         1232318, # forager's medley
+         1232320, # silvermoon standard
+         1232321, # spiced biscuits
+         1232324, # mana-infused stew
+         1232325, # bloom skewers
+         1232407, # spellfire filet
+         1232408, # twilight angler's medley
+         1232490, # sun-seared lumifin / tasty smoked tetra
+         1232491, # glitter skewers
+         1232492, # buttered root crab
+         1232493, # null and void plate
+         1232500, # crimson calamari
+         1232501, # braised blood hunter
+         1232585, # harandar celebration / silvermoon parade
+         1233400, # bloodthistle-wrapped cutlets
+         1233401, # hearthflame supper
+         1233402, # wise tails
+         1233404, # eversong pudding
+         1233405, # sunwell delight
+         1233406, # fried bloomtail
+         1283372, # felberry figs
+         1284619, # champion's bento / flora frenzy / puffer plate / sweet-and-sour-skewers / venom-spiced cutlet
+         1294727, # impossibly royal roast / royal roast
+         1305151, # feast of knowledge
+         1305154, # amani cornucopia / loa's gathering
          1252524, 1257183, 1252814, 1252817, 1252818, 1252832, # Loa Worshipers Band
          1252486, 1252487, 1252488, 1252489, # Darkmoon Deck: Hunt
          1255853, 1255857, 1255856, # Emberwing Feather
@@ -1543,6 +1573,7 @@ class SpellDataGenerator(DataGenerator):
          1292299, 1292300, 1306870, 1308012, 1308013, 1308014, # Gebbo's Bottomless Bag
          1305376, # Voracious Heart of Ula'tek
          1295898, 1295899, 1295900, 1295901, # Hunter's Ritual Stone
+         1296890, # Ophidian Bone Whistle
         ),
 
         # Warrior:
@@ -2442,6 +2473,7 @@ class SpellDataGenerator(DataGenerator):
           ( 201671, 3 ), ( 1307881, 3 ), # Gory Fur
           ( 1250913, 3 ), # Memory of Ysera heal
           ( 1269616, 3 ), ( 1270277, 3 ), ( 1308522, 3 ), # Wild Guardian's Spirit (new apex)
+          ( 1308448, 3 ), # Apex related?
           ( 1310213, 3 ), # 12.1 Set 4pc
           # Restoration
         ),
@@ -2582,41 +2614,6 @@ class SpellDataGenerator(DataGenerator):
         202,  # Engineering
         333,  # Enchanting
         773,  # Inscription
-    ]
-
-    _pet_skill_categories = [
-        ( ),
-        ( ),         # Warrior
-        ( ),         # Paladin
-        ( 203, 208, 209, 210, 211, 212, 213, 214, 215, 217, 218, 236, 251, 270, 653, 654, 655, 656, 763, 764, 765, 766, 767, 768, 775, 780, 781, 783, 784, 785, 786, 787, 788, 808, 811 ),       # Hunter
-        ( ),         # Rogue
-        ( ),         # Priest
-        ( 782, ),    # Death Knight
-        ( 962, 963 ),         # Shaman
-        ( 805, ),    # Mage
-        ( 188, 189, 204, 205, 206, 207, 761 ),  # Warlock
-        ( ),         # Monk
-        ( ),         # Druid
-        ( ),         # Evoker
-    ]
-
-    # Specialization categories, Spec0 | Spec1 | Spec2
-    # Note, these are reset for MoP
-    _spec_skill_categories = [
-        (),
-        (   71,   72,   73,   0 ), # Warrior
-        (   65,   66,   70,   0 ), # Paladin
-        (  254,  255,  256,   0 ), # Hunter
-        (  259,  260,  261,   0 ), # Rogue
-        (  256,  257,  258,   0 ), # Priest
-        (  250,  251,  252,   0 ), # Death Knight
-        (  262,  263,  264,   0 ), # Shaman
-        (   62,   63,   64,   0 ), # Mage
-        (  265,  266,  267,   0 ), # Warlock
-        (  268,  270,  269,   0 ), # Monk
-        (  102,  103,  104, 105 ), # Druid
-        (  577,  581, 1480,   0 ), # Demon Hunter
-        ( 1467, 1468, 1473,   0 ), # Evoker
     ]
 
     _race_categories = [
@@ -2807,15 +2804,15 @@ class SpellDataGenerator(DataGenerator):
         return 0
 
     def class_mask_by_spec_skill(self, spec_skill):
-        for i in range(0, len(self._spec_skill_categories)):
-            if spec_skill in self._spec_skill_categories[i]:
+        for i in range(0, len(constants.SPEC_SKILL_CATEGORIES)):
+            if spec_skill in constants.SPEC_SKILL_CATEGORIES[i]:
                 return util.class_mask(class_id=i)
 
         return 0
 
     def class_mask_by_pet_skill(self, pet_skill):
-        for i in range(0, len(self._pet_skill_categories)):
-            if pet_skill in self._pet_skill_categories[i]:
+        for i in range(0, len(constants.PET_SKILL_CATEGORIES)):
+            if pet_skill in constants.PET_SKILL_CATEGORIES[i]:
                 return util.class_mask(class_id=i)
 
         return 0
@@ -4927,8 +4924,16 @@ class TraitGenerator(DataGenerator):
                     _name = self.db('SpellName')[int(override[11:])].name
 
             fields.append("{:>40s}".format(f'"{_name}"'))
-            fields.append(f'{{ {", ".join(["{:4d}".format(x) for x in sorted(entry["specs"]) + [0] * (constants.MAX_SPECIALIZATION - len(entry["specs"]))])} }}')
-            fields.append(f'{{ {", ".join(["{:4d}".format(x) for x in sorted(entry["starter"]) + [0] * (constants.MAX_SPECIALIZATION - len(entry["starter"]))])} }}')
+
+            specs_list = sorted(entry["specs"]) + [0] * (constants.MAX_SPECIALIZATION - len(entry["specs"]))
+            starter_list = sorted(entry["starter"]) + [0] * (constants.MAX_SPECIALIZATION - len(entry["starter"]))
+
+            # granted hero traits with no explicit starter spec are automatically given to all available specs
+            if entry["is_granted"] and entry["tree"] == 3 and all(x == 0 for x in starter_list):
+                starter_list = specs_list.copy()
+
+            fields.append(f'{{ {", ".join(["{:4d}".format(x) for x in specs_list])} }}')
+            fields.append(f'{{ {", ".join(["{:4d}".format(x) for x in starter_list])} }}')
 
             _subtree = entry['entry'].id_trait_sub_tree if entry['tree'] == 4 else entry['node'].id_trait_sub_tree
             if _subtree != 0:

@@ -811,9 +811,7 @@ namespace warlock
                           ->set_duration( talents.summon_doomguard->duration() )
                           ->set_proc_callbacks( false );
 
-    buffs.tyrant = make_buff( this, "tyrant" )->set_max_stack( 1 )
-                       ->set_duration( talents.summon_demonic_tyrant->duration() )
-                       ->set_proc_callbacks( false );
+    buffs.tyrant = make_buff( this, "tyrant", talents.summon_demonic_tyrant )->set_max_stack( 1 )->set_cooldown( 0_s );
   }
 
   void warlock_t::create_buffs_destruction()
@@ -1710,8 +1708,6 @@ namespace warlock
     add_option( opt_deprecated( "eye_explosion_instanced_bug_sb", "warlock.eye_explosion_instanced_bug_sb" ) );
     add_option( opt_bool( "warlock.eye_explosion_instanced_bug_rof", eye_explosion_instanced_bug_rof ) );
     add_option( opt_deprecated( "eye_explosion_instanced_bug_rof", "warlock.eye_explosion_instanced_bug_rof" ) );
-    add_option( opt_float( "warlock.tyrant_antoran_armaments_target_mul", tyrant_antoran_armaments_target_mul, 0.0, 1.0 ));
-    add_option( opt_deprecated( "tyrant_antoran_armaments_target_mul", "warlock.tyrant_antoran_armaments_target_mul" ) );
 
     rng_settings.for_each( [ this ]( auto& setting )
     {

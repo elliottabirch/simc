@@ -6,9 +6,9 @@ namespace hunter_apl {
 std::string potion( const player_t* p )
 {
   // Spec-specific logic for Level 90 Potions
-  std::string lvl90_potion = ( p -> specialization() == HUNTER_SURVIVAL )      ? "lights_potential_2" :
-                             ( p -> specialization() == HUNTER_MARKSMANSHIP )  ? "lights_potential_2" :
-                             "lights_potential_2"; // Beast Mastery
+  std::string lvl90_potion = ( p -> specialization() == HUNTER_SURVIVAL )      ? "potion_of_recklessness_2" :
+                             ( p -> specialization() == HUNTER_MARKSMANSHIP )  ? "potion_of_recklessness_2" :
+                             "potion_of_recklessness_2"; // Beast Mastery
 
   return ( p -> true_level > 80 ) ? lvl90_potion :
          ( p -> true_level > 70 ) ? "tempered_potion_3" : 
@@ -99,10 +99,10 @@ void beast_mastery( player_t* p )
   cds->add_action( "fireblood,if=cooldown.bestial_wrath.ready|fight_remains<9" );
   cds->add_action( "potion,if=cooldown.bestial_wrath.ready|fight_remains<31" );
 
+  cleave->add_action( "wild_thrash,if=talent.beast_cleave&(prev_gcd.1.bestial_wrath|!buff.beast_cleave.up)", "Bestial Wrath spawns an Apex Pet which casts Bestial Wrath 1.5s after, but it does not get the Beast Cleave that was active prior to Bestial Wrath. Therefore, to ensure this hit cleaves, Wild Thrash needs to follow up Bestial Wrath." );
   cleave->add_action( "barbed_shot,target_if=min:dot.barbed_shot.remains|max_prio_damage,if=full_recharge_time<gcd" );
   cleave->add_action( "bestial_wrath,if=buff.beast_cleave.remains|!talent.beast_cleave|!talent.wild_thrash" );
-  cleave->add_action( "wild_thrash,if=talent.beast_cleave" );
-  cleave->add_action( "wild_thrash,if=!talent.beast_cleave" );
+  cleave->add_action( "wild_thrash,if=talent.beast_cleave&cooldown.bestial_wrath.remains>buff.beast_cleave.remains|!talent.beast_cleave" );
   cleave->add_action( "kill_command,if=buff.natures_ally.react|talent.master_handler&(active_enemies>3|howl_summon.ready)|!apex.3" );
   cleave->add_action( "cobra_shot,if=buff.cobra_fang.up&buff.beast_cleave.remains" );
   cleave->add_action( "barbed_shot,target_if=min:dot.barbed_shot.remains|max_prio_damage" );
@@ -110,9 +110,9 @@ void beast_mastery( player_t* p )
 
   drcleave->add_action( "black_arrow,if=buff.beast_cleave.remains<gcd&cooldown.bestial_wrath.remains<gcd&active_enemies>2" );
   drcleave->add_action( "bestial_wrath,if=buff.beast_cleave.remains|!talent.beast_cleave" );
-  drcleave->add_action( "wild_thrash" );
+  drcleave->add_action( "wild_thrash,if=talent.beast_cleave&(prev_gcd.1.bestial_wrath|!buff.beast_cleave.up|cooldown.bestial_wrath.remains>buff.beast_cleave.remains)|!talent.beast_cleave" );
   drcleave->add_action( "kill_command,if=cooldown.bestial_wrath.remains>full_recharge_time+gcd&buff.natures_ally.react|!apex.3" );
-  drcleave->add_action( "barbed_shot,if=full_recharge_time<1*gcd,target_if=min:dot.barbed_shot.remains|max_prio_damage" );
+  drcleave->add_action( "barbed_shot,target_if=min:dot.barbed_shot.remains|max_prio_damage,if=full_recharge_time<1*gcd" );
   drcleave->add_action( "black_arrow,if=buff.withering_fire.up" );
   drcleave->add_action( "wailing_arrow,if=buff.withering_fire.remains<execute_time+gcd|time_to_die.remains<execute_time+gcd" );
   drcleave->add_action( "barbed_shot,target_if=min:dot.barbed_shot.remains|max_prio_damage" );
@@ -125,7 +125,7 @@ void beast_mastery( player_t* p )
   drst->add_action( "black_arrow,if=buff.withering_fire.up&cooldown.kill_command.full_recharge_time>gcd" );
   drst->add_action( "kill_command,if=cooldown.bestial_wrath.remains>full_recharge_time+gcd&buff.natures_ally.react|!apex.3" );
   drst->add_action( "wailing_arrow,if=buff.withering_fire.remains<execute_time+2*gcd|time_to_die.remains<execute_time+gcd" );
-  drst->add_action( "cobra_shot,if=buff.cobra_fang.stack>3" );
+  drst->add_action( "cobra_shot,if=buff.cobra_fang.at_max_stacks" );
   drst->add_action( "cobra_shot,if=talent.killer_cobra&buff.bestial_wrath.up&cooldown.barbed_shot.charges_fractional<1.4" );
   drst->add_action( "black_arrow" );
   drst->add_action( "barbed_shot,target_if=min:dot.barbed_shot.remains|max_prio_damage" );
@@ -134,14 +134,13 @@ void beast_mastery( player_t* p )
   st->add_action( "barbed_shot,target_if=min:dot.barbed_shot.remains|max_prio_damage,if=cooldown.bestial_wrath.remains<gcd|full_recharge_time<gcd" );
   st->add_action( "bestial_wrath" );
   st->add_action( "wild_thrash,if=active_enemies>1" );
-  st->add_action( "kill_command,if=howl_summon.ready" );
-  st->add_action( "kill_command,if=(cooldown.bestial_wrath.remains>full_recharge_time+gcd&buff.natures_ally.react|!apex.3)&(buff.howl_of_the_pack_leader_cooldown.remains>4|cooldown.kill_command.charges_fractional>1.8)" );
-  st->add_action( "cobra_shot,if=buff.cobra_fang.stack>=3" );
+  st->add_action( "kill_command,if=howl_summon.ready|(cooldown.bestial_wrath.remains>full_recharge_time+gcd&buff.natures_ally.react|!apex.3)&(buff.howl_of_the_pack_leader_cooldown.remains>4|cooldown.kill_command.charges_fractional>1.8)" );
+  st->add_action( "cobra_shot,if=buff.cobra_fang.at_max_stacks" );
   st->add_action( "barbed_shot,if=(focus<75|full_recharge_time<gcd)&!talent.serpentine_strikes|talent.serpentine_strikes" );
   st->add_action( "cobra_shot,if=cooldown.bestial_wrath.remains>gcd" );
 
-  trinkets->add_action( "use_items,check_existing=0,slots=trinket1:trinket2,if=this_trinket.has_use_damage" );
-  trinkets->add_action( "use_items,check_existing=0,slots=trinket1:trinket2,if=this_trinket.has_use_buff" );
+  trinkets->add_action( "use_items,check_existing=0,slots=trinket1:trinket2,if=this_trinket.has_use_buff&(cooldown.bestial_wrath.ready|cooldown.bestial_wrath.remains<this_trinket.proc.any_dps.duration-15)|fight_remains<21" );
+  trinkets->add_action( "use_items,check_existing=0,slots=trinket1:trinket2,if=this_trinket.has_use_damage&!potion.liquid_luster|!equipped.font_of_venomous_rage|((buff.liquid_luster.up&buff.liquid_luster.remains<6)|(fight_remains<cooldown.potion.remains&!buff.liquid_luster.up))|fight_remains<10" );
 }
 //beast_mastery_apl_end
 
@@ -177,10 +176,10 @@ void beast_mastery_ptr( player_t* p )
   cds->add_action( "fireblood,if=cooldown.bestial_wrath.ready|fight_remains<9" );
   cds->add_action( "potion,if=cooldown.bestial_wrath.ready|fight_remains<31" );
 
+  cleave->add_action( "wild_thrash,if=talent.beast_cleave&(prev_gcd.1.bestial_wrath|!buff.beast_cleave.up)", "Bestial Wrath spawns an Apex Pet which casts Bestial Wrath 1.5s after, but it does not get the Beast Cleave that was active prior to Bestial Wrath. Therefore, to ensure this hit cleaves, Wild Thrash needs to follow up Bestial Wrath." );
   cleave->add_action( "barbed_shot,target_if=min:dot.barbed_shot.remains|max_prio_damage,if=full_recharge_time<gcd" );
   cleave->add_action( "bestial_wrath,if=buff.beast_cleave.remains|!talent.beast_cleave|!talent.wild_thrash" );
-  cleave->add_action( "wild_thrash,if=talent.beast_cleave" );
-  cleave->add_action( "wild_thrash,if=!talent.beast_cleave" );
+  cleave->add_action( "wild_thrash,if=talent.beast_cleave&cooldown.bestial_wrath.remains>buff.beast_cleave.remains|!talent.beast_cleave" );
   cleave->add_action( "kill_command,if=buff.natures_ally.react|talent.master_handler&(active_enemies>3|howl_summon.ready)|!apex.3" );
   cleave->add_action( "cobra_shot,if=buff.cobra_fang.up&buff.beast_cleave.remains" );
   cleave->add_action( "barbed_shot,target_if=min:dot.barbed_shot.remains|max_prio_damage" );
@@ -188,9 +187,9 @@ void beast_mastery_ptr( player_t* p )
 
   drcleave->add_action( "black_arrow,if=buff.beast_cleave.remains<gcd&cooldown.bestial_wrath.remains<gcd&active_enemies>2" );
   drcleave->add_action( "bestial_wrath,if=buff.beast_cleave.remains|!talent.beast_cleave" );
-  drcleave->add_action( "wild_thrash" );
+  drcleave->add_action( "wild_thrash,if=talent.beast_cleave&(prev_gcd.1.bestial_wrath|!buff.beast_cleave.up|cooldown.bestial_wrath.remains>buff.beast_cleave.remains)|!talent.beast_cleave" );
   drcleave->add_action( "kill_command,if=cooldown.bestial_wrath.remains>full_recharge_time+gcd&buff.natures_ally.react|!apex.3" );
-  drcleave->add_action( "barbed_shot,if=full_recharge_time<1*gcd,target_if=min:dot.barbed_shot.remains|max_prio_damage" );
+  drcleave->add_action( "barbed_shot,target_if=min:dot.barbed_shot.remains|max_prio_damage,if=full_recharge_time<1*gcd" );
   drcleave->add_action( "black_arrow,if=buff.withering_fire.up" );
   drcleave->add_action( "wailing_arrow,if=buff.withering_fire.remains<execute_time+gcd|time_to_die.remains<execute_time+gcd" );
   drcleave->add_action( "barbed_shot,target_if=min:dot.barbed_shot.remains|max_prio_damage" );
@@ -203,7 +202,7 @@ void beast_mastery_ptr( player_t* p )
   drst->add_action( "black_arrow,if=buff.withering_fire.up&cooldown.kill_command.full_recharge_time>gcd" );
   drst->add_action( "kill_command,if=cooldown.bestial_wrath.remains>full_recharge_time+gcd&buff.natures_ally.react|!apex.3" );
   drst->add_action( "wailing_arrow,if=buff.withering_fire.remains<execute_time+2*gcd|time_to_die.remains<execute_time+gcd" );
-  drst->add_action( "cobra_shot,if=buff.cobra_fang.stack>3" );
+  drst->add_action( "cobra_shot,if=buff.cobra_fang.at_max_stacks" );
   drst->add_action( "cobra_shot,if=talent.killer_cobra&buff.bestial_wrath.up&cooldown.barbed_shot.charges_fractional<1.4" );
   drst->add_action( "black_arrow" );
   drst->add_action( "barbed_shot,target_if=min:dot.barbed_shot.remains|max_prio_damage" );
@@ -212,14 +211,13 @@ void beast_mastery_ptr( player_t* p )
   st->add_action( "barbed_shot,target_if=min:dot.barbed_shot.remains|max_prio_damage,if=cooldown.bestial_wrath.remains<gcd|full_recharge_time<gcd" );
   st->add_action( "bestial_wrath" );
   st->add_action( "wild_thrash,if=active_enemies>1" );
-  st->add_action( "kill_command,if=howl_summon.ready" );
-  st->add_action( "kill_command,if=(cooldown.bestial_wrath.remains>full_recharge_time+gcd&buff.natures_ally.react|!apex.3)&(buff.howl_of_the_pack_leader_cooldown.remains>4|cooldown.kill_command.charges_fractional>1.8)" );
-  st->add_action( "cobra_shot,if=buff.cobra_fang.stack>=3" );
+  st->add_action( "kill_command,if=howl_summon.ready|(cooldown.bestial_wrath.remains>full_recharge_time+gcd&buff.natures_ally.react|!apex.3)&(buff.howl_of_the_pack_leader_cooldown.remains>4|cooldown.kill_command.charges_fractional>1.8)" );
+  st->add_action( "cobra_shot,if=buff.cobra_fang.at_max_stacks" );
   st->add_action( "barbed_shot,if=(focus<75|full_recharge_time<gcd)&!talent.serpentine_strikes|talent.serpentine_strikes" );
   st->add_action( "cobra_shot,if=cooldown.bestial_wrath.remains>gcd" );
 
-  trinkets->add_action( "use_items,check_existing=0,slots=trinket1:trinket2,if=this_trinket.has_use_damage" );
-  trinkets->add_action( "use_items,check_existing=0,slots=trinket1:trinket2,if=this_trinket.has_use_buff" );
+  trinkets->add_action( "use_items,check_existing=0,slots=trinket1:trinket2,if=this_trinket.has_use_buff&(cooldown.bestial_wrath.ready|cooldown.bestial_wrath.remains<this_trinket.proc.any_dps.duration-15)|fight_remains<21" );
+  trinkets->add_action( "use_items,check_existing=0,slots=trinket1:trinket2,if=this_trinket.has_use_damage&!potion.liquid_luster|!equipped.font_of_venomous_rage|((buff.liquid_luster.up&buff.liquid_luster.remains<6)|(fight_remains<cooldown.potion.remains&!buff.liquid_luster.up))|fight_remains<10" );
 }
 //beast_mastery_ptr_apl_end
 
@@ -258,14 +256,15 @@ void marksmanship( player_t* p )
   cds->add_action( "fireblood,if=buff.trueshot.up|cooldown.trueshot.remains>30|fight_remains<9" );
   cds->add_action( "lights_judgment,if=buff.trueshot.down" );
   cds->add_action( "potion,if=buff.trueshot.up&(buff.bloodlust.up|fight_remains<120-30*talent.calling_the_shots)|fight_remains<31" );
+  cds->add_action( "potion,name=liquid_luster_2,if=potion.potion_of_recklessness&buff.bullseye.up&cooldown.trueshot.remains<10&(fight_style.dungeonroute|cooldown.explosive_shot.remains>=25|cooldown.explosive_shot.remains<10)|fight_remains<31", "Bullseye's crit devalues Potion of Recklessness in execute. Additionally, a mid-fight pot means that prepotting Luster before Trueshot becomes higher value than pre-potting before combat begins. Therefore, Pot of Recklessness on pull, but during execute, Luster pot around 10s before Trueshot to maximize its benefit." );
 
   drst->add_action( "black_arrow,target_if=max:debuff.spotters_mark.down|action.aimed_shot.in_flight_to_target|max_prio_damage,if=buff.precise_shots.up" );
   drst->add_action( "explosive_shot,target_if=min:dot.explosive_shot.remains,if=set_bonus.mid2_4pc&active_enemies>1&(!max_prio_damage|!fight_style.dungeonroute)&(!talent.tactical_reload|!buff.lock_and_load.up)" );
-  drst->add_action( "explosive_shot,if=!talent.tactical_reload|!buff.lock_and_load.up" );
+  drst->add_action( "explosive_shot,if=(!talent.tactical_reload|!buff.lock_and_load.up)&(!cooldown.rapid_fire.ready|buff.unstable_trigger.up|!fight_style.dungeonroute)", "In DRoute, prioritize Rapid Fire over Explosive Shot to maximize the RF CDR from Explo, but never let the 2nd free Explo from Unstable Trigger lapse." );
   drst->add_action( "volley" );
   drst->add_action( "aimed_shot,if=buff.trueshot.up&buff.precise_shots.down&cooldown.black_arrow.ready|full_recharge_time<gcd+cast_time" );
   drst->add_action( "trueshot,if=variable.trueshot_ready" );
-  drst->add_action( "rapid_fire,interrupt_if=talent.unload&ticks_remain<2&buff.precise_shots.up&!gcd.remains,interrupt_immediate=1,interrupt_global=1" );
+  drst->add_action( "rapid_fire" );
   drst->add_action( "wailing_arrow" );
   drst->add_action( "multishot,target_if=max:debuff.spotters_mark.down,if=buff.precise_shots.up&active_enemies>1&talent.aspect_of_the_hydra&(!fight_style.dungeonroute|active_enemies>2)", "Multi-Shot as a PS spender on 2T with Hydra talented. In DRoute, do it on 3 or more targets." );
   drst->add_action( "arcane_shot,target_if=max:debuff.spotters_mark.down|action.aimed_shot.in_flight_to_target|max_prio_damage,if=buff.precise_shots.up" );
@@ -274,13 +273,13 @@ void marksmanship( player_t* p )
   drst->add_action( "steady_shot" );
 
   draoe->add_action( "explosive_shot,target_if=min:dot.explosive_shot.remains,if=set_bonus.mid2_4pc&(!max_prio_damage|!fight_style.dungeonroute)&(!talent.tactical_reload|!buff.lock_and_load.up)" );
-  draoe->add_action( "explosive_shot,if=!talent.tactical_reload|!buff.lock_and_load.up" );
+  draoe->add_action( "explosive_shot,if=(!talent.tactical_reload|!buff.lock_and_load.up)&(!cooldown.rapid_fire.ready|buff.unstable_trigger.up|!fight_style.dungeonroute)", "In DRoute, prioritize Rapid Fire over Explosive Shot to maximize the RF CDR from Explo, but never let the 2nd free Explo from Unstable Trigger lapse." );
   draoe->add_action( "volley" );
   draoe->add_action( "aimed_shot,target_if=max:debuff.spotters_mark.up|max_prio_damage,if=buff.trick_shots.remains>cast_time&full_recharge_time<gcd+cast_time" );
   draoe->add_action( "black_arrow,target_if=max:debuff.spotters_mark.down|action.aimed_shot.in_flight_to_target|max_prio_damage,if=buff.precise_shots.up" );
   draoe->add_action( "multishot,target_if=max:debuff.spotters_mark.down|action.aimed_shot.in_flight_to_target|max_prio_damage,if=buff.trick_shots.down" );
   draoe->add_action( "trueshot,if=variable.trueshot_ready" );
-  draoe->add_action( "rapid_fire,if=buff.trick_shots.remains>execute_time&(buff.bulletstorm.remains<action.aimed_shot.execute_time|talent.unload),interrupt_if=talent.unload&ticks_remain<2&buff.precise_shots.up&!gcd.remains,interrupt_immediate=1,interrupt_global=1" );
+  draoe->add_action( "rapid_fire,if=buff.trick_shots.remains>execute_time" );
   draoe->add_action( "wailing_arrow,if=!cooldown.black_arrow.ready" );
   draoe->add_action( "multishot,target_if=max:debuff.spotters_mark.down|action.aimed_shot.in_flight_to_target|max_prio_damage,if=buff.precise_shots.up" );
   draoe->add_action( "aimed_shot,target_if=max:debuff.spotters_mark.up|max_prio_damage,if=buff.trick_shots.remains>cast_time" );
@@ -289,29 +288,31 @@ void marksmanship( player_t* p )
   draoe->add_action( "steady_shot" );
 
   sentaoe->add_action( "explosive_shot,target_if=min:dot.explosive_shot.remains,if=set_bonus.mid2_4pc&(!max_prio_damage|!fight_style.dungeonroute)&(!talent.tactical_reload|!buff.lock_and_load.up)" );
-  sentaoe->add_action( "explosive_shot,if=!talent.tactical_reload|!buff.lock_and_load.up" );
+  sentaoe->add_action( "explosive_shot,if=(!talent.tactical_reload|!buff.lock_and_load.up)&(!cooldown.rapid_fire.ready|buff.unstable_trigger.up|!fight_style.dungeonroute)", "In DRoute, prioritize Rapid Fire over Explosive Shot to maximize the RF CDR from Explo, but never let the 2nd free Explo from Unstable Trigger lapse." );
   sentaoe->add_action( "volley" );
   sentaoe->add_action( "trueshot,if=variable.trueshot_ready" );
   sentaoe->add_action( "moonlight_chakram,if=buff.moonlight_chakram.remains<gcd.max" );
   sentaoe->add_action( "multishot,target_if=max:debuff.sentinels_mark.down,if=buff.precise_shots.up&!talent.aspect_of_the_hydra|buff.trick_shots.down" );
+  sentaoe->add_action( "aimed_shot,target_if=max:debuff.sentinels_mark.up,if=debuff.sentinels_mark.react&buff.bulletstorm.up" );
   sentaoe->add_action( "rapid_fire,target_if=max:debuff.sentinels_mark.down,if=talent.unload,interrupt_if=talent.unload&ticks_remain<2&buff.precise_shots.up&!gcd.remains,interrupt_immediate=1,interrupt_global=1" );
   sentaoe->add_action( "rapid_fire,interrupt_if=talent.unload&ticks_remain<2&buff.precise_shots.up&!gcd.remains,interrupt_immediate=1,interrupt_global=1" );
-  sentaoe->add_action( "aimed_shot,target_if=max:debuff.sentinels_mark.up|max_prio_damage,if=buff.trick_shots.remains>cast_time" );
+  sentaoe->add_action( "aimed_shot,target_if=max:debuff.sentinels_mark.up,if=buff.trick_shots.remains>cast_time" );
   sentaoe->add_action( "moonlight_chakram" );
   sentaoe->add_action( "multishot,if=focus>cost+action.aimed_shot.cost&!max_prio_damage" );
   sentaoe->add_action( "steady_shot" );
 
   sentst->add_action( "explosive_shot,target_if=min:dot.explosive_shot.remains,if=set_bonus.mid2_4pc&active_enemies>1&(!max_prio_damage|!fight_style.dungeonroute)&(!talent.tactical_reload|!buff.lock_and_load.up)" );
-  sentst->add_action( "explosive_shot,if=!talent.tactical_reload|!buff.lock_and_load.up" );
+  sentst->add_action( "explosive_shot,if=(!talent.tactical_reload|!buff.lock_and_load.up)&(!cooldown.rapid_fire.ready|buff.unstable_trigger.up|!fight_style.dungeonroute)", "In DRoute, prioritize Rapid Fire over Explosive Shot to maximize the RF CDR from Explo, but never let the 2nd free Explo from Unstable Trigger lapse." );
   sentst->add_action( "volley" );
   sentst->add_action( "trueshot,if=variable.trueshot_ready" );
-  sentst->add_action( "moonlight_chakram,if=buff.moonlight_chakram.remains<gcd.max" );
+  sentst->add_action( "moonlight_chakram,if=buff.moonlight_chakram.remains<5" );
+  sentst->add_action( "aimed_shot,if=debuff.sentinels_mark.react&buff.bulletstorm.up&active_enemies>1&fight_style.dungeonroute" );
+  sentst->add_action( "rapid_fire,target_if=max:debuff.sentinels_mark.down,if=!fight_style.dungeonroute" );
+  sentst->add_action( "rapid_fire" );
   sentst->add_action( "kill_shot,target_if=max:debuff.sentinels_mark.down|max_prio_damage,if=buff.precise_shots.up" );
   sentst->add_action( "multishot,target_if=max:debuff.sentinels_mark.down,if=buff.precise_shots.up&active_enemies>1&talent.aspect_of_the_hydra&(!fight_style.dungeonroute|!max_prio_damage|active_enemies>2)", "Multi-Shot as a PS spender on 2T with Hydra talented. In DRoute, do it on 3 or more targets." );
-  sentst->add_action( "arcane_shot,target_if=max:debuff.sentinels_mark.down|max_prio_damage,if=buff.precise_shots.up&(buff.trueshot.up&prev_gcd.1.aimed_shot|!buff.trueshot.up)" );
-  sentst->add_action( "rapid_fire,target_if=max:debuff.sentinels_mark.down,if=!fight_style.dungeonroute,interrupt_if=talent.unload&ticks_remain<2&buff.precise_shots.up&!gcd.remains,interrupt_immediate=1,interrupt_global=1" );
-  sentst->add_action( "rapid_fire,interrupt_if=talent.unload&ticks_remain<2&buff.precise_shots.up&!gcd.remains,interrupt_immediate=1,interrupt_global=1" );
-  sentst->add_action( "aimed_shot,target_if=max:debuff.sentinels_mark.up|max_prio_damage" );
+  sentst->add_action( "arcane_shot,target_if=max:debuff.sentinels_mark.down|max_prio_damage,if=buff.precise_shots.up" );
+  sentst->add_action( "aimed_shot,target_if=max:debuff.sentinels_mark.up" );
   sentst->add_action( "moonlight_chakram" );
   sentst->add_action( "steady_shot" );
 
@@ -364,7 +365,7 @@ void marksmanship_ptr( player_t* p )
   drst->add_action( "volley" );
   drst->add_action( "aimed_shot,if=buff.trueshot.up&buff.precise_shots.down&cooldown.black_arrow.ready|full_recharge_time<gcd+cast_time" );
   drst->add_action( "trueshot,if=variable.trueshot_ready" );
-  drst->add_action( "rapid_fire,interrupt_if=talent.unload&ticks_remain<2&buff.precise_shots.up&!gcd.remains,interrupt_immediate=1,interrupt_global=1" );
+  drst->add_action( "rapid_fire" );
   drst->add_action( "wailing_arrow" );
   drst->add_action( "multishot,target_if=max:debuff.spotters_mark.down,if=buff.precise_shots.up&active_enemies>1&talent.aspect_of_the_hydra&(!fight_style.dungeonroute|active_enemies>2)", "Multi-Shot as a PS spender on 2T with Hydra talented. In DRoute, do it on 3 or more targets." );
   drst->add_action( "arcane_shot,target_if=max:debuff.spotters_mark.down|action.aimed_shot.in_flight_to_target|max_prio_damage,if=buff.precise_shots.up" );
@@ -379,7 +380,7 @@ void marksmanship_ptr( player_t* p )
   draoe->add_action( "black_arrow,target_if=max:debuff.spotters_mark.down|action.aimed_shot.in_flight_to_target|max_prio_damage,if=buff.precise_shots.up" );
   draoe->add_action( "multishot,target_if=max:debuff.spotters_mark.down|action.aimed_shot.in_flight_to_target|max_prio_damage,if=buff.trick_shots.down" );
   draoe->add_action( "trueshot,if=variable.trueshot_ready" );
-  draoe->add_action( "rapid_fire,if=buff.trick_shots.remains>execute_time&(buff.bulletstorm.remains<action.aimed_shot.execute_time|talent.unload),interrupt_if=talent.unload&ticks_remain<2&buff.precise_shots.up&!gcd.remains,interrupt_immediate=1,interrupt_global=1" );
+  draoe->add_action( "rapid_fire,if=buff.trick_shots.remains>execute_time&buff.bulletstorm.remains<action.aimed_shot.execute_time" );
   draoe->add_action( "wailing_arrow,if=!cooldown.black_arrow.ready" );
   draoe->add_action( "multishot,target_if=max:debuff.spotters_mark.down|action.aimed_shot.in_flight_to_target|max_prio_damage,if=buff.precise_shots.up" );
   draoe->add_action( "aimed_shot,target_if=max:debuff.spotters_mark.up|max_prio_damage,if=buff.trick_shots.remains>cast_time" );
@@ -393,8 +394,7 @@ void marksmanship_ptr( player_t* p )
   sentaoe->add_action( "trueshot,if=variable.trueshot_ready" );
   sentaoe->add_action( "moonlight_chakram,if=buff.moonlight_chakram.remains<gcd.max" );
   sentaoe->add_action( "multishot,target_if=max:debuff.sentinels_mark.down,if=buff.precise_shots.up&!talent.aspect_of_the_hydra|buff.trick_shots.down" );
-  sentaoe->add_action( "rapid_fire,target_if=max:debuff.sentinels_mark.down,if=talent.unload,interrupt_if=talent.unload&ticks_remain<2&buff.precise_shots.up&!gcd.remains,interrupt_immediate=1,interrupt_global=1" );
-  sentaoe->add_action( "rapid_fire,interrupt_if=talent.unload&ticks_remain<2&buff.precise_shots.up&!gcd.remains,interrupt_immediate=1,interrupt_global=1" );
+  sentaoe->add_action( "rapid_fire,target_if=max:debuff.sentinels_mark.down" );
   sentaoe->add_action( "aimed_shot,target_if=max:debuff.sentinels_mark.up|max_prio_damage,if=buff.trick_shots.remains>cast_time" );
   sentaoe->add_action( "moonlight_chakram" );
   sentaoe->add_action( "multishot,if=focus>cost+action.aimed_shot.cost&!max_prio_damage" );
@@ -408,8 +408,7 @@ void marksmanship_ptr( player_t* p )
   sentst->add_action( "kill_shot,target_if=max:debuff.sentinels_mark.down|max_prio_damage,if=buff.precise_shots.up" );
   sentst->add_action( "multishot,target_if=max:debuff.sentinels_mark.down,if=buff.precise_shots.up&active_enemies>1&talent.aspect_of_the_hydra&(!fight_style.dungeonroute|!max_prio_damage|active_enemies>2)", "Multi-Shot as a PS spender on 2T with Hydra talented. In DRoute, do it on 3 or more targets." );
   sentst->add_action( "arcane_shot,target_if=max:debuff.sentinels_mark.down|max_prio_damage,if=buff.precise_shots.up&(buff.trueshot.up&prev_gcd.1.aimed_shot|!buff.trueshot.up)" );
-  sentst->add_action( "rapid_fire,target_if=max:debuff.sentinels_mark.down,if=!fight_style.dungeonroute,interrupt_if=talent.unload&ticks_remain<2&buff.precise_shots.up&!gcd.remains,interrupt_immediate=1,interrupt_global=1" );
-  sentst->add_action( "rapid_fire,interrupt_if=talent.unload&ticks_remain<2&buff.precise_shots.up&!gcd.remains,interrupt_immediate=1,interrupt_global=1" );
+  sentst->add_action( "rapid_fire" );
   sentst->add_action( "aimed_shot,target_if=max:debuff.sentinels_mark.up|max_prio_damage" );
   sentst->add_action( "moonlight_chakram" );
   sentst->add_action( "steady_shot" );
@@ -469,14 +468,14 @@ void survival( player_t* p )
   plst->add_action( "takedown" );
 
   sentst->add_action( "kill_command,if=buff.tip_of_the_spear.stack=0&(cooldown.takedown.remains|!talent.twin_fangs)", "ST - Sent" );
-  sentst->add_action( "boomstick,if=buff.tip_of_the_spear.up&!debuff.sentinels_mark.remains" );
-  sentst->add_action( "wildfire_bomb,if=buff.tip_of_the_spear.up&(debuff.sentinels_mark.remains|full_recharge_time<4+gcd)" );
+  sentst->add_action( "boomstick" );
+  sentst->add_action( "wildfire_bomb,if=(debuff.sentinels_mark.remains|full_recharge_time<4)" );
   sentst->add_action( "kill_command,if=cooldown.takedown.remains<gcd&buff.tip_of_the_spear.stack<2&!talent.twin_fangs" );
   sentst->add_action( "takedown,if=buff.tip_of_the_spear.stack>0&!talent.twin_fangs|buff.tip_of_the_spear.stack=0&talent.twin_fangs" );
-  sentst->add_action( "boomstick,if=buff.tip_of_the_spear.up" );
-  sentst->add_action( "moonlight_chakram,if=buff.tip_of_the_spear.up" );
-  sentst->add_action( "raptor_strike,if=buff.tip_of_the_spear.up|!buff.raptor_swipe.up" );
+  sentst->add_action( "moonlight_chakram" );
+  sentst->add_action( "raptor_strike" );
   sentst->add_action( "kill_command,if=cooldown.takedown.remains" );
+  sentst->add_action( "wildfire_bomb" );
   sentst->add_action( "takedown" );
 
   plcleave->add_action( "kill_command,if=buff.tip_of_the_spear.stack<2&(buff.howl_of_the_pack_leader_wyvern.remains|buff.howl_of_the_pack_leader_boar.remains|buff.howl_of_the_pack_leader_bear.remains)", "AOE - PL" );
@@ -549,14 +548,14 @@ void survival_ptr( player_t* p )
   plst->add_action( "takedown" );
 
   sentst->add_action( "kill_command,if=buff.tip_of_the_spear.stack=0&(cooldown.takedown.remains|!talent.twin_fangs)", "ST - Sent" );
-  sentst->add_action( "boomstick,if=buff.tip_of_the_spear.up&!debuff.sentinels_mark.remains" );
-  sentst->add_action( "wildfire_bomb,if=buff.tip_of_the_spear.up&(debuff.sentinels_mark.remains|full_recharge_time<4+gcd)" );
+  sentst->add_action( "boomstick" );
+  sentst->add_action( "wildfire_bomb,if=(debuff.sentinels_mark.remains|full_recharge_time<4)" );
   sentst->add_action( "kill_command,if=cooldown.takedown.remains<gcd&buff.tip_of_the_spear.stack<2&!talent.twin_fangs" );
   sentst->add_action( "takedown,if=buff.tip_of_the_spear.stack>0&!talent.twin_fangs|buff.tip_of_the_spear.stack=0&talent.twin_fangs" );
-  sentst->add_action( "boomstick,if=buff.tip_of_the_spear.up" );
-  sentst->add_action( "moonlight_chakram,if=buff.tip_of_the_spear.up" );
-  sentst->add_action( "raptor_strike,if=buff.tip_of_the_spear.up|!buff.raptor_swipe.up" );
+  sentst->add_action( "moonlight_chakram" );
+  sentst->add_action( "raptor_strike" );
   sentst->add_action( "kill_command,if=cooldown.takedown.remains" );
+  sentst->add_action( "wildfire_bomb" );
   sentst->add_action( "takedown" );
 
   plcleave->add_action( "kill_command,if=buff.tip_of_the_spear.stack<2&(buff.howl_of_the_pack_leader_wyvern.remains|buff.howl_of_the_pack_leader_boar.remains|buff.howl_of_the_pack_leader_bear.remains)", "AOE - PL" );

@@ -36,7 +36,7 @@ paladin_t::paladin_t( sim_t* sim, util::string_view name, race_e r )
     random_weapon_target( nullptr ),
     random_bulwark_target( nullptr ),
     divine_inspiration_next( -1 ),
-    reflection_of_radiance_proc_chance( .001 ) // ToDo Fluttershy: Find out real proc chance - Currently something very, very low
+    glory_of_the_vanguard_delay( 300_ms )
 {
   active_consecration = nullptr;
   active_boj_cons = nullptr;
@@ -84,6 +84,12 @@ paladin_t::paladin_t( sim_t* sim, util::string_view name, race_e r )
 
   cooldowns.righteous_cause_icd = get_cooldown( "righteous_cause_icd" );
   cooldowns.righteous_cause_icd->duration = find_spell( 402912 )->internal_cooldown();
+
+  cooldowns.divine_resonance_icd = get_cooldown( "divine_resonance_icd" );
+  cooldowns.divine_resonance_icd->duration = find_spell( 1266308 )->internal_cooldown();
+
+  cooldowns.guided_prayer_icd = get_cooldown( "guided_prayer_icd" );
+  cooldowns.guided_prayer_icd->duration = find_spell( 404357 )->internal_cooldown();
 
   beacon_target         = nullptr;
   resource_regeneration = regen_type::DYNAMIC;
@@ -994,10 +1000,11 @@ struct melee_t : public paladin_melee_attack_t
   {
     if ( !player->in_combat )
       return 10_ms;
-    if ( first )
+
+    if ( first && !player->channeling )
       return 0_ms;
-    else
-      return paladin_melee_attack_t::execute_time();
+
+    return paladin_melee_attack_t::execute_time();
   }
 
   void execute() override
@@ -1135,7 +1142,7 @@ struct crusader_strike_t : public paladin_melee_attack_t
       }
     }
 
-    p()->trigger_grand_crusader();
+    p()->trigger_grand_crusader( GC_CS );
     p()->buffs.lightsmith.blessed_assurance->expire();
   }
 
@@ -1234,7 +1241,8 @@ struct word_of_glory_t : public holy_power_consumer_t<paladin_heal_t>
 {
   struct sacred_word_t : public paladin_heal_t
   {
-    sacred_word_t( paladin_t* p ) : paladin_heal_t( "sacred_word", p, p->spells.lightsmith.sacred_word )
+    sacred_word_t( paladin_t* p, util::string_view name )
+      : paladin_heal_t( "sacred_word_" + std::string( name ), p, p->spells.lightsmith.sacred_word )
     {
       background = true;
     }
@@ -1242,8 +1250,8 @@ struct word_of_glory_t : public holy_power_consumer_t<paladin_heal_t>
 
   sacred_word_t* sacred_word;
   light_of_the_titans_t* light_of_the_titans;
-  word_of_glory_t( paladin_t* p, util::string_view options_str )
-    : holy_power_consumer_t( "word_of_glory", p, p->find_class_spell( "Word of Glory" ) ),
+  word_of_glory_t( paladin_t* p, util::string_view options_str, util::string_view name )
+    : holy_power_consumer_t( name, p, p->find_class_spell( "Word of Glory" ) ),
       sacred_word( nullptr ),
       light_of_the_titans( new light_of_the_titans_t( p, "" ) )
   {
@@ -1252,7 +1260,7 @@ struct word_of_glory_t : public holy_power_consumer_t<paladin_heal_t>
     is_wog = true;
     if ( p->talents.lightsmith.blessing_of_the_forge->ok() )
     {
-      sacred_word = new sacred_word_t( p );
+      sacred_word = new sacred_word_t( p, name );
       add_child( sacred_word );
     }
   }
@@ -1326,6 +1334,26 @@ struct word_of_glory_t : public holy_power_consumer_t<paladin_heal_t>
       // Shining Light does not benefit from divine purpose
       am /= 1.0 + p()->spells.divine_purpose_buff->effectN( 2 ).percent();
     return am;
+  }
+};
+
+struct word_of_glory_afterimage_t : word_of_glory_t
+{
+  word_of_glory_afterimage_t(paladin_t* p) : word_of_glory_t(p, "", "word_of_glory_afterimage")
+  {
+    base_multiplier = p->talents.afterimage->effectN( 1 ).percent();
+    background      = true;
+    doesnt_consume_dp = false;
+  }
+};
+
+struct word_of_glory_guided_prayer_t : word_of_glory_t
+{
+  word_of_glory_guided_prayer_t(paladin_t* p) : word_of_glory_t(p, "", "word_of_glory_guided_prayer")
+  {
+    base_multiplier = p->talents.guided_prayer->effectN( 2 ).percent();
+    background      = true;
+    doesnt_consume_dp = true;
   }
 };
 
@@ -1576,9 +1604,10 @@ struct judgment_ret_t : public judgment_t
   {
     judgment_t::execute();
 
-    if ( !background && p()->specialization() == PALADIN_RETRIBUTION && p()->buffs.divine_resonance->up() )
+    if ( !background && p()->specialization() == PALADIN_RETRIBUTION && p()->buffs.divine_resonance->up() && p()->cooldowns.divine_resonance_icd->up() )
     {
       p()->active.divine_resonance_ret->execute_on_target( execute_state->target );
+      p()->cooldowns.divine_resonance_icd->start();
       p()->buffs.divine_resonance->decrement();
     }
   }
@@ -1676,6 +1705,12 @@ hammer_of_wrath_t::hammer_of_wrath_t(paladin_t* p, util::string_view n, const sp
   triggers_divine_resonance = true;
   triggers_second_sunrise   = false;
   cooldown->duration        = 0_ms;
+
+  if ( p->talents.blessed_champion->ok() )
+  {
+    aoe = as<int>( 1 + p->talents.blessed_champion->effectN( 4 ).base_value() );
+    base_aoe_multiplier *= 1.0 - p->talents.blessed_champion->effectN( 3 ).percent();
+  }
 }
 
 hammer_of_wrath_t::hammer_of_wrath_t( paladin_t* p, util::string_view name, util::string_view options_str,
@@ -1707,6 +1742,7 @@ hammer_of_wrath_t::hammer_of_wrath_t( paladin_t* p, util::string_view name, util
     echo->base_aoe_multiplier     = base_aoe_multiplier;
     echo->crit_bonus_multiplier   = crit_bonus_multiplier;
     echo->triggers_higher_calling = true;
+    echo->triggers_divine_resonance = false;
     echo->base_multiplier *= p->talents.herald_of_the_sun.second_sunrise->effectN( 2 ).percent();
   }
   if ( p->specialization() == PALADIN_PROTECTION )
@@ -1735,9 +1771,11 @@ void hammer_of_wrath_t::execute()
   if ( result_is_hit( execute_state->result ) && p()->talents.sanctified_wrath->ok() && p()->wings_up() )
     p()->resource_gain( RESOURCE_HOLY_POWER, 1, p()->gains.judgment );
 
-  if ( triggers_divine_resonance && p()->specialization() == PALADIN_RETRIBUTION && p()->buffs.divine_resonance->up() )
+  if ( triggers_divine_resonance && p()->specialization() == PALADIN_RETRIBUTION && p()->buffs.divine_resonance->up() &&
+       p()->cooldowns.divine_resonance_icd->up() )
   {
     p()->active.divine_resonance_ret_how->execute_on_target( execute_state->target );
+    p()->cooldowns.divine_resonance_icd->start();
     p()->buffs.divine_resonance->decrement();
   }
   if (p()->talents.herald_of_the_sun.walk_into_light->ok() && p()->wings_up() && p()->cooldowns.walk_into_light_icd->up())
@@ -1882,6 +1920,10 @@ struct divine_toll_t : public paladin_spell_t
       {
         p()->active.divine_toll->execute_on_target( s->target );
       }
+      if ( p()->talents.lightsmith.resounding_strike->ok() )
+      {
+        trigger_hammer_and_anvil( p(), s->target, haa, HAA_DIVINE_TOLL );
+      }
     }
   }
 
@@ -1927,10 +1969,6 @@ struct divine_toll_t : public paladin_spell_t
       {
         make_event<delayed_execute_event_t>( *sim, p(), a, execute_state->target, 300_ms * ( i + 1 ) );
       }
-    }
-    if ( p()->talents.lightsmith.resounding_strike->ok() )
-    {
-      trigger_hammer_and_anvil( p(), execute_state->target, haa, HAA_DIVINE_TOLL );
     }
   }
 };
@@ -2409,13 +2447,12 @@ struct sacred_weapon_proc_damage_t : public paladin_spell_t
   void execute() override
   {
     paladin_spell_t::execute();
-    double chance = p()->reflection_of_radiance_proc_chance;
+    double chance = p()->options.reflection_of_radiance_proc_chance_sacred_weapon;
     if ( p()->options.fake_solidarity )
       chance = 1.0 - ( std::pow( 1.0 - chance, p()->buffs.lightsmith.fake_solidarity->stack() + 1 ) );
     if ( p()->talents.lightsmith.reflection_of_radiance->ok() && p()->rng().roll( chance ) )
     {
-      p()->trigger_grand_crusader( GC_ROR );
-      p()->procs.grand_crusader_ror_sw->occur();
+      p()->trigger_grand_crusader( GC_ROR_SW );
     }
   }
 
@@ -2928,7 +2965,7 @@ struct shield_of_the_righteous_t : public holy_power_consumer_t<paladin_melee_at
 
   void execute() override
   {
-    bool hasDpUp = p()->buffs.divine_purpose->up();
+    // bool hasDpUp = p()->buffs.divine_purpose->up();
 
     holy_power_consumer_t::execute();
 
@@ -2975,10 +3012,10 @@ struct shield_of_the_righteous_t : public holy_power_consumer_t<paladin_melee_at
   {
     double am = paladin_melee_attack_t::action_multiplier();
 
-    if (p()->talents.instrument_of_the_divine->ok() && cost() > 3.0)
+    if ( p()->talents.instrument_of_the_divine->ok() && p()->resources.current[RESOURCE_HOLY_POWER] > 3.0 )
     {
       double overflow = std::min( p()->talents.instrument_of_the_divine->effectN( 2 ).base_value(),
-                                  cost() - 3.0 );
+                                  p()->resources.current[ RESOURCE_HOLY_POWER ] - 3.0 );
       am *= 1.0 + p()->talents.instrument_of_the_divine->effectN( 1 ).percent() * overflow;
     }
     return am;
@@ -3353,6 +3390,9 @@ void paladin_t::create_actions()
   active.background_cons = new consecration_t( this, "blade_of_justice", BLADE_OF_JUSTICE );
   active.hammer_of_light_cons = new consecration_t( this, "hol", HAMMER_OF_LIGHT );
 
+  active.afterimage    = new word_of_glory_afterimage_t( this );
+  active.guided_prayer = new word_of_glory_guided_prayer_t( this );
+
   player_t::create_actions();
 }
 
@@ -3421,7 +3461,7 @@ action_t* paladin_t::create_action( util::string_view name, util::string_view op
   if ( name == "shield_of_the_righteous" )
     return new shield_of_the_righteous_t( this, options_str );
   if ( name == "word_of_glory" )
-    return new word_of_glory_t( this, options_str );
+    return new word_of_glory_t( this, options_str, "word_of_glory" );
   if ( name == "holy_armaments" )
     return new holy_armaments_t( this, options_str );
   if ( name == "hammer_of_light" )
@@ -3491,7 +3531,14 @@ void paladin_t::reset()
   all_active_consecrations.clear();
   active_aura         = nullptr;
 
-  next_armament = SACRED_WEAPON;
+  if ( options.starting_armament == "sacred_weapon" )
+    next_armament = SACRED_WEAPON;
+  // If option is set to gibberish, just roll
+  else if ( options.starting_armament == "holy_bulwark" || sim->rng().roll( .5 ) )
+    next_armament = HOLY_BULWARK;
+  else
+    next_armament = SACRED_WEAPON;
+
   random_weapon_target = nullptr;
   random_bulwark_target = nullptr;
   divine_inspiration_next = -1;
@@ -3539,13 +3586,15 @@ void paladin_t::init_procs()
   procs.empyrean_power    = get_proc( "Empyrean Power" );
 
   procs.as_grand_crusader         = get_proc( "Avenger's Shield: Grand Crusader" );
-  procs.as_grand_crusader_wasted  = get_proc( "Avenger's Shield: Grand Crusader wasted" );
+  procs.as_grand_crusader_wasted = get_proc( "Avenger's Shield: Grand Crusader wasted" );
+  procs.as_grand_crusader_ror_sw = get_proc( "Grand Crusader: Reflection of Radiance Sacred Weapon" );
+  procs.as_grand_crusader_ror_hb = get_proc( "Grand Crusader: Reflection of Radiance Holy Bulwark" );
+  procs.as_grand_crusader_avoid   = get_proc( "Grand Crusader: Parry/Dodge/Miss" );
+  procs.as_grand_crusader_cs      = get_proc( "Grand Crusader: CS/BH/HotR" );
+
   procs.divine_inspiration = get_proc( "Divine Inspiration" );
 
   procs.templar_lights_judicator = get_proc( "Templar Light's Judicator LD additional stacks" );
-
-  procs.grand_crusader_ror_sw = get_proc( "Grand Crusader: Reflection of Radiance Sacred Weapon" );
-  procs.grand_crusader_ror_hb = get_proc( "Grand Crusader: Reflection of Radiance Holy Bulwark" );
 }
 
 // paladin_t::init_scaling ==================================================
@@ -3676,6 +3725,7 @@ void paladin_t::create_buffs()
   }
 
   buffs.hammer_of_wrath = make_buff( this, "hammer_of_wrath", find_spell( 1277026 ) );
+  buffs.afterimage      = make_buff( this, "afterimage", find_spell( 400745 ) );
 
   buffs.lightsmith.holy_bulwark =
       make_buff<buffs::holy_bulwark_buff_t>( this )
@@ -3795,7 +3845,7 @@ std::string paladin_t::default_potion() const
 {
   std::string retribution_pot = ( true_level > 80 ) ? "lights_potential_2" : "disabled";
 
-  std::string protection_pot = ( true_level > 80 ) ? "lights_potential_2" : "disabled";
+  std::string protection_pot = ( true_level > 80 ) ? "liquid_luster_2" : "disabled";
 
   std::string holy_dps_pot = ( true_level > 50 ) ? "spectral_intellect" : "disabled";
 
@@ -3818,7 +3868,7 @@ std::string paladin_t::default_food() const
 {
   std::string retribution_food = ( true_level > 80 ) ? "royal_roast" : "disabled";
 
-  std::string protection_food = ( true_level > 80 ) ? "blooming_feast" : "disabled";
+  std::string protection_food = ( true_level > 80 ) ? "silvermoon_parade" : "disabled";
 
   std::string holy_dps_food = ( true_level > 50 ) ? "feast_of_gluttonous_hedonism" : "disabled";
 
@@ -3841,7 +3891,7 @@ std::string paladin_t::default_flask() const
 {
   std::string retribution_flask = ( true_level > 80 ) ? "flask_of_the_magisters_2" : "disabled";
 
-  std::string protection_flask = ( true_level > 80 ) ? "flask_of_the_shattered_sun_2" : "disabled";
+  std::string protection_flask = ( true_level > 80 ) ? "flask_of_the_blood_knights_2" : "disabled";
 
   std::string holy_dps_flask = ( true_level > 50 ) ? "spectral_flask_of_power" : "disabled";
 
@@ -4143,6 +4193,17 @@ void paladin_t::init()
 
   if ( specialization() == PALADIN_HOLY && primary_role() != ROLE_ATTACK )
     sim->errorf( "%s is using an unsupported spec.", name() );
+
+  if ( options.starting_armament == "sacred_weapon" )
+    next_armament = SACRED_WEAPON;
+  // If option is set to gibberish, just roll
+  else if ( options.starting_armament == "holy_bulwark" || sim->rng().roll( .5 ) )
+    next_armament = HOLY_BULWARK;
+  else
+    next_armament = SACRED_WEAPON;
+
+  if ( options.max_range_apex )
+    glory_of_the_vanguard_delay = 800_ms;
 }
 
 void paladin_t::init_spells()
@@ -4851,6 +4912,13 @@ double paladin_t::resource_gain( resource_e resource_type, double amount, gain_t
 double paladin_t::resource_loss( resource_e resource_type, double amount, gain_t* source, action_t* action )
 {
   double result     = player_t::resource_loss( resource_type, amount, source, action );
+
+  if (resource_type == RESOURCE_HEALTH && talents.guided_prayer->ok() && cooldowns.guided_prayer_icd->up() && resources.pct(resource_type) < talents.guided_prayer->effectN(1).percent())
+  {
+    active.guided_prayer->execute_on_target( this );
+    cooldowns.guided_prayer_icd->start();
+  }
+
   return result;
 }
 
@@ -4897,7 +4965,7 @@ void paladin_t::assess_damage( school_e school, result_amount_type dtype, action
   // Trigger Grand Crusader on an avoidance event (TODO: test if it triggers on misses)
   if ( s->result == RESULT_DODGE || s->result == RESULT_PARRY || s->result == RESULT_MISS )
   {
-    trigger_grand_crusader();
+    trigger_grand_crusader( GC_AVOID );
   }
 
   player_t::assess_damage( school, dtype, s );
@@ -4911,8 +4979,11 @@ void paladin_t::create_options()
   add_option( opt_bool( "paladin_fake_sov", options.fake_sov ) );
   add_option( opt_bool( "fake_solidarity", options.fake_solidarity ) );
   add_option( opt_float( "blessed_hammer_strikes", options.blessed_hammer_strikes, 1, 3 ) );
+  add_option( opt_float( "reflection_of_radiance_proc_chance_sacred_weapon", options.reflection_of_radiance_proc_chance_sacred_weapon, 0, 1 ) );
+  add_option( opt_float( "reflection_of_radiance_proc_chance_holy_bulwark", options.reflection_of_radiance_proc_chance_holy_bulwark, 0, 1 ) );
   add_option( opt_float( "ror_bulwark_additional_proc_chance", options.ror_bulwark_additional_proc_chance, 0, 1 ) );
   add_option( opt_string( "starting_armament", options.starting_armament ) );
+  add_option( opt_bool( "max_range_apex", options.max_range_apex ) );
 
   player_t::create_options();
 }
@@ -4932,6 +5003,12 @@ void paladin_t::combat_begin()
 {
   player_t::combat_begin();
 
+  // When we have Blessed Hammer, we can spam it pre-combat and start with full charges
+  if (talents.blessed_hammer->ok())
+  {
+    resources.current[ RESOURCE_HOLY_POWER ]++;
+  }
+
   // Mid-fight episode seeding (simc-offline-evaluation-pipeline phase 116,
   // 116-07) - this ret-specific start-of-combat holy-power clamp only
   // applies when the run did NOT explicitly seed holy_power via
@@ -4950,17 +5027,17 @@ void paladin_t::combat_begin()
     }
   }
 
-  if ( options.starting_armament == "sacred_weapon" )
-    next_armament = SACRED_WEAPON;
-  // If option is set to gibberish, just roll
-  else if ( options.starting_armament == "holy_bulwark" || sim->rng().roll( .5 ) )
-    next_armament = HOLY_BULWARK;
-  else
-    next_armament = SACRED_WEAPON;
-
   if ( talents.herald_of_the_sun.morning_star->ok() )
   {
     buffs.herald_of_the_sun.morning_star_driver->trigger();
+  }
+
+  if (buffs.lightsmith.sacred_weapon->up())
+  {
+    // This gives Shining Light, which seems to be correct
+    buffs.lightsmith.sacred_weapon->cancel();
+    if ( buffs.lightsmith.fake_solidarity->up() )
+      buffs.lightsmith.fake_solidarity->cancel();
   }
 }
 

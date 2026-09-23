@@ -1180,7 +1180,7 @@ public:
     heal_t* consume_soul_empowered_demon = nullptr;
     spell_t* immolation_aura_tick        = nullptr;
     spell_t* immolation_aura_initial     = nullptr;
-    spell_t* collective_anguish          = nullptr;
+    spell_t* the_hunt_dot                = nullptr;
 
     // Devourer
     spell_t* void_buildup = nullptr;
@@ -1197,6 +1197,7 @@ public:
     attack_t* screaming_brutality_slash_proc_throw_glaive          = nullptr;
     attack_t* essence_break_proc                                   = nullptr;
     spell_t* glaive_tempest                                        = nullptr;
+    spell_t* collective_anguish          = nullptr;
 
     // Vengeance
     spell_t* infernal_armor = nullptr;
@@ -2804,10 +2805,10 @@ struct art_of_the_glaive_trigger_t : public BASE
     {
       if ( BASE::dh()->talent.aldrachi_reaver.thrill_of_the_fight->ok() )
       {
-        BASE::dh()->buff.thrill_of_the_fight_haste->trigger();
+        BASE::dh()->buff.thrill_of_the_fight_damage->trigger();
 
         make_event( *BASE::dh()->sim, thrill_delay,
-                    [ this ] { BASE::dh()->buff.thrill_of_the_fight_damage->trigger(); } );
+                    [ this ] { BASE::dh()->buff.thrill_of_the_fight_haste->trigger(); } );
       }
       if ( BASE::dh()->talent.aldrachi_reaver.aldrachi_tactics->ok() )
       {
@@ -3161,7 +3162,7 @@ struct mass_acceleration_trigger_t : public BASE
     switch ( BASE::dh()->specialization() )
     {
       case DEMON_HUNTER_DEVOURER:
-        BASE::dh()->cooldown.reap->reset( true );
+        BASE::dh()->cooldown.reap->reset( false );
         break;
       case DEMON_HUNTER_VENGEANCE:
         BASE::dh()->cooldown.spirit_bomb->reset( true );
@@ -4041,7 +4042,8 @@ struct eye_beam_base_t : public student_of_suffering_trigger_t<final_breath_trig
       // 08/01/2026 - Essence Break and Eyebeam currently reduce the value of the other by 2.5 seconds when stacks 2 - 4
       // are each applied.
       // 2026-08-17 -- EssB is only reduced if the playerh as the 4pc equipped.
-      if ( dh()->set_bonuses.mid2_havoc_4pc->ok() && dh()->buff.cycle_of_hatred->check() && dh()->buff.cycle_of_hatred->stack() < 4 )
+      if ( dh()->set_bonuses.mid2_havoc_4pc->ok() && dh()->buff.cycle_of_hatred->check() &&
+           dh()->buff.cycle_of_hatred->stack() < 4 )
       {
         dh()->cooldown.essence_break->adjust(
             -timespan_t::from_millis( as<int>( dh()->buff.cycle_of_hatred->check_value() ) ) );
@@ -4980,8 +4982,16 @@ struct metamorphosis_t : public mass_acceleration_trigger_t<demon_hunter_spell_t
 
         if ( dh()->talent.scarred.violent_transformation->ok() )
         {
-          dh()->cooldown.voidblade->reset( true );
-          dh()->cooldown.predators_wake->reset( true );
+          dh()->cooldown.voidblade->reset( false );
+
+          if ( sim->dbc->wowv() >= wowv_t( 12, 1, 5 ) )
+          {
+            dh()->cooldown.soul_immolation->reset( false );
+          }
+          else
+          {
+            dh()->cooldown.predators_wake->reset( false );
+          }
         }
         break;
       case DEMON_HUNTER_HAVOC:
@@ -5496,28 +5506,34 @@ struct sigil_of_spite_t : public demon_hunter_spell_t
 
 // The Hunt =================================================================
 
+struct the_hunt_dot_t : public demon_hunter_spell_t
+{
+  the_hunt_dot_t( util::string_view n, demon_hunter_t* p )
+    : demon_hunter_spell_t( n, p, p->spec.the_hunt_dot )
+  {
+    dual         = true;
+    aoe          = as<int>( p->spec.the_hunt->effectN( 2 ).trigger()->effectN( 1 ).base_value() );
+    dot_behavior = DOT_NONE;
+
+    // 09/20/2026 The Hunt does not benefit from chaotic disposition
+    affected_by.chaotic_disposition = false;
+  }
+};
+
 struct the_hunt_base_t
   : public voidrush_trigger_t<hungering_slash_trigger_t<
         unbound_chaos_trigger_t<inertia_trigger_trigger_t<exergy_trigger_t<demon_hunter_spell_t>>>>>
 {
-  struct the_hunt_dot_t : public demon_hunter_spell_t
-  {
-    the_hunt_dot_t( util::string_view n, demon_hunter_t* p )
-      : demon_hunter_spell_t( fmt::format( "{}_dot", n ), p, p->spec.the_hunt_dot )
-    {
-      dual = true;
-      aoe  = as<int>( p->spec.the_hunt->effectN( 2 ).trigger()->effectN( 1 ).base_value() );
-    }
-  };
-
   struct the_hunt_damage_t : public demon_hunter_spell_t
   {
     the_hunt_damage_t( util::string_view n, demon_hunter_t* p )
       : demon_hunter_spell_t( fmt::format( "{}_damage", n ), p, p->spec.the_hunt_impact )
     {
       dual          = true;
-      impact_action = p->get_background_action<the_hunt_dot_t>( n );
-      add_child( impact_action );
+      impact_action = p->active.the_hunt_dot;
+
+      // 09/20/2026 The Hunt does not benefit from chaotic disposition
+      affected_by.chaotic_disposition = false;
     }
 
     void impact( action_state_t* s ) override
@@ -5538,7 +5554,8 @@ struct the_hunt_base_t
            dh()->talent.scarred.violent_transformation->ok() )
       {
         // only resets one charge of Soul Immo
-        dh()->cooldown.soul_immolation->reset( true, 1 );
+        if ( sim->dbc->wowv() < wowv_t( 12, 1, 5 ) )
+          dh()->cooldown.soul_immolation->reset( false, 1 );
       }
     }
   };
@@ -5582,6 +5599,8 @@ struct predators_wake_t : public voidsurge_trigger_t<voidsurge_ability::PREDATOR
   predators_wake_t( demon_hunter_t* p, util::string_view o )
     : base_t( "predators_wake", p, p->hero_spec.predators_wake, o )
   {
+    if ( sim->dbc->wowv() >= wowv_t( 12, 1, 5 ) )
+      cooldown = p->cooldown.the_hunt;
   }
 
   bool action_ready() override
@@ -5683,7 +5702,7 @@ struct consume_base_t : public shattered_souls_trigger_t<voidfall_building_trigg
       if ( dh()->set_bonuses.mid2_devourer_4pc->ok() )
       {
         dh()->buff.moment_of_craving->trigger();
-        dh()->cooldown.reap->reset( true );
+        dh()->cooldown.reap->reset( false );
         dh()->spawn_soul_fragment( dh()->proc.soul_fragment_from_soulburst, soul_fragment::LESSER,
                                    as<unsigned int>( dh()->set_bonuses.mid2_devourer_4pc->effectN( 1 ).base_value() ) );
       }
@@ -5834,7 +5853,7 @@ struct consume_t : public consume_base_t
 
 struct voidblade_base_t : public voidrush_trigger_t<hungering_slash_trigger_t<demon_hunter_spell_t>>
 {
-  struct voidblade_damage_t : public burning_blades_trigger_t<shattered_souls_trigger_t<demon_hunter_spell_t>>
+  struct voidblade_damage_t : public burning_blades_trigger_t<demon_hunter_spell_t>
   {
     voidblade_damage_t( util::string_view name, demon_hunter_t* p ) : base_t( name, p, p->spec.voidblade )
     {
@@ -6407,7 +6426,7 @@ struct void_ray_t
       if ( dh()->talent.devourer.moment_of_craving->ok() )
       {
         dh()->buff.moment_of_craving->trigger();
-        dh()->cooldown.reap->reset( true );
+        dh()->cooldown.reap->reset( false );
       }
       if ( voidglare_boon_energize )
       {
@@ -6494,9 +6513,9 @@ struct collapsing_star_t : public demon_hunter_spell_t
     {
       double m = base_t::composite_da_multiplier( s );
 
-      if ( s->chain_target == 0 )
+      if ( s->chain_target != 0 )
       {
-        m *= 1.0 + dh()->spec.collapsing_star_spell->effectN( 2 ).percent();
+        m *= dh()->spec.collapsing_star_spell->effectN( 2 ).percent();
       }
 
       return m;
@@ -6555,6 +6574,11 @@ struct collapsing_star_t : public demon_hunter_spell_t
     dh()->buff.collapsing_star->expire();
     dh()->buff.collapsing_star_stack->decrement( soul_cost );
     demon_hunter_spell_t::execute();
+
+    if ( sim->dbc->wowv() >= wowv_t( 12, 1, 5 ) && dh()->talent.scarred.demonic_intensity->ok() )
+    {
+      dh()->cooldown.the_hunt->reset( false );
+    }
   }
 
   bool action_ready() override
@@ -7523,12 +7547,6 @@ struct chaos_strike_base_t
         dh()->buff.serrated_glaive->trigger();
       }
 
-      if ( dh()->talent.aldrachi_reaver.warblades_hunger && dh()->buff.warblades_hunger->up() )
-      {
-        dh()->active.warblades_hunger->execute_on_target( target );
-        dh()->buff.warblades_hunger->expire();
-      }
-
       if ( result_is_hit( s->result ) && td( s->target )->debuffs.essence_break->up() )
       {
         cooldown_t* tcd = dh()->cooldown.essence_break_proc_icd->get_cooldown( s->target );
@@ -7608,6 +7626,12 @@ struct chaos_strike_base_t
     {
       make_event<delayed_execute_event_t>( *sim, dh(), dh()->active.inner_demon, target, 1.25_s );
       dh()->buff.inner_demon->expire();
+    }
+
+    if ( dh()->talent.aldrachi_reaver.warblades_hunger->ok() && dh()->buff.warblades_hunger->up() )
+    {
+      dh()->active.warblades_hunger->execute_on_target( target );
+      dh()->buff.warblades_hunger->expire();
     }
   }
 
@@ -8523,17 +8547,17 @@ struct burning_blades_t : public residual_action::residual_periodic_action_t<dem
 struct vengeful_retreat_t
   : public unbound_chaos_trigger_t<inertia_trigger_trigger_t<exergy_trigger_t<demon_hunter_spell_t>>>
 {
-  struct voidstep_damage_t : public shattered_souls_trigger_t<demon_hunter_spell_t>
+  struct voidstep_damage_t : public demon_hunter_spell_t
   {
     voidstep_damage_t( util::string_view n, demon_hunter_t* p )
-      : base_t( n, p, p->spec.voidstep->effectN( 1 ).trigger() )
+      : demon_hunter_spell_t( n, p, p->spec.voidstep->effectN( 1 ).trigger() )
     {
       aoe = -1;
     }
 
     void execute() override
     {
-      base_t::execute();
+      demon_hunter_spell_t::execute();
 
       dh()->buff.voidstep->expire();
     }
@@ -11480,9 +11504,9 @@ void demon_hunter_t::init_spells()
   // action
   active.burning_wound = get_background_action<burning_wound_t>( "burning_wound" );
 
-  if ( talent.havoc.collective_anguish->ok() )
+  if ( talent.devourer.the_hunt->ok() || talent.havoc.the_hunt->ok() )
   {
-    active.collective_anguish = get_background_action<collective_anguish_t>( "collective_anguish" );
+    active.the_hunt_dot = get_background_action<the_hunt_dot_t>( "the_hunt_dot" );
   }
 
   if ( spec.demon_blades_damage->ok() )
@@ -11523,6 +11547,10 @@ void demon_hunter_t::init_spells()
   if ( talent.havoc.glaive_tempest->ok() )
   {
     active.glaive_tempest = get_background_action<glaive_tempest_t>( "glaive_tempest" );
+  }
+  if ( talent.havoc.collective_anguish->ok() )
+  {
+    active.collective_anguish = get_background_action<collective_anguish_t>( "collective_anguish" );
   }
 
   if ( talent.vengeance.retaliation->ok() )
@@ -11585,6 +11613,12 @@ void demon_hunter_t::init_spells()
       default:
         break;
     }
+  }
+
+  if ( talent.scarred.demonic_intensity->ok() )
+  {
+    // Create a hunt to guarantee the cooldown object exists properly formed.
+    new the_hunt_t( this, "" );
   }
 
   if ( specialization() == DEMON_HUNTER_DEVOURER )
@@ -13124,12 +13158,6 @@ public:
         .operation( hotfix::HOTFIX_SET )
         .modifier( 16.0 )
         .verification_value( 50.0 );
-    hotfix::register_effect( "Demon Hunter", "2025-03-26",
-                             "Collapsing star still only does 50% additional damage to primary target", 1290193 )
-        .field( "base_value" )
-        .operation( hotfix::HOTFIX_SET )
-        .modifier( 50.0 )
-        .verification_value( 75.0 );
   }
 };
 
