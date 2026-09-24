@@ -879,7 +879,9 @@ enum class direct_id
   active_enemies, t, maelstrom,
   // stats
   stats_attack_haste, stats_attack_crit_chance, stats_mastery_value,
-  stats_damage_versatility, stats_attack_power,
+  // 260923-lrc stage 1D (PLAN.md D24): stats_attack_power REMOVED -- the live in-game addon can
+  // never read the raw attack-power stat off the character sheet (owner directive 2026-09-23).
+  stats_damage_versatility,
   stats_agility, stats_crit_rating, stats_haste_rating, stats_mastery_rating,
   stats_versatility_rating,
   // swing_cast
@@ -948,17 +950,19 @@ enum class cooldown_leaf_kind { remains, charges, charges_fractional, recharge_t
 // (on the action OR the player, per resolve_action_leaf's own comment) --
 // the resolved expr_t lives in slot_table::owned_expressions exactly like
 // every other expression-kind binding in this file, no new ownership
-// mechanism needed. The `shared_*` kinds are OBS-07's cost-split
-// mechanism: crit_pct_current/persistent_multiplier/da_multiplier for the SAME
-// action share ONE `action_state_t*` (owned in
-// slot_table::owned_action_states, allocated once at bind, snapshotted once
-// per action per DECISION in build_obs -- never per leaf, never per bind).
-// 260923-lrc (PLAN.md D11): shared_hit_damage REMOVED -- the eight
-// action_leaves.*.hit_damage census leaves it served are gone from the
-// registry (R7-4: the live addon can never read a damage amount), and it
-// was the only caller of calculate_direct_amount()/target_mitigation() under
-// engine/sim/rl_*. The two `dot_molten_weapon_*` kinds are lava_lash's
-// Molten Weapon residual
+// mechanism needed. 260923-lrc (PLAN.md D11): shared_hit_damage REMOVED --
+// the eight action_leaves.*.hit_damage census leaves it served are gone
+// from the registry (R7-4: the live addon can never read a damage amount),
+// and it was the only caller of calculate_direct_amount()/target_mitigation()
+// under engine/sim/rl_*. 260923-lrc stage 1D (PLAN.md D24): the remaining
+// `shared_*` kinds (OBS-07's cost-split mechanism: crit_pct_current/
+// persistent_multiplier/da_multiplier for the SAME action sharing ONE
+// `action_state_t*`) are ALSO REMOVED -- the six action_leaves.<member>.
+// {crit_pct_current,multiplier} census leaves they served are gone from the
+// registry too (owner directive 2026-09-23: the live addon can never read a
+// spell's current crit chance or damage multiplier), leaving no remaining
+// `shared_*` kind and no remaining action_state_t sharing mechanism. The two
+// `dot_molten_weapon_*` kinds are lava_lash's Molten Weapon residual
 // (220-RESEARCH.md's own citation: "per-enemy dot_list, same as
 // enemy_slots") -- read fresh off the CURRENT target's dot_list each
 // decision (never cached at bind time: the current target, and therefore
@@ -966,7 +970,6 @@ enum class cooldown_leaf_kind { remains, charges, charges_fractional, recharge_t
 enum class action_leaf_kind
 {
   plain_expression,
-  shared_crit_pct_current, shared_persistent_multiplier, shared_da_multiplier,
   dot_molten_weapon_ticking, dot_molten_weapon_remains
   // 228-11 (Q19, D-A/R-D): spell_targets_count REMOVED -- the deterministic geometry leaf
   // (232-12, LO-01: target_fact.chain_lightning.neighbours_within_radius, the single column
@@ -1032,8 +1035,9 @@ struct slot_binding
   action_t* bound_action = nullptr;              // non-owning; the engine owns every action_t
                                                   // (ALSO used by kind == target_fact, 228-09 -- the
                                                   // action whose stamped pick this leaf reads)
-  action_state_t* shared_action_state = nullptr; // non-owning; owned by slot_table::owned_action_states,
-                                                  // shared by all three shared_* leaves of this SAME action
+  // 260923-lrc stage 1D (PLAN.md D24): action_state_t* shared_action_state REMOVED -- its only
+  // reader/writer (get_or_create_shared_action_state(), resolve_action_leaf's shared-snapshot
+  // branch) is gone, the six shared_* leaves it served having lost their registry declarations.
 
   // kind == target_fact (228-09, D-23/TGT-08): which fact about bound_action's stamped pick
   // this leaf reads -- resolved ONCE at bind time from the leaf name, never re-parsed per
@@ -1064,16 +1068,10 @@ struct slot_table
   // slot_table itself in g_slot_table_cache) -- slot_binding::expr is a
   // non-owning raw pointer into this vector, never re-created per decision.
   std::vector<std::unique_ptr<expr_t>> owned_expressions;
-  // 220-06 Task 3 (OBS-07): ONE action_state_t* per action that declares any
-  // of crit_pct_current/persistent_multiplier/da_multiplier (hit_damage
-  // REMOVED 260923-lrc, see action_leaf_kind's own note above), allocated once at
-  // bind time via action_t::get_state() (a plain `new`, safe to `delete` --
-  // action_state_expr_t's own destructor does exactly that, see
-  // action.cpp:3199-3202) and reused every decision -- never reallocated,
-  // never released mid-run (same process-lifetime-leak convention this file
-  // already uses for owned_expressions and every raw engine handle it never
-  // frees).
-  std::vector<std::unique_ptr<action_state_t>> owned_action_states;
+  // 260923-lrc stage 1D (PLAN.md D24): std::vector<std::unique_ptr<action_state_t>>
+  // owned_action_states REMOVED -- its only reader/writer (get_or_create_shared_action_state())
+  // is gone, the six shared_* action_leaves.<member>.{crit_pct_current,multiplier} leaves it
+  // served having lost their registry declarations (owner directive 2026-09-23).
 };
 
 namespace
@@ -1631,8 +1629,10 @@ slot_binding resolve_stats_swing_cast_position_leaf( rl_family fam_id, const std
 
   if ( fam_id == rl_family::stats )
   {
-    if ( member == "attack_power" )      b.direct = direct_id::stats_attack_power;
-    else if ( member == "crit" )         b.direct = direct_id::stats_attack_crit_chance;
+    // 260923-lrc stage 1D (PLAN.md D24): the "attack_power" member branch (direct_id::
+    // stats_attack_power) is REMOVED -- stats.attack_power has no registry declaration to
+    // resolve any more (owner directive 2026-09-23).
+    if ( member == "crit" )              b.direct = direct_id::stats_attack_crit_chance;
     else if ( member == "damage_versatility" ) b.direct = direct_id::stats_damage_versatility;
     else if ( member == "haste" )        b.direct = direct_id::stats_attack_haste;
     else if ( member == "mastery_value" ) b.direct = direct_id::stats_mastery_value;
@@ -1921,21 +1921,13 @@ enemy_handle_cache& get_enemy_handle_cache( const player_t* p, player_t* t )
 // 220-06 Task 3: `action_leaves` resolution (rl_family_kind::action_expression).
 // ---------------------------------------------------------------------------
 
-// OBS-07's cost-split mechanism: ONE `action_state_t*` per action that
-// declares any of crit_pct_current/persistent_multiplier/da_multiplier
-// (hit_damage REMOVED 260923-lrc, PLAN.md D11), allocated once at bind time
-// (never per decision) and shared by every remaining leaf of that SAME action.
-action_state_t* get_or_create_shared_action_state( action_t* a, slot_table& table )
-{
-  for ( auto& s : table.owned_action_states )
-  {
-    if ( s->action == a )
-      return s.get();
-  }
-  action_state_t* fresh = a->get_state();
-  table.owned_action_states.push_back( std::unique_ptr<action_state_t>( fresh ) );
-  return fresh;
-}
+// 260923-lrc stage 1D (PLAN.md D24): get_or_create_shared_action_state() (OBS-07's cost-split
+// mechanism, one `action_state_t*` per action declaring any of crit_pct_current/
+// persistent_multiplier/da_multiplier; hit_damage REMOVED 260923-lrc, PLAN.md D11) is DELETED
+// -- its only call site (resolve_action_leaf's crit_pct_current/multiplier branch) is gone,
+// and no other file references it (grep confirmed under engine/sim/rl_*). slot_table::
+// owned_action_states and slot_binding::shared_action_state (their only reader/writer) are
+// deleted alongside it, below.
 
 // rl_family_kind::action_expression resolution. `engine_token` IS the
 // action's `find_action()` token for every member in this census (verified
@@ -1958,80 +1950,13 @@ slot_binding resolve_action_leaf( player_t* p, const std::string& engine_token, 
 
   const std::string leaf_name = leaf.leaf;
 
-  // The three shared-snapshot leaves (OBS-07, Task 3 step 2; `multiplier`
-  // added 221-07; `hit_damage` REMOVED 260923-lrc, PLAN.md D11) -- see
-  // build_obs' own dispatch for the derivation arithmetic.
-  if ( leaf_name == "crit_pct_current" ||
-       leaf_name == "persistent_multiplier" || leaf_name == "multiplier" )
-  {
-    // 221-07 WR-01: `a->create_expression("multiplier")` is NOT usable for
-    // this leaf -- action_t::create_expression (action.cpp) unconditionally
-    // tries `dot_t::create_expression(nullptr, this, this, name, true)`
-    // BEFORE its own name-match chain reaches "multiplier"
-    // (action.cpp:~3368), and dot_t's own "multiplier" handler
-    // (dot.cpp:561) is a DIFFERENT, unrelated alias -- the DOT tick
-    // multiplier (`dot->state ? dot->state->ta_multiplier : 0`), which is
-    // permanently 0 for every non-DOT action in this registry (proven via
-    // live instrumentation: the real action_t::create_expression body for
-    // "multiplier" never once executed for crash_lightning/lava_lash/
-    // voltaic_blaze/sundering/windstrike across a live episode). The
-    // MEANINGFUL "how hard is this ability hitting right now" signal is
-    // `composite_da_multiplier()` -- the same per-action virtual this
-    // schema's own persistent_multiplier leaf already calls the sibling
-    // `composite_persistent_multiplier()` for -- so `multiplier` is folded
-    // into the SAME shared-snapshot cache (no new `snapshot_state()` call,
-    // OBS-07's cost discipline unchanged) rather than routed through
-    // `create_expression` at all.
-    //
-    // 221-07 WR-02: `windstrike`/`voltaic_blaze` are DISPATCHER/CARRIER
-    // actions with zero direct-damage component of their own (windstrike_t's
-    // own comment: "Actual damaging attacks are done by stormstrike_attack_t";
-    // voltaic_blaze_t's damage is entirely its `impact_action`,
-    // voltaic_blaze_damage_t) -- `a->calculate_direct_amount()` on the
-    // dispatcher itself is structurally always 0 (confirmed live:
-    // base_dd_min/max=0, spell_power_mod.direct=0 on the resolved
-    // `windstrike`/`voltaic_blaze` action objects). The REAL damage-dealing
-    // child action is separately named and separately `find_action()`-able,
-    // so the shared cache is snapshotted against THAT action instead --
-    // mirrors this same file's own `full_recharge_time`/"strike" ->
-    // "stormstrike" hardcoded remap precedent (resolve_cooldown_leaf, just
-    // above). `ready`/every OTHER leaf of this member is UNCHANGED -- the
-    // RL agent still needs the DISPATCHER's own ready() bit for legality,
-    // only the four shared-cache damage leaves redirect.
-    action_t* damage_action = a;
-    if ( engine_token == "windstrike" )
-    {
-      if ( action_t* mh = p->find_action( "windstrike_mh" ) )
-        damage_action = mh;
-    }
-    else if ( engine_token == "voltaic_blaze" )
-    {
-      if ( action_t* dmg = p->find_action( "voltaic_blaze_damage" ) )
-        damage_action = dmg;
-    }
-    else if ( engine_token == "stormstrike" )
-    {
-      // 260901-pb1 LEVER A: `stormstrike` is the same dispatcher/carrier
-      // shape as `windstrike` just above (stormstrike_t fires both a
-      // main-hand and (talented) off-hand stormstrike_attack_t child; the
-      // real damage-dealing action is separately named and separately
-      // find_action()-able) -- mirrors this file's own
-      // resolve_cooldown_leaf "strike" -> "stormstrike" precedent, one
-      // level deeper (dispatcher action -> its own mh child).
-      if ( action_t* mh = p->find_action( "stormstrike_mh" ) )
-        damage_action = mh;
-    }
-
-    slot_binding b;
-    b.leaf = &leaf;
-    b.kind = slot_binding_kind::action_expression;
-    b.bound_action = damage_action;
-    b.shared_action_state = get_or_create_shared_action_state( damage_action, table );
-    b.action_leaf = ( leaf_name == "crit_pct_current" ) ? action_leaf_kind::shared_crit_pct_current
-                   : ( leaf_name == "persistent_multiplier" ) ? action_leaf_kind::shared_persistent_multiplier
-                   : action_leaf_kind::shared_da_multiplier;
-    return b;
-  }
+  // 260923-lrc stage 1D (PLAN.md D24): the crit_pct_current/persistent_multiplier/multiplier
+  // shared-snapshot leaf-name resolution (OBS-07, Task 3 step 2; multiplier added 221-07;
+  // hit_damage REMOVED 260923-lrc, PLAN.md D11) is REMOVED here -- the census no longer
+  // declares any action_leaves.<member>.{crit_pct_current,multiplier} leaf (owner directive
+  // 2026-09-23: the live addon can never read a spell's current crit chance or damage
+  // multiplier), so this leaf-name branch, get_shared_action_leaves(), and
+  // get_or_create_shared_action_state() all lose their only caller/consumer.
 
   // lava_lash's Molten Weapon residual -- read fresh off the CURRENT
   // target's dot_list each decision (220-RESEARCH.md's own citation:
@@ -2699,135 +2624,13 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
     return hits_values;
   };
 
-  // 220-06 Task 3 (OBS-07): the shared-snapshot cache for
-  // crit_pct_current/persistent_multiplier/da_multiplier (3rd slot,
-  // `multiplier`, added 221-07 WR-01 -- see resolve_action_leaf's own
-  // comment for why `multiplier` could not stay on the generic
-  // create_expression path; hit_damage REMOVED 260923-lrc, PLAN.md D11 --
-  // shrunk 4 -> 3), keyed by the SAME `action_state_t*` slot_table already
-  // owns per action -- computed at most ONCE per action per decision, local
-  // to this call (a plain local unordered_map, never persisted across
-  // decisions: the state pointer itself is stable across decisions, but the
-  // VALUES it derives are not).
-  std::unordered_map<action_state_t*, std::array<double, 3>> shared_action_leaf_cache;
-  auto get_shared_action_leaves = [ & ]( action_t* a, action_state_t* state ) -> const std::array<double, 3>&
-  {
-    auto found = shared_action_leaf_cache.find( state );
-    if ( found != shared_action_leaf_cache.end() )
-      return found->second;
-
-    // Mirrors persistent_multiplier_expr_t's own n_targets logic
-    // (action.cpp:3466-3481) so composite_persistent_multiplier is correct
-    // for cleave-shaped actions, THEN calls snapshot_state ONCE -- never
-    // four times -- and derives all four leaves from that ONE state,
-    // replicating each retired expression's own arithmetic exactly:
-    // action.cpp:3226-3251 (hit_damage), :3514-3533 (crit_pct_current),
-    // :3460-3484 (persistent_multiplier). `da_multiplier` calls the same
-    // `composite_da_multiplier( state )` virtual `action_multiplier`-style
-    // code elsewhere in this engine already relies on for "how hard is this
-    // hitting right now" (e.g. crash_lightning_t's own TWW2 4pc override).
-    // `state->result` is fixed to RESULT_HIT once here (never averaged with
-    // crit) -- the same contract amount_expr_t's own hit_damage
-    // construction uses (action.cpp:3212-3224, constructed with an explicit
-    // RESULT_HIT, not RESULT_NONE, so average_crit stays false).
-    state->target = a->target;
-    int num_targets = a->aoe;   // 228-11 (Q19): a->aoe, never the retired virtual accessor -- IDENTICAL value
-                                // for every action this schema declares (none overrides the
-                                // virtual n_targets() { return aoe; } base, action.hpp:836-837),
-                                // avoiding the retired P226-45 symbol entirely (P226_45_FALLBACK_GONE).
-    if ( num_targets == -1 || num_targets > 1 )
-    {
-      // 260902/FORK-03 (Candidate 1, sealed) -- do NOT force a->target_list()
-      // to resolve here, and do NOT invalidate the cache to force a future
-      // resolve either. action_t::target_list() recomputes via
-      // available_targets() + check_distance_targeting() whenever its cache
-      // is invalid (action.cpp:1758-1769); for a shaman chain-bounce action
-      // under distance_targeting_enabled=1, that recompute
-      // (__check_distance_targeting, sc_shaman.cpp:1004-1067) draws from
-      // sim->rng().range(...) to randomly search for the best bounce path --
-      // measured: this is the actual random-stream perturbation this task's
-      // tracer exists to close (an add-bearing fight's DPS mean moved from
-      // 343514.6 to 349746.6 at the same seed with only a decision_dump=
-      // line added). Read the target cache's CURRENT size only if it is
-      // already valid (a real cast recently resolved it).
-      //
-      // 228-11 (Q19, D-A/R-D): the P226-45 min(live enemy count, this action's own n_targets()
-      // cap) stopgap is DELETED (P226_45_FALLBACK_GONE) -- replaced by the SAME deterministic
-      // per-target geometry the new target_fact/shape_fact leaves already compute (228-02/
-      // 228-10), never a new computation. For a TARGETED multi-target action (chain_lightning,
-      // tempest) the count is the current pick's own neighbours_within_radius (OBS-03, 232-02:
-      // the always-equal splash/jump pair is now one `a->radius`-parameterised field); for the
-      // two SHAPED actions (crash_lightning, sundering) it is that action's own shape fact's
-      // enemies_hit. Both come from lookup_pick()/build_enemy_fact() and
-      // compute_crash_lightning_shape()/compute_sundering_shape() -- never select(), never
-      // target_list() (RNG-free either way). An unrecognised multi-target action (none exist in
-      // this registry today) or a targeted action with no stamped pick this decision falls back
-      // to the live enemy count alone, honestly labelled here as the one remaining imperfect case
-      // rather than silently guessed.
-      //
-      // 260914-rbp Task 1 Step 4 (R11): `voltaic_blaze` REMOVED from this check -- it was dead
-      // code even before this task. This branch only runs when `a->aoe == -1 || a->aoe > 1`
-      // (the enclosing `if`, above); Voltaic Blaze's PARENT action (the one `a` is here, the
-      // registry token this whole function iterates) never sets `aoe` at all (HIT-INPUTS-DESIGN.md
-      // §A.9/§B.2 -- `aoe = 6` lives on the DAMAGE CHILD, `voltaic_blaze_damage`, never on the
-      // parent), so `a->aoe` is always 0 for `an == "voltaic_blaze"` and this branch's own
-      // enclosing `if` is never entered for it -- confirmed unaffected by this task's own R13
-      // change (which sets `radius` on the CHILD action only, never touches the parent's `aoe`).
-      // The honest VB cleave/new-Flame-Shocks counts this task adds live in the NEW
-      // `hits.voltaic_blaze.*` direct_id scalars instead (R9, above) -- this masked `hit_damage`
-      // leaf's own scaling input was never that count to begin with (it read the live enemy
-      // count the whole time, per this dead branch never firing).
-      const int live_enemies = s.has_active_enemies
-                                    ? static_cast<int>( s.active_enemies )
-                                    : static_cast<int>( p->sim->active_enemies );
-      int geometry_count = live_enemies;
-      const std::string& an = a->name_str;
-      if ( an == "chain_lightning" || an == "tempest" )
-      {
-        bool      pick_found = false;
-        player_t* pick       = rl_target_select::lookup_pick( a, &pick_found );
-        if ( pick_found && pick != nullptr )
-        {
-          geometry_count = rl_target_select::build_enemy_fact( a, pick ).neighbours_within_radius;
-        }
-      }
-      else if ( an == "crash_lightning" )
-      {
-        geometry_count = compute_crash_lightning_shape( const_cast<player_t*>( p ) ).enemies_hit;
-      }
-      else if ( an == "sundering" )
-      {
-        geometry_count = compute_sundering_shape( const_cast<player_t*>( p ) ).enemies_hit;
-      }
-      const int max_targets = a->target_cache.is_valid
-                                   ? static_cast<int>( a->target_cache.list.size() )
-                                   : geometry_count;
-      num_targets = ( num_targets < 0 ) ? max_targets : std::min( max_targets, num_targets );
-    }
-    state->n_targets = std::max( 1, num_targets );
-    state->chain_target = 0;
-    state->result = RESULT_HIT;
-
-    a->snapshot_state( state, result_amount_type::NONE );
-
-    // 260923-lrc (PLAN.md D11): the calculate_direct_amount()/target_mitigation() hit_damage
-    // computation, and its stamp_target_fact_hit_damage()/lookup_target_fact_snapshot()
-    // pre-cast-snapshot pair (232-04 OBS-02, R-T), are REMOVED -- they served only the eight
-    // now-deleted action_leaves.*.hit_damage census leaves (R7-4: the live addon can never read
-    // a damage amount), and this was the only calculate_direct_amount() call under engine/sim/
-    // rl_*. crit_pct_current/persistent_multiplier/da_multiplier need no RNG-drawing amount
-    // computation -- they read straight off the `state` this same snapshot_state() call above
-    // already prepared (composite_crit_chance()/composite_persistent_multiplier()/
-    // composite_da_multiplier() are all deterministic composite-stat virtuals, no
-    // calculate_direct_amount() involved).
-    const double crit_pct_current = std::min( 100.0, state->composite_crit_chance() * 100.0 );
-    const double persistent_multiplier = a->composite_persistent_multiplier( state );
-    const double da_multiplier = a->composite_da_multiplier( state );
-
-    auto& entry = shared_action_leaf_cache[ state ];
-    entry = { crit_pct_current, persistent_multiplier, da_multiplier };
-    return entry;
-  };
+  // 260923-lrc stage 1D (PLAN.md D24): the shared-snapshot cache for
+  // crit_pct_current/persistent_multiplier/da_multiplier (220-06 Task 3, OBS-07;
+  // `multiplier` added 221-07 WR-01; hit_damage REMOVED 260923-lrc, PLAN.md D11) is DELETED
+  // wholesale here -- the six action_leaves.<member>.{crit_pct_current,multiplier} census
+  // leaves it served are gone from the registry (owner directive 2026-09-23: the live addon
+  // can never read a spell's current crit chance or damage multiplier), leaving this cache,
+  // its lambda, and the shared action_state_t it snapshotted with no remaining consumer.
 
   for ( std::size_t slot = 0; slot < RL_OBS_DIM; ++slot )
   {
@@ -2962,10 +2765,9 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
               raw = p->cache.damage_versatility();
               status = lookup_status::present;
               break;
-            case direct_id::stats_attack_power:
-              raw = p->cache.attack_power();
-              status = lookup_status::present;
-              break;
+            // 260923-lrc stage 1D (PLAN.md D24): direct_id::stats_attack_power REMOVED -- the
+            // live in-game addon can never read the raw attack-power stat off the character
+            // sheet the way this observation did (owner directive 2026-09-23).
 
             // 260915-sti Task 1: the four secondary-rating getters and
             // agility, unconditionally well-defined -- never absent. These
@@ -3401,25 +3203,15 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
         {
           switch ( b.action_leaf )
           {
-            case action_leaf_kind::shared_crit_pct_current:
-            case action_leaf_kind::shared_persistent_multiplier:
-            case action_leaf_kind::shared_da_multiplier:
-            {
-              if ( b.bound_action == nullptr || b.shared_action_state == nullptr )
-              {
-                status = lookup_status::absent;
-                break;
-              }
-              // 260923-lrc (PLAN.md D11): vals[] shrunk 4 -> 3, hit_damage's slot 0 removed --
-              // every remaining index shifted down by one.
-              const std::array<double, 3>& vals =
-                  get_shared_action_leaves( b.bound_action, b.shared_action_state );
-              raw = ( b.action_leaf == action_leaf_kind::shared_crit_pct_current ) ? vals[ 0 ]
-                  : ( b.action_leaf == action_leaf_kind::shared_persistent_multiplier ) ? vals[ 1 ]
-                  : vals[ 2 ];
-              status = lookup_status::present;
-              break;
-            }
+            // 260923-lrc stage 1D (PLAN.md D24): action_leaf_kind::{shared_crit_pct_current,
+            // shared_persistent_multiplier,shared_da_multiplier} and their shared-snapshot-cache
+            // dispatch REMOVED here -- the six action_leaves.<member>.{crit_pct_current,
+            // multiplier} census leaves they served are gone from the registry (owner directive
+            // 2026-09-23: the live addon can never read a spell's current crit chance or damage
+            // multiplier), and this was the only consumer of get_shared_action_leaves() /
+            // get_or_create_shared_action_state() / slot_binding::shared_action_state under
+            // engine/sim/rl_* -- all three deleted alongside this dispatch (see resolve_action_leaf
+            // and get_shared_action_leaves' own former sites for the rest of the removal).
             // 228-11 (Q19, D-A/R-D, P226_45_FALLBACK_GONE): action_leaf_kind::spell_targets_count
             // and its P226-45 min(live enemy count, this action's own n_targets() cap) fallback
             // were REMOVED here -- action_leaves.chain_lightning.spell_targets is no longer a
