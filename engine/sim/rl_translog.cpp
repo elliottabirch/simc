@@ -171,52 +171,61 @@ void append_row( sim_t* root, const void* row )
 constexpr std::uint32_t ZSTD_TRANSLOG_FRAME_ROWS = 64;
 constexpr int ZSTD_TRANSLOG_COMPRESSION_LEVEL = 3;
 
+// Drives exactly one ZSTD_compressStream2() input chunk (`data`/`n_bytes`, arbitrary size, not
+// necessarily row-aligned -- the 256-byte file_header is the one caller that is not) to
+// completion for the given `op`, writing whatever compressed bytes zstd produces straight to the
+// (already-open, raw/binary) underlying ofstream. `op == ZSTD_e_continue` returns once the whole
+// input is consumed; `op == ZSTD_e_end` returns once zstd's own `ret == 0` signals the frame's
+// epilogue (checksum/end-marker) is fully flushed, not merely that input was consumed. The one
+// low-level primitive both zstd_compress_and_write_rows() (row-by-row, frame-cadence-aware) and
+// open_and_write_header()'s own header write (a single one-shot ZSTD_e_continue chunk, see that
+// call site's own comment for why the header lives INSIDE the compressed stream) build on.
+void zstd_drive_stream( sim_t* root, const unsigned char* data, std::size_t n_bytes, ZSTD_EndDirective op )
+{
+  auto* cstream = reinterpret_cast<ZSTD_CStream*>( root->rl_translog_zstd_cstream );
+  if ( root->rl_translog_zstd_outbuf.empty() )
+    root->rl_translog_zstd_outbuf.resize( ZSTD_CStreamOutSize() );
+
+  ZSTD_inBuffer in{ data, n_bytes, 0 };
+  for ( ;; )
+  {
+    ZSTD_outBuffer out{ root->rl_translog_zstd_outbuf.data(), root->rl_translog_zstd_outbuf.size(), 0 };
+    const std::size_t ret = ZSTD_compressStream2( cstream, &out, &in, op );
+    if ( ZSTD_isError( ret ) )
+    {
+      throw sc_runtime_error(
+          fmt::format( "rl_translog: zstd compression failed: {}", ZSTD_getErrorName( ret ) ) );
+    }
+    if ( out.pos > 0 )
+    {
+      root->rl_translog_stream->write( reinterpret_cast<const char*>( out.dst ),
+                                        static_cast<std::streamsize>( out.pos ) );
+    }
+    const bool done = ( op == ZSTD_e_continue ) ? ( in.pos == in.size ) : ( ret == 0 );
+    if ( done )
+      break;
+  }
+}
+
 // Pushes `n_bytes` (always a whole number of RECORD_SIZE rows -- every caller below hands this
 // function exactly one of root->rl_translog_buffer's fight-aligned flushes) through the root's
 // persistent ZSTD_CStream, one row at a time so the ZSTD_TRANSLOG_FRAME_ROWS cadence can be
-// enforced at row granularity regardless of how many rows a single caller flushes at once.
-// Writes whatever compressed bytes zstd produces straight to the (already-open, raw/binary)
-// underlying ofstream -- the row layout itself never touches disk uncompressed once this path is
-// live (260924-tlz: compressed output is the ONLY writer path, no opt-out).
+// enforced at row granularity regardless of how many rows a single caller flushes at once. The
+// row layout itself never touches disk uncompressed once this path is live (260924-tlz:
+// compressed output is the ONLY writer path, no opt-out).
 void zstd_compress_and_write_rows( sim_t* root, const unsigned char* data, std::size_t n_bytes )
 {
   if ( n_bytes == 0 )
     return;
   assert( n_bytes % RECORD_SIZE == 0 );
-  auto* cstream = reinterpret_cast<ZSTD_CStream*>( root->rl_translog_zstd_cstream );
-  if ( root->rl_translog_zstd_outbuf.empty() )
-    root->rl_translog_zstd_outbuf.resize( ZSTD_CStreamOutSize() );
 
   const std::size_t n_rows = n_bytes / RECORD_SIZE;
   for ( std::size_t row = 0; row < n_rows; ++row )
   {
-    ZSTD_inBuffer in{ data + row * RECORD_SIZE, RECORD_SIZE, 0 };
     ++root->rl_translog_zstd_rows_in_frame;
     const bool end_this_frame = root->rl_translog_zstd_rows_in_frame >= ZSTD_TRANSLOG_FRAME_ROWS;
-    const ZSTD_EndDirective op = end_this_frame ? ZSTD_e_end : ZSTD_e_continue;
-
-    for ( ;; )
-    {
-      ZSTD_outBuffer out{ root->rl_translog_zstd_outbuf.data(), root->rl_translog_zstd_outbuf.size(), 0 };
-      const std::size_t ret = ZSTD_compressStream2( cstream, &out, &in, op );
-      if ( ZSTD_isError( ret ) )
-      {
-        throw sc_runtime_error( fmt::format( "rl_translog: zstd compression failed: {}",
-                                              ZSTD_getErrorName( ret ) ) );
-      }
-      if ( out.pos > 0 )
-      {
-        root->rl_translog_stream->write( reinterpret_cast<const char*>( out.dst ),
-                                          static_cast<std::streamsize>( out.pos ) );
-      }
-      // ZSTD_e_continue: done once this row's bytes are fully consumed (a full round-trip
-      // through a too-small output buffer just means looping again with a fresh one).
-      // ZSTD_e_end: `ret == 0` is zstd's own signal that the frame's epilogue (checksum/
-      // end-marker) is fully flushed, not merely that input was consumed.
-      const bool done = ( op == ZSTD_e_continue ) ? ( in.pos == in.size ) : ( ret == 0 );
-      if ( done )
-        break;
-    }
+    zstd_drive_stream( root, data + row * RECORD_SIZE, RECORD_SIZE,
+                        end_this_frame ? ZSTD_e_end : ZSTD_e_continue );
     if ( end_this_frame )
       root->rl_translog_zstd_rows_in_frame = 0;
   }
@@ -231,25 +240,7 @@ void zstd_finish_stream( sim_t* root )
 {
   if ( root->rl_translog_zstd_rows_in_frame == 0 )
     return;
-  auto* cstream = reinterpret_cast<ZSTD_CStream*>( root->rl_translog_zstd_cstream );
-  ZSTD_inBuffer in{ nullptr, 0, 0 };
-  for ( ;; )
-  {
-    ZSTD_outBuffer out{ root->rl_translog_zstd_outbuf.data(), root->rl_translog_zstd_outbuf.size(), 0 };
-    const std::size_t ret = ZSTD_compressStream2( cstream, &out, &in, ZSTD_e_end );
-    if ( ZSTD_isError( ret ) )
-    {
-      throw sc_runtime_error(
-          fmt::format( "rl_translog: zstd final-frame flush failed: {}", ZSTD_getErrorName( ret ) ) );
-    }
-    if ( out.pos > 0 )
-    {
-      root->rl_translog_stream->write( reinterpret_cast<const char*>( out.dst ),
-                                        static_cast<std::streamsize>( out.pos ) );
-    }
-    if ( ret == 0 )
-      break;
-  }
+  zstd_drive_stream( root, nullptr, 0, ZSTD_e_end );
   root->rl_translog_zstd_rows_in_frame = 0;
 }
 
@@ -357,11 +348,13 @@ void open_and_write_header( sim_t* sim )
   }
 
   // 260924-tlz: the ONE zstd compression context for this file's whole lifetime -- created
-  // here, freed in write_footer(). Header bytes below are written raw (uncompressed) BEFORE
-  // this context exists: the 256-byte file_header is a fixed, directly-`stat`-able prefix by
-  // design (every existing reader/tooling path that peeks a header without decoding the whole
-  // file relies on this), so it is deliberately excluded from the compressed stream -- only the
-  // ROW data (decision/close/footer records) that follows the header goes through zstd.
+  // here (before the header write below), freed in write_footer(). Per the brief's own layout
+  // rule, the 256-byte file_header is INSIDE the compressed stream, same as every row that
+  // follows it -- not a raw/uncompressed prefix -- so a reader decompresses the WHOLE file
+  // (header included) before it does any offset-based parsing at all (scripts/rl/translog.py's
+  // resolve_translog_path()/decode() sniff the zstd magic at byte 0 of the .zst file for exactly
+  // this reason: with the header compressed, that magic -- not 'RLTL' -- is genuinely the first
+  // four bytes on disk).
   root->rl_translog_zstd_cstream = reinterpret_cast<ZSTD_CCtx_s*>( ZSTD_createCStream() );
   if ( root->rl_translog_zstd_cstream == nullptr )
   {
@@ -415,7 +408,12 @@ void open_and_write_header( sim_t* sim )
   std::strncpy( h.mask_rules_sha, RL_MASK_RULES_SHA, sizeof( h.mask_rules_sha ) - 1 );
   std::strncpy( h.action_space_sha, RL_ACTION_SPACE_SHA, sizeof( h.action_space_sha ) - 1 );
 
-  root->rl_translog_stream->write( reinterpret_cast<const char*>( &h ), sizeof( h ) );
+  // 260924-tlz: the header goes through the SAME compressed stream every row after it does
+  // (zstd_drive_stream(), ZSTD_e_continue -- this call does not end a frame, so the header and
+  // the first ZSTD_TRANSLOG_FRAME_ROWS rows share frame 0; a kill mid-header-write already left
+  // an unreadable (too-short) file under the pre-260924-tlz raw format too, so this is not a new
+  // failure mode).
+  zstd_drive_stream( root, reinterpret_cast<const unsigned char*>( &h ), sizeof( h ), ZSTD_e_continue );
   root->rl_translog_stream->flush();
   assert_stream_ok( root, "open_and_write_header" );
 
