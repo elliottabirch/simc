@@ -9,6 +9,7 @@
 #include "player/player.hpp"
 #include "player/stats.hpp"
 #include "sim/expressions.hpp"
+#include "sim/rl_rng_record.hpp"
 #include "sim/sim.hpp"
 #include "sim/event.hpp"
 #include "util/rng.hpp"
@@ -973,6 +974,13 @@ void dot_t::check_tick_zero( bool start )
 {
   if ( current_action->tick_zero || ( current_action->tick_on_application && start ) )
   {
+    // 250-03 (REC-04, A-07): a tick-zero or tick-on-application tick is its own tick press of
+    // this dot's action -- nested inside the applying cast's own outer press when this fires
+    // synchronously from apply()/refresh() (the usual case), or standing alone as its own outer
+    // press if it somehow does not (rl_rng_record.cpp's open_tick() makes that call, not here).
+    rl_rng_record::rl_press_scope_t rl_press_guard( &sim, current_action,
+                                                      rl_rng_record::rl_press_scope_t::mode_e::open_tick );
+    rl_rng_record::stamp_state( &sim, state );
     tick();
   }
 }
@@ -1125,6 +1133,12 @@ void dot_t::dot_tick_event_t::execute()
   {
     rl_cause_scope_t rl_cause_guard(
         dot->current_action->player, rl_cause_t{ dot->state->rl_cause_seq, RL_CAUSE_DOT_TICK } );
+    // 250-03 (REC-04): this scheduled tick's OWN tick press, covering the same skill-check gate
+    // AND no-skill-check-required path the cause guard above spans (before the skill-check roll,
+    // so that roll itself carries the tick's own press).
+    rl_rng_record::rl_press_scope_t rl_press_guard( &dot->sim, dot->current_action,
+                                                      rl_rng_record::rl_press_scope_t::mode_e::open_tick );
+    rl_rng_record::stamp_state( &dot->sim, dot->state );
 
     if ( dot->current_action->channeled &&
          dot->current_action->action_skill < 1.0 &&
@@ -1176,6 +1190,11 @@ void dot_t::dot_end_event_t::execute()
   if ( dot->time_to_next_full_tick() < dot->tick_time )
   {
     dot->current_tick++;
+    // 250-03 (REC-04): the final partial tick is its own tick press, exactly like a regular
+    // scheduled dot_tick_event_t tick.
+    rl_rng_record::rl_press_scope_t rl_press_guard( &dot->sim, dot->current_action,
+                                                      rl_rng_record::rl_press_scope_t::mode_e::open_tick );
+    rl_rng_record::stamp_state( &dot->sim, dot->state );
     dot->tick();
   }
 

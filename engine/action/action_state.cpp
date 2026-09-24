@@ -6,6 +6,7 @@
 #include "action/action_state.hpp"
 #include "action/action.hpp"
 #include "player/player.hpp"
+#include "sim/rl_rng_record.hpp"
 #include "sim/sim.hpp"
 #include <sstream>
 
@@ -61,6 +62,10 @@ void action_state_t::initialize()
   // through execute() (routing treats it identically to an explicit ORPHAN).
   rl_cause_seq   = -1;
   rl_cause_class = RL_CAUSE_ORPHAN;
+  // 250-03 (REC-04): reset to "never stamped" (kind 0, TRIGGER_KIND_NONE) -- a state pulled from
+  // state_cache can otherwise still carry a stale press stamp from a PREVIOUS execute().
+  rl_press_outer_kind = 0;
+  rl_press_inner_kind = 0;
 }
 /*
 void action_state_t::copy_state( const action_state_t* o )
@@ -124,6 +129,14 @@ void action_state_t::copy_state( const action_state_t* o )
   // still remembers which decision applied it.
   rl_cause_seq   = o->rl_cause_seq;
   rl_cause_class = o->rl_cause_class;
+  // 250-03 (REC-04): carries the press stamp alongside the cause stamp, for the same reason --
+  // a DoT's own state at application/refresh remembers which press applied it.
+  rl_press_outer_kind    = o->rl_press_outer_kind;
+  rl_press_outer_trigger = o->rl_press_outer_trigger;
+  rl_press_outer_number  = o->rl_press_outer_number;
+  rl_press_inner_kind    = o->rl_press_inner_kind;
+  rl_press_inner_trigger = o->rl_press_inner_trigger;
+  rl_press_inner_number  = o->rl_press_inner_number;
 }
 
 action_state_t::action_state_t( action_t* a, player_t* t )
@@ -286,6 +299,10 @@ void travel_event_t::execute()
     // post-Base::impact() tail) across the DEFERRED travel-time boundary, not just
     // action_t::impact()'s own body.
     rl_cause_scope_t rl_cause_guard( action->player, rl_cause_t{ state->rl_cause_seq, state->rl_cause_class } );
+    // 250-03 (REC-04): restores the press that was active when `state` was stamped, across this
+    // SAME deferred travel-time boundary -- see do_schedule_travel's zero-travel-time branch
+    // (action.cpp) for the sibling call this mirrors.
+    rl_rng_record::rl_press_scope_t rl_press_guard( action->sim, state );
     action->impact( state );
   }
 

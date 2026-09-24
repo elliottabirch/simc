@@ -631,6 +631,14 @@ public:
   // consumes it. Pure bookkeeping -- see rl_credit.hpp's top-of-file comment.
   rl_cause_t rl_pending_cause;
 
+  // tstl-sylvanas phase 250, plan 250-03 (REC-04): this action's own execute/tick press
+  // counters -- 1-based, bumped by rl_rng_record::rl_press_scope_t's open-execute/open-tick
+  // modes, zeroed unconditionally in action_t::reset() (once per fight). Pure bookkeeping, never
+  // read by any RNG or scheduling decision -- see rl_rng_record.hpp's rl_press_scope_t doc
+  // comment for the full model.
+  std::uint32_t rl_press_count_ = 0;
+  std::uint32_t rl_tick_count_ = 0;
+
   unsigned snapshot_flags;
 
   unsigned update_flags;

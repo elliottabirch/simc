@@ -13,6 +13,7 @@
 #include "sim/rl_rng_record.hpp"
 
 #include "action/action.hpp"
+#include "action/action_state.hpp"
 #include "player/player.hpp"
 #include "player/stats.hpp"
 #include "sim/sim.hpp"
@@ -25,6 +26,8 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <map>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 
@@ -115,6 +118,13 @@ struct roller_entry_t
   std::uint32_t refills = 0;
   std::uint32_t no_draw_rolls = 0;
   std::uint32_t roll_entries = 0;
+
+  // Whole-recording tallies (250-03, A-04) -- NOT cleared at fight_begin() (unlike the per-fight
+  // fields above): compare_report() only ever runs on a one-fight recording, so per-fight vs.
+  // whole-recording makes no observable difference there, and keeping them whole-recording avoids
+  // a second reset site to keep in sync. Only ever non-zero for cls == action.
+  std::uint32_t first_cast_presses = 0;
+  std::uint32_t early_return_presses = 0;
 };
 
 // The recorder object -- owned by sim_t::rl_rng_recorder (root only, unique_ptr, forward
@@ -151,8 +161,22 @@ public:
   std::uint32_t register_roller( rng::rng_t& stream, std::string_view key, roller_class_e cls,
                                   const action_t* action );
 
+  // ---- Press-tag interface (plan 250-03, REC-04) -- called only from rl_press_scope_t's
+  // out-of-line ctors/dtor and the free functions at the bottom of this file. ----
+  press_frame_t current_outer() const { return current_outer_; }
+  press_frame_t current_inner() const { return current_inner_; }
+  const action_t* current_inner_owner() const { return current_inner_owner_; }
+  void open_execute( action_t* action, const action_state_t* carried_state );
+  void open_tick( action_t* action );
+  void restore_from_state( const action_state_t* state );
+  void restore_frames( const press_frame_t& outer, const press_frame_t& inner, const action_t* inner_owner );
+  void stamp_state( action_state_t* state );
+  bool inner_owner_is( const action_t* action ) const { return current_inner_owner_ == action; }
+  void note_early_return( const action_t* action );
+
 private:
   std::uint32_t ensure_registered( std::uint32_t& roller_slot, const std::uint64_t& draw_counter );
+  std::uint32_t ensure_action_roller( rng::rng_t& stream );
   void append( const record& r );
   void assert_stream_ok( const char* where );
   void write_sidecar();
@@ -192,6 +216,27 @@ private:
   // two DIFFERENT rollers share a key -- reported under the sidecar's duplicateKeys, never
   // merged (D-05).
   std::unordered_map<std::string, std::vector<std::uint32_t>> keys_seen_;
+
+  // ---- Press-tag state (plan 250-03, REC-04). Process-wide, not per-player: the recorder
+  // forces threads=1 (R-08) whenever it is active, so there is exactly one call stack to track.
+  // rl_press_scope_t's ctors/dtor save and restore these three fields, giving correct LIFO
+  // nesting from the call stack itself -- exactly rl_cause_scope_t's own pattern (sim/
+  // rl_credit.hpp), just recorder-owned instead of player-owned. Default frames (kind ==
+  // TRIGGER_KIND_NONE) mean "no press active" -- a roll drawn in that state carries trigger 0 and
+  // is reported by class, never hidden (REC-03, D-07). ----
+  press_frame_t current_outer_{};
+  press_frame_t current_inner_{};
+  const action_t* current_inner_owner_ = nullptr;
+
+  // Per-fight ROLL position counters (250-03, REC-04), keyed by (trigger_kind, trigger, press,
+  // roller) for the outer window and the inner-field quadruple for the inner window -- exactly
+  // the key rng_record.py's check() reconciles a ROLL entry's position/inner_position against.
+  // std::map (not unordered_map): tuple has no default std::hash, and this is never a hot-path
+  // container (one lookup per roll, not per frame). Cleared at fight_begin() alongside the other
+  // per-fight position maps this class already keeps.
+  using window_key_t = std::tuple<std::uint8_t, std::uint32_t, std::uint32_t, std::uint32_t>;
+  std::map<window_key_t, std::uint32_t> outer_window_positions_;
+  std::map<window_key_t, std::uint32_t> inner_window_positions_;
 };
 
 std::uint32_t recorder_t::ensure_registered( std::uint32_t& roller_slot, const std::uint64_t& draw_counter )
@@ -225,7 +270,24 @@ void recorder_t::on_draw( std::uint32_t& roller_slot, const std::uint64_t& draw_
   // events, a later plan), so this is pure defense.
   const std::uint32_t logical_clamped = logical < rollers_.size() ? logical : stream_id;
   roller_entry_t& logical_entry = rollers_[ logical_clamped ];
-  const std::uint32_t position = logical_entry.roll_entries++;
+  // This roller's total ROLL-entry tally (COUNTER's own @60 field, "ROLL entries, this roller")
+  // -- distinct from the WINDOW-scoped position below (250-03, REC-04): this counts every ROLL
+  // ever assigned to this roller across the whole fight, the window position counts only rolls
+  // within the SAME (trigger_kind, trigger, press) window.
+  ++logical_entry.roll_entries;
+
+  // 250-03 (REC-04): position is 0-based WITHIN the active (trigger_kind, trigger, press, roller)
+  // window, not a running total per roller -- exactly the key rng_record.py's check() reconciles
+  // against. Before this plan wires any press guard, current_outer_/current_inner_ both sit at
+  // their default TRIGGER_KIND_NONE/0/0 frame for every roll, so every roller's one window key is
+  // (NONE, 0, 0, roller) and position reduces to the prior per-roller running count -- byte-
+  // identical to plan 250-01/250-02's behavior for any recording made before a press guard ever
+  // opens.
+  const window_key_t outer_key{ current_outer_.kind, current_outer_.trigger, current_outer_.press, logical_clamped };
+  const std::uint32_t position = outer_window_positions_[ outer_key ]++;
+
+  const window_key_t inner_key{ current_inner_.kind, current_inner_.trigger, current_inner_.press, logical_clamped };
+  const std::uint32_t inner_position = inner_window_positions_[ inner_key ]++;
 
   record rec{};
   rec.raw = raw;
@@ -234,16 +296,16 @@ void recorder_t::on_draw( std::uint32_t& roller_slot, const std::uint64_t& draw_
   rec.draw_ordinal = draw_counter;
   rec.roller = logical_clamped;
   rec.stream = stream_id;
-  rec.trigger = 0;
-  rec.press = 0;
+  rec.trigger = current_outer_.trigger;
+  rec.press = current_outer_.press;
   rec.position = position;
-  rec.inner_trigger = 0;
-  rec.inner_press = 0;
-  rec.inner_position = position;
+  rec.inner_trigger = current_inner_.trigger;
+  rec.inner_press = current_inner_.press;
+  rec.inner_position = inner_position;
   rec.iteration = current_iteration_field_;
   rec.kind = KIND_ROLL;
-  rec.trigger_kind = TRIGGER_KIND_NONE;
-  rec.inner_trigger_kind = TRIGGER_KIND_NONE;
+  rec.trigger_kind = current_outer_.kind;
+  rec.inner_trigger_kind = current_inner_.kind;
   rec.outcome = OUTCOME_NOT_A_ROLL;
   rec.label = LABEL_NONE;
   rec.flags = after_resalt_ ? FLAG_AFTER_RESALT : 0;
@@ -319,6 +381,138 @@ std::uint32_t recorder_t::register_roller( rng::rng_t& stream, std::string_view 
   return id;
 }
 
+std::uint32_t recorder_t::ensure_action_roller( rng::rng_t& stream )
+{
+  // Mirrors ensure_registered() above, but for an action's OWN per-source stream rather than a
+  // stream reached through rng::rl_draw_sink::on_draw()'s roller_slot reference: action_t (and
+  // every other owner of its own rng::rng_t member) exposes only rl_roller_id()/rl_set_roller_id()
+  // by value, not a mutable reference to the private storage, so this cannot reuse
+  // ensure_registered() verbatim. Same lazy-numbering contract: an action whose stream was never
+  // registered by action_t::reset() (per_source_rng off, or a stream this plan never wires) gets
+  // numbered here, at its first press, under a synthetic key -- exactly "unregistered" (D-05).
+  const std::uint32_t existing = stream.rl_roller_id();
+  if ( existing != rng::RL_ROLLER_UNREGISTERED && existing < rollers_.size() )
+    return existing;
+
+  const auto id = static_cast<std::uint32_t>( rollers_.size() );
+  rollers_.emplace_back();
+  roller_entry_t& entry = rollers_.back();
+  entry.key = fmt::format( "unregistered|{}", id );
+  entry.cls = roller_class_e::unregistered;
+  entry.draw_counter = &stream.rl_draw_counter();
+  const std::uint64_t counter = stream.rl_draw_counter();
+  entry.begin_ordinal = counter > 0 ? counter - 1 : 0;
+  stream.rl_set_roller_id( id );
+  return id;
+}
+
+// ---- Press-tag interface (plan 250-03, REC-04) -- see rl_rng_record.hpp's rl_press_scope_t doc
+// comment for the full model. Every method below is called only through rl_press_scope_t's
+// out-of-line ctors/dtor or the small free functions at the bottom of this file, all of which
+// already guard on root->rl_rng_recorder being non-null -- these methods themselves assume the
+// recorder IS on (D-17: no rng call, no event, no reorder, no dispatch change anywhere here). ----
+
+void recorder_t::open_execute( action_t* action, const action_state_t* carried_state )
+{
+  ++action->rl_press_count_;
+  const std::uint32_t roller = ensure_action_roller( action->source_rng_ );
+  const press_frame_t new_frame{ TRIGGER_KIND_EXECUTE, roller, action->rl_press_count_ };
+
+  if ( carried_state && carried_state->rl_press_outer_kind != TRIGGER_KIND_NONE )
+  {
+    // A deferred dispatch (a proc's schedule_execute(), a tick_action's schedule_execute(
+    // tick_state )) that already carries a stamped outer frame keeps it -- the outer press stays
+    // whichever button (or tick) originally led here, exactly like rl_resolve_cause()'s own
+    // carried-cause branches (action.cpp) run before any fresh resolution.
+    current_outer_ = press_frame_t{ carried_state->rl_press_outer_kind, carried_state->rl_press_outer_trigger,
+                                     carried_state->rl_press_outer_number };
+  }
+  else if ( current_outer_.kind == TRIGGER_KIND_NONE )
+  {
+    // No enclosing press and nothing carried -- THIS press is the outermost one (a genuine
+    // top-level button press).
+    current_outer_ = new_frame;
+  }
+  // else: an outer press is already open (a proc/secondary fired synchronously inside another
+  // action's own execute scope) -- keep it; this new press only ever becomes the INNER frame.
+
+  current_inner_ = new_frame;
+  current_inner_owner_ = action;
+
+  if ( roller < rollers_.size() )
+    rollers_[ roller ].execute_presses = action->rl_press_count_;
+
+  if ( action->player && action->player->first_cast && action->harmful && roller < rollers_.size() )
+    ++rollers_[ roller ].first_cast_presses;
+}
+
+void recorder_t::open_tick( action_t* action )
+{
+  ++action->rl_tick_count_;
+  const std::uint32_t roller = ensure_action_roller( action->source_rng_ );
+  const press_frame_t new_frame{ TRIGGER_KIND_TICK, roller, action->rl_tick_count_ };
+
+  if ( current_outer_.kind == TRIGGER_KIND_NONE )
+  {
+    // A standalone scheduled tick (dot_tick_event_t, dot_end_event_t) with no enclosing press --
+    // the tick is its own outer AND inner frame (A-must-have: "every DoT tick ... is its own tick
+    // press ... numbered per action per fight").
+    current_outer_ = new_frame;
+  }
+  // else: a tick-zero or tick-on-application tick fired SYNCHRONOUSLY from within the applying
+  // cast's own execute/impact dispatch (dot_t::check_tick_zero(), called from apply/refresh) --
+  // current_outer_ is already that cast's outer press; keep it (A-07: "its own tick press nested
+  // inside the applying cast's outer press").
+
+  current_inner_ = new_frame;
+  current_inner_owner_ = nullptr;  // ticks are never an execute()'s "owner frame" (A-04)
+
+  if ( roller < rollers_.size() )
+    rollers_[ roller ].tick_presses = action->rl_tick_count_;
+}
+
+void recorder_t::restore_from_state( const action_state_t* state )
+{
+  // "When it is not stamped, change nothing" -- a state whose outer kind is still the
+  // never-stamped default (TRIGGER_KIND_NONE, action_state_t::initialize()'s own reset) carries
+  // no press to restore; leave current_outer_/current_inner_ exactly as the caller's own scope
+  // left them (D-07).
+  if ( !state || state->rl_press_outer_kind == TRIGGER_KIND_NONE )
+    return;
+
+  current_outer_ = press_frame_t{ state->rl_press_outer_kind, state->rl_press_outer_trigger,
+                                   state->rl_press_outer_number };
+  current_inner_ = press_frame_t{ state->rl_press_inner_kind, state->rl_press_inner_trigger,
+                                   state->rl_press_inner_number };
+  current_inner_owner_ = nullptr;  // a restored frame is never itself an execute()'s owner frame
+}
+
+void recorder_t::restore_frames( const press_frame_t& outer, const press_frame_t& inner, const action_t* inner_owner )
+{
+  current_outer_ = outer;
+  current_inner_ = inner;
+  current_inner_owner_ = inner_owner;
+}
+
+void recorder_t::stamp_state( action_state_t* state )
+{
+  if ( !state )
+    return;
+  state->rl_press_outer_kind    = current_outer_.kind;
+  state->rl_press_outer_trigger = current_outer_.trigger;
+  state->rl_press_outer_number  = current_outer_.press;
+  state->rl_press_inner_kind    = current_inner_.kind;
+  state->rl_press_inner_trigger = current_inner_.trigger;
+  state->rl_press_inner_number  = current_inner_.press;
+}
+
+void recorder_t::note_early_return( const action_t* action )
+{
+  const std::uint32_t roller = action->source_rng_.rl_roller_id();
+  if ( roller != rng::RL_ROLLER_UNREGISTERED && roller < rollers_.size() )
+    ++rollers_[ roller ].early_return_presses;
+}
+
 void recorder_t::append( const record& r )
 {
   const auto* bytes = reinterpret_cast<const unsigned char*>( &r );
@@ -384,6 +578,15 @@ void recorder_t::fight_begin()
   after_resalt_ = false;
   fight_roll_entries_ = 0;
   fight_counter_entries_ = 0;
+  // 250-03 (REC-04): per-fight ROLL position windows. Every rl_press_scope_t properly restores
+  // current_outer_/current_inner_ via RAII before the next event fires, so both are already back
+  // at their default (no press active) frame here between fights -- reset anyway, defensively,
+  // rather than relying on that invariant holding across every future call site.
+  current_outer_ = press_frame_t{};
+  current_inner_ = press_frame_t{};
+  current_inner_owner_ = nullptr;
+  outer_window_positions_.clear();
+  inner_window_positions_.clear();
 
   const int it = root_->current_iteration;
   if ( it < 0 )
@@ -440,7 +643,27 @@ void recorder_t::fight_end()
     rec.time_ms = static_cast<std::int64_t>( r.begin_ordinal );      // @16 begin ordinal
     rec.draw_ordinal = end_ordinal;                                  // @24 end ordinal
     rec.roller = static_cast<std::uint32_t>( roller_id );            // @32 roller
-    rec.stream = ( r.cls == roller_class_e::raid_event ) ? FLAG_LOGICAL_ONLY : 0u; // @36
+    // A-50 fix (orchestrator ledger, wave 1 review): the reader (rng_record.py check()) reads
+    // COUNTER's @36 `stream` as the roller's OWN physical stream number -- the same value its
+    // ROLL entries carry in `stream` -- and reads the raid-event marker from the @71 `flags`
+    // byte, not from `stream`. The prior code wrote FLAG_LOGICAL_ONLY (0x02) into `stream` for a
+    // raid-event roller and 0 into `stream` for EVERY other roller regardless of its own number,
+    // which collapsed every own-stream roller's COUNTER onto the wrong key (stream 0) and made
+    // `check` report bogus "last ROLL ordinal is not the COUNTER's end" mismatches on wave 1's
+    // own recordings (e.g. patchwerk-t1-c-s1.rec, 133 problems). Fixed at the source, not the
+    // reader: an own-stream roller's COUNTER carries its own stream number and flags 0; a
+    // raid-event (logical-only, no stream of its own) roller carries stream 0 and flags
+    // FLAG_LOGICAL_ONLY -- raid events are Task 2's territory (R-01), but this fix must land now
+    // so Task 1's own recordings pass `check` (the sole gate this task's verify block runs).
+    if ( r.cls == roller_class_e::raid_event )
+    {
+      rec.stream = 0u;                  // @36 -- draws stay on the shared stream (R-01)
+      rec.flags = FLAG_LOGICAL_ONLY;    // @71
+    }
+    else
+    {
+      rec.stream = static_cast<std::uint32_t>( roller_id );  // @36 -- this roller's own stream
+    }
     rec.trigger = 0;                                                 // @40
     rec.press = r.execute_presses;                                   // @44 execute presses
     rec.position = r.tick_presses;                                   // @48 tick presses
@@ -525,7 +748,12 @@ void recorder_t::write_sidecar()
               << ", \"actorKind\": \"" << actor_kind << "\""
               << ", \"statsName\": \"" << json_escape( stats_name ) << "\""
               << ", \"dual\": " << ( a->dual ? "true" : "false" )
-              << ", \"harmful\": " << ( a->harmful ? "true" : "false" );
+              << ", \"harmful\": " << ( a->harmful ? "true" : "false" )
+              // 250-03 (REC-04, A-04): whole-recording tallies rng_record.py's compare_report()
+              // reads to explain an execute-count mismatch (first_cast) or annotate one as
+              // diagnostic context (early returns) -- see roller_entry_t's own doc comment.
+              << ", \"firstCastPresses\": " << r.first_cast_presses
+              << ", \"earlyReturnPresses\": " << r.early_return_presses;
     }
     sidecar << "}";
   }
@@ -653,6 +881,79 @@ bool active( const sim_t* sim )
   while ( root->parent )
     root = root->parent;
   return static_cast<bool>( root->rl_rng_recorder );
+}
+
+// ---- rl_press_scope_t (plan 250-03, REC-04). Out-of-line ctors/dtor -- needs recorder_t
+// complete, mirroring rl_cause_scope_t's own placement in rl_translog.cpp (needs player_t
+// complete). Every body below is a single pointer check (root->rl_rng_recorder) when the
+// recorder is off: no allocation, no rng call, no event, no reorder, no dispatch change (D-17).
+// ----
+
+rl_press_scope_t::rl_press_scope_t( sim_t* sim, action_t* action, mode_e mode, const action_state_t* carried_state )
+  : sim_( sim )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder )
+    return;
+
+  active_ = true;
+  saved_outer_ = root->rl_rng_recorder->current_outer();
+  saved_inner_ = root->rl_rng_recorder->current_inner();
+  saved_inner_owner_ = root->rl_rng_recorder->current_inner_owner();
+
+  if ( mode == mode_e::open_execute )
+    root->rl_rng_recorder->open_execute( action, carried_state );
+  else
+    root->rl_rng_recorder->open_tick( action );
+}
+
+rl_press_scope_t::rl_press_scope_t( sim_t* sim, const action_state_t* state )
+  : sim_( sim )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder )
+    return;
+
+  active_ = true;
+  saved_outer_ = root->rl_rng_recorder->current_outer();
+  saved_inner_ = root->rl_rng_recorder->current_inner();
+  saved_inner_owner_ = root->rl_rng_recorder->current_inner_owner();
+
+  root->rl_rng_recorder->restore_from_state( state );
+}
+
+rl_press_scope_t::~rl_press_scope_t()
+{
+  if ( !active_ )
+    return;
+  sim_t* root = root_of( sim_ );
+  if ( !root->rl_rng_recorder )
+    return;
+  root->rl_rng_recorder->restore_frames( saved_outer_, saved_inner_, saved_inner_owner_ );
+}
+
+void stamp_state( sim_t* sim, action_state_t* state )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder )
+    return;
+  root->rl_rng_recorder->stamp_state( state );
+}
+
+bool inner_owner_is( sim_t* sim, const action_t* action )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder )
+    return false;
+  return root->rl_rng_recorder->inner_owner_is( action );
+}
+
+void note_early_return( sim_t* sim, const action_t* action )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder )
+    return;
+  root->rl_rng_recorder->note_early_return( action );
 }
 
 } // namespace rl_rng_record

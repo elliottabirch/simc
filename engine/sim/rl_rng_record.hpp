@@ -33,6 +33,7 @@
 struct sim_t;
 struct player_t;
 struct action_t;
+struct action_state_t;
 
 namespace rng
 {
@@ -184,6 +185,75 @@ struct press_frame_t
   std::uint32_t trigger = 0;
   std::uint32_t press = 0;
 };
+
+// ---- Press-tag interface (plan 250-03, REC-04). Mirrors sim/rl_credit.hpp's rl_cause_scope_t
+// exactly: an RAII guard that saves the recorder's current outer/inner frames and restores them
+// in its destructor, giving correct LIFO nesting from the call stack itself -- no explicit stack
+// container. Every constructor and the destructor are a single pointer check (root sim's
+// rl_rng_recorder) when the recorder is off: no allocation, no rng call, no event, no reorder
+// (D-17). Unlike rl_cause_scope_t (per-player, always on), this guard is recorder-owned and
+// process-wide -- correct because the recorder forces threads=1 (R-08) whenever it is active, so
+// there is exactly one call stack to track at a time. ----
+
+// A guard opened at one of the three execute() dispatch entry points (or, as a fallback, inside
+// action_t::execute() itself when none of them covered this call -- see action.cpp's own
+// comments at each site) or at a DoT tick's own dispatch (dot.cpp). Two open modes and one
+// restore mode; constructed via the matching factory-style constructor below.
+struct rl_press_scope_t
+{
+  enum class mode_e : std::uint8_t
+  {
+    open_execute,  // bumps action->rl_press_count_, opens kind=execute
+    open_tick,     // bumps action->rl_tick_count_, opens kind=tick
+  };
+
+  // Open a new execute or tick press for `action`. `carried_state` (open_execute only; always
+  // null for open_tick -- ticks have no equivalent carried-state concept) is consulted so a
+  // deferred dispatch that already carries a stamped outer frame (a proc's schedule_execute(),
+  // a tick_action's schedule_execute( tick_state )) keeps that outer frame rather than opening a
+  // fresh one -- see rl_rng_record.cpp's open_execute() for the exact three-way branch (carried
+  // stamp / already-open outer / brand new outer).
+  rl_press_scope_t( sim_t* sim, action_t* action, mode_e mode, const action_state_t* carried_state = nullptr );
+
+  // Restore the outer/inner frames from a stamped action_state_t (a travel/proc/tick boundary
+  // that carries its own press stamp via stamp_state() below). A state that was never stamped
+  // (rl_press_outer_kind == TRIGGER_KIND_NONE) leaves the current frames untouched -- see D-07.
+  rl_press_scope_t( sim_t* sim, const action_state_t* state );
+
+  ~rl_press_scope_t();
+
+  rl_press_scope_t( const rl_press_scope_t& ) = delete;
+  rl_press_scope_t& operator=( const rl_press_scope_t& ) = delete;
+  rl_press_scope_t( rl_press_scope_t&& ) = delete;
+  rl_press_scope_t& operator=( rl_press_scope_t&& ) = delete;
+
+private:
+  sim_t* sim_;
+  bool active_ = false;
+  press_frame_t saved_outer_{};
+  press_frame_t saved_inner_{};
+  const action_t* saved_inner_owner_ = nullptr;
+};
+
+// Copies the recorder's CURRENT outer/inner press frames into `state` -- called beside a state's
+// existing rl_cause_seq stamp (action.cpp's per-target work, action_t::tick()'s tick_state stamp,
+// dot.cpp's open-tick call sites) so a later restore (a travel/proc/tick boundary, above) can
+// recover the press that was active when this state was created. No-op when the recorder is off
+// or `state` is null.
+void stamp_state( sim_t* sim, action_state_t* state );
+
+// True exactly when the recorder is on and its current inner-frame owner is `action` -- meaning
+// one of the three execute() dispatch entry points already opened this action's own execute
+// press before calling execute() (A-04). action_t::execute()'s early-return branch and its
+// direct-call fallback guard both consult this so the SAME dispatch is never counted twice.
+bool inner_owner_is( sim_t* sim, const action_t* action );
+
+// Tallies one early return against `action`'s sidecar row (250-03, A-04): an entry-point
+// dispatch already opened (and counted) this action's own execute press, but action_t::execute()
+// took its early return before any per-target work ran, so the press produced no report.json
+// execute. Diagnostic context only -- never subtracted in rng_record.py's compare_report(), only
+// printed alongside an UNEXPLAINED verdict. No-op when the recorder is off.
+void note_early_return( sim_t* sim, const action_t* action );
 
 // ---- Writer interface. Every function is a no-op (one pointer check) when rl_rng_record= is unset. ----
 

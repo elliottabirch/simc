@@ -35,6 +35,19 @@ struct action_state_t : private noncopyable
   // copy_state() below. Pure bookkeeping: never read by any RNG or scheduling decision.
   std::int64_t    rl_cause_seq = -1;
   std::uint8_t    rl_cause_class = RL_CAUSE_ORPHAN;
+  // tstl-sylvanas phase 250, plan 250-03 (REC-04): the press active when this state was stamped
+  // (rl_rng_record::stamp_state(), called beside the rl_cause_seq stamp above at every site that
+  // sets it) -- outer is the outermost active press (the button that was pressed), inner is the
+  // innermost executing one (proc/tick nested inside it). A later restore (a travel/proc/tick
+  // boundary, rl_rng_record::rl_press_scope_t's restore-mode ctor) reads these back. Kind 0
+  // (TRIGGER_KIND_NONE, action_state_t::initialize()'s own reset) means "never stamped" -- pure
+  // bookkeeping, never read by any RNG or scheduling decision.
+  std::uint8_t    rl_press_outer_kind = 0;
+  std::uint32_t   rl_press_outer_trigger = 0;
+  std::uint32_t   rl_press_outer_number = 0;
+  std::uint8_t    rl_press_inner_kind = 0;
+  std::uint32_t   rl_press_inner_trigger = 0;
+  std::uint32_t   rl_press_inner_number = 0;
   // Execution results
   result_amount_type           result_type;
   result_e        result;
