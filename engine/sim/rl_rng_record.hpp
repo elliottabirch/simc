@@ -186,6 +186,17 @@ struct press_frame_t
   std::uint32_t press = 0;
 };
 
+// A plain-value pair of outer/inner press frames, captured at deferred-dispatch CREATION time by
+// snapshot_press() below and restored at the deferred point by rl_press_scope_t's matching
+// constructor -- for a deferred boundary with no action_state_t to carry a stamp on (unlike
+// stamp_state()/restore_from_state(), which stamp/restore via a state object). Default-constructed
+// (both frames TRIGGER_KIND_NONE) is the "never captured" sentinel, restoring as a no-op (D-07).
+struct press_snapshot_t
+{
+  press_frame_t outer{};
+  press_frame_t inner{};
+};
+
 // ---- Press-tag interface (plan 250-03, REC-04). Mirrors sim/rl_credit.hpp's rl_cause_scope_t
 // exactly: an RAII guard that saves the recorder's current outer/inner frames and restores them
 // in its destructor, giving correct LIFO nesting from the call stack itself -- no explicit stack
@@ -219,6 +230,15 @@ struct rl_press_scope_t
   // that carries its own press stamp via stamp_state() below). A state that was never stamped
   // (rl_press_outer_kind == TRIGGER_KIND_NONE) leaves the current frames untouched -- see D-07.
   rl_press_scope_t( sim_t* sim, const action_state_t* state );
+
+  // Restore the outer/inner frames from a plain-value snapshot captured at deferred-dispatch
+  // creation time via snapshot_press() below -- for a deferred boundary that has no
+  // action_state_t to carry a stamp on (buff_t's own zero-delay "on landed" proc dispatch,
+  // buff.cpp, scheduled to "ensure buff is fully processed" the same way proc_event_t detaches
+  // proc execution from proc triggering). A never-captured snapshot (kind TRIGGER_KIND_NONE, the
+  // struct's own default) leaves the current frames untouched -- same D-07 rule as the
+  // action_state_t overload above.
+  rl_press_scope_t( sim_t* sim, const press_snapshot_t& snapshot );
 
   ~rl_press_scope_t();
 
@@ -254,6 +274,13 @@ bool inner_owner_is( sim_t* sim, const action_t* action );
 // execute. Diagnostic context only -- never subtracted in rng_record.py's compare_report(), only
 // printed alongside an UNEXPLAINED verdict. No-op when the recorder is off.
 void note_early_return( sim_t* sim, const action_t* action );
+
+// Captures the recorder's CURRENT outer/inner press frames as a plain value with no
+// action_state_t attached -- for a deferred dispatch that has nothing to stamp a state onto
+// (buff_t's zero-delay "on landed" proc dispatch, buff.cpp). Returns a default-constructed
+// (TRIGGER_KIND_NONE) snapshot when the recorder is off; a later restore from that default is a
+// correct no-op, matching stamp_state()/restore_from_state()'s own "never stamped" convention.
+press_snapshot_t snapshot_press( sim_t* sim );
 
 // ---- Writer interface. Every function is a no-op (one pointer check) when rl_rng_record= is unset. ----
 
