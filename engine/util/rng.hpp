@@ -184,9 +184,20 @@ public:
     return engine.name();
   }
 
-  /// Seed rng engine
+  /// Seed rng engine. Also clears the cached gaussian spare (tstl-sylvanas phase 253,
+  /// REP-05), exactly as reset() does -- and nothing else. A per-fight reseed of a per-source
+  /// stream goes through seed() only (never reset()), so the second half of a gaussian pair
+  /// cached by gauss(double,double) leaked into the next fight -- measured by the phase 253
+  /// research: 13 of 40 batched fights (per_source_rng=1, one seed list) differed from the same
+  /// seed played alone; 0 of 40 with per_source_rng=0 (where seed()+reset() both run per fight).
+  /// rl_trace_n_ and the roller identity members stay untouched on purpose: a mid-fight re-salt
+  /// also calls seed(), and the recorder reads each stream's draw counter at fight begin and end
+  /// (rl_trace_n_ must never go backwards mid-fight). The RNG_STREAM_DEBUG counter is untouched
+  /// for the same reason reset() leaves it alone on that path.
   void seed( uint64_t s ) {
     engine.seed( s );
+    gauss_pair_value = 0;
+    gauss_pair_use = false;
   }
 
   /// Reseed using current state
