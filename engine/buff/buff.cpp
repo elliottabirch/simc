@@ -2848,7 +2848,20 @@ void buff_t::bump( int stacks, double value )
   if ( proc_callbacks && !constant && ( !suppress_caster_procs || enable_proc_from_suppressed ) && source &&
        !source->callbacks.procs[ PROC1_NONE_HELPFUL ][ PROC2_LANDED ].empty() )
   {
-    make_event( *sim, [ this ] { source->trigger_callbacks( PROC1_NONE_HELPFUL, PROC2_LANDED, this ); } );
+    // 250-03 (REC-04, Step B no-press gap): this is the SAME "detach execution from triggering"
+    // shape dbc_proc_callback.cpp's proc_event_t uses (schedule now, run on a later zero-delay
+    // tick) -- but there is no action_state_t here to carry a stamp on, only `this` (the buff).
+    // Capture the press active RIGHT NOW (still inside the causing hit's own press, synchronously,
+    // before this event is even queued) as a plain value, and restore it at the deferred point --
+    // the same stamp-at-creation/restore-at-the-deferred-point mechanism, just without a state
+    // object as the carrier. A trigger with no causing press at all (this buff gained a stack
+    // outside any press -- a heartbeat/periodic source) captures a TRIGGER_KIND_NONE snapshot,
+    // which restores as a no-op, same as an unstamped action_state_t (D-07).
+    const auto rl_press_snapshot = rl_rng_record::snapshot_press( sim );
+    make_event( *sim, [ this, rl_press_snapshot ] {
+      rl_rng_record::rl_press_scope_t rl_press_guard( sim, rl_press_snapshot );
+      source->trigger_callbacks( PROC1_NONE_HELPFUL, PROC2_LANDED, this );
+    } );
   }
 }
 

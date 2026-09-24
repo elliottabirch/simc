@@ -34,6 +34,7 @@
 #include "sim/proc.hpp"
 #include "sim/proc_rng.hpp"
 #include "sim/rl_credit.hpp"
+#include "sim/rl_rng_record.hpp"
 #include "sim/rl_target_select.hpp"
 #include "util/string_view.hpp"
 
@@ -6491,9 +6492,15 @@ struct crash_lightning_t : public shaman_attack_t
       const rl_cause_t rl_su3_cause = p()->rl_cause_stack.empty()
                                            ? rl_cause_t{}
                                            : rl_credit::promote( p()->rl_cause_stack.back().cause );
+      // 250-03 (REC-04, Step B no-press gap): same reasoning as rl_su3_cause just above, for the
+      // press instead of the cause -- captured HERE, synchronously, while this cast's own press
+      // scope is still on the stack, because make_repeating_event()'s callback fires on LATER,
+      // separate event-loop passes (1s apart, up to N times) by which point that scope has closed.
+      const rl_rng_record::press_snapshot_t rl_su3_press = rl_rng_record::snapshot_press( sim );
 
-      make_repeating_event( sim, 1_s, [ this, mul = mid2_4pc_mul, rl_su3_cause ]() {
+      make_repeating_event( sim, 1_s, [ this, mul = mid2_4pc_mul, rl_su3_cause, rl_su3_press ]() {
         rl_cause_scope_t rl_cause_guard( p(), rl_su3_cause );
+        rl_rng_record::rl_press_scope_t rl_press_guard( sim, rl_su3_press );
         for ( auto t : target_list() )
         {
           if ( !rng().roll( p()->options.crash_lightning_su_hit_chance ) )

@@ -922,6 +922,26 @@ rl_press_scope_t::rl_press_scope_t( sim_t* sim, const action_state_t* state )
   root->rl_rng_recorder->restore_from_state( state );
 }
 
+rl_press_scope_t::rl_press_scope_t( sim_t* sim, const press_snapshot_t& snapshot )
+  : sim_( sim )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder )
+    return;
+
+  active_ = true;
+  saved_outer_ = root->rl_rng_recorder->current_outer();
+  saved_inner_ = root->rl_rng_recorder->current_inner();
+  saved_inner_owner_ = root->rl_rng_recorder->current_inner_owner();
+
+  // "When it is not stamped, change nothing" -- mirrors restore_from_state()'s own D-07 rule, but
+  // for a plain-value snapshot instead of an action_state_t.
+  if ( snapshot.outer.kind == TRIGGER_KIND_NONE )
+    return;
+
+  root->rl_rng_recorder->restore_frames( snapshot.outer, snapshot.inner, nullptr );
+}
+
 rl_press_scope_t::~rl_press_scope_t()
 {
   if ( !active_ )
@@ -954,6 +974,14 @@ void note_early_return( sim_t* sim, const action_t* action )
   if ( !root->rl_rng_recorder )
     return;
   root->rl_rng_recorder->note_early_return( action );
+}
+
+press_snapshot_t snapshot_press( sim_t* sim )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder )
+    return press_snapshot_t{};
+  return press_snapshot_t{ root->rl_rng_recorder->current_outer(), root->rl_rng_recorder->current_inner() };
 }
 
 } // namespace rl_rng_record
