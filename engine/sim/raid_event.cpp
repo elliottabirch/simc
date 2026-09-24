@@ -17,6 +17,7 @@
 #include "raid_event.hpp"
 #include "sim/event.hpp"
 #include "sim/expressions.hpp"
+#include "sim/rl_rng_record.hpp"
 #include "sim/sim.hpp"
 #include "util/rng.hpp"
 #include <cstdlib>  // TEMPORARY (260919-scb T1) -- getenv() for rl_trace_rng_enabled()
@@ -295,7 +296,11 @@ struct adds_event_t final : public raid_event_t
     if ( rl_trace_rng_enabled() )
       fmt::print( stderr, "[RL_TRACE_RNG] iter={} seed={} n={} site=start_entry name={}\n",
                   sim->current_iteration, sim->seed, sim->rng().rl_trace_n(), log_name() );
-    double count_draw = sim->rng().range( count - count_range, count + count_range );
+    double count_draw;
+    {
+      rl_rng_record::rl_raid_draw_scope_t rl_raid_draw_guard( sim, *this );
+      count_draw = sim->rng().range( count - count_range, count + count_range );
+    }
     if ( rl_trace_rng_enabled() )
       fmt::print( stderr, "[RL_TRACE_RNG] iter={} seed={} n={} site=adds_count name={} value={}\n",
                   sim->current_iteration, sim->seed, sim->rng().rl_trace_n(), log_name(), count_draw );
@@ -324,11 +329,19 @@ struct adds_event_t final : public raid_event_t
         {
           double angle_start = spawn_angle_start * ( m_pi / 180 );
           double angle_end   = spawn_angle_end * ( m_pi / 180 );
-          double angle       = sim->rng().range( angle_start, angle_end );
+          double angle;
+          {
+            rl_rng_record::rl_raid_draw_scope_t rl_raid_draw_guard( sim, *this );
+            angle = sim->rng().range( angle_start, angle_end );
+          }
           if ( rl_trace_rng_enabled() )
             fmt::print( stderr, "[RL_TRACE_RNG] iter={} seed={} n={} site=angle name={} value={}\n",
                         sim->current_iteration, sim->seed, sim->rng().rl_trace_n(), log_name(), angle );
-          double radius      = sim->rng().range( std::fabs( spawn_radius_min ), std::fabs( spawn_radius_max ) );
+          double radius;
+          {
+            rl_rng_record::rl_raid_draw_scope_t rl_raid_draw_guard( sim, *this );
+            radius = sim->rng().range( std::fabs( spawn_radius_min ), std::fabs( spawn_radius_max ) );
+          }
           if ( rl_trace_rng_enabled() )
             fmt::print( stderr, "[RL_TRACE_RNG] iter={} seed={} n={} site=radius name={} value={}\n",
                         sim->current_iteration, sim->seed, sim->rng().rl_trace_n(), log_name(), radius );
@@ -1280,19 +1293,26 @@ struct movement_event_t final : public raid_event_t
     {
       auto min           = static_cast<int>( movement_direction_type::OMNI );
       auto max_exclusive = static_cast<int>( movement_direction_type::RANDOM );
+      rl_rng_record::rl_raid_draw_scope_t rl_raid_draw_guard( sim, *this );
       m                  = static_cast<movement_direction_type>( int( sim->rng().range( min, max_exclusive ) ) );
     }
 
     if ( distance_range > 0 )
     {
-      move = sim->rng().range( move_distance - distance_range, move_distance + distance_range );
+      {
+        rl_rng_record::rl_raid_draw_scope_t rl_raid_draw_guard( sim, *this );
+        move = sim->rng().range( move_distance - distance_range, move_distance + distance_range );
+      }
       if ( move < move_distance_min )
         move = move_distance_min;
       else if ( move > move_distance_max )
         move = move_distance_max;
     }
     else if ( move_distance_min > 0 || move_distance_max > 0 )
+    {
+      rl_rng_record::rl_raid_draw_scope_t rl_raid_draw_guard( sim, *this );
       move = sim->rng().range( move_distance_min, move_distance_max );
+    }
     else
       move = move_distance;
 
@@ -1430,8 +1450,11 @@ struct damage_event_t final : public raid_event_t
 
     for ( auto p : affected_players )
     {
-      raid_damage->base_dd_min = raid_damage->base_dd_max =
-          sim->rng().range( amount - amount_range, amount + amount_range );
+      {
+        rl_rng_record::rl_raid_draw_scope_t rl_raid_draw_guard( sim, *this );
+        raid_damage->base_dd_min = raid_damage->base_dd_max =
+            sim->rng().range( amount - amount_range, amount + amount_range );
+      }
       raid_damage->target = p;
       raid_damage->execute();
     }
@@ -1497,7 +1520,10 @@ struct heal_event_t final : public raid_event_t
       {
         double pct_actual = to_pct;
         if ( to_pct_range > 0 )
+        {
+          rl_rng_record::rl_raid_draw_scope_t rl_raid_draw_guard( sim, *this );
           pct_actual = sim->rng().range( to_pct - to_pct_range, to_pct + to_pct_range );
+        }
 
         sim->print_debug( "{} heals {} {}% ({}) of max health, current health {}", log_name(), p->name(), pct_actual,
                           p->resources.max[ RESOURCE_HEALTH ] * pct_actual / 100,
@@ -1508,6 +1534,7 @@ struct heal_event_t final : public raid_event_t
       }
       else
       {
+        rl_rng_record::rl_raid_draw_scope_t rl_raid_draw_guard( sim, *this );
         amount_to_heal = sim->rng().range( amount - amount_range, amount + amount_range );
       }
 
@@ -1960,11 +1987,15 @@ timespan_t raid_event_t::cooldown_time()
   if ( num_starts == 0 )
     return 0_ms;
   else
+  {
+    rl_rng_record::rl_raid_draw_scope_t rl_raid_draw_guard( sim, *this );
     return sim->rng().gauss( cooldown );
+  }
 }
 
 timespan_t raid_event_t::duration_time()
 {
+  rl_rng_record::rl_raid_draw_scope_t rl_raid_draw_guard( sim, *this );
   return sim->rng().gauss( duration );
 }
 
@@ -2309,6 +2340,11 @@ void raid_event_t::reset()
   event_t::cancel( end_event );
 
   affected_players.clear();
+
+  // 250-03 (REC-05/R-01): registers (or confirms) this event's own roller number. Both override
+  // reset()s below call this base reset() first, so a nested event is covered the same as a
+  // top-level one; register_raid_event() itself is idempotent past the first call.
+  rl_rng_record::register_raid_event( sim, *this );
 }
 
 // raid_event_t::parse_options ==============================================
@@ -2605,8 +2641,11 @@ bool raid_event_t::filter_player( const player_t* p )
   if ( p->is_pet() && players_only )
     return true;
 
-  if ( !sim->rng().roll( player_chance ) )
-    return true;
+  {
+    rl_rng_record::rl_raid_draw_scope_t rl_raid_draw_guard( sim, *this );
+    if ( !sim->rng().roll( player_chance ) )
+      return true;
+  }
 
   if ( affected_role != ROLE_NONE && p->role != affected_role )
     return true;

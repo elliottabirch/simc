@@ -14,6 +14,7 @@
 #include "player/pet.hpp"
 #include "player/player.hpp"
 #include "sim/rl_policy.hpp"
+#include "sim/rl_rng_record.hpp"
 #include "sim/sim.hpp"
 #include "util/io.hpp"
 #include "util/util.hpp"
@@ -31,6 +32,13 @@
 // because it needs player_t/pet_t complete.
 void rl_count_proc( player_t* p, rl_proc::id which, double chance, bool success )
 {
+  // 250-03 (REC-04, R-09): labels the last ROLL entry this call's own draw produced, BEFORE the
+  // null/pet/enemy returns below -- a null player, a pet (routed to its owner below) or an enemy
+  // still drew the roll being counted, and label_last_roll()'s own chance/outcome match (not this
+  // function's early returns) is what decides whether the entry gets labelled.
+  if ( p != nullptr )
+    rl_rng_record::label_last_roll( p->sim, static_cast<std::uint8_t>( which ) + 1, chance, success );
+
   if ( p == nullptr ) return;
   if ( p->is_pet() ) { p = p->cast_pet()->owner; if ( p == nullptr ) return; }
   if ( p->is_enemy() ) return;

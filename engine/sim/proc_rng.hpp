@@ -80,6 +80,13 @@ public:
 
   rng_type_e type() const
   { return rng_type_; }
+
+  // 250-03 (REC-06): this deck's own roller number in the rl_rng_record= recording (registered
+  // by reseed_source_rng() above, on the per-fight call) -- rl_refill_scope_t reads this to tag
+  // its refill scope. RL_ROLLER_UNREGISTERED when per_source_rng is off or this source was never
+  // registered.
+  std::uint32_t rl_roller_id() const
+  { return source_rng_.rl_roller_id(); }
 };
 
 struct simple_proc_t final : public proc_rng_t

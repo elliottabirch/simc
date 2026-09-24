@@ -34,6 +34,8 @@ struct sim_t;
 struct player_t;
 struct action_t;
 struct action_state_t;
+struct raid_event_t;
+struct proc_rng_t;
 
 namespace rng
 {
@@ -255,6 +257,57 @@ private:
   const action_t* saved_inner_owner_ = nullptr;
 };
 
+// A guard opened around ONE shared-stream draw a raid event makes (plan 250-03, REC-05/R-01).
+// The draw itself stays on the shared stream (sim->rng()) -- this guard only sets that stream's
+// existing rl_roller_override_ (util/rng.hpp, wired for exactly this by plan 250-01) to the
+// event's own registered roller number for the single draw in its scope, and restores whatever
+// override was active before on destruction (LIFO, matching every other guard in this file). Open
+// ONE scope per draw, never a whole function -- adds_event_t::_start() (raid_event.cpp) summons
+// pets BETWEEN its draws, and those summons must never carry the raid event's roller. No-op (one
+// pointer check) when the recorder is off.
+struct rl_raid_draw_scope_t
+{
+  rl_raid_draw_scope_t( sim_t* sim, const raid_event_t& event );
+  ~rl_raid_draw_scope_t();
+
+  rl_raid_draw_scope_t( const rl_raid_draw_scope_t& ) = delete;
+  rl_raid_draw_scope_t& operator=( const rl_raid_draw_scope_t& ) = delete;
+  rl_raid_draw_scope_t( rl_raid_draw_scope_t&& ) = delete;
+  rl_raid_draw_scope_t& operator=( rl_raid_draw_scope_t&& ) = delete;
+
+private:
+  sim_t* sim_;
+  bool active_ = false;
+  std::uint32_t saved_override_ = 0;
+};
+
+// A guard opened around a deck's OWN reset() call, at the two call sites only (never inside
+// shuffled_rng_t::reset() itself -- dre_deck_rng_t overrides it, sc_shaman.cpp): when `deck` is
+// non-null, the recorder is on and deck->type() is RNG_SHUFFLE, tallies one refill for this deck
+// this fight and sets BOTH outer and inner to (refill, the deck's own roller number, the tally)
+// for its lifetime -- a refill wins over any enclosing press (REC-06, D-08, R-04), unconditionally,
+// not merged with whatever was active before. Restores the prior outer/inner/inner-owner on
+// destruction, same LIFO shape as every other guard here. No-op for any other proc_rng_t subtype
+// (a plain fight-start reset of a non-deck source_rng_ draws no refill entry) or an unregistered
+// deck (per_source_rng off).
+struct rl_refill_scope_t
+{
+  rl_refill_scope_t( sim_t* sim, proc_rng_t* deck );
+  ~rl_refill_scope_t();
+
+  rl_refill_scope_t( const rl_refill_scope_t& ) = delete;
+  rl_refill_scope_t& operator=( const rl_refill_scope_t& ) = delete;
+  rl_refill_scope_t( rl_refill_scope_t&& ) = delete;
+  rl_refill_scope_t& operator=( rl_refill_scope_t&& ) = delete;
+
+private:
+  sim_t* sim_;
+  bool active_ = false;
+  press_frame_t saved_outer_{};
+  press_frame_t saved_inner_{};
+  const action_t* saved_inner_owner_ = nullptr;
+};
+
 // Copies the recorder's CURRENT outer/inner press frames into `state` -- called beside a state's
 // existing rl_cause_seq stamp (action.cpp's per-target work, action_t::tick()'s tick_state stamp,
 // dot.cpp's open-tick call sites) so a later restore (a travel/proc/tick boundary, above) can
@@ -281,6 +334,21 @@ void note_early_return( sim_t* sim, const action_t* action );
 // (TRIGGER_KIND_NONE) snapshot when the recorder is off; a later restore from that default is a
 // correct no-op, matching stamp_state()/restore_from_state()'s own "never stamped" convention.
 press_snapshot_t snapshot_press( sim_t* sim );
+
+// Annotates the LAST ROLL entry written for `stream` as a swing-table draw (R-09): writes
+// chance/outcome/label and sets FLAG_ANNOTATED, but ONLY when exactly one draw happened on
+// `stream` since `before` (a one-result attack table draws nothing and stays un-annotated) and
+// that entry's own (stream, draw_ordinal) still matches -- mirrors on_roll_outcome()'s own
+// find-the-entry-just-written contract. No-op when the recorder is off.
+void annotate_draw( sim_t* sim, rng::rng_t& stream, std::uint64_t before, double chance, bool outcome,
+                     std::uint8_t label );
+
+// Labels the LAST ROLL entry written (any roller/stream) with `label` (R-09) -- ONLY when that
+// entry's own label is still LABEL_NONE and its chance/outcome exactly match chance/success (an
+// rl_count_proc call this roll's draw did NOT itself produce leaves the entry untouched). Tallies
+// one matched or unmatched call against `label` in the sidecar's labelCalls regardless. No-op
+// when the recorder is off (the tally is per-recording, so nothing to tally either).
+void label_last_roll( sim_t* sim, std::uint8_t label, double chance, bool success );
 
 // ---- Writer interface. Every function is a no-op (one pointer check) when rl_rng_record= is unset. ----
 
@@ -329,6 +397,15 @@ void register_roller( sim_t* sim, rng::rng_t& stream, std::string_view key, roll
 // action_t* so the <path>.rollers.json sidecar can report actor/actorKind/statsName/dual/
 // harmful for it (plan 250-01 Task 2).
 void register_action_roller( sim_t* sim, rng::rng_t& stream, std::string_view key, const action_t* action );
+
+// Registers `event` under its own roller number (plan 250-03, REC-05/R-01) -- key
+// "sim|raid_event|INTERNAL_ID|TYPE|NAME", class raid_event, no stream of its own (every one of
+// its draws stays on the shared stream, tagged only via rl_raid_draw_scope_t's override). Keeps
+// `event`'s existing number if it already has one (both raid_event_t::reset() overrides call the
+// base reset() first, so a call from an override and the base's own call for the SAME event are
+// idempotent -- second call is a no-op read of event.rl_roller_id). Called from the base
+// raid_event_t::reset(), covering every raid event including nested ones.
+void register_raid_event( sim_t* sim, raid_event_t& event );
 
 // True exactly when the recorder is open (between open_and_write_header() and write_footer()).
 // Cheap query for a call site that wants to skip building a key string entirely when recording
