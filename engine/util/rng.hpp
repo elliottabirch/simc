@@ -117,6 +117,54 @@ public:
 #endif
 };
 
+// Random-roll recorder hook (tstl-sylvanas phase 250, plan 250-01, REC-01/02/03). Pure
+// observer: real()/roll() below call into this interface strictly AFTER a value already
+// computed the normal way is known, and neither this interface nor anything that implements it
+// may call an rng method, reset() a stream, schedule an event, or otherwise change what a roll
+// draws or returns -- see basic_rng_t::real()/roll() doc comments for the exact call sites, and
+// rl_rng_record.hpp (implemented by rl_rng_record::recorder_t in rl_rng_record.cpp) for the one
+// concrete implementation. Deliberately dependency-free: this file includes nothing beyond
+// <cstdint> to declare it, so the choke point stays as cheap as a null-pointer check when no
+// recorder is attached (D-03).
+struct rl_draw_sink_t
+{
+  virtual ~rl_draw_sink_t() = default;
+
+  // Called from real(), after the draw is computed, immediately before it is returned.
+  // `roller_slot` is the calling stream's own rl_roller_id_ member, passed by reference so an
+  // unregistered stream can be numbered lazily on its first draw; `draw_counter` is that
+  // stream's rl_trace_n_ AFTER this draw (its physical draw ordinal); `roller_override` is the
+  // stream's rl_roller_override_ (0 = none, otherwise the logical roller this one draw should
+  // be attributed to instead of the stream itself -- a raid event borrowing the shared stream
+  // uses this); `raw` is the value real() is about to return.
+  virtual void on_draw( std::uint32_t& roller_slot, const std::uint64_t& draw_counter,
+                         std::uint32_t roller_override, double raw ) = 0;
+
+  // Called from roll( chance ), after the comparison, only when a draw actually happened
+  // (chance strictly between 0 and 1 -- see roll()'s early-return branches below).
+  // `draw_ordinal` is the SAME draw_counter value on_draw() just saw for this draw, so an
+  // implementation can find and annotate the entry on_draw() already wrote.
+  virtual void on_roll_outcome( std::uint32_t roller, std::uint64_t draw_ordinal, double chance,
+                                 bool outcome ) = 0;
+
+  // Called from roll( chance ) when chance <= 0 or chance >= 1 -- no draw happens and no entry
+  // is written for it, but an implementation still counts it (R-05: "rolls that never draw").
+  // Same roller_slot/draw_counter meaning as on_draw() above.
+  virtual void on_no_draw_roll( std::uint32_t& roller_slot, const std::uint64_t& draw_counter ) = 0;
+};
+
+// Process-wide. Non-null only between rl_rng_record::open_and_write_header() and
+// rl_rng_record::write_footer() (or the recorder object's destructor) -- see rl_rng_record.hpp.
+// Every read of this pointer in real()/roll() below is the ENTIRE cost this hook adds when
+// rl_rng_record= is unset: one pointer load and a branch (D-03, D-17).
+inline rl_draw_sink_t* rl_draw_sink = nullptr;
+
+// Sentinel: a stream whose rl_roller_id_ has never been assigned a real roller number -- either
+// the recorder has never been open for this stream, or it drew nothing while open before this
+// check. rl_rng_record::recorder_t::on_draw() numbers a stream lazily the first time it sees
+// this value.
+inline constexpr std::uint32_t RL_ROLLER_UNREGISTERED = 0xFFFFFFFFu;
+
 /**\ingroup SC_RNG
  * @brief Random number generator wrapper around an rng engine
  *
@@ -159,6 +207,26 @@ public:
   // Remove this block (and its two touch points in real()/reset() below) once the raid-events
   // divergence traced in SCB-RECEIPT.md Section 7/8 is closed.
   uint64_t rl_trace_n() const { return rl_trace_n_; }
+
+  // Roller identity (tstl-sylvanas phase 250, plan 250-01, REC-01/02/03/D-05). Observer only:
+  // never read by any roll, reset by seed()/reseed() the way rl_trace_n_ is not either -- see
+  // reset()'s own doc comment below for why rl_roller_id_/rl_roller_override_ are NOT cleared
+  // there. Set once, at registration (rl_rng_record::register_roller/register_action_roller) or
+  // lazily on first draw while the recorder is open (rl_rng_record::recorder_t::on_draw()).
+  std::uint32_t rl_roller_id() const { return rl_roller_id_; }
+  void rl_set_roller_id( std::uint32_t id ) { rl_roller_id_ = id; }
+
+  // Logical-roller override (D-06/R-01): 0 = none (this stream's own rl_roller_id_ is the
+  // logical roller), otherwise the roller number a single draw should be attributed to instead
+  // -- a raid event borrowing the shared sim stream sets this immediately around its one draw
+  // and clears it right after, never leaving it set across any other code.
+  std::uint32_t rl_roller_override() const { return rl_roller_override_; }
+  void rl_set_roller_override( std::uint32_t roller ) { rl_roller_override_ = roller; }
+
+  // Read-only accessor to this stream's own draw counter -- rl_rng_record::register_roller()
+  // stores this pointer so the recorder can read a roller's draw count at fight begin/end
+  // without ever calling an rng method on it. "Observer only: never read by any roll."
+  const uint64_t& rl_draw_counter() const { return rl_trace_n_; }
 
   /// Bernoulli Distribution
   bool roll( double chance );
@@ -273,6 +341,16 @@ private:
 #endif
   // TEMPORARY (260919-scb T1) -- see rl_trace_n() above.
   uint64_t rl_trace_n_ = 0U;
+  // Roller identity (250-01, D-05/D-06). Default RL_ROLLER_UNREGISTERED: numbered lazily on
+  // first draw while a recorder is open, or set explicitly by rl_rng_record::register_roller().
+  // Deliberately NOT cleared by reset() -- a stream's roller number is a per-object identity
+  // assigned once per run, not per-fight state (mirrors rl_trace_n_'s own "TEMPORARY" note: this
+  // one is not temporary, but the "never reset" rule is the same kind of deliberate choice).
+  std::uint32_t rl_roller_id_ = RL_ROLLER_UNREGISTERED;
+  // Logical-roller override (250-01, D-06/R-01). 0 = none. Also never cleared by reset() --
+  // callers that set it (raid-event draw wrappers) are responsible for clearing it themselves
+  // immediately after their one draw.
+  std::uint32_t rl_roller_override_ = 0;
 };
 
 /// Reseed using current state
@@ -325,16 +403,39 @@ inline double basic_rng_t<Engine>::real()
   std::cout << fmt::format( "[RNG] fn=real() engine={} n={} next={} value={}",
                            engine.name(), n, u64raw, u.d - 1.0 ) << std::endl;
 #endif
-  return u.d - 1.0;
+  const double value = u.d - 1.0;
+  // Random-roll recorder hook (250-01, D-03/D-04/D-17): pure observation AFTER value is
+  // computed the normal way above -- see rl_draw_sink_t's own doc comment for the promise this
+  // keeps. One pointer check when no recorder is attached.
+  if ( rng::rl_draw_sink )
+    rng::rl_draw_sink->on_draw( rl_roller_id_, rl_trace_n_, rl_roller_override_, value );
+  return value;
 }
 
 /// Bernoulli Distribution
 template <typename Engine>
 bool basic_rng_t<Engine>::roll( double chance )
 {
-  if ( chance <= 0 ) return false;
-  if ( chance >= 1 ) return true;
-  return real() < chance;
+  if ( chance <= 0 )
+  {
+    if ( rng::rl_draw_sink )
+      rng::rl_draw_sink->on_no_draw_roll( rl_roller_id_, rl_trace_n_ );
+    return false;
+  }
+  if ( chance >= 1 )
+  {
+    if ( rng::rl_draw_sink )
+      rng::rl_draw_sink->on_no_draw_roll( rl_roller_id_, rl_trace_n_ );
+    return true;
+  }
+  const bool ok = real() < chance;
+  // Random-roll recorder hook (250-01, D-02/D-04): the chance is known here, one level above
+  // real()'s own hook call -- captured and attached to the SAME draw via draw_ordinal. Passes
+  // rl_roller_id_ (the physical stream), not any override: the recorder matches this call back
+  // to the ROLL entry on_draw() just wrote by (stream, draw_ordinal), never by logical roller.
+  if ( rng::rl_draw_sink )
+    rng::rl_draw_sink->on_roll_outcome( rl_roller_id_, rl_trace_n_, chance, ok );
+  return ok;
 }
 
 /// Uniform distribution in the range [min..max)

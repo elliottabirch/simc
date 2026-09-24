@@ -63,6 +63,16 @@ namespace rl_policy
 struct rl_weights_t;
 }
 
+// Random-roll recorder (tstl-sylvanas phase 250, plan 250-01, REC-01/02/03). Forward
+// declaration only -- sim.hpp must NOT include rl_rng_record.hpp, mirroring the rl_policy
+// forward declaration immediately above. rl_rng_recorder below is a std::unique_ptr (not
+// shared_ptr, unlike solver_policy_weights above): sim_t::~sim_t is already defined out of
+// line, in sim.cpp, which is where the type becomes complete.
+namespace rl_rng_record
+{
+class recorder_t;
+}
+
 struct sim_progress_t
 {
   int current_iterations;
@@ -722,6 +732,23 @@ struct sim_t : private sc_thread_t
   // record_close() (right after that fight's close row), closed with a footer in write_footer().
   // Root-owned, same single-writer reason as rl_translog_stream above.
   std::unique_ptr<io::ofstream> rl_translog_attr_stream;
+  // Random-roll recorder (tstl-sylvanas phase 250, plan 250-01, REC-01/02/03).
+  // rl_rng_record=<path>, off by default (empty string), byte-identical to today's behavior
+  // when unset (D-03). Refused by name in setup() unless per_source_rng=1 and threads=1 both
+  // hold (R-08) -- see sim.cpp's refusal block, placed before the recorder ever opens a file.
+  // Root-owned for the identical single-writer reason rl_translog_stream above is: with
+  // threads=1 forced whenever this is set, only the root sim_t ever constructs one. All
+  // registry/buffer/roller state lives inside rl_rng_record::recorder_t (one class, defined in
+  // rl_rng_record.hpp/.cpp) rather than as ten more members here, unlike rl_translog's own
+  // flat-members-on-sim_t layout above -- see that file's own top-of-file comment for why one
+  // class was preferred this time. std::shared_ptr, not std::unique_ptr -- same reason as
+  // solver_policy_weights above (rl_policy forward declaration doc comment): sim_t::~sim_t is
+  // out of line in sim.cpp, which never includes rl_rng_record.cpp and therefore never sees
+  // recorder_t as a complete type; shared_ptr's deleter is type-erased at construction time
+  // (inside rl_rng_record.cpp, where the type IS complete), so sim.cpp only ever needs to hold
+  // and drop this pointer, never instantiate its destructor.
+  std::string rl_rng_record_file_str;
+  std::shared_ptr<rl_rng_record::recorder_t> rl_rng_recorder;
   // tstl-sylvanas phase 218, plan 218-02 (RIG-01). rl_fight_shape_index=<n>
   // names which declared fight shape (scripts/rl/specs/enhancement.json's
   // episode.fightMix, 1-based) this run was launched under. 0 is the

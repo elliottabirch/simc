@@ -158,6 +158,7 @@ sim/rl_proc_counters.hpp
 sim/rl_credit.hpp
 sim/rl_target_select.hpp
 sim/rl_translog.hpp
+sim/rl_rng_record.hpp
 sim/expressions.hpp
 sim/gain.hpp
 sim/iteration_data_entry.hpp
@@ -358,6 +359,7 @@ sim/rl_policy_obs.cpp
 sim/rl_policy_net.cpp
 sim/rl_target_select.cpp
 sim/rl_translog.cpp
+sim/rl_rng_record.cpp
 sim/expressions.cpp
 sim/gear_stats.cpp
 sim/option.cpp
