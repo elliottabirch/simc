@@ -18,6 +18,7 @@
 #include "sim/expressions.hpp"
 #include "sim/proc_rng.hpp"
 #include "sim/sim.hpp"
+#include "sim/rl_rng_record.hpp"
 #include "util/rng.hpp"
 
 #include <optional>
@@ -3166,8 +3167,11 @@ void buff_t::reset()
       idx = it != sim->buff_list.end() ? static_cast<size_t>( std::distance( sim->buff_list.begin(), it ) )
                                         : sim->buff_list.size();
     }
-    source_rng_.seed( rng::per_source_seed( sim->seed, sim->thread_index, sim->rng_iteration_index(),
-                                             fmt::format( "{}|buff|{}|{}", owner_name, idx, name_str ) ) );
+    const std::string key = fmt::format( "{}|buff|{}|{}", owner_name, idx, name_str );
+    source_rng_.seed( rng::per_source_seed( sim->seed, sim->thread_index, sim->rng_iteration_index(), key ) );
+    // Random-roll recorder registration (phase 250, plan 250-01 Task 2, D-05). No-op when
+    // rl_rng_record= is unset. Same key the seed above just used -- the seed never changes.
+    rl_rng_record::register_roller( sim, source_rng_, key, rl_rng_record::roller_class_e::buff );
   }
 
   for ( auto e : delay )

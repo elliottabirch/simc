@@ -62,6 +62,7 @@
 #include "sim/proc_rng.hpp"
 #include "sim/scale_factor_control.hpp"
 #include "sim/sim.hpp"
+#include "sim/rl_rng_record.hpp"
 #include "util/io.hpp"
 #include "util/plot_data.hpp"
 #include "util/util.hpp"
@@ -6794,8 +6795,11 @@ void player_t::reset()
   // comment for the full contract.
   if ( sim->per_source_rng )
   {
-    source_rng_.seed( rng::per_source_seed( sim->seed, sim->thread_index, sim->rng_iteration_index(),
-                                             fmt::format( "{}|player", name_str ) ) );
+    const std::string key = fmt::format( "{}|player", name_str );
+    source_rng_.seed( rng::per_source_seed( sim->seed, sim->thread_index, sim->rng_iteration_index(), key ) );
+    // Random-roll recorder registration (phase 250, plan 250-01 Task 2, D-05). No-op when
+    // rl_rng_record= is unset. Same key the seed above just used -- the seed never changes.
+    rl_rng_record::register_roller( sim, source_rng_, key, rl_rng_record::roller_class_e::player );
   }
 
   last_cast = timespan_t::zero();

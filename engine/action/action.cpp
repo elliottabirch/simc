@@ -27,6 +27,7 @@
 #include "sim/rl_credit.hpp"
 #include "sim/rl_target_select.hpp"
 #include "sim/sim.hpp"
+#include "sim/rl_rng_record.hpp"
 #include "util/generic.hpp"
 #include "util/io.hpp"
 #include "util/util.hpp"
@@ -3403,8 +3404,11 @@ void action_t::reset()
     size_t idx = it != player->action_list.end()
                      ? static_cast<size_t>( std::distance( player->action_list.begin(), it ) )
                      : player->action_list.size();
-    source_rng_.seed( rng::per_source_seed( sim->seed, sim->thread_index, sim->rng_iteration_index(),
-                                             fmt::format( "{}|action|{}|{}", player->name_str, idx, name_str ) ) );
+    const std::string key = fmt::format( "{}|action|{}|{}", player->name_str, idx, name_str );
+    source_rng_.seed( rng::per_source_seed( sim->seed, sim->thread_index, sim->rng_iteration_index(), key ) );
+    // Random-roll recorder registration (phase 250, plan 250-01 Task 2, D-05). No-op when
+    // rl_rng_record= is unset. Same key the seed above just used -- the seed never changes.
+    rl_rng_record::register_action_roller( sim, source_rng_, key, this );
   }
 
   if ( pre_execute_state )
