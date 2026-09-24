@@ -63,6 +63,14 @@ namespace rl_policy
 struct rl_weights_t;
 }
 
+// 260924-tlz: write-time zstd compression for the RL translog (TRANSLOG-BUDGET.md Section 6/7,
+// owner ruling 2026-09-24). Forward declaration only -- <zstd.h> is included only in
+// rl_translog.cpp, mirroring rl_translog_stream's own io::ofstream pattern (io.hpp is not
+// pulled into every translation unit that includes sim.hpp). `ZSTD_CStream` is zstd.h's own
+// typedef alias for `ZSTD_CCtx` (`typedef ZSTD_CCtx ZSTD_CStream;`), so `ZSTD_CCtx_s*` here is
+// exactly that pointer type without needing the header.
+struct ZSTD_CCtx_s;
+
 struct sim_progress_t
 {
   int current_iterations;
@@ -722,6 +730,20 @@ struct sim_t : private sc_thread_t
   // record_close() (right after that fight's close row), closed with a footer in write_footer().
   // Root-owned, same single-writer reason as rl_translog_stream above.
   std::unique_ptr<io::ofstream> rl_translog_attr_stream;
+  // 260924-tlz (write-time zstd, owner ruling 2026-09-24, R-TLZ): the main translog stream
+  // above (`rl_translog_stream`) now carries COMPRESSED bytes -- the row layout itself is
+  // unchanged (no FORMAT_VERSION bump), only what gets written to disk. `rl_translog_zstd_cstream`
+  // is the ONE zstd compression context for the whole file's lifetime (created in
+  // open_and_write_header(), freed in write_footer()); `rl_translog_zstd_outbuf` is a reusable
+  // ZSTD_compressStream2 output scratch buffer (sized once, never per-call);
+  // `rl_translog_zstd_rows_in_frame` is the running row count since the last zstd FRAME boundary
+  // -- a frame is force-closed every ZSTD_TRANSLOG_FRAME_ROWS rows (rl_translog.cpp) so an
+  // unclean kill loses at most the trailing partial frame, the zstd-stream counterpart to the
+  // raw layout's own torn-ROW guarantee (D-14). Root-owned, same single-writer reason as every
+  // other rl_translog_* member above.
+  ZSTD_CCtx_s* rl_translog_zstd_cstream = nullptr;
+  std::vector<unsigned char> rl_translog_zstd_outbuf;
+  std::uint32_t rl_translog_zstd_rows_in_frame = 0;
   // tstl-sylvanas phase 218, plan 218-02 (RIG-01). rl_fight_shape_index=<n>
   // names which declared fight shape (scripts/rl/specs/enhancement.json's
   // episode.fightMix, 1-based) this run was launched under. 0 is the

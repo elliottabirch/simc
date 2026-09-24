@@ -41,6 +41,21 @@ if(NOT SC_NO_NETWORKING)
     endif()
 endif()
 
+# 260924-tlz (write-time zstd for the RL translog, owner ruling 2026-09-24, R-TLZ): the RL
+# translog writer (rl_translog.cpp) streams every row through libzstd rather than a raw fwrite.
+# Prefer the package's own CMake config (exports the zstd::libzstd target); fall back to
+# pkg-config's libzstd.pc when no CMake config is installed. Deliberately NO silent fallback to
+# an uncompressed writer if zstd cannot be found -- configure FAILS loudly instead, per the same
+# "compressed output is the only writer path, no opt-out" rule the fork side itself follows.
+find_package(zstd CONFIG QUIET)
+if(zstd_FOUND)
+    target_link_libraries(engine zstd::libzstd)
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
+    target_link_libraries(engine PkgConfig::ZSTD)
+endif()
+
 if(SC_EVENT_QUEUE_DEBUG)
     target_compile_definitions(engine PUBLIC EVENT_QUEUE_DEBUG)
 endif()
