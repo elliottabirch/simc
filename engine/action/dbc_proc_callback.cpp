@@ -96,6 +96,13 @@ struct proc_event_t : public event_t
       rl_cause_guard.emplace( cb->listener,
                                rl_credit::promote( rl_cause_t{ source_state->rl_cause_seq, source_state->rl_cause_class } ) );
     }
+    // 250-03 (REC-04): restores the press active when source_state was stamped (the triggering
+    // hit's own press), across this SAME detached-execution boundary the cause guard above
+    // restores across. A never-stamped source_state (recorder was off, or a heartbeat proc with
+    // no real state) leaves the current frames untouched (D-07).
+    std::optional<rl_rng_record::rl_press_scope_t> rl_press_guard;
+    if ( source_state )
+      rl_press_guard.emplace( cb->listener->sim, source_state );
     cb->execute( spell, target, source_state );
   }
 };
@@ -227,6 +234,14 @@ void dbc_proc_callback_t::trigger( const proc_data_t& source_data, player_t* tar
     }
   }
 
+  // 250-03 (REC-04, R-09/D-07): restores the press active when `state` (the triggering hit's own
+  // state) was stamped, so THIS proc-chance roll carries the press that caused the triggering
+  // hit -- not whatever happened to be current when trigger() itself was called. A null `state`
+  // (no triggering hit -- a heartbeat proc, a no-state trigger) leaves the enclosing press (or
+  // trigger 0, D-07) in place; never fabricates one.
+  std::optional<rl_rng_record::rl_press_scope_t> rl_press_guard;
+  if ( state )
+    rl_press_guard.emplace( listener->sim, state );
   bool triggered = roll( state ? state->action : nullptr );
 
   if ( listener->sim->debug )

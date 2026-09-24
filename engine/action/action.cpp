@@ -32,6 +32,7 @@
 #include "util/io.hpp"
 #include "util/util.hpp"
 
+#include <optional>
 #include <utility>
 
 // ==========================================================================
@@ -91,6 +92,11 @@ void do_execute( action_t* action, execute_type type )
     // whole virtual execute() call (base body plus any override's continuation).
     {
       rl_cause_scope_t rl_cause_guard( action->player, action->rl_resolve_cause(), /*owner=*/action );
+      // 250-03 (REC-04): opens this action's own execute press, spanning the same whole virtual
+      // execute() call the cause guard above spans. No carried state here -- do_execute() has no
+      // deferred-dispatch carried state concept (unlike entry point 1's pre_execute_state).
+      rl_rng_record::rl_press_scope_t rl_press_guard( action->sim, action,
+                                                        rl_rng_record::rl_press_scope_t::mode_e::open_execute );
       action->execute();
     }
     action->line_cooldown->start();
@@ -350,6 +356,13 @@ struct action_execute_event_t : public player_event_t
       // (the charge-flip recreate) and the repeating-reschedule inside the channel-interrupt
       // branch just above both run OUTSIDE this scope, unchanged.
       rl_cause_scope_t rl_cause_guard( action->player, action->rl_resolve_cause(), /*owner=*/action );
+      // 250-03 (REC-04): opens this action's own execute press. `action->pre_execute_state` is
+      // the carried state this deferred event fires with (if any) -- when IT was already stamped
+      // with a press (a proc's schedule_execute(), a tick_action's schedule_execute( tick_state
+      // )), that stamped outer press wins over a fresh one (rl_rng_record.cpp's open_execute()).
+      rl_rng_record::rl_press_scope_t rl_press_guard( action->sim, action,
+                                                        rl_rng_record::rl_press_scope_t::mode_e::open_execute,
+                                                        action->pre_execute_state );
       action->execute();
     }
     else
@@ -1968,7 +1981,30 @@ void action_t::execute()
   interrupt_immediate_occurred = false;
 
   if ( num_targets == 0 && target->is_sleeping() )
+  {
+    // 250-03 (REC-04, A-04): an entry-point dispatch may already have opened THIS action's own
+    // execute press before calling us (inner_owner_is() true); that press still happened (a
+    // button was pressed) even though we are about to bail before any per-target work runs --
+    // tally it so rng_record.py's compare_report() can show it as diagnostic context on an
+    // unexplained mismatch, never silently dropped (REC-03).
+    if ( rl_rng_record::inner_owner_is( sim, this ) )
+      rl_rng_record::note_early_return( sim, this );
     return;
+  }
+
+  // 250-03 (REC-04): a direct execute() call with no entry-point wrapper (impact_action-
+  // >execute(), execute_action->execute(), a proc's cb->execute() dispatching straight into
+  // action->execute(), ...) has not had an open-execute press opened for it yet -- open one
+  // here, function-scoped, covering everything below including any override's post-
+  // Base::execute() tail (this guard lives until execute() returns). When an entry point already
+  // opened THIS action's own press (inner_owner_is() true), skip: opening a second, nested press
+  // for the SAME action's SAME dispatch would double-count it.
+  std::optional<rl_rng_record::rl_press_scope_t> rl_press_fallback_guard;
+  if ( !rl_rng_record::inner_owner_is( sim, this ) )
+  {
+    rl_press_fallback_guard.emplace( sim, this, rl_rng_record::rl_press_scope_t::mode_e::open_execute,
+                                      pre_execute_state );
+  }
 
   if ( sim->log && !dual )
   {
@@ -2043,6 +2079,9 @@ void action_t::execute()
         }
         s->rl_cause_seq   = rl_cause.seq;
         s->rl_cause_class = rl_cause.cls;
+        // 250-03 (REC-04): stamp this state's press alongside its cause -- a later restore (a
+        // travel/proc/tick boundary) recovers the press active right now.
+        rl_rng_record::stamp_state( sim, s );
         s->result       = calculate_result( s );
         s->block_result = calculate_block_result( s );
 
@@ -2066,6 +2105,9 @@ void action_t::execute()
         snapshot_state( s, amount_type( s ) );
       s->rl_cause_seq   = rl_cause.seq;
       s->rl_cause_class = rl_cause.cls;
+      // 250-03 (REC-04): stamp this state's press alongside its cause -- a later restore (a
+      // travel/proc/tick boundary) recovers the press active right now.
+      rl_rng_record::stamp_state( sim, s );
       s->result       = calculate_result( s );
       s->block_result = calculate_block_result( s );
 
@@ -2253,6 +2295,11 @@ void action_t::tick( dot_t* d )
     // inherit its seq, force the class.
     tick_state->rl_cause_seq   = d->state->rl_cause_seq;
     tick_state->rl_cause_class = RL_CAUSE_DOT_TICK;
+    // 250-03 (REC-04): stamp tick_state with the CURRENT press (this dot tick's own tick press,
+    // opened around this call by dot.cpp's dot_tick_event_t::execute()/check_tick_zero()) so the
+    // tick action's later (deferred) execute() restores the tick press as ITS outer press --
+    // exactly the rl_cause_seq inheritance just above, for the press instead of the cause.
+    rl_rng_record::stamp_state( sim, tick_state );
 
     tick_action->schedule_execute( tick_state );
 
@@ -3421,6 +3468,11 @@ void action_t::reset()
   // schedule_execute() call, whose deferred execute() never got to fire and consume it) would
   // leak into iteration N+1's first execute() and mis-stamp it. Pure bookkeeping.
   rl_pending_cause = rl_cause_t{};
+  // 250-03 (REC-04): this action's own execute/tick press counters are per-fight -- zero them
+  // unconditionally (outside the per_source_rng block above: press counting is independent of
+  // whether per-source streams are on, and this is cheap regardless).
+  rl_press_count_ = 0;
+  rl_tick_count_  = 0;
   cooldown->reset_init();
   internal_cooldown->reset_init();
   line_cooldown->reset_init();
@@ -4851,6 +4903,11 @@ void action_t::do_schedule_travel( action_state_t* state, timespan_t time_ )
     // comment -- this wraps impact()'s full virtual dispatch (base body + any override's
     // post-Base::impact() tail), not just action_t::impact()'s own body.
     rl_cause_scope_t rl_cause_guard( player, rl_cause_t{ state->rl_cause_seq, state->rl_cause_class } );
+    // 250-03 (REC-04): restores the press that was active when `state` was stamped (the casting
+    // action's own execute press) across this zero-travel-time boundary -- same span as the
+    // cause guard just above. A never-stamped state (recorder was off) leaves the current frames
+    // untouched (D-07).
+    rl_rng_record::rl_press_scope_t rl_press_guard( sim, state );
     impact( state );
     action_state_t::release( state );
   }
@@ -5894,6 +5951,10 @@ void action_t::execute_on_target( player_t* t, double amount )
   // Either way this action's own execute() then sees ITS OWN frame on top (owner == this) and
   // reuses the cause resolved here rather than re-resolving or double-pushing.
   rl_cause_scope_t rl_cause_guard( player, rl_resolve_cause(), /*owner=*/this );
+  // 250-03 (REC-04): opens this action's own execute press, spanning the same whole virtual
+  // execute() call the cause guard above spans. No carried state -- execute_on_target() has no
+  // deferred-dispatch carried state concept.
+  rl_rng_record::rl_press_scope_t rl_press_guard( sim, this, rl_rng_record::rl_press_scope_t::mode_e::open_execute );
   execute();
 }
 
