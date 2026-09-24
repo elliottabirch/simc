@@ -9,6 +9,7 @@
 #include "item/item.hpp"
 #include "player/player.hpp"
 #include "sim/sim.hpp"
+#include "sim/rl_rng_record.hpp"
 #include "util/rng.hpp"
 
 proc_rng_t::proc_rng_t( rng_type_e type_ ) : player( nullptr ), rng_type_( type_ )
@@ -30,10 +31,20 @@ void proc_rng_t::reseed_source_rng( size_t index_in_list, uint64_t extra_salt )
   if ( !player || !player->sim->per_source_rng )
     return;
 
+  const std::string key = fmt::format( "{}|procrng|{}|{}|{}", player->name_str, index_in_list,
+                                        static_cast<int>( rng_type_ ), name_str );
   source_rng_.seed( rng::per_source_seed( player->sim->seed ^ extra_salt, player->sim->thread_index,
-                                           player->sim->rng_iteration_index(),
-                                           fmt::format( "{}|procrng|{}|{}|{}", player->name_str, index_in_list,
-                                                         static_cast<int>( rng_type_ ), name_str ) ) );
+                                           player->sim->rng_iteration_index(), key ) );
+  // Random-roll recorder registration (phase 250, plan 250-01 Task 2, D-05). No-op when
+  // rl_rng_record= is unset. Registered only on the per-fight call (extra_salt == 0, the
+  // default player.cpp's call uses) -- never from the re-salt walk (sim.cpp's non-zero-salt
+  // call), which reseeds the SAME object and would otherwise re-register it every re-salt with
+  // no new information (this function's caller is responsible for this split per
+  // 250-01-PLAN.md Task 2's proc-object note).
+  if ( extra_salt == 0 )
+  {
+    rl_rng_record::register_roller( player->sim, source_rng_, key, rl_rng_record::roller_class_e::proc_object );
+  }
 }
 
 simple_proc_t::simple_proc_t( std::string_view n, player_t* p, double c )

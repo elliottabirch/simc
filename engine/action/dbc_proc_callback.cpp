@@ -16,6 +16,7 @@
 #include "sim/event.hpp"
 #include "sim/proc_rng.hpp"
 #include "sim/sim.hpp"
+#include "sim/rl_rng_record.hpp"
 #include "util/rng.hpp"
 
 #include <cassert>
@@ -435,9 +436,14 @@ void dbc_proc_callback_t::reset()
     size_t idx = it != listener->callbacks.all_callbacks.end()
                      ? static_cast<size_t>( std::distance( listener->callbacks.all_callbacks.begin(), it ) )
                      : listener->callbacks.all_callbacks.size();
-    source_rng_.seed( rng::per_source_seed(
-        listener->sim->seed, listener->sim->thread_index, listener->sim->rng_iteration_index(),
-        fmt::format( "{}|proc|{}|{}:{}", listener->name_str, idx, effect.spell_id, effect.name() ) ) );
+    const std::string key =
+        fmt::format( "{}|proc|{}|{}:{}", listener->name_str, idx, effect.spell_id, effect.name() );
+    source_rng_.seed( rng::per_source_seed( listener->sim->seed, listener->sim->thread_index,
+                                             listener->sim->rng_iteration_index(), key ) );
+    // Random-roll recorder registration (phase 250, plan 250-01 Task 2, D-05). No-op when
+    // rl_rng_record= is unset. Same key the seed above just used -- the seed never changes.
+    rl_rng_record::register_roller( listener->sim, source_rng_, key,
+                                     rl_rng_record::roller_class_e::proc_callback );
   }
 }
 
