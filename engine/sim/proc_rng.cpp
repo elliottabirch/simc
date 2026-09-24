@@ -191,7 +191,14 @@ void shuffled_rng_t::reset( reset_type_e /* reset_type */)
 int shuffled_rng_t::trigger( action_state_t* )
 {
   if ( position == entries.end() )
+  {
+    // 250-03 (REC-06, D-08, R-04): an inline reshuffle when the deck runs out mid-fight -- refill
+    // number 2, 3, ... -- placed at the CALL SITE (never inside reset() itself, for the same
+    // virtual-dispatch reason player.cpp's fight-start call is) so a fully overriding subclass
+    // (sc_shaman.cpp's dre_deck_rng_t) still gets tagged.
+    rl_rng_record::rl_refill_scope_t rl_refill_guard( player->sim, this );
     reset( reset_type_e::COMBAT );
+  }
 
   return *position++;
 }

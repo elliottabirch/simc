@@ -16,6 +16,9 @@
 #include "action/action_state.hpp"
 #include "player/player.hpp"
 #include "player/stats.hpp"
+#include "sim/proc_rng.hpp"
+#include "sim/raid_event.hpp"
+#include "sim/rl_proc_counters.hpp"
 #include "sim/sim.hpp"
 #include "util/io.hpp"
 #include "util/rng.hpp"
@@ -160,6 +163,7 @@ public:
   void mark_resalt();
   std::uint32_t register_roller( rng::rng_t& stream, std::string_view key, roller_class_e cls,
                                   const action_t* action );
+  void register_raid_event( raid_event_t& event );
 
   // ---- Press-tag interface (plan 250-03, REC-04) -- called only from rl_press_scope_t's
   // out-of-line ctors/dtor and the free functions at the bottom of this file. ----
@@ -168,6 +172,9 @@ public:
   const action_t* current_inner_owner() const { return current_inner_owner_; }
   void open_execute( action_t* action, const action_state_t* carried_state );
   void open_tick( action_t* action );
+  void open_refill( proc_rng_t* deck );
+  void annotate_draw( rng::rng_t& stream, std::uint64_t before, double chance, bool outcome, std::uint8_t label );
+  void label_last_roll( std::uint8_t label, double chance, bool success );
   void restore_from_state( const action_state_t* state );
   void restore_frames( const press_frame_t& outer, const press_frame_t& inner, const action_t* inner_owner );
   void stamp_state( action_state_t* state );
@@ -216,6 +223,18 @@ private:
   // two DIFFERENT rollers share a key -- reported under the sidecar's duplicateKeys, never
   // merged (D-05).
   std::unordered_map<std::string, std::vector<std::uint32_t>> keys_seen_;
+
+  // Per-label matched/unmatched call tallies (plan 250-03, R-09) -- whole-recording, not cleared
+  // at fight_begin() (mirrors first_cast_presses/early_return_presses's own whole-recording
+  // rationale: diagnostic context, never itself part of a reconciliation check). std::map for a
+  // stable, sorted sidecar write order; label ids are sparse (rl_proc::id+1, or 255) so this is
+  // never more than ~21 entries.
+  struct label_tally_t
+  {
+    std::uint32_t matched = 0;
+    std::uint32_t unmatched = 0;
+  };
+  std::map<std::uint8_t, label_tally_t> label_calls_;
 
   // ---- Press-tag state (plan 250-03, REC-04). Process-wide, not per-player: the recorder
   // forces threads=1 (R-08) whenever it is active, so there is exactly one call stack to track.
@@ -338,6 +357,55 @@ void recorder_t::on_roll_outcome( std::uint32_t roller, std::uint64_t draw_ordin
   ++outcome_mismatches_;
 }
 
+void recorder_t::annotate_draw( rng::rng_t& stream, std::uint64_t before, double chance, bool outcome,
+                                 std::uint8_t label )
+{
+  // Exactly one draw happened on `stream` since `before` -- a one-result attack table (no crit
+  // roll possible) draws nothing and is correctly left un-annotated; more than one draw means
+  // this wasn't a single, unambiguous attack-table roll (defensive; not expected from the call
+  // site's own placement).
+  const std::uint64_t after = stream.rl_draw_counter();
+  if ( after != before + 1 )
+    return;
+
+  const std::uint32_t roller = stream.rl_roller_id();
+  if ( roller != last_roll_stream_ || after != last_roll_ordinal_ || buffer_.size() < RECORD_SIZE )
+    return;
+
+  record rec;
+  std::memcpy( &rec, buffer_.data() + buffer_.size() - RECORD_SIZE, RECORD_SIZE );
+  if ( rec.kind != KIND_ROLL || rec.stream != roller || rec.draw_ordinal != after )
+    return;
+
+  rec.chance = chance;
+  rec.outcome = outcome ? OUTCOME_SUCCESS : OUTCOME_FAIL;
+  rec.label = label;
+  rec.flags = static_cast<std::uint8_t>( rec.flags | FLAG_ANNOTATED );
+  std::memcpy( buffer_.data() + buffer_.size() - RECORD_SIZE, &rec, RECORD_SIZE );
+}
+
+void recorder_t::label_last_roll( std::uint8_t label, double chance, bool success )
+{
+  bool matched = false;
+  if ( buffer_.size() >= RECORD_SIZE )
+  {
+    record rec;
+    std::memcpy( &rec, buffer_.data() + buffer_.size() - RECORD_SIZE, RECORD_SIZE );
+    if ( rec.kind == KIND_ROLL && rec.label == LABEL_NONE && rec.chance == chance &&
+         rec.outcome == ( success ? OUTCOME_SUCCESS : OUTCOME_FAIL ) )
+    {
+      rec.label = label;
+      std::memcpy( buffer_.data() + buffer_.size() - RECORD_SIZE, &rec, RECORD_SIZE );
+      matched = true;
+    }
+  }
+  label_tally_t& tally = label_calls_[ label ];
+  if ( matched )
+    ++tally.matched;
+  else
+    ++tally.unmatched;
+}
+
 void recorder_t::on_no_draw_roll( std::uint32_t& roller_slot, const std::uint64_t& draw_counter )
 {
   const std::uint32_t stream_id = ensure_registered( roller_slot, draw_counter );
@@ -379,6 +447,28 @@ std::uint32_t recorder_t::register_roller( rng::rng_t& stream, std::string_view 
   auto& ids = keys_seen_[ std::string( key ) ];
   ids.push_back( id );
   return id;
+}
+
+void recorder_t::register_raid_event( raid_event_t& event )
+{
+  // Idempotent: both raid_event_t::reset() overrides call the base reset() first (which is where
+  // this is called from), so a nested event's own override and the base's call for that SAME
+  // event both reach here -- keep the existing number rather than assigning a second one.
+  if ( event.rl_roller_id != rng::RL_ROLLER_UNREGISTERED && event.rl_roller_id < rollers_.size() )
+    return;
+
+  const auto id = static_cast<std::uint32_t>( rollers_.size() );
+  rollers_.emplace_back();
+  roller_entry_t& entry = rollers_.back();
+  entry.key = fmt::format( "sim|raid_event|{}|{}|{}", event.internal_id, event.type,
+                            event.name.empty() ? event.type : event.name );
+  entry.cls = roller_class_e::raid_event;
+  // No stream/draw_counter of its own (R-01) -- fight_end()'s begin/end-ordinal reads are already
+  // null-safe (`r.draw_counter ? *r.draw_counter : ...`), same as any other logical-only roller.
+  event.rl_roller_id = id;
+
+  auto& ids = keys_seen_[ entry.key ];
+  ids.push_back( id );
 }
 
 std::uint32_t recorder_t::ensure_action_roller( rng::rng_t& stream )
@@ -492,6 +582,24 @@ void recorder_t::restore_frames( const press_frame_t& outer, const press_frame_t
   current_outer_ = outer;
   current_inner_ = inner;
   current_inner_owner_ = inner_owner;
+}
+
+void recorder_t::open_refill( proc_rng_t* deck )
+{
+  if ( !deck || deck->type() != RNG_SHUFFLE )
+    return;
+  const std::uint32_t roller = deck->rl_roller_id();
+  if ( roller == rng::RL_ROLLER_UNREGISTERED || roller >= rollers_.size() )
+    return;  // per_source_rng off, or this deck was never registered -- nothing to tag against
+
+  ++rollers_[ roller ].refills;
+  const press_frame_t new_frame{ TRIGGER_KIND_REFILL, roller, rollers_[ roller ].refills };
+  // A refill wins over any enclosing press, unconditionally (REC-06, D-08, R-04) -- unlike
+  // open_execute()'s carried-state/already-open-outer branches, there is no "keep the enclosing
+  // frame" case here.
+  current_outer_ = new_frame;
+  current_inner_ = new_frame;
+  current_inner_owner_ = nullptr;
 }
 
 void recorder_t::stamp_state( action_state_t* state )
@@ -775,7 +883,25 @@ void recorder_t::write_sidecar()
     }
     sidecar << "]}";
   }
-  sidecar << "]}";
+  sidecar << "], \"labelNames\": {";
+  for ( std::uint32_t i = 0; i < rl_proc::COUNT; ++i )
+  {
+    if ( i != 0 )
+      sidecar << ", ";
+    sidecar << "\"" << ( i + 1 ) << "\": \"" << rl_proc::NAMES[ i ] << "\"";
+  }
+  sidecar << ", \"" << static_cast<int>( LABEL_SWING_TABLE ) << "\": \"swing_attack_table\"}";
+  sidecar << ", \"labelCalls\": {";
+  bool first_label = true;
+  for ( const auto& kv : label_calls_ )
+  {
+    if ( !first_label )
+      sidecar << ", ";
+    first_label = false;
+    sidecar << "\"" << static_cast<int>( kv.first ) << "\": {\"matched\": " << kv.second.matched
+            << ", \"unmatched\": " << kv.second.unmatched << "}";
+  }
+  sidecar << "}}";
 
   if ( !sidecar )
   {
@@ -867,6 +993,14 @@ void register_roller( sim_t* sim, rng::rng_t& stream, std::string_view key, roll
   root->rl_rng_recorder->register_roller( stream, key, cls, nullptr );
 }
 
+void register_raid_event( sim_t* sim, raid_event_t& event )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder )
+    return;
+  root->rl_rng_recorder->register_raid_event( event );
+}
+
 void register_action_roller( sim_t* sim, rng::rng_t& stream, std::string_view key, const action_t* action )
 {
   sim_t* root = root_of( sim );
@@ -952,6 +1086,59 @@ rl_press_scope_t::~rl_press_scope_t()
   root->rl_rng_recorder->restore_frames( saved_outer_, saved_inner_, saved_inner_owner_ );
 }
 
+// ---- rl_raid_draw_scope_t (plan 250-03, REC-05/R-01). Out-of-line ctors/dtor for the same
+// reason rl_press_scope_t's are -- needs recorder_t complete. Sets/restores sim->rng()'s OWN
+// rl_roller_override_ (util/rng.hpp), never rollers_ or any press frame -- a raid event's draw is
+// tagged at the physical-stream level (on_draw()'s existing roller_override parameter), not
+// through the press mechanism. ----
+
+rl_raid_draw_scope_t::rl_raid_draw_scope_t( sim_t* sim, const raid_event_t& event )
+  : sim_( sim )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder )
+    return;
+
+  active_ = true;
+  saved_override_ = sim->rng().rl_roller_override();
+  sim->rng().rl_set_roller_override( event.rl_roller_id );
+}
+
+rl_raid_draw_scope_t::~rl_raid_draw_scope_t()
+{
+  if ( !active_ )
+    return;
+  sim_->rng().rl_set_roller_override( saved_override_ );
+}
+
+// ---- rl_refill_scope_t (plan 250-03, REC-06/D-08/R-04). Out-of-line ctors/dtor, same reason as
+// the guards above. ----
+
+rl_refill_scope_t::rl_refill_scope_t( sim_t* sim, proc_rng_t* deck )
+  : sim_( sim )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder )
+    return;
+
+  active_ = true;
+  saved_outer_ = root->rl_rng_recorder->current_outer();
+  saved_inner_ = root->rl_rng_recorder->current_inner();
+  saved_inner_owner_ = root->rl_rng_recorder->current_inner_owner();
+
+  root->rl_rng_recorder->open_refill( deck );
+}
+
+rl_refill_scope_t::~rl_refill_scope_t()
+{
+  if ( !active_ )
+    return;
+  sim_t* root = root_of( sim_ );
+  if ( !root->rl_rng_recorder )
+    return;
+  root->rl_rng_recorder->restore_frames( saved_outer_, saved_inner_, saved_inner_owner_ );
+}
+
 void stamp_state( sim_t* sim, action_state_t* state )
 {
   sim_t* root = root_of( sim );
@@ -982,6 +1169,23 @@ press_snapshot_t snapshot_press( sim_t* sim )
   if ( !root->rl_rng_recorder )
     return press_snapshot_t{};
   return press_snapshot_t{ root->rl_rng_recorder->current_outer(), root->rl_rng_recorder->current_inner() };
+}
+
+void annotate_draw( sim_t* sim, rng::rng_t& stream, std::uint64_t before, double chance, bool outcome,
+                     std::uint8_t label )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder )
+    return;
+  root->rl_rng_recorder->annotate_draw( stream, before, chance, outcome, label );
+}
+
+void label_last_roll( sim_t* sim, std::uint8_t label, double chance, bool success )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder )
+    return;
+  root->rl_rng_recorder->label_last_roll( label, chance, success );
 }
 
 } // namespace rl_rng_record

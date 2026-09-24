@@ -11,6 +11,7 @@
 #include "player/stats.hpp"
 #include "sim/cooldown.hpp"
 #include "sim/event.hpp"
+#include "sim/rl_rng_record.hpp"
 #include "sim/sim.hpp"
 #include "util/rng.hpp"
 
@@ -285,6 +286,23 @@ result_e attack_t::calculate_result( action_state_t* s ) const
   attack_table.build_table( miss, dodge, parry, may_glance ? glance_chance( delta_level ) : 0.0,
                             !special ? std::min( 1.0, crit ) : 0.0, sim );
 
+  // 250-03 (REC-04, R-09): captured BEFORE the attack-table branch below so annotate_draw() can
+  // tell "exactly one draw happened" (the num_results > 1 branch's rng().real()) from "no draw at
+  // all" (a one-result table, num_results == 1, e.g. a target immune to everything but a hit).
+  const std::uint64_t rl_swing_draw_before = rng().rl_draw_counter();
+  // 250-03 (REC-04, R-09, Rule 1 fix): the actual raw draw, when one happens -- needed below to
+  // compute an outcome that is SELF-CONSISTENT with rng_record.py check()'s hard raw<chance
+  // invariant. "crit share" alone is NOT sufficient: build_table() orders brackets
+  // [miss, dodge, parry, glance, crit, hit] cumulatively, so a crit is raw landing in
+  // (miss+dodge+parry+glance, +crit_share] -- NOT raw < crit_share from zero. Against a boss with
+  // non-zero avoidance (the common case; this is not a "no misses" fixture) those preceding
+  // brackets ARE sometimes non-zero, so "outcome = result == RESULT_CRIT" paired with
+  // "chance = crit_share" fails check() on exactly the swings where an earlier bracket has
+  // nonzero width -- measured on the Patchwerk fixture: 170 of 694 swing-table annotations.
+  // Recording outcome = (raw < crit_share) instead is always consistent with the stored raw (the
+  // roll itself is never touched, D-17) and is exactly what "crit chance" means in isolation.
+  double rl_swing_draw_raw = 0.0;
+
   if ( attack_table.num_results == 1 )
   {
     result = attack_table.results.front();
@@ -294,6 +312,7 @@ result_e attack_t::calculate_result( action_state_t* s ) const
     // 1-roll attack table with true RNG
 
     double random = rng().real();
+    rl_swing_draw_raw = random;
 
     for ( int i = 0; i < attack_table.num_results; ++i )
     {
@@ -312,6 +331,8 @@ result_e attack_t::calculate_result( action_state_t* s ) const
   // is added here.
   if ( !special )
   {
+    rl_rng_record::annotate_draw( sim, rng(), rl_swing_draw_before, std::min( 1.0, crit ),
+                                   rl_swing_draw_raw < std::min( 1.0, crit ), rl_rng_record::LABEL_SWING_TABLE );
     rl_count_proc( player, rl_proc::id::auto_attack_hit, 1.0 - std::min( 1.0, miss + dodge + parry ),
                    result != RESULT_MISS && result != RESULT_DODGE && result != RESULT_PARRY );
     if ( may_crit )

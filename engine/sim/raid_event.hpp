@@ -43,6 +43,11 @@ public:
   std::string pull_target_str;
   // Every raid event is given a unique internal_id in init()
   int internal_id;
+  // 250-03 (REC-05/R-01): this raid event's own roller number in the rl_rng_record= recording --
+  // registered once, at this event's own reset() (base raid_event_t::reset(), covering both
+  // override subclasses that call it first). The event never gets a stream of its own; every one
+  // of its draws stays on the shared stream, tagged only via rl_raid_draw_scope_t's override.
+  std::uint32_t rl_roller_id = rng::RL_ROLLER_UNREGISTERED;
 
   // Player filter options
   double distance_min;   // Minimal player distance

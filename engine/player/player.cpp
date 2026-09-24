@@ -6907,6 +6907,11 @@ void player_t::reset()
   for ( size_t rng_idx = 0; rng_idx < proc_rng_list.size(); ++rng_idx )
   {
     proc_rng_list[ rng_idx ]->reseed_source_rng( rng_idx );
+    // 250-03 (REC-06, D-08, R-04): the fight-start deck reshuffle -- refill number 1 -- placed at
+    // the CALL SITE (never inside shuffled_rng_t::reset() itself) so virtual dispatch to a fully
+    // overriding subclass (sc_shaman.cpp's dre_deck_rng_t, which never calls the base reset())
+    // still gets tagged, whichever override actually runs.
+    rl_rng_record::rl_refill_scope_t rl_refill_guard( sim, proc_rng_list[ rng_idx ] );
     proc_rng_list[ rng_idx ]->reset( reset_type_e::ITERATION );
   }
 
