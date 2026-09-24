@@ -34,6 +34,7 @@
 #include "sim/rl_policy.hpp"
 #include "sim/rl_target_select.hpp"
 #include "sim/rl_translog.hpp"
+#include "sim/rl_rng_record.hpp"
 #include "sim/scale_factor_control.hpp"
 #include "sim/sim_control.hpp"
 #include "sim/solver_control.hpp"
@@ -1965,6 +1966,12 @@ void sim_t::reset()
   else if ( deterministic )
     seed = rng().reseed();
 
+  // Random-roll recorder fight-begin hook (phase 250, plan 250-01, REC-01/02/03). No-op when
+  // rl_rng_record= is unset. Placed here, before event_mgr.reset() and every actor/buff/
+  // raid-event reset below, so every per-fight registration call those resets make lands
+  // inside this fight's FIGHT_BEGIN..FIGHT_END window.
+  rl_rng_record::fight_begin( this );
+
   event_mgr.reset();
 
   expected_iteration_time = max_time * iteration_time_adjust();
@@ -2036,6 +2043,12 @@ void sim_t::resalt_source_rngs( uint64_t salt )
 {
   if ( !per_source_rng )
     return;
+
+  // Random-roll recorder re-salt marker (phase 250, plan 250-01, REC-01/02/03, R-01). No-op
+  // when rl_rng_record= is unset. Writes one RESALT entry and flips the after-re-salt flag
+  // every later ROLL entry this fight carries -- changes nothing the re-salt itself does below;
+  // no stream is touched here, only an entry written and a flag set.
+  rl_rng_record::mark_resalt( this );
 
   // Reseed the shared stream too -- anything not yet migrated to a per-source holder still
   // draws from this (sim->rng() / sim_t::_rng). Uses the SAME per_source_seed() derivation as
@@ -2331,6 +2344,12 @@ void sim_t::combat_end()
   // close row is written on BOTH transports and with neither (D-08).
   // No-op when rl_translog= is unset.
   rl_translog::record_close( this );
+
+  // Random-roll recorder fight-end hook (phase 250, plan 250-01, REC-01/02/03). No-op when
+  // rl_rng_record= is unset. Writes this fight's per-roller COUNTER entries and a FIGHT_END
+  // entry, then flushes the fight's buffered rows to disk in one write -- mirrors
+  // rl_translog::record_close()'s own placement and flush cadence immediately above.
+  rl_rng_record::fight_end( this );
 
   //assert( active_enemies == 0 );
   //assert( active_allies == 0 );
@@ -3875,6 +3894,11 @@ bool sim_t::execute()
     // No-op when rl_translog= is unset.
     rl_translog::write_footer( this );
 
+    // Random-roll recorder footer (phase 250, plan 250-01, REC-01/02/03). No-op when
+    // rl_rng_record= is unset. Writes the FOOTER entry, flushes and closes the stream, writes
+    // the <path>.rollers.json sidecar and prints the summary line to stderr.
+    rl_rng_record::write_footer( this );
+
     // tstl-sylvanas phase 220, plan 220-01 (OBS-07). rl_obs_timing=1
     // readout -- deliberately NOT written into the translog footer (that
     // would couple a perf number into the transport in the same phase
@@ -4371,6 +4395,9 @@ void sim_t::create_options()
   // to today's per_source_rng=1 behavior when unset.
   add_option( opt_timespan( "per_source_rng_resalt_at", per_source_rng_resalt_at ) );
   add_option( opt_uint64( "per_source_rng_salt", per_source_rng_salt ) );
+  // Random-roll recorder (tstl-sylvanas phase 250, plan 250-01, REC-01/02/03). See sim.hpp's
+  // rl_rng_record_file_str doc comment. Default empty, byte-identical to today's behavior.
+  add_option( opt_string( "rl_rng_record", rl_rng_record_file_str ) );
   // Iteration-batched scorecard seeding (tstl-sylvanas quick task 260919-scb). See sim.hpp's
   // rl_iteration_seeds doc comment. Default empty, byte-identical to today's behavior.
   add_option( opt_func( "rl_iteration_seeds", parse_rl_iteration_seeds ) );
@@ -5173,6 +5200,64 @@ void sim_t::setup( sim_control_t* c )
   // at all -- confirmed by a scoped grep: the symbol appears nowhere under engine/sim/rl_* or
   // decision_dump.cpp). average_range=0 with solver_policy=/decision_dump= is no longer a
   // read-only-observation hazard.
+
+  // Random-roll recorder (phase 250, plan 250-01, REC-01/02/03). Refused by name, in order,
+  // before the file is ever opened -- per_source_rng, then threads, then profilesets, then
+  // non-root sim (R-08's "refusal order" contract) -- so a refused run leaves no file (D-17,
+  // must_haves). An empty rl_rng_record_file_str is the same as unset (REC-02).
+  if ( !rl_rng_record_file_str.empty() )
+  {
+    if ( !per_source_rng )
+    {
+      throw sc_invalid_sim_argument(
+          "rl_rng_record requires per_source_rng=1 -- refusing to record rollers that are not "
+          "per-source (see rl_rng_record.hpp)." );
+    }
+
+    // R-08: refused by name, never clamped -- every RL fixture that would use this option
+    // already runs threads=1, and (unlike rl_translog=/solver_policy= just below) silently
+    // forcing threads=1 here would make a recorded run a DIFFERENT run than an unrecorded one,
+    // which D-17 forbids. `threads` at this point is the EFFECTIVE count: adjust_threads() and
+    // the log=1 clamp both already ran above.
+    if ( threads > 1 )
+    {
+      throw sc_invalid_sim_argument(
+          fmt::format( "rl_rng_record requires threads=1 (effective threads={}) -- refusing "
+                       "rather than forcing one thread, because a recorded run must be the "
+                       "same run as an unrecorded one.",
+                       threads ) );
+    }
+
+    // Profileset refusal, re-worded from rl_translog='s/solver_policy='s: each profileset
+    // child sim would inherit this same rl_rng_record_file_str and would truncate the same
+    // file the others write -- there is no safe value to force, so refuse rather than silently
+    // drop rows.
+    if ( !profileset_map.empty() )
+    {
+      throw sc_runtime_error(
+          fmt::format( "rl_rng_record= cannot be combined with profilesets ({} defined): each "
+                       "profileset runs in its own sim and would share one recorder file. Run "
+                       "one simc process per profile with a distinct rl_rng_record= path "
+                       "instead.",
+                       profileset_map.size() ) );
+    }
+
+    // Mirrors rl_translog='s NT-03/WR-03 non-root refusal just below: only the root sim ever
+    // opens the recorder stream, so a non-root sim reaching this point with a non-empty
+    // rl_rng_record_file_str would otherwise silently accept the option and write nothing.
+    if ( parent )
+    {
+      throw sc_runtime_error(
+          "rl_rng_record= is set on a non-root sim (a profileset's own option block, or a "
+          "calculate_scale_factors=1/dps_plot_stats=/reforge_plot_stat= child sim): only the "
+          "root sim ever opens the recorder stream, so this option would be silently accepted "
+          "while nothing is ever written for this sim's fights. Set rl_rng_record= on the "
+          "top-level sim options only, and run those analyses without it." );
+    }
+
+    // Root only -- see sim.hpp's rl_rng_recorder member comment.
+    rl_rng_record::open_and_write_header( this );
+  }
 
   // Flight recorder clamp (phase 212, plan 212-01, TLOG-01/02/03). Same
   // shape as solver_control='s and solver_policy='s clamps just above --
