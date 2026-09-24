@@ -99,12 +99,12 @@ struct rl_talent_gate
 inline constexpr const char* RL_REGISTRY_ID = "enhancement";
 inline constexpr const char* RL_ACTOR_NAME = "MID2_Shaman_Enhancement_Stormbringer";
 inline constexpr int RL_ENCODER_VERSION = 6;
-inline constexpr std::size_t RL_OBS_DIM = 299;
+inline constexpr std::size_t RL_OBS_DIM = 297;
 inline constexpr std::size_t RL_ACTION_DIM = 16;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
-inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:0a118a4e614ec4c5a3edf850d6287080cbb7e8a3562bd65b4005631f13204d32";
+inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:2e734972fde4a0710144faef19ea5753d74d5ae8eaeb3df3c3e6d76a25fb1aad";
 inline constexpr const char* RL_MASK_RULES_SHA = "3f930294d36b217dca01fc51600c0da9d0568e20152fb53c588b6e8ddccf7662";
 inline constexpr const char* RL_ACTION_SPACE_SHA = "5ee0d827b3a19bb2b38bf36f38901cacd7c5f0d002dd99ce0a8b57c0e8d65b77";
 
@@ -311,7 +311,6 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "deck.tempest_procs_this_deck.value",
   "deck.tempest_spends_since_proc.value",
   "deck.ti_chain_lightning.value",
-  "stats.agility.value",
   "stats.crit.value",
   "stats.crit_rating.value",
   "stats.damage_versatility.value",
@@ -355,7 +354,6 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "fight_remains",
   "active_enemies",
   "raid_event_next_in",
-  "time_to_bloodlust",
   "dying_within_5s",
   "dying_within_15s",
   "enemies_in_front",
@@ -852,42 +850,38 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_DECK_MEMBERS[] = {
 };
 
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_0[] = {
-    { "value", rl_kind::k_float, 0.0, true, 5000.0, false, 1.0, nullptr, 0, false },
+    { "value", rl_kind::k_float, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_1[] = {
-    { "value", rl_kind::k_float, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-};
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_2[] = {
     { "value", rl_kind::k_float, 0.0, true, 3000.0, false, 1.0, nullptr, 0, false },
 };
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_3[] = {
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_2[] = {
     { "value", rl_kind::k_float, 0.0, true, 0.15, false, 1.0, nullptr, 0, false },
 };
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_4[] = {
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_3[] = {
     { "value", rl_kind::k_float, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_4[] = {
+    { "value", rl_kind::k_float, 0.0, true, 4000.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_5[] = {
     { "value", rl_kind::k_float, 0.0, true, 4000.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_6[] = {
-    { "value", rl_kind::k_float, 0.0, true, 4000.0, false, 1.0, nullptr, 0, false },
-};
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_7[] = {
     { "value", rl_kind::k_float, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
 };
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_8[] = {
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_7[] = {
     { "value", rl_kind::k_float, 0.0, true, 750.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_obs_member RL_OBS_FAMILY_STATS_MEMBERS[] = {
-  { "agility", "agility", RL_OBS_FAMILY_STATS_LEAVES_0, 1 },
-  { "crit", "crit", RL_OBS_FAMILY_STATS_LEAVES_1, 1 },
-  { "crit_rating", "crit_rating", RL_OBS_FAMILY_STATS_LEAVES_2, 1 },
-  { "damage_versatility", "damage_versatility", RL_OBS_FAMILY_STATS_LEAVES_3, 1 },
-  { "haste", "haste", RL_OBS_FAMILY_STATS_LEAVES_4, 1 },
-  { "haste_rating", "haste_rating", RL_OBS_FAMILY_STATS_LEAVES_5, 1 },
-  { "mastery_rating", "mastery_rating", RL_OBS_FAMILY_STATS_LEAVES_6, 1 },
-  { "mastery_value", "mastery_value", RL_OBS_FAMILY_STATS_LEAVES_7, 1 },
-  { "versatility_rating", "versatility_rating", RL_OBS_FAMILY_STATS_LEAVES_8, 1 },
+  { "crit", "crit", RL_OBS_FAMILY_STATS_LEAVES_0, 1 },
+  { "crit_rating", "crit_rating", RL_OBS_FAMILY_STATS_LEAVES_1, 1 },
+  { "damage_versatility", "damage_versatility", RL_OBS_FAMILY_STATS_LEAVES_2, 1 },
+  { "haste", "haste", RL_OBS_FAMILY_STATS_LEAVES_3, 1 },
+  { "haste_rating", "haste_rating", RL_OBS_FAMILY_STATS_LEAVES_4, 1 },
+  { "mastery_rating", "mastery_rating", RL_OBS_FAMILY_STATS_LEAVES_5, 1 },
+  { "mastery_value", "mastery_value", RL_OBS_FAMILY_STATS_LEAVES_6, 1 },
+  { "versatility_rating", "versatility_rating", RL_OBS_FAMILY_STATS_LEAVES_7, 1 },
 };
 
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_SWING_CAST_LEAVES_0[] = {
@@ -1006,43 +1000,42 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_PROC_CHANCES_MEMBERS[] = {
   { "windfury", "windfury_proc_chance_current", RL_OBS_FAMILY_PROC_CHANCES_LEAVES_1, 1 },
 };
 
-inline constexpr double RL_BUCKETS_SLOT267[] = { 0.0, 2.0 };
-inline constexpr double RL_BUCKETS_SLOT268[] = { 0.0, 3.0 };
-inline constexpr double RL_BUCKETS_SLOT269[] = { 0.0, 4.0 };
-inline constexpr double RL_BUCKETS_SLOT270[] = { 0.0, 5.0 };
-inline constexpr double RL_BUCKETS_SLOT271[] = { 0.0, 2.0 };
-inline constexpr double RL_BUCKETS_SLOT272[] = { 0.0, 3.0 };
-inline constexpr double RL_BUCKETS_SLOT273[] = { 0.0, 4.0 };
-inline constexpr double RL_BUCKETS_SLOT274[] = { 0.0, 5.0 };
-inline constexpr double RL_BUCKETS_SLOT275[] = { 0.0, 2.0 };
-inline constexpr double RL_BUCKETS_SLOT276[] = { 0.0, 3.0 };
-inline constexpr double RL_BUCKETS_SLOT277[] = { 0.0, 4.0 };
-inline constexpr double RL_BUCKETS_SLOT278[] = { 0.0, 5.0 };
-inline constexpr double RL_BUCKETS_SLOT279[] = { 0.0, 1.0 };
-inline constexpr double RL_BUCKETS_SLOT280[] = { 0.0, 2.0 };
-inline constexpr double RL_BUCKETS_SLOT281[] = { 0.0, 3.0 };
-inline constexpr double RL_BUCKETS_SLOT282[] = { 0.0, 4.0 };
-inline constexpr double RL_BUCKETS_SLOT283[] = { 0.0, 5.0 };
-inline constexpr double RL_BUCKETS_SLOT284[] = { 0.0, 1.0 };
-inline constexpr double RL_BUCKETS_SLOT285[] = { 0.0, 2.0 };
-inline constexpr double RL_BUCKETS_SLOT286[] = { 0.0, 3.0 };
-inline constexpr double RL_BUCKETS_SLOT287[] = { 0.0, 4.0 };
-inline constexpr double RL_BUCKETS_SLOT288[] = { 0.0, 5.0 };
-inline constexpr double RL_BUCKETS_SLOT289[] = { 0.0, 1.0 };
-inline constexpr double RL_BUCKETS_SLOT290[] = { 0.0, 2.0 };
-inline constexpr double RL_BUCKETS_SLOT291[] = { 0.0, 3.0 };
-inline constexpr double RL_BUCKETS_SLOT292[] = { 0.0, 4.0 };
-inline constexpr double RL_BUCKETS_SLOT293[] = { 0.0, 5.0 };
-inline constexpr double RL_BUCKETS_SLOT294[] = { 0.0, 1.0 };
-inline constexpr double RL_BUCKETS_SLOT295[] = { 0.0, 2.0 };
-inline constexpr double RL_BUCKETS_SLOT296[] = { 0.0, 3.0 };
-inline constexpr double RL_BUCKETS_SLOT297[] = { 0.0, 4.0 };
-inline constexpr double RL_BUCKETS_SLOT298[] = { 0.0, 5.0 };
+inline constexpr double RL_BUCKETS_SLOT265[] = { 0.0, 2.0 };
+inline constexpr double RL_BUCKETS_SLOT266[] = { 0.0, 3.0 };
+inline constexpr double RL_BUCKETS_SLOT267[] = { 0.0, 4.0 };
+inline constexpr double RL_BUCKETS_SLOT268[] = { 0.0, 5.0 };
+inline constexpr double RL_BUCKETS_SLOT269[] = { 0.0, 2.0 };
+inline constexpr double RL_BUCKETS_SLOT270[] = { 0.0, 3.0 };
+inline constexpr double RL_BUCKETS_SLOT271[] = { 0.0, 4.0 };
+inline constexpr double RL_BUCKETS_SLOT272[] = { 0.0, 5.0 };
+inline constexpr double RL_BUCKETS_SLOT273[] = { 0.0, 2.0 };
+inline constexpr double RL_BUCKETS_SLOT274[] = { 0.0, 3.0 };
+inline constexpr double RL_BUCKETS_SLOT275[] = { 0.0, 4.0 };
+inline constexpr double RL_BUCKETS_SLOT276[] = { 0.0, 5.0 };
+inline constexpr double RL_BUCKETS_SLOT277[] = { 0.0, 1.0 };
+inline constexpr double RL_BUCKETS_SLOT278[] = { 0.0, 2.0 };
+inline constexpr double RL_BUCKETS_SLOT279[] = { 0.0, 3.0 };
+inline constexpr double RL_BUCKETS_SLOT280[] = { 0.0, 4.0 };
+inline constexpr double RL_BUCKETS_SLOT281[] = { 0.0, 5.0 };
+inline constexpr double RL_BUCKETS_SLOT282[] = { 0.0, 1.0 };
+inline constexpr double RL_BUCKETS_SLOT283[] = { 0.0, 2.0 };
+inline constexpr double RL_BUCKETS_SLOT284[] = { 0.0, 3.0 };
+inline constexpr double RL_BUCKETS_SLOT285[] = { 0.0, 4.0 };
+inline constexpr double RL_BUCKETS_SLOT286[] = { 0.0, 5.0 };
+inline constexpr double RL_BUCKETS_SLOT287[] = { 0.0, 1.0 };
+inline constexpr double RL_BUCKETS_SLOT288[] = { 0.0, 2.0 };
+inline constexpr double RL_BUCKETS_SLOT289[] = { 0.0, 3.0 };
+inline constexpr double RL_BUCKETS_SLOT290[] = { 0.0, 4.0 };
+inline constexpr double RL_BUCKETS_SLOT291[] = { 0.0, 5.0 };
+inline constexpr double RL_BUCKETS_SLOT292[] = { 0.0, 1.0 };
+inline constexpr double RL_BUCKETS_SLOT293[] = { 0.0, 2.0 };
+inline constexpr double RL_BUCKETS_SLOT294[] = { 0.0, 3.0 };
+inline constexpr double RL_BUCKETS_SLOT295[] = { 0.0, 4.0 };
+inline constexpr double RL_BUCKETS_SLOT296[] = { 0.0, 5.0 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "fight_remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, true },
     { "active_enemies", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
     { "raid_event_next_in", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
-    { "time_to_bloodlust", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
     { "dying_within_5s", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
     { "dying_within_15s", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
     { "enemies_in_front", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
@@ -1065,41 +1058,41 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "hits.voltaic_blaze.cleave", rl_kind::k_int, 0.0, true, 6.0, false, 1.0, nullptr, 0, false },
     { "hits.voltaic_blaze.new_flame_shocks", rl_kind::k_int, 0.0, true, 6.0, false, 1.0, nullptr, 0, false },
     { "hits.fire_nova", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
-    { "hits.chain_lightning.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT267, 2, false },
-    { "hits.chain_lightning.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT268, 2, false },
-    { "hits.chain_lightning.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT269, 2, false },
-    { "hits.chain_lightning.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT270, 2, false },
-    { "hits.tempest.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT271, 2, false },
-    { "hits.tempest.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT272, 2, false },
-    { "hits.tempest.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT273, 2, false },
-    { "hits.tempest.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT274, 2, false },
-    { "hits.voltaic_blaze.cleave.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT275, 2, false },
-    { "hits.voltaic_blaze.cleave.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT276, 2, false },
-    { "hits.voltaic_blaze.cleave.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT277, 2, false },
-    { "hits.voltaic_blaze.cleave.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT278, 2, false },
-    { "hits.crash_lightning.at_least_1", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT279, 2, false },
-    { "hits.crash_lightning.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT280, 2, false },
-    { "hits.crash_lightning.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT281, 2, false },
-    { "hits.crash_lightning.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT282, 2, false },
-    { "hits.crash_lightning.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT283, 2, false },
-    { "hits.voltaic_blaze.new_flame_shocks.at_least_1", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT284, 2, false },
-    { "hits.voltaic_blaze.new_flame_shocks.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT285, 2, false },
-    { "hits.voltaic_blaze.new_flame_shocks.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT286, 2, false },
-    { "hits.voltaic_blaze.new_flame_shocks.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT287, 2, false },
-    { "hits.voltaic_blaze.new_flame_shocks.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT288, 2, false },
-    { "hits.fire_nova.at_least_1", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT289, 2, false },
-    { "hits.fire_nova.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT290, 2, false },
-    { "hits.fire_nova.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT291, 2, false },
-    { "hits.fire_nova.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT292, 2, false },
-    { "hits.fire_nova.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT293, 2, false },
-    { "hits.lava_lash.flame_shock_spread.at_least_1", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT294, 2, false },
-    { "hits.lava_lash.flame_shock_spread.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT295, 2, false },
-    { "hits.lava_lash.flame_shock_spread.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT296, 2, false },
-    { "hits.lava_lash.flame_shock_spread.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT297, 2, false },
-    { "hits.lava_lash.flame_shock_spread.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT298, 2, false },
+    { "hits.chain_lightning.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT265, 2, false },
+    { "hits.chain_lightning.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT266, 2, false },
+    { "hits.chain_lightning.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT267, 2, false },
+    { "hits.chain_lightning.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT268, 2, false },
+    { "hits.tempest.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT269, 2, false },
+    { "hits.tempest.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT270, 2, false },
+    { "hits.tempest.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT271, 2, false },
+    { "hits.tempest.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT272, 2, false },
+    { "hits.voltaic_blaze.cleave.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT273, 2, false },
+    { "hits.voltaic_blaze.cleave.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT274, 2, false },
+    { "hits.voltaic_blaze.cleave.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT275, 2, false },
+    { "hits.voltaic_blaze.cleave.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT276, 2, false },
+    { "hits.crash_lightning.at_least_1", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT277, 2, false },
+    { "hits.crash_lightning.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT278, 2, false },
+    { "hits.crash_lightning.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT279, 2, false },
+    { "hits.crash_lightning.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT280, 2, false },
+    { "hits.crash_lightning.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT281, 2, false },
+    { "hits.voltaic_blaze.new_flame_shocks.at_least_1", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT282, 2, false },
+    { "hits.voltaic_blaze.new_flame_shocks.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT283, 2, false },
+    { "hits.voltaic_blaze.new_flame_shocks.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT284, 2, false },
+    { "hits.voltaic_blaze.new_flame_shocks.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT285, 2, false },
+    { "hits.voltaic_blaze.new_flame_shocks.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT286, 2, false },
+    { "hits.fire_nova.at_least_1", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT287, 2, false },
+    { "hits.fire_nova.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT288, 2, false },
+    { "hits.fire_nova.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT289, 2, false },
+    { "hits.fire_nova.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT290, 2, false },
+    { "hits.fire_nova.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT291, 2, false },
+    { "hits.lava_lash.flame_shock_spread.at_least_1", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT292, 2, false },
+    { "hits.lava_lash.flame_shock_spread.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT293, 2, false },
+    { "hits.lava_lash.flame_shock_spread.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT294, 2, false },
+    { "hits.lava_lash.flame_shock_spread.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT295, 2, false },
+    { "hits.lava_lash.flame_shock_spread.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT296, 2, false },
 };
 inline constexpr rl_obs_member RL_OBS_FAMILY_SCALARS_MEMBERS[] = {
-  { "", "", RL_OBS_FAMILY_SCALARS_LEAVES_0, 58 },
+  { "", "", RL_OBS_FAMILY_SCALARS_LEAVES_0, 57 },
 };
 
 inline constexpr std::size_t RL_OBS_FAMILY_COUNT = 12;
@@ -1111,12 +1104,12 @@ inline constexpr rl_obs_family RL_OBS_FAMILIES[RL_OBS_FAMILY_COUNT] = {
   { rl_family::shapes, "shapes", rl_family_kind::shape_fact, false, RL_OBS_FAMILY_SHAPES_MEMBERS, 1, 173, 3 },
   { rl_family::action_leaves, "action_leaves", rl_family_kind::action_expression, false, RL_OBS_FAMILY_ACTION_LEAVES_MEMBERS, 10, 176, 12 },
   { rl_family::deck, "deck", rl_family_kind::expression, false, RL_OBS_FAMILY_DECK_MEMBERS, 12, 188, 12 },
-  { rl_family::stats, "stats", rl_family_kind::direct, false, RL_OBS_FAMILY_STATS_MEMBERS, 9, 200, 9 },
-  { rl_family::swing_cast, "swing_cast", rl_family_kind::direct, false, RL_OBS_FAMILY_SWING_CAST_MEMBERS, 4, 209, 4 },
-  { rl_family::raid_events, "raid_events", rl_family_kind::expression, false, RL_OBS_FAMILY_RAID_EVENTS_MEMBERS, 2, 213, 10 },
-  { rl_family::legality, "legality", rl_family_kind::legality, false, RL_OBS_FAMILY_LEGALITY_MEMBERS, 16, 223, 16 },
-  { rl_family::proc_chances, "proc_chances", rl_family_kind::proc_chance, false, RL_OBS_FAMILY_PROC_CHANCES_MEMBERS, 2, 239, 2 },
-  { rl_family::scalars, "scalars", rl_family_kind::scalar, true, RL_OBS_FAMILY_SCALARS_MEMBERS, 1, 241, 58 },
+  { rl_family::stats, "stats", rl_family_kind::direct, false, RL_OBS_FAMILY_STATS_MEMBERS, 8, 200, 8 },
+  { rl_family::swing_cast, "swing_cast", rl_family_kind::direct, false, RL_OBS_FAMILY_SWING_CAST_MEMBERS, 4, 208, 4 },
+  { rl_family::raid_events, "raid_events", rl_family_kind::expression, false, RL_OBS_FAMILY_RAID_EVENTS_MEMBERS, 2, 212, 10 },
+  { rl_family::legality, "legality", rl_family_kind::legality, false, RL_OBS_FAMILY_LEGALITY_MEMBERS, 16, 222, 16 },
+  { rl_family::proc_chances, "proc_chances", rl_family_kind::proc_chance, false, RL_OBS_FAMILY_PROC_CHANCES_MEMBERS, 2, 238, 2 },
+  { rl_family::scalars, "scalars", rl_family_kind::scalar, true, RL_OBS_FAMILY_SCALARS_MEMBERS, 1, 240, 57 },
 };
 
 // ---- Action descriptors ----
