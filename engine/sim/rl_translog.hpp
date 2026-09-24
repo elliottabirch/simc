@@ -297,7 +297,18 @@ inline constexpr std::uint32_t FORMAT_VERSION = 10u;  // 260918-cbc: credit-by-c
 // compile (tstl 220-03, OBS-06; formula updated 260901-pb1 Task 3 for version 5, updated again
 // 228-09 for version 6, updated again 230-04 for version 7, updated again 260917-pcn for
 // version 9 -- see top-of-file comment).
-inline constexpr std::uint32_t RECORD_SIZE = 2240u;  // 260923-lrc stage 1D (PLAN.md D24):
+inline constexpr std::uint32_t RECORD_SIZE = 2232u;  // 260924-tba (owner directive
+                                                       // 2026-09-24, R-TBA): 2240 -> 2232
+                                                       // -- RL_OBS_DIM moves 299 -> 297
+                                                       // (stats.agility.value and the
+                                                       // time_to_bloodlust scalar removed,
+                                                       // owner ruling). roundup8(45 + 4*297
+                                                       // + 4*8*23 + 4) = roundup8(1973) =
+                                                       // 1976, + 160 proc block + 96 credit
+                                                       // block = 2232. Confirmed by the
+                                                       // static_assert immediately below,
+                                                       // not hand-verified.
+                                                       // 260923-lrc stage 1D (PLAN.md D24):
                                                        // 2272 -> 2240 -- RL_OBS_DIM moves 306 -> 299
                                                        // (six action_leaves.<member>.
                                                        // {crit_pct_current,multiplier} leaves
@@ -364,9 +375,9 @@ inline constexpr std::uint32_t PROC_BLOCK_OFFSET =
         4u * static_cast<std::uint32_t>( RL_TARGET_SLOTS ) * static_cast<std::uint32_t>( RL_TARGET_FEATURES ) +
         4u + 7u ) / 8u ) * 8u;
 inline constexpr std::uint32_t PROC_BLOCK_SIZE = 8u * rl_proc::COUNT;
-static_assert( PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE == 2144u,
+static_assert( PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE == 2136u,
                "PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE must equal the version-9 row size at the "
-               "260923-lrc stage 1D (PLAN.md D24) obs width (2144) -- CREDIT_BLOCK_OFFSET below is "
+               "260924-tba (R-TBA) obs width (2136) -- CREDIT_BLOCK_OFFSET below is "
                "pinned to that exact value" );
 // 260918-cbc: the version-9 row size (unchanged formula) is where the new credit-by-cause
 // block starts; CREDIT_BLOCK_SIZE is the block's own byte count (two double[STREAM_COUNT]
