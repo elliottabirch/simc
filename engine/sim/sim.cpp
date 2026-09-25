@@ -4401,10 +4401,10 @@ void sim_t::create_options()
   // rl_rng_record_file_str doc comment. Default empty, byte-identical to today's behavior.
   add_option( opt_string( "rl_rng_record", rl_rng_record_file_str ) );
   // The replay option (tstl-sylvanas phase 253, plan 253-02, REP-01/D-01/D-16). See sim.hpp's
-  // rl_rng_replay_file_str/rl_rng_replay_address_str doc comments. Default empty, byte-identical
-  // to today's behavior when unset.
+  // rl_rng_replay_file_str doc comment. Default empty, byte-identical to today's behavior when
+  // unset. The address choice was removed in phase 254 (Gate 2 verdict); replay always reads
+  // the outer press address.
   add_option( opt_string( "rl_rng_replay", rl_rng_replay_file_str ) );
-  add_option( opt_string( "rl_rng_replay_address", rl_rng_replay_address_str ) );
   // Iteration-batched scorecard seeding (tstl-sylvanas quick task 260919-scb). See sim.hpp's
   // rl_iteration_seeds doc comment. Default empty, byte-identical to today's behavior.
   add_option( opt_func( "rl_iteration_seeds", parse_rl_iteration_seeds ) );
@@ -5329,20 +5329,6 @@ void sim_t::setup( sim_control_t* c )
           throw sc_runtime_error( "rl_rng_replay and rl_rng_record name the same file" );
         }
       }
-    }
-  }
-
-  // rl_rng_replay_address= (253-02 Task 2, D-03): accepted only together with rl_rng_replay=,
-  // and only the two named values.
-  if ( !rl_rng_replay_address_str.empty() )
-  {
-    if ( rl_rng_replay_file_str.empty() )
-    {
-      throw sc_invalid_sim_argument( "rl_rng_replay_address requires rl_rng_replay" );
-    }
-    if ( rl_rng_replay_address_str != "outer" && rl_rng_replay_address_str != "inner" )
-    {
-      throw sc_invalid_sim_argument( "rl_rng_replay_address must be outer or inner" );
     }
   }
 

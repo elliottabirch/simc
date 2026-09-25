@@ -761,12 +761,8 @@ struct sim_t : private sc_thread_t
   // sidecar run when rl_rng_record= is ALSO set (D-16). Both options may be set at once (record
   // while replaying), so a chain of pairs can be built.
   std::string rl_rng_replay_file_str;
-  // Which press address replay reads from a ROLL entry's outer or inner fields (D-03, flagged
-  // A-22): "outer" (default, empty value = outer) or "inner". Accepted only together with
-  // rl_rng_replay= -- refused by name otherwise. Both values ship in this phase; deleting the
-  // unused one is a later phase's work once the default is picked (owner's "new behaviour
-  // becomes the default, delete the old path" rule).
-  std::string rl_rng_replay_address_str;
+  // The address choice was removed in phase 254 (Gate 2 verdict): replay always reads the outer
+  // press address from a ROLL entry's fields. There is no longer a switch here.
   // tstl-sylvanas phase 218, plan 218-02 (RIG-01). rl_fight_shape_index=<n>
   // names which declared fight shape (scripts/rl/specs/enhancement.json's
   // episode.fightMix, 1-based) this run was launched under. 0 is the
