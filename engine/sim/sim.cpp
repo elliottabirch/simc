@@ -35,6 +35,8 @@
 #include "sim/rl_target_select.hpp"
 #include "sim/rl_translog.hpp"
 #include "sim/rl_rng_record.hpp"
+
+#include <filesystem>
 #include "sim/scale_factor_control.hpp"
 #include "sim/sim_control.hpp"
 #include "sim/solver_control.hpp"
@@ -5308,11 +5310,40 @@ void sim_t::setup( sim_control_t* c )
           "top-level sim options only, and run those analyses without it." );
     }
 
-    // rl_rng_replay and rl_rng_record naming the SAME file would have the recorder's truncating
-    // open (D-13) destroy the very recording being replayed -- refused by name, comparing
-    // canonical paths, only when a replay file is actually named (Pitfall 5). Task 2 adds the
-    // rl_rng_replay_address= refusals; this task only wires the four refusals above plus
-    // construction.
+    // Same-file refusal (253-02 Task 2, Pitfall 5): rl_rng_record='s truncating open (D-13)
+    // would destroy the very recording being replayed. Compares CANONICAL paths -- two spellings
+    // of the same file (a relative path and its absolute form, a path through a symlink) must
+    // still be caught -- but only when the replay file actually exists yet to canonicalize; a
+    // replay refusal already fired above if it does not.
+    if ( !rl_rng_record_file_str.empty() )
+    {
+      std::error_code canon_ec;
+      const auto replay_canonical = std::filesystem::canonical( rl_rng_replay_file_str, canon_ec );
+      if ( !canon_ec )
+      {
+        std::error_code record_canon_ec;
+        const auto record_canonical =
+            std::filesystem::weakly_canonical( rl_rng_record_file_str, record_canon_ec );
+        if ( !record_canon_ec && replay_canonical == record_canonical )
+        {
+          throw sc_runtime_error( "rl_rng_replay and rl_rng_record name the same file" );
+        }
+      }
+    }
+  }
+
+  // rl_rng_replay_address= (253-02 Task 2, D-03): accepted only together with rl_rng_replay=,
+  // and only the two named values.
+  if ( !rl_rng_replay_address_str.empty() )
+  {
+    if ( rl_rng_replay_file_str.empty() )
+    {
+      throw sc_invalid_sim_argument( "rl_rng_replay_address requires rl_rng_replay" );
+    }
+    if ( rl_rng_replay_address_str != "outer" && rl_rng_replay_address_str != "inner" )
+    {
+      throw sc_invalid_sim_argument( "rl_rng_replay_address must be outer or inner" );
+    }
   }
 
   // Root only -- see sim.hpp's rl_rng_recorder member comment. Constructed once either option is
