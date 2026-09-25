@@ -44,6 +44,7 @@
 
 #include "rapidjson/document.h"
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -206,7 +207,18 @@ struct replay_state_t
 
   std::string path;
   std::string address;   // "outer" (default/empty) or "inner" (D-03) -- picks which press frame
-                          // (live and recorded alike) on_draw()/the loader read.
+                          // (live and recorded alike) on_draw()/the loader read; kept ONLY for the
+                          // printed stdout/sidecar value -- the hot-path comparison uses is_inner
+                          // below (254-06 Task 2, REP-06 speed round 2).
+  // Cached once by replay_init() alongside `address` above, instead of re-comparing the string on
+  // every draw (replay_active_frame(), called from on_draw() up to twice per draw) and once per
+  // fight (replay_fight_begin()'s own `use_inner`). Since D-21 the address is hard-wired
+  // fork-wide to "outer", so this is always false today -- profiled to cost real instructions
+  // anyway (a memcmp plus the surrounding call overhead on every draw, $S/speed/profile-r1-replay.txt),
+  // for a value that can never change within one run. Pure no-behavior-change cache: `address` and
+  // `is_inner` are set together, in the one place either is ever written, and every reader of the
+  // old `address == "inner"` comparison switches to this bool.
+  bool is_inner = false;
   std::ifstream in;
   std::uint64_t footer_fight_count = 0;   // the recording's own FOOTER.press (FIGHT_END count)
   std::uint64_t next_read_offset = 0;     // where the sequential per-fight reader resumes
@@ -284,7 +296,13 @@ struct replay_state_t
     std::uint64_t excluded = 0;
     std::uint64_t after_stop = 0;
   };
-  std::map<roller_class_e, class_counts_t> per_class;
+  // 254-06 Task 2 (REP-06 speed round 2, re-deriving 253-03's prepared speed patch against
+  // the post-254-04 source): fixed-size array, not std::map -- roller_class_e has exactly
+  // ROLLER_CLASS_COUNT values, so indexing by static_cast<uint8_t>(cls) is O(1) with no
+  // per-lookup tree traversal, on every replaying draw's on_draw() hot path. Same counts,
+  // same values, same effective iteration order (ascending enum value, identical to
+  // std::map<roller_class_e, ...>'s own sorted order) -- a pure data-structure swap.
+  std::array<class_counts_t, ROLLER_CLASS_COUNT> per_class{};
 
   // One fight's counters -- reset at fight_begin(), accumulated during the open window, pushed
   // to fights_detail (with its own stop_time_ms) at fight_end(). This is the per-fight row the
@@ -529,7 +547,7 @@ double recorder_t::on_draw( std::uint32_t& roller_slot, const std::uint64_t& dra
   // replayed. Nothing here runs once the recorder has stopped replaying this fight (REP-04).
   if ( replay_ && replay_->window_open && !replay_->stopped )
   {
-    replay_state_t::class_counts_t& class_counts = replay_->per_class[ logical_entry.cls ];
+    replay_state_t::class_counts_t& class_counts = replay_->per_class[ static_cast<std::size_t>( logical_entry.cls ) ];
     replay_state_t::fight_counts_t& fight_counts = replay_->current_fight;
 
     if ( replay_is_excluded_draw( logical_clamped ) )
@@ -599,7 +617,7 @@ double recorder_t::on_draw( std::uint32_t& roller_slot, const std::uint64_t& dra
     // recording; here it is simply live-and-counted, never looked up.
     ++replay_->after_stop;
     ++replay_->current_fight.after_stop;
-    ++replay_->per_class[ logical_entry.cls ].after_stop;
+    ++replay_->per_class[ static_cast<std::size_t>( logical_entry.cls ) ].after_stop;
   }
   else if ( replay_ && !replay_->window_open )
   {
@@ -1030,6 +1048,7 @@ void recorder_t::replay_init()
   replay_state_t& rp = *replay_;
   rp.path = root_->rl_rng_replay_file_str;
   rp.address = "outer";  // hard-wired (phase 254 Gate 2 verdict); the address choice was removed
+  rp.is_inner = false;   // cached alongside rp.address above (254-06 Task 2, REP-06 speed round 2)
 
   rp.in.open( rp.path, std::ios::in | std::ios::binary );
   if ( !rp.in.is_open() )
@@ -1216,7 +1235,7 @@ const press_frame_t& recorder_t::replay_active_frame() const
   // D-03: which press address replay reads -- hard-wired to outer (the address choice was
   // removed in phase 254, Gate 2 verdict). Read identically at load time (replay_fight_begin(),
   // off the recording's own outer_* fields) and at draw time (here, off the LIVE current_outer_).
-  return replay_->address == "inner" ? current_inner_ : current_outer_;
+  return replay_->is_inner ? current_inner_ : current_outer_;
 }
 
 bool recorder_t::replay_is_excluded_draw( std::uint32_t drawing_roller ) const
@@ -1316,7 +1335,7 @@ void recorder_t::replay_fight_begin()
     return;
   }
 
-  const bool use_inner = rp.address == "inner";
+  const bool use_inner = rp.is_inner;  // 254-06 Task 2 (REP-06 speed round 2): cached, see rp.is_inner's own doc comment
   bool found_end = false;
   while ( rp.in.read( reinterpret_cast<char*>( &rec ), RECORD_SIZE ) )
   {
@@ -1676,14 +1695,21 @@ void recorder_t::write_sidecar()
             << ", \"live_was_recorded\": " << rp.live_was_recorded
             << ", \"recorded_unused\": " << rp.recorded_unused << "}, \"byClass\": {";
     bool first_class = true;
-    for ( const auto& kv : rp.per_class )
+    for ( std::size_t class_idx = 0; class_idx < ROLLER_CLASS_COUNT; ++class_idx )
     {
+      const replay_state_t::class_counts_t& counts = rp.per_class[ class_idx ];
+      // Matches the old std::map's own membership rule exactly: only classes actually touched
+      // (any of the four counters incremented at least once) get an entry -- an untouched class
+      // in the fixed array has all four counters at their zero default.
+      if ( counts.reused == 0 && counts.fresh == 0 && counts.excluded == 0 && counts.after_stop == 0 )
+        continue;
       if ( !first_class )
         sidecar << ", ";
       first_class = false;
-      sidecar << "\"" << class_name( kv.first ) << "\": {\"reused\": " << kv.second.reused
-              << ", \"fresh\": " << kv.second.fresh << ", \"excluded\": " << kv.second.excluded
-              << ", \"after_stop\": " << kv.second.after_stop << "}";
+      const roller_class_e cls = static_cast<roller_class_e>( class_idx );
+      sidecar << "\"" << class_name( cls ) << "\": {\"reused\": " << counts.reused
+              << ", \"fresh\": " << counts.fresh << ", \"excluded\": " << counts.excluded
+              << ", \"after_stop\": " << counts.after_stop << "}";
     }
     sidecar << "}, \"fights\": [";
     for ( std::size_t i = 0; i < rp.fights_detail.size(); ++i )
@@ -1759,9 +1785,7 @@ void recorder_t::write_footer()
       classes_present.insert( r.cls );
     for ( roller_class_e cls : classes_present )
     {
-      const auto it = replay_->per_class.find( cls );
-      const replay_state_t::class_counts_t counts =
-          it != replay_->per_class.end() ? it->second : replay_state_t::class_counts_t{};
+      const replay_state_t::class_counts_t& counts = replay_->per_class[ static_cast<std::size_t>( cls ) ];
       fmt::print( "rl_rng_replay class={} reused={} fresh={} excluded={} after_stop={}\n",
                   class_name( cls ), counts.reused, counts.fresh, counts.excluded, counts.after_stop );
     }

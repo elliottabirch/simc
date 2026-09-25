@@ -100,6 +100,13 @@ enum class roller_class_e : std::uint8_t
   unregistered = 8,
 };
 
+// One past the highest roller_class_e value -- sizes the fixed per_class array in
+// replay_state_t (254-06 Task 2, REP-06 speed round 2, re-deriving 253-03's prepared-but-
+// never-applied speed patch against the post-254-04 source): a std::array indexed by
+// static_cast<uint8_t>(cls) replaces a std::map<roller_class_e, ...> on the on_draw() hot
+// path. Bump this if roller_class_e ever grows.
+inline constexpr std::size_t ROLLER_CLASS_COUNT = 9u;
+
 // 64 bytes.
 struct alignas( 8 ) file_header
 {
