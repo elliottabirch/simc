@@ -53,6 +53,7 @@
 #include <set>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -123,6 +124,43 @@ std::string_view class_name( roller_class_e cls )
   return "unregistered";
 }
 
+// The replay-only fresh-number stream's salt (253-02, D-17) -- XOR-ed into the sim's own seed so
+// this stream never collides with any real per-source stream's own seed derivation.
+inline constexpr std::uint64_t REPLAY_FRESH_SALT = 0x253253253253253ull;
+
+// The 64-bit pattern of a double's bit representation -- used as the replay value set's key
+// (253-02, D-17) so set membership is exact bit-for-bit equality, never a float tolerance.
+inline std::uint64_t replay_bits_of( double d )
+{
+  std::uint64_t bits;
+  std::memcpy( &bits, &d, sizeof( bits ) );
+  return bits;
+}
+
+// Draws one double from a RAW xoshiro256plus_t engine, using the exact bit-to-double conversion
+// basic_rng_t<Engine>::real() itself uses (253-02, D-17's "the replay-only stream ... same
+// bit-to-double conversion real() uses"). Never goes through basic_rng_t -- calling any
+// basic_rng_t method here would re-enter the on_draw() hook.
+inline double replay_raw_draw( rng::xoshiro256plus_t& engine )
+{
+  std::uint64_t ui64 = engine.next();
+  ui64 &= 0x000fffffffffffffULL;
+  ui64 |= 0x3ff0000000000000ULL;
+  union { std::uint64_t ui64; double d; } u;
+  u.ui64 = ui64;
+  return u.d - 1.0;
+}
+
+// True when `key` names a stream this run's replay never matches against (253-02, D-20): the
+// exploration stream's own fixed key, or a lazily-numbered "unregistered|N" stream (not stable
+// across runs).
+inline bool replay_key_is_excluded( const std::string& key )
+{
+  static constexpr std::string_view explore_key = "sim|solver_explore_rng";
+  static constexpr std::string_view unregistered_prefix = "unregistered|";
+  return key == explore_key || key.compare( 0, unregistered_prefix.size(), unregistered_prefix ) == 0;
+}
+
 } // anonymous namespace
 
 // Per-roller bookkeeping, indexed by roller number (registry position == roller id, so lookup
@@ -167,23 +205,28 @@ struct replay_state_t
   static constexpr std::uint32_t KEY_INDEX_NOT_IN_RECORDING = 0xFFFFFFFFu;
 
   std::string path;
-  std::string address;   // "outer" (default/empty) or "inner" -- Task 1 always reads the outer
-                          // frame regardless; the inner branch is 253-02 Task 2's work (D-03).
+  std::string address;   // "outer" (default/empty) or "inner" (D-03) -- picks which press frame
+                          // (live and recorded alike) on_draw()/the loader read.
   std::ifstream in;
   std::uint64_t footer_fight_count = 0;   // the recording's own FOOTER.press (FIGHT_END count)
   std::uint64_t next_read_offset = 0;     // where the sequential per-fight reader resumes
   bool exhausted = false;                 // no more fight windows in the recording -- every
                                            // later fight_begin() finds nothing and stays live
   bool window_open = false;
+  bool stopped = false;    // REP-04/D-05: set by mark_resalt(), cleared at the next fight_begin()
+                            // -- from here on every draw this fight is live, counted after_stop.
   std::uint64_t fights_served = 0;        // fight windows successfully loaded so far
 
   // Key interning (D-02): every distinct key string the sidecar declares gets one small index,
   // in first-seen order. sidecar_id_to_key_index maps the RECORDING's own roller ids (the
   // sidecar's "id" field) to that index; live_key_index_cache maps THIS RUN's own live roller
   // ids (recorder_t::rollers_ indices) to the same index space, filled lazily on first use from
-  // the live roller's own key string.
+  // the live roller's own key string. sidecar_id_excluded parallels sidecar_id_to_key_index:
+  // true when that RECORDED roller's own key names the exploration stream or an
+  // "unregistered|" stream (D-20) -- its numbers never enter `table`, only `value_set`.
   std::unordered_map<std::string, std::uint32_t> key_string_to_index;
   std::vector<std::uint32_t> sidecar_id_to_key_index;
+  std::vector<bool> sidecar_id_excluded;
   std::vector<std::uint32_t> live_key_index_cache;
 
   // One fight's address table: address -> the recorded raw numbers at that address, in record
@@ -197,9 +240,18 @@ struct replay_state_t
   using address_key_t = std::tuple<std::uint8_t, std::uint32_t, std::uint32_t, std::uint32_t>;
   std::map<address_key_t, entry_run_t> table;
 
-  // Per-class totals for the "rl_rng_replay class=" stdout lines (Task 1 fills in reused/fresh
-  // from its own single fresh bucket; excluded/after_stop are Task 2's territory and stay 0
-  // here).
+  // This fight's full raw-number set (D-17's fresh-number rule): every kept ROLL entry's raw
+  // number, EXCLUDED ones included (D-20's "their recorded numbers never enter the table [but]
+  // do enter the value set"). Keyed by bit pattern -- see replay_bits_of().
+  std::unordered_set<std::uint64_t> value_set;
+
+  // Replay-only streams for the fresh-number rule (D-17), keyed by the LIVE roller id (never the
+  // key index -- two different live rollers absent from the recording would otherwise collapse
+  // onto the single KEY_INDEX_NOT_IN_RECORDING sentinel and wrongly share one stream). Lazily
+  // seeded on first use, cleared at every fight_begin() ("seeded lazily per fight").
+  std::unordered_map<std::uint32_t, rng::xoshiro256plus_t> fresh_streams;
+
+  // Per-class totals for the "rl_rng_replay class=" stdout lines.
   struct class_counts_t
   {
     std::uint64_t reused = 0;
@@ -209,9 +261,29 @@ struct replay_state_t
   };
   std::map<roller_class_e, class_counts_t> per_class;
 
+  // One fight's counters -- reset at fight_begin(), accumulated during the open window, pushed
+  // to fights_detail (with its own stop_time_ms) at fight_end(). This is the per-fight row the
+  // sidecar's "replay" block ("Interfaces this plan adds") writes; whole-run totals below are
+  // simply the running sum of every field except stop_time_ms.
+  struct fight_counts_t
+  {
+    std::uint64_t reused = 0;
+    std::uint64_t fresh_no_address = 0;
+    std::uint64_t fresh_used_up = 0;
+    std::uint64_t fresh_roller_not_in_recording = 0;
+    std::uint64_t excluded = 0;
+    std::uint64_t after_stop = 0;
+    std::uint64_t live_was_recorded = 0;
+    std::uint64_t recorded_unused = 0;
+    std::int64_t stop_time_ms = -1;   // -1 when no re-salt happened this fight
+  };
+  fight_counts_t current_fight;
+  std::vector<fight_counts_t> fights_detail;   // one entry per fight_end(), in fight order
+
   // Whole-run totals -- the exact fields the "Interfaces this plan adds" stdout totals line
-  // prints, in that order. Task 1 only ever increments reused/fresh_no_address; the rest are
-  // Task 2's territory (D-04/D-17/D-20/REP-04) and stay 0 here, printed as 0 in the interim.
+  // prints, in that order. Every field except outside_fight is the running sum of the matching
+  // current_fight field, accumulated as each fight closes; outside_fight has no fight to belong
+  // to by definition and is bumped directly.
   std::uint64_t reused = 0;
   std::uint64_t fresh_no_address = 0;
   std::uint64_t fresh_used_up = 0;
@@ -290,9 +362,25 @@ private:
   void replay_init();
   void replay_fight_begin();
   void replay_fight_end();
+  // Refuses (fight-scoped message) when sidecar_id is out of the sidecar's own declared range --
+  // the shared bounds check both accessors below call first.
+  void replay_check_sidecar_id( std::uint32_t sidecar_id ) const;
   std::uint32_t replay_key_index_for_sidecar_roller( std::uint32_t sidecar_id ) const;
+  bool replay_sidecar_excluded( std::uint32_t sidecar_id ) const;
   std::uint32_t replay_key_index_for_live_roller( std::uint32_t live_id );
-  replay_state_t::address_key_t replay_outer_address( std::uint32_t drawing_roller );
+  // The press frame replay_->address names (outer or inner, D-03), read identically at load and
+  // draw time.
+  const press_frame_t& replay_active_frame() const;
+  // Builds the address key from whichever frame replay_->address names (outer or inner, D-03) --
+  // used identically at load time (with the recording's own frame fields) and at draw time (with
+  // the LIVE current_outer_/current_inner_ frames).
+  replay_state_t::address_key_t replay_address_for_draw( std::uint32_t drawing_roller );
+  // True when this draw is excluded from replay altogether (D-20): the drawing roller is the
+  // exploration stream or an "unregistered|" stream, or an open press's trigger roller is.
+  bool replay_is_excluded_draw( std::uint32_t drawing_roller ) const;
+  // The fresh-number rule (D-17): the next number, from a per-live-roller replay-only stream,
+  // that is NOT one of this fight's recorded numbers.
+  double replay_take_fresh_number( std::uint32_t live_roller_id );
 
   sim_t* root_;
   // True only when rl_rng_record= is set (253-02): gates every write-side concern (the stream,
@@ -409,30 +497,91 @@ double recorder_t::on_draw( std::uint32_t& roller_slot, const std::uint64_t& dra
 
   double value = raw;
 
-  // Replay (253-02, REP-01/D-16): a no-write mode of this same object. The table probe happens
-  // BEFORE the writing-only record fields below are built, because when both options are on the
-  // reused value becomes THIS run's own ROLL entry raw field too (D-16's "write the returned
-  // value") -- so a self-replay's recording is byte-identical to the one it replayed.
-  if ( replay_ && replay_->window_open )
+  // Replay (253-02, REP-01/D-04/D-16/D-17/D-20/REP-04): a no-write mode of this same object. The
+  // table probe happens BEFORE the writing-only record fields below are built, because when both
+  // options are on the reused value becomes THIS run's own ROLL entry raw field too (D-16's
+  // "write the returned value") -- so a self-replay's recording is byte-identical to the one it
+  // replayed. Nothing here runs once the recorder has stopped replaying this fight (REP-04).
+  if ( replay_ && replay_->window_open && !replay_->stopped )
   {
-    const replay_state_t::address_key_t key = replay_outer_address( logical_clamped );
-    const auto it = replay_->table.find( key );
     replay_state_t::class_counts_t& class_counts = replay_->per_class[ logical_entry.cls ];
-    if ( it != replay_->table.end() && it->second.next_unused < it->second.raw.size() )
+    replay_state_t::fight_counts_t& fight_counts = replay_->current_fight;
+
+    if ( replay_is_excluded_draw( logical_clamped ) )
     {
-      value = it->second.raw[ it->second.next_unused ];
-      ++it->second.next_unused;
-      ++replay_->reused;
-      ++class_counts.reused;
+      // D-20: the exploration stream, an "unregistered|" stream, or a press opened by one --
+      // always the live number, never subject to the fresh-number rule below.
+      ++replay_->excluded;
+      ++fight_counts.excluded;
+      ++class_counts.excluded;
     }
     else
     {
-      // Task 1: one bucket for every "no unused recorded number at this address" reason; Task 2
-      // (D-04/D-17/D-20) splits this into fresh_no_address/fresh_used_up/
-      // fresh_roller_not_in_recording and adds the fresh-number rule. `value` stays `raw` here.
-      ++replay_->fresh_no_address;
-      ++class_counts.fresh;
+      const replay_state_t::address_key_t key = replay_address_for_draw( logical_clamped );
+      const std::uint32_t roller_key = std::get<3>( key );
+      bool matched = false;
+
+      if ( roller_key == replay_state_t::KEY_INDEX_NOT_IN_RECORDING )
+      {
+        // D-04: the drawing roller's key string does not appear in the recording at all.
+        ++replay_->fresh_roller_not_in_recording;
+        ++fight_counts.fresh_roller_not_in_recording;
+      }
+      else
+      {
+        const auto it = replay_->table.find( key );
+        if ( it == replay_->table.end() )
+        {
+          ++replay_->fresh_no_address;
+          ++fight_counts.fresh_no_address;
+        }
+        else if ( it->second.next_unused >= it->second.raw.size() )
+        {
+          ++replay_->fresh_used_up;
+          ++fight_counts.fresh_used_up;
+        }
+        else
+        {
+          value = it->second.raw[ it->second.next_unused ];
+          ++it->second.next_unused;
+          ++replay_->reused;
+          ++fight_counts.reused;
+          ++class_counts.reused;
+          matched = true;
+        }
+      }
+
+      if ( !matched )
+      {
+        // D-17: a fresh draw whose live number is one of THIS FIGHT's recorded numbers (at any
+        // address, not only this one) is replaced by the next number from a replay-only stream
+        // for this roller, skipping any number also in that set -- so one raw number never
+        // decides two rolls in the same fight.
+        if ( replay_->value_set.count( replay_bits_of( value ) ) )
+        {
+          value = replay_take_fresh_number( logical_clamped );
+          ++replay_->live_was_recorded;
+          ++fight_counts.live_was_recorded;
+        }
+        ++class_counts.fresh;
+      }
     }
+  }
+  else if ( replay_ && replay_->window_open && replay_->stopped )
+  {
+    // REP-04/D-05: from the re-salt moment on, every draw this fight is live -- the recorder's
+    // own after_resalt_ flag already drops these entries at load time on the NEXT replay of this
+    // recording; here it is simply live-and-counted, never looked up.
+    ++replay_->after_stop;
+    ++replay_->current_fight.after_stop;
+    ++replay_->per_class[ logical_entry.cls ].after_stop;
+  }
+  else if ( replay_ && !replay_->window_open )
+  {
+    // No fight window is open at all (not yet started, exhausted, or between fight_end() and the
+    // next fight_begin()) -- always live, counted separately from every fresh-inside-a-fight
+    // reason.
+    ++replay_->outside_fight;
   }
 
   // 250-03 (REC-04): position is 0-based WITHIN the active (trigger_kind, trigger, press, roller)
@@ -914,6 +1063,18 @@ void recorder_t::replay_init()
   }
   rp.footer_fight_count = footer.press;   // FOOTER's own @44 field: the FIGHT_END count
 
+  // 253-02 Task 2: this run must not ask for more fights than the recording can serve.
+  // root_->iterations is 0 when the run has no fixed iteration count (e.g. only rl_iteration_seeds
+  // is set) -- that shape has no single "how many fights does this run ask for" number, so it is
+  // not checked here.
+  if ( root_->iterations > 0 &&
+       static_cast<std::uint64_t>( root_->iterations ) > rp.footer_fight_count )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_rng_replay: '{}' holds {} fights but this run asks for {}.",
+        rp.path, rp.footer_fight_count, root_->iterations ) );
+  }
+
   // The sidecar: PATH.rollers.json, read with the vendored rapidjson (D-02's key strings).
   const std::string sidecar_path = rp.path + ".rollers.json";
   std::ifstream sidecar_stream( sidecar_path, std::ios::in | std::ios::binary );
@@ -962,8 +1123,15 @@ void recorder_t::replay_init()
     }
 
     if ( id >= rp.sidecar_id_to_key_index.size() )
+    {
       rp.sidecar_id_to_key_index.resize( id + 1, replay_state_t::KEY_INDEX_NOT_IN_RECORDING );
+      rp.sidecar_id_excluded.resize( id + 1, false );
+    }
     rp.sidecar_id_to_key_index[ id ] = key_index;
+    // D-20: the exploration stream and any "unregistered|" stream are excluded from replay
+    // altogether -- their numbers still enter the fresh-number rule's value set (D-17), just
+    // never the address table (Task 2's on_draw/replay_fight_begin both consult this).
+    rp.sidecar_id_excluded[ id ] = replay_key_is_excluded( key );
   }
 
   // The sequential per-fight reader starts right after the header (D-15).
@@ -972,17 +1140,28 @@ void recorder_t::replay_init()
   rp.in.seekg( HEADER_SIZE, std::ios::beg );
 }
 
-std::uint32_t recorder_t::replay_key_index_for_sidecar_roller( std::uint32_t sidecar_id ) const
+void recorder_t::replay_check_sidecar_id( std::uint32_t sidecar_id ) const
 {
   const replay_state_t& rp = *replay_;
   if ( sidecar_id >= rp.sidecar_id_to_key_index.size() )
   {
     throw sc_runtime_error( fmt::format(
-        "rl_rng_replay: '{}': a recorded entry names roller {} but the sidecar declares only {} "
+        "rl_rng_replay: '{}' fight {}: entry names roller {} but the sidecar declares only {} "
         "roller(s).",
-        rp.path, sidecar_id, rp.sidecar_id_to_key_index.size() ) );
+        rp.path, rp.fights_served, sidecar_id, rp.sidecar_id_to_key_index.size() ) );
   }
-  return rp.sidecar_id_to_key_index[ sidecar_id ];
+}
+
+std::uint32_t recorder_t::replay_key_index_for_sidecar_roller( std::uint32_t sidecar_id ) const
+{
+  replay_check_sidecar_id( sidecar_id );
+  return replay_->sidecar_id_to_key_index[ sidecar_id ];
+}
+
+bool recorder_t::replay_sidecar_excluded( std::uint32_t sidecar_id ) const
+{
+  replay_check_sidecar_id( sidecar_id );
+  return replay_->sidecar_id_excluded[ sidecar_id ];
 }
 
 std::uint32_t recorder_t::replay_key_index_for_live_roller( std::uint32_t live_id )
@@ -1008,23 +1187,78 @@ std::uint32_t recorder_t::replay_key_index_for_live_roller( std::uint32_t live_i
   return slot;
 }
 
-replay_state_t::address_key_t recorder_t::replay_outer_address( std::uint32_t drawing_roller )
+const press_frame_t& recorder_t::replay_active_frame() const
 {
-  // Task 1: always the outer frame, regardless of rl_rng_replay_address (Task 2 branches on
-  // replay_->address to read the inner frame instead -- D-03).
-  const std::uint8_t kind = current_outer_.kind;
+  // D-03: which press address replay reads -- default outer, or inner when
+  // rl_rng_replay_address=inner. Read identically at load time (replay_fight_begin(), off the
+  // recording's own inner_* fields) and at draw time (here, off the LIVE current_inner_).
+  return replay_->address == "inner" ? current_inner_ : current_outer_;
+}
+
+bool recorder_t::replay_is_excluded_draw( std::uint32_t drawing_roller ) const
+{
+  if ( drawing_roller < rollers_.size() && replay_key_is_excluded( rollers_[ drawing_roller ].key ) )
+    return true;
+  const press_frame_t& frame = replay_active_frame();
+  if ( frame.kind != TRIGGER_KIND_NONE && frame.trigger < rollers_.size() &&
+       replay_key_is_excluded( rollers_[ frame.trigger ].key ) )
+    return true;
+  return false;
+}
+
+replay_state_t::address_key_t recorder_t::replay_address_for_draw( std::uint32_t drawing_roller )
+{
+  const press_frame_t& frame = replay_active_frame();
+  const std::uint8_t kind = frame.kind;
   const std::uint32_t trigger_key = kind == TRIGGER_KIND_NONE
       ? replay_state_t::NO_PRESS_KEY_INDEX
-      : replay_key_index_for_live_roller( current_outer_.trigger );
-  const std::uint32_t press = kind == TRIGGER_KIND_NONE ? 0u : current_outer_.press;
+      : replay_key_index_for_live_roller( frame.trigger );
+  const std::uint32_t press = kind == TRIGGER_KIND_NONE ? 0u : frame.press;
   const std::uint32_t roller_key = replay_key_index_for_live_roller( drawing_roller );
   return replay_state_t::address_key_t{ kind, trigger_key, press, roller_key };
+}
+
+double recorder_t::replay_take_fresh_number( std::uint32_t live_roller_id )
+{
+  replay_state_t& rp = *replay_;
+  auto it = rp.fresh_streams.find( live_roller_id );
+  if ( it == rp.fresh_streams.end() )
+  {
+    const std::string key = live_roller_id < rollers_.size() ? rollers_[ live_roller_id ].key
+                                                              : std::string();
+    const std::uint64_t seed = rng::per_source_seed( root_->seed ^ REPLAY_FRESH_SALT,
+                                                       root_->thread_index,
+                                                       root_->rng_iteration_index(), key );
+    rng::xoshiro256plus_t engine;
+    engine.seed( seed );
+    it = rp.fresh_streams.emplace( live_roller_id, engine ).first;
+  }
+
+  double value;
+  std::size_t guard = 0;
+  do
+  {
+    value = replay_raw_draw( it->second );
+    if ( ++guard > 1000000 )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_rng_replay: '{}': the fresh-number stream for roller {} could not find a value "
+          "outside this fight's recorded set after 1,000,000 draws.",
+          rp.path, live_roller_id ) );
+    }
+  }
+  while ( rp.value_set.count( replay_bits_of( value ) ) );
+  return value;
 }
 
 void recorder_t::replay_fight_begin()
 {
   replay_state_t& rp = *replay_;
   rp.table.clear();
+  rp.value_set.clear();
+  rp.fresh_streams.clear();
+  rp.stopped = false;
+  rp.current_fight = replay_state_t::fight_counts_t{};
   rp.window_open = false;
   if ( rp.exhausted )
     return;
@@ -1044,21 +1278,21 @@ void recorder_t::replay_fight_begin()
     if ( rec.kind == KIND_FOOTER )
       break;   // no more fights -- the FOOTER is always last (D-15's trailing-window handling)
     // Any other kind here means a prior window closed mid-file without reaching this reader's
-    // own bookkeeping -- cannot happen from a recording this reader itself produced; Task 2's
-    // refusal list covers a hand-corrupted file.
+    // own bookkeeping -- cannot happen from a recording this reader itself produced.
   }
 
   if ( !found_begin )
   {
     // The recording holds no more fight windows -- this and every later fight of this run plays
-    // live (D-15's "the extra reset after the last fight opens no window", generalized to "asked
-    // for more fights than the recording holds"; Task 2 turns the latter into a named refusal at
-    // init instead of a silent fall-through).
+    // live (D-15's "the extra reset after the last fight opens no window"; replay_init() already
+    // refuses a run that asks for MORE fights than the recording holds, so reaching this point
+    // mid-run means the run's own request matched the recording's count exactly).
     rp.exhausted = true;
     rp.next_read_offset = static_cast<std::uint64_t>( rp.in.tellg() );
     return;
   }
 
+  const bool use_inner = rp.address == "inner";
   bool found_end = false;
   while ( rp.in.read( reinterpret_cast<char*>( &rec ), RECORD_SIZE ) )
   {
@@ -1067,18 +1301,37 @@ void recorder_t::replay_fight_begin()
       found_end = true;
       break;
     }
+    if ( rec.kind < KIND_ROLL || rec.kind > KIND_FOOTER )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_rng_replay: '{}' fight {}: entry has invalid kind {}.",
+          rp.path, rp.fights_served, static_cast<int>( rec.kind ) ) );
+    }
     if ( rec.kind == KIND_ROLL && !( rec.flags & FLAG_AFTER_RESALT ) )
     {
-      // D-15/D-16: for no press (trigger_kind NONE) the trigger-roller key is the fixed
-      // NO_PRESS_KEY_INDEX sentinel, never the recorded roller-0 key -- "a trigger field of 0
-      // means 'no press', not sim|_rng".
-      const std::uint32_t trigger_key = rec.trigger_kind == TRIGGER_KIND_NONE
-          ? replay_state_t::NO_PRESS_KEY_INDEX
-          : replay_key_index_for_sidecar_roller( rec.trigger );
-      const std::uint32_t press = rec.trigger_kind == TRIGGER_KIND_NONE ? 0u : rec.press;
-      const std::uint32_t roller_key = replay_key_index_for_sidecar_roller( rec.roller );
-      const replay_state_t::address_key_t key{ rec.trigger_kind, trigger_key, press, roller_key };
-      rp.table[ key ].raw.push_back( rec.raw );
+      const std::uint8_t trigger_kind = use_inner ? rec.inner_trigger_kind : rec.trigger_kind;
+      const std::uint32_t trigger_id = use_inner ? rec.inner_trigger : rec.trigger;
+      const std::uint32_t press_number = use_inner ? rec.inner_press : rec.press;
+
+      // D-17: every kept ROLL's raw number joins the fight's value set, EXCLUDED ones included --
+      // the fresh-number rule must avoid ties with numbers it can never reuse too.
+      rp.value_set.insert( replay_bits_of( rec.raw ) );
+
+      replay_check_sidecar_id( rec.roller );
+      const bool roller_excluded = replay_sidecar_excluded( rec.roller );
+      const bool press_excluded = trigger_kind != TRIGGER_KIND_NONE && replay_sidecar_excluded( trigger_id );
+      if ( !roller_excluded && !press_excluded )
+      {
+        // D-15/D-16: for no press (trigger_kind NONE) the trigger-roller key is the fixed
+        // NO_PRESS_KEY_INDEX sentinel, never the recorded roller-0 key -- "a trigger field of 0
+        // means 'no press', not sim|_rng".
+        const std::uint32_t trigger_key = trigger_kind == TRIGGER_KIND_NONE
+            ? replay_state_t::NO_PRESS_KEY_INDEX
+            : replay_key_index_for_sidecar_roller( trigger_id );
+        const std::uint32_t roller_key = replay_key_index_for_sidecar_roller( rec.roller );
+        const replay_state_t::address_key_t key{ trigger_kind, trigger_key, press_number, roller_key };
+        rp.table[ key ].raw.push_back( rec.raw );
+      }
     }
     // COUNTER, RESALT and after-resalt ROLL entries are skipped -- dropped at load (D-05/D-15).
   }
@@ -1086,7 +1339,7 @@ void recorder_t::replay_fight_begin()
   if ( !found_end )
   {
     throw sc_runtime_error( fmt::format(
-        "rl_rng_replay: '{}': fight {}: no FIGHT_END for the window that started reading at offset "
+        "rl_rng_replay: '{}' fight {}: no FIGHT_END for the window that started reading at offset "
         "{} -- truncated or malformed recording.",
         rp.path, rp.fights_served, rp.next_read_offset ) );
   }
@@ -1101,8 +1354,12 @@ void recorder_t::replay_fight_end()
   replay_state_t& rp = *replay_;
   if ( !rp.window_open )
     return;
+  std::uint64_t unused_this_fight = 0;
   for ( const auto& kv : rp.table )
-    rp.recorded_unused += kv.second.raw.size() - kv.second.next_unused;
+    unused_this_fight += kv.second.raw.size() - kv.second.next_unused;
+  rp.recorded_unused += unused_this_fight;
+  rp.current_fight.recorded_unused = unused_this_fight;
+  rp.fights_detail.push_back( rp.current_fight );
   rp.table.clear();
   rp.window_open = false;
 }
@@ -1284,6 +1541,15 @@ void recorder_t::mark_resalt()
     append( rec );
   }
   after_resalt_ = true;
+
+  // REP-04/D-05: from this moment on, replay stops for the rest of THIS fight; the fight's own
+  // stop time is kept for the sidecar's per-fight row. Only the first re-salt this fight counts
+  // (a second call before the next fight_begin() would otherwise overwrite an earlier stop time).
+  if ( replay_ && !replay_->stopped )
+  {
+    replay_->stopped = true;
+    replay_->current_fight.stop_time_ms = static_cast<std::int64_t>( root_->current_time().total_millis() );
+  }
 }
 
 void recorder_t::write_sidecar()
@@ -1367,7 +1633,53 @@ void recorder_t::write_sidecar()
     sidecar << "\"" << static_cast<int>( kv.first ) << "\": {\"matched\": " << kv.second.matched
             << ", \"unmatched\": " << kv.second.unmatched << "}";
   }
-  sidecar << "}}";
+  sidecar << "}";
+
+  // 253-02 Task 2 ("Interfaces this plan adds"): only present when replay_ is ALSO active (record
+  // while replaying, D-01) -- a plain recording (no rl_rng_replay=) carries no "replay" key at
+  // all, matching the interface's own "only when both options are set" note.
+  if ( replay_ )
+  {
+    const replay_state_t& rp = *replay_;
+    sidecar << ", \"replay\": {\"source\": \"" << json_escape( rp.path ) << "\", \"address\": \""
+            << rp.address << "\", \"totals\": {"
+            << "\"fights\": " << rp.fights_served << ", \"reused\": " << rp.reused
+            << ", \"fresh_no_address\": " << rp.fresh_no_address
+            << ", \"fresh_used_up\": " << rp.fresh_used_up
+            << ", \"fresh_roller_not_in_recording\": " << rp.fresh_roller_not_in_recording
+            << ", \"excluded\": " << rp.excluded << ", \"after_stop\": " << rp.after_stop
+            << ", \"outside_fight\": " << rp.outside_fight
+            << ", \"live_was_recorded\": " << rp.live_was_recorded
+            << ", \"recorded_unused\": " << rp.recorded_unused << "}, \"byClass\": {";
+    bool first_class = true;
+    for ( const auto& kv : rp.per_class )
+    {
+      if ( !first_class )
+        sidecar << ", ";
+      first_class = false;
+      sidecar << "\"" << class_name( kv.first ) << "\": {\"reused\": " << kv.second.reused
+              << ", \"fresh\": " << kv.second.fresh << ", \"excluded\": " << kv.second.excluded
+              << ", \"after_stop\": " << kv.second.after_stop << "}";
+    }
+    sidecar << "}, \"fights\": [";
+    for ( std::size_t i = 0; i < rp.fights_detail.size(); ++i )
+    {
+      const replay_state_t::fight_counts_t& fc = rp.fights_detail[ i ];
+      if ( i != 0 )
+        sidecar << ", ";
+      sidecar << "{\"fight\": " << i << ", \"reused\": " << fc.reused
+              << ", \"fresh_no_address\": " << fc.fresh_no_address
+              << ", \"fresh_used_up\": " << fc.fresh_used_up
+              << ", \"fresh_roller_not_in_recording\": " << fc.fresh_roller_not_in_recording
+              << ", \"excluded\": " << fc.excluded << ", \"after_stop\": " << fc.after_stop
+              << ", \"live_was_recorded\": " << fc.live_was_recorded
+              << ", \"recorded_unused\": " << fc.recorded_unused
+              << ", \"stop_time_ms\": " << fc.stop_time_ms << "}";
+    }
+    sidecar << "]}";
+  }
+
+  sidecar << "}";
 
   if ( !sidecar )
   {
