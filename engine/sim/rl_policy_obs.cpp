@@ -588,8 +588,48 @@ bool rl_capability_own_value( player_t* p, const rl_capability& cap )
   }
   if ( std::strcmp( cap.sim_kind, "special_effect" ) == 0 )
   {
-    return unique_gear::find_special_effect( p, static_cast<unsigned>( cap.sim_driver_spell_id ) ) !=
-           nullptr;
+    unsigned driver_id = static_cast<unsigned>( cap.sim_driver_spell_id );
+    if ( unique_gear::find_special_effect( p, driver_id ) != nullptr )
+      return true;
+
+    // F1 fix (246.1-05 follow-up, 2026-09-25): `find_special_effect` matches on
+    // `special_effect_t::spell_id`, but several setup callbacks legitimately REASSIGN that
+    // field away from the driver id, to the RPPM/proc spell that actually fires the buff --
+    // an established, intentional simc convention (the callback needs the driver's own effect
+    // data to build the buff first, then re-homes the effect under the spell that really
+    // procs it so combat-log/callback plumbing tracks the right id). Receipts:
+    //   unique_gear_midnight.cpp:724  arcanoweave_lining:       effect.spell_id = effect.trigger()->id();
+    //   unique_gear_midnight.cpp:1424 hunters_ritual_stone:     effect.spell_id = effect.trigger()->id();
+    //   unique_gear_midnight.cpp:574  stat_weapon_enchant (arcane_mastery/berserkers_rage as
+    //                                 well as every other stat-weapon-enchant driver registered
+    //                                 at unique_gear_midnight.cpp:6307-6311): same reassignment.
+    // `special_effect_t::trigger()` (item/special_effect.cpp:175-196) computes exactly which id
+    // the effect gets renamed to: `trigger_spell_id` if the encoding set one (not the case for
+    // any of these four drivers), else the first driver effect whose own trigger spell is ok(),
+    // else the driver itself. Because the rename already happened by the time this detector
+    // runs, there is no live `special_effect_t` left to ask -- so this fallback recomputes the
+    // SAME id from the driver spell's own effect data (never engine state that could have been
+    // mutated) and searches for a live effect under THAT id instead. This is "the same predicate
+    // that decides whether the buff can ever trigger": the buff cannot exist on this actor
+    // unless a special_effect_t was registered under exactly the id the actor's own gear/enchant
+    // setup renamed it to.
+    const spell_data_t* driver_spell = p->find_spell( driver_id );
+    if ( driver_spell != nullptr && driver_spell->ok() )
+    {
+      unsigned trigger_id = 0;
+      for ( size_t i = 1, end = driver_spell->effect_count(); i <= end; i++ )
+      {
+        if ( driver_spell->effectN( i ).trigger()->ok() )
+        {
+          trigger_id = driver_spell->effectN( i ).trigger()->id();
+          break;
+        }
+      }
+      if ( trigger_id != 0 && trigger_id != driver_id &&
+           unique_gear::find_special_effect( p, trigger_id ) != nullptr )
+        return true;
+    }
+    return false;
   }
   if ( std::strcmp( cap.sim_kind, "set_bonus" ) == 0 )
   {
