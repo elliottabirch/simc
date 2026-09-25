@@ -1360,9 +1360,22 @@ void recorder_t::replay_fight_begin()
       // the fresh-number rule must avoid ties with numbers it can never reuse too.
       rp.value_set.insert( replay_bits_of( rec.raw ) );
 
+      // 254-06 Task 2 (REP-06 speed round 3): replay_sidecar_excluded()/
+      // replay_key_index_for_sidecar_roller() each re-ran replay_check_sidecar_id() on the SAME
+      // id this block already validated, up to 5 bounds-check calls per kept ROLL record (3 for
+      // rec.roller, 2 for trigger_id) -- profiled at 1.21% of the replaying run's own instruction
+      // count in replay_check_sidecar_id() alone ($S/speed/profile-r2-replay.txt). Each id is
+      // validated exactly ONCE below, in the same order as before (roller, then trigger -- so the
+      // same first-invalid-id throws the same exception with the same message), then read
+      // directly off the validated arrays -- no behavior change, fewer redundant calls.
       replay_check_sidecar_id( rec.roller );
-      const bool roller_excluded = replay_sidecar_excluded( rec.roller );
-      const bool press_excluded = trigger_kind != TRIGGER_KIND_NONE && replay_sidecar_excluded( trigger_id );
+      const bool roller_excluded = rp.sidecar_id_excluded[ rec.roller ];
+      bool press_excluded = false;
+      if ( trigger_kind != TRIGGER_KIND_NONE )
+      {
+        replay_check_sidecar_id( trigger_id );
+        press_excluded = rp.sidecar_id_excluded[ trigger_id ];
+      }
       if ( !roller_excluded && !press_excluded )
       {
         // D-15/D-16: for no press (trigger_kind NONE) the trigger-roller key is the fixed
@@ -1370,8 +1383,8 @@ void recorder_t::replay_fight_begin()
         // means 'no press', not sim|_rng".
         const std::uint32_t trigger_key = trigger_kind == TRIGGER_KIND_NONE
             ? replay_state_t::NO_PRESS_KEY_INDEX
-            : replay_key_index_for_sidecar_roller( trigger_id );
-        const std::uint32_t roller_key = replay_key_index_for_sidecar_roller( rec.roller );
+            : rp.sidecar_id_to_key_index[ trigger_id ];
+        const std::uint32_t roller_key = rp.sidecar_id_to_key_index[ rec.roller ];
         const replay_state_t::address_key_t key{ trigger_kind, trigger_key, press_number, roller_key };
         rp.table[ key ].raw.push_back( rec.raw );
       }
