@@ -26,6 +26,8 @@
 #include "buff/buff.hpp"
 #include "player/consumable.hpp"
 #include "player/player.hpp"
+#include "player/set_bonus.hpp"
+#include "player/unique_gear.hpp"
 #include "sim/cooldown.hpp"
 #include "sim/decision_dump.hpp"
 #include "sim/event.hpp"
@@ -567,6 +569,152 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground, bool is_d
 }
 
 // ---------------------------------------------------------------------------
+// Capability binding (246.1-05, CAP-01/CAP-02). RL_CAPABILITIES is the ONE
+// generated table (gen_rl_constants.py, 246.1-02) -- this file never hand-
+// lists a detector for a capability id, only a dispatch on `sim_kind`.
+// Every branch here is a THIN wrapper over an existing engine query; nothing
+// here decides game rules. Placed here (ahead of both read_action_gate_bits
+// below and bind_slots' scalar case further down) so both can call it.
+// ---------------------------------------------------------------------------
+
+// Evaluates capability `cap`'s OWN detector for actor `p` -- NOT the effective (own AND
+// requires) value; see rl_capability_effective_value below for that. An unknown sim_kind is a
+// generator/engine dispatch-table drift, thrown by name, never a silent false.
+bool rl_capability_own_value( player_t* p, const rl_capability& cap )
+{
+  if ( std::strcmp( cap.sim_kind, "racial_spell" ) == 0 )
+  {
+    return p->find_racial_spell( cap.sim_name )->ok();
+  }
+  if ( std::strcmp( cap.sim_kind, "special_effect" ) == 0 )
+  {
+    return unique_gear::find_special_effect( p, static_cast<unsigned>( cap.sim_driver_spell_id ) ) !=
+           nullptr;
+  }
+  if ( std::strcmp( cap.sim_kind, "set_bonus" ) == 0 )
+  {
+    set_bonus_type_e set;
+    if ( std::strcmp( cap.sim_set, "MID1" ) == 0 )
+      set = MID1;
+    else if ( std::strcmp( cap.sim_set, "MID2" ) == 0 )
+      set = MID2;
+    else if ( std::strcmp( cap.sim_set, "MID_BOZ" ) == 0 )
+      set = MID_BOZ;
+    else
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::rl_capability_own_value: capability '{}' has unknown sim_set '{}'", cap.id,
+          cap.sim_set ) );
+
+    set_bonus_e bonus;
+    if ( cap.sim_pieces == 2 )
+      bonus = B2;
+    else if ( cap.sim_pieces == 4 )
+      bonus = B4;
+    else
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::rl_capability_own_value: capability '{}' has unknown sim_pieces {}", cap.id,
+          cap.sim_pieces ) );
+
+    return p->sets->has_set_bonus( p->specialization(), set, bonus );
+  }
+  if ( std::strcmp( cap.sim_kind, "potion_enabled" ) == 0 )
+  {
+    // Same `!background` predicate the mask uses below -- reached via `p->find_action` directly
+    // (never g_action_handle_cache, which is filled lazily on first MASK use and must not be a
+    // bind-time dependency) -- the same seam resolve_generic_consumable_buff already uses to
+    // reach the potion action's consumable_buff.
+    action_t* a = p->find_action( "potion" );
+    return a != nullptr && !a->background;
+  }
+  throw sc_runtime_error( fmt::format(
+      "rl_policy::rl_capability_own_value: capability '{}' has unknown sim_kind '{}'", cap.id,
+      cap.sim_kind ) );
+}
+
+// Linear scan by id -- RL_CAPABILITY_COUNT is 17; called only at bind time and once per
+// read_action_gate_bits refresh, never per hot per-decision inner loop. Returns -1 if not found
+// (a `requires` referencing an unknown id is a generator bug, caught here rather than silently
+// treated as "always satisfied").
+int rl_capability_index_by_id( const char* id )
+{
+  for ( std::size_t i = 0; i < RL_CAPABILITY_COUNT; ++i )
+  {
+    if ( std::strcmp( RL_CAPABILITIES[ i ].id, id ) == 0 )
+      return static_cast<int>( i );
+  }
+  return -1;
+}
+
+// Computes capability index `idx`'s EFFECTIVE value: its own detector AND every `requires`
+// capability's own EFFECTIVE value, recursively (obs.py's bit-0 rule, mirrored exactly -- CAP-02).
+// Memoized into `memo` (one call per capability per invocation of the caller's own local memo
+// array, regardless of how many other capabilities require it or how many governed slots/actions
+// it has).
+bool rl_capability_effective_value( player_t* p, std::size_t idx,
+                                     std::array<int, RL_CAPABILITY_COUNT>& memo )
+{
+  if ( memo[ idx ] >= 0 )
+    return memo[ idx ] != 0;
+
+  const rl_capability& cap = RL_CAPABILITIES[ idx ];
+  bool value = rl_capability_own_value( p, cap );
+  for ( std::size_t ri = 0; ri < cap.requires_count && value; ++ri )
+  {
+    const char* required_id = RL_CAPABILITY_REQUIRES[ cap.requires_offset + ri ];
+    int required_idx = rl_capability_index_by_id( required_id );
+    if ( required_idx < 0 )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::rl_capability_effective_value: capability '{}' requires unknown id '{}'",
+          cap.id, required_id ) );
+    }
+    value = value && rl_capability_effective_value( p, static_cast<std::size_t>( required_idx ), memo );
+  }
+  memo[ idx ] = value ? 1 : 0;
+  return value;
+}
+
+// 246.1-05 (CAP-02): if a governed action of a zero-EFFECTIVE-bit capability is EVER marked
+// legal (resolvable && ready -- see build_mask's own R0 comment: for a `kind == cast` action
+// this pair IS the whole mask verdict), the engine and the capability table have diverged --
+// abort by name rather than let a non-Troll row ever record "Berserking ready" (research
+// hazard 2). Same idiom solver_control's protocol_abort uses: named, immediate, never a silent
+// default. Checked every time read_action_gate_bits freshly computes the bits (not on a cache
+// hit -- the freshly-computed data already passed this check the time it was computed).
+void rl_capability_assert_no_governed_action_legal( const player_t* p,
+                                                     const std::uint8_t out_resolvable[ RL_ACTION_DIM ],
+                                                     const std::uint8_t out_ready[ RL_ACTION_DIM ] )
+{
+  std::array<int, RL_CAPABILITY_COUNT> memo;
+  memo.fill( -1 );
+  player_t* mutable_p = const_cast<player_t*>( p );
+  for ( std::size_t ci = 0; ci < RL_CAPABILITY_COUNT; ++ci )
+  {
+    if ( rl_capability_effective_value( mutable_p, ci, memo ) )
+      continue;
+    const rl_capability& cap = RL_CAPABILITIES[ ci ];
+    for ( std::size_t gi = 0; gi < cap.governed_actions_count; ++gi )
+    {
+      const char* action_token = RL_CAPABILITY_GOVERNED_ACTIONS[ cap.governed_actions_offset + gi ];
+      for ( std::size_t ai = 0; ai < RL_ACTION_DIM; ++ai )
+      {
+        if ( RL_ACTIONS[ ai ].kind != rl_action_kind::cast ||
+             std::strcmp( RL_ACTIONS[ ai ].token, action_token ) != 0 )
+          continue;
+        if ( out_resolvable[ ai ] && out_ready[ ai ] )
+        {
+          throw sc_runtime_error( fmt::format(
+              "rl_policy::read_action_gate_bits: capability '{}' is 0 for actor '{}' but its "
+              "governed action '{}' (index {}) reads legal at time {} -- the engine and the "
+              "capability table have diverged",
+              cap.id, p->name(), action_token, ai, p->sim->current_time().total_seconds() ) );
+        }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // read_action_gate_bits -- 221-01 (ACT-02, Pattern 1/2). Resolves each
 // `kind == cast` action's token to an action_t* through
 // solver_control::resolve_action (the SAME resolver accept_cast uses, via a
@@ -735,6 +883,11 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
                         a->target_ready( a->target ) ) ? 1 : 0;
   }
 
+  // 246.1-05 (CAP-02): freshly computed this call (never on the cache-hit early return above,
+  // which already passed this check the time it was computed) -- named abort, not a silent
+  // default, the instant a zero capability's governed action would otherwise read legal.
+  rl_capability_assert_no_governed_action_legal( p, out_resolvable, out_ready );
+
   if ( is_decision_boundary )
   {
     // CR-04 (260902/cr4): the deadlock census -- ONE registry action existing but none of them
@@ -852,6 +1005,11 @@ enum class slot_binding_kind
                 // member IS the action token (crash_lightning/sundering), value comes from
                 // 228-10's compute_crash_lightning_shape()/compute_sundering_shape(), never a
                 // per-candidate pick (the shaped actions have none, OR-2)
+  constant,     // 246.1-05 (CAP-01/CAP-02): an already-encoded fixed value -- a capability's own
+                // EFFECTIVE bit (own detector AND every `requires`, recursive) written directly
+                // into `capability.<id>`, or the CAP-02 bit-0 fixed value rebound into every slot
+                // a zero-bit capability governs. `build_obs` writes `constant_value` straight
+                // through with no further scaling -- the value is already the encoded double.
   unresolved
 };
 
@@ -1056,6 +1214,11 @@ struct slot_binding
   // unresolved (caught by the bind-time dispatch below, which never
   // constructs a `legality`-kind binding with this left at -1).
   int legality_action_index = -1;
+
+  // kind == constant (246.1-05, CAP-01/CAP-02): the already-encoded value -- either a
+  // capability's own effective bit (0.0/1.0) or RL_CAPABILITY_FIXED_VALUE for a slot a zero-bit
+  // capability governs. Resolved ONCE at bind time; build_obs writes it through unscaled.
+  double constant_value = 0.0;
 };
 
 struct slot_table
@@ -2190,6 +2353,13 @@ const slot_table& bind_slots( player_t* p )
   table.bindings.reserve( RL_OBS_DIM );
   table.composed_names.reserve( RL_OBS_DIM );
 
+  // 246.1-05 (CAP-01/CAP-02): -1 == not yet computed for this bind, 0/1 == computed effective
+  // value. Populated lazily by rl_capability_effective_value as each capability.<id> scalar leaf
+  // is walked below, and read again (fully populated by then) by the governed-slot rebind pass
+  // after the family walk.
+  std::array<int, RL_CAPABILITY_COUNT> capability_effective_memo;
+  capability_effective_memo.fill( -1 );
+
   std::size_t counter = 0;
   for ( std::size_t fi = 0; fi < RL_OBS_FAMILY_COUNT; ++fi )
   {
@@ -2239,6 +2409,28 @@ const slot_table& bind_slots( player_t* p )
             break;
           }
           case rl_family_kind::scalar:
+            // 246.1-05 (CAP-01/CAP-02): a `capability.<id>` leaf resolves through RL_CAPABILITIES,
+            // not resolve_scalar_leaf (which has no `player_t*` in scope -- capability detectors
+            // need one). Bound as `constant` carrying the EFFECTIVE (own AND every `requires`,
+            // recursive) value, already encoded 0.0/1.0 -- build_obs writes it through unscaled.
+            if ( std::strncmp( leaf.leaf, "capability.", 11 ) == 0 )
+            {
+              const char* cap_id = leaf.leaf + 11;
+              int cap_idx = rl_capability_index_by_id( cap_id );
+              if ( cap_idx < 0 )
+              {
+                throw sc_runtime_error( fmt::format(
+                    "rl_policy::bind_slots: scalars-family leaf '{}' (slot '{}') names capability "
+                    "'{}', which RL_CAPABILITIES has no entry for -- generator/table mismatch",
+                    leaf.leaf, composed, cap_id ) );
+              }
+              bool effective = rl_capability_effective_value(
+                  p, static_cast<std::size_t>( cap_idx ), capability_effective_memo );
+              binding.kind = slot_binding_kind::constant;
+              binding.leaf = &leaf;
+              binding.constant_value = effective ? 1.0 : 0.0;
+              break;
+            }
             binding = resolve_scalar_leaf( leaf );
             // 260914-rbp Task 2c (ME-4 fork half): an `unresolved` binding for a `scalars`-family
             // leaf is FATAL, by name -- unlike a family with a legitimate "not present on this
@@ -2445,6 +2637,34 @@ const slot_table& bind_slots( player_t* p )
         "rl_policy::bind_slots: the family table walk produced {} slots, expected RL_OBS_DIM={} "
         "-- this is a generator bug (a short table), not a runtime data problem",
         counter, RL_OBS_DIM ) );
+  }
+
+  // 246.1-05 (CAP-02): for every capability whose EFFECTIVE value is 0, rebind every slot it
+  // governs to the fixed value -- ONCE per actor, before the table is cached, so there is no
+  // per-decision cost and no path by which a governed slot could ever read anything but the
+  // fixed value (research hazard 2: a non-Troll row must never record "Berserking ready").
+  // capability_effective_memo is already fully populated (every one of the 17 capability.<id>
+  // scalars was walked above -- census note "materialized LAST"); the call below is a memoized
+  // no-op for every capability already computed, and a defensive direct compute for any that
+  // were not (there are none by construction, but this pass must never silently skip one).
+  for ( std::size_t ci = 0; ci < RL_CAPABILITY_COUNT; ++ci )
+  {
+    if ( rl_capability_effective_value( p, ci, capability_effective_memo ) )
+      continue;
+    const rl_capability& cap = RL_CAPABILITIES[ ci ];
+    for ( std::size_t gi = 0; gi < cap.governed_slots_count; ++gi )
+    {
+      std::size_t slot = RL_CAPABILITY_GOVERNED_SLOTS[ cap.governed_slots_offset + gi ];
+      if ( slot >= table.bindings.size() )
+      {
+        throw sc_runtime_error( fmt::format(
+            "rl_policy::bind_slots: capability '{}' governs out-of-range slot {} (table has {} "
+            "slots)",
+            cap.id, slot, table.bindings.size() ) );
+      }
+      table.bindings[ slot ].kind          = slot_binding_kind::constant;
+      table.bindings[ slot ].constant_value = RL_CAPABILITY_FIXED_VALUE;
+    }
   }
 
   write_names_out_if_requested( p, table );
@@ -3259,6 +3479,16 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
           // this is exactly the same bits masked_argmax/the epsilon draw/
           // record_decision's own packed-mask column see.
           raw = mask[ b.legality_action_index ] != 0 ? 1.0 : 0.0;
+          status = lookup_status::present;
+          break;
+        }
+        case slot_binding_kind::constant:
+        {
+          // 246.1-05 (CAP-01/CAP-02): the already-encoded value -- a capability's own effective
+          // bit, or the CAP-02 fixed value for a slot a zero-bit capability governs. Bound ONCE
+          // at bind time (bind_slots); every capability.* leaf's own div is 1.0 so apply_scale
+          // below is a no-op -- this is written through exactly as bound, on every row.
+          raw = b.constant_value;
           status = lookup_status::present;
           break;
         }

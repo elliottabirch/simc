@@ -399,11 +399,18 @@ wait_result build_wait( const rl_state_t& s, const rl_wait_anchor& anchor );
 //                 `body == ln_dueling` re-checked per layer; that is what
 //                 makes forward() depth-agnostic instead of re-encoding the
 //                 convention a third time.
+// 246.1-05 (CAP-01/CAP-02): `grouped_ln_dueling` is body index 3 on the wire (RLW1 format 5,
+// mandatory STRUCTURE section) -- scripts/rl/agent/network_bodies.py's `GroupedDuelingBody`. Every
+// observation column a capability governs is gated (multiplied by that capability's own 0/1
+// column) before five named blocks + a shared per-spell layer + the pass-through capability
+// columns feed the SAME trunk + dueling combine `ln_dueling` already uses -- see
+// rl_grouped_layout_t below for the split and rl_policy_net.cpp's grouped forward branch.
 enum class rl_body_type
 {
   mlp,
   dueling,
-  ln_dueling
+  ln_dueling,
+  grouped_ln_dueling
 };
 
 // NET-01 (Phase 222): the ONE derived layer-split rule this language uses --
@@ -461,6 +468,57 @@ struct rl_scorer_t
   // at load, reused every scoring call, never reallocated per decision.
   mutable std::vector<std::vector<float>> hidden_scratch;
   mutable std::vector<float>              feature_scratch;
+};
+
+// 246.1-05 (CAP-01/CAP-02): the RLW1 v5 STRUCTURE section's decoded shape -- present (non-default)
+// only when rl_weights_t::body == grouped_ln_dueling. Mirrors scripts/rl/net_layout.py's own
+// ResolvedLayout; this struct is populated from the BLOB's own STRUCTURE section at load time
+// (the fork has no registry of its own -- n_obs/layout_sha are cross-checked at load against this
+// build's live RL_OBS_DIM/RL_NET_LAYOUT_SHA, never re-derived here).
+struct rl_grouped_layout_t
+{
+  std::uint32_t n_obs = 0;
+  std::string   layout_sha;
+
+  // gate_src[i] -- for observation column i, the capability column's OWN slot if governed, or
+  // n_obs itself (the "point at an appended constant 1" sentinel, network_bodies.py's own
+  // convention) if ungoverned. Size n_obs, built ONCE at load from the STRUCTURE section's
+  // `gated` pairs (never per decision).
+  std::vector<std::uint32_t> gate_src;
+
+  // One slot list per grouped block, in the STRUCTURE section's own block order (net_layout.py's
+  // blockOrder) -- block k's own `block_layers[k].in_features` must equal `block_slots[k].size()`.
+  std::vector<std::vector<std::uint32_t>> block_slots;
+  // n_repeats x n_facts matrix of slots -- the shared per-spell layer's own per-repeat input
+  // gather; `spell_layer.in_features` must equal `per_spell[0].size()`.
+  std::vector<std::vector<std::uint32_t>> per_spell;
+  // The pass-through slots (today, the 17 capability columns) -- fed to the trunk raw (gated, but
+  // through no block Linear/LayerNorm of their own).
+  std::vector<std::uint32_t> passthrough;
+
+  // Weights: one Linear+LayerNorm+ReLU per block, then ONE shared Linear+LayerNorm+ReLU applied
+  // identically to every per_spell row -- parsed off the SAME wire layer list as
+  // rl_weights_t::layers (layer order `[block_0 .. block_{G-1}, shared, trunk_0 .. trunk_{T-1},
+  // v_head, a_head]`, rlw1.py's own `_validate_grouped_layers` docstring), split at load time so
+  // the trunk + v_head/a_head remainder becomes rl_weights_t::layers itself -- forward()'s
+  // existing trunk/dueling code (the ln_dueling shape) runs on it completely unchanged.
+  std::vector<rl_layer> block_layers;
+  rl_layer               spell_layer;
+
+  // Load-time-sized scratch (never per decision -- same single-thread/no-per-decision-allocation
+  // reasoning as rl_weights_t::hidden_scratch above). dot_fn needs a CONTIGUOUS input array
+  // (rl_policy_net.cpp's own dot_fn/select_dot_fn comment), so each block/the shared per-spell
+  // layer first GATHERS its own (non-contiguous) slots out of gated_scratch into its own small
+  // contiguous buffer before the dot product runs -- block_gather_scratch/spell_gather_scratch
+  // below are exactly that buffer, one per block plus one reused across spell repeats (spell rows
+  // are processed sequentially, so a single reusable buffer is correct and cheaper than one per
+  // repeat).
+  mutable std::vector<float>              gated_scratch;          // size n_obs -- x[i] * gate value
+  mutable std::vector<std::vector<float>> block_gather_scratch;   // one per block, size block_slots[k].size()
+  mutable std::vector<std::vector<float>> block_scratch;          // one per block, post-ReLU
+  mutable std::vector<float>              spell_gather_scratch;   // size n_facts, reused per spell repeat
+  mutable std::vector<std::vector<float>> spell_scratch;          // one per per_spell row, post-ReLU
+  mutable std::vector<float>              concat_scratch;         // the trunk's own input buffer
 };
 
 struct rl_weights_t
@@ -535,6 +593,11 @@ struct rl_weights_t
   // never allocated per decision.
   mutable std::vector<std::vector<float>> hidden_scratch;
   mutable std::vector<float>              obs_gather_scratch;
+
+  // 246.1-05 (CAP-01/CAP-02): populated only when body == grouped_ln_dueling (default-constructed
+  // empty otherwise). `layers` above holds ONLY the trunk + v_head/a_head remainder for a grouped
+  // blob -- see rl_grouped_layout_t's own doc comment for the load-time split.
+  rl_grouped_layout_t grouped;
 };
 
 rl_weights_t load_rlw1( const std::string& path );   // throws sc_runtime_error, named per refusal

@@ -94,19 +94,45 @@ struct rl_talent_gate
   bool        forbidden;
 };
 
+// 246.1-02 Task 2 (CAP-01/CAP-02): one row per declared capability. `requires`/
+// `governed_slots`/`governed_actions` are each a (offset, count) SLICE into the
+// matching flat RL_CAPABILITY_REQUIRES/RL_CAPABILITY_GOVERNED_SLOTS/
+// RL_CAPABILITY_GOVERNED_ACTIONS array below -- never a fixed-width inline array,
+// because each capability's own counts differ (weapon_venomfang alone governs 21
+// columns; several capabilities govern zero). sim_name/sim_driver_spell_id/sim_set/
+// sim_pieces are populated ONLY for the matching sim_kind (racial_spell/
+// special_effect/set_bonus respectively) -- nullptr/0 otherwise, never a sentinel
+// string baked INTO sim_kind itself.
+struct rl_capability
+{
+  const char* id;
+  std::size_t column_slot;
+  const char* sim_kind;
+  const char* sim_name;              // racial_spell only; nullptr otherwise
+  long long   sim_driver_spell_id;   // special_effect only; 0 otherwise
+  const char* sim_set;               // set_bonus only; nullptr otherwise
+  int         sim_pieces;             // set_bonus only; 0 otherwise
+  std::size_t requires_offset;
+  std::size_t requires_count;
+  std::size_t governed_slots_offset;
+  std::size_t governed_slots_count;
+  std::size_t governed_actions_offset;
+  std::size_t governed_actions_count;
+};
+
 // ---- Scalar constants ----
 
 inline constexpr const char* RL_REGISTRY_ID = "enhancement";
 inline constexpr const char* RL_ACTOR_NAME = "MID2_Shaman_Enhancement_Stormbringer";
 inline constexpr int RL_ENCODER_VERSION = 6;
-inline constexpr std::size_t RL_OBS_DIM = 297;
-inline constexpr std::size_t RL_ACTION_DIM = 16;
+inline constexpr std::size_t RL_OBS_DIM = 315;
+inline constexpr std::size_t RL_ACTION_DIM = 17;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
-inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:2e734972fde4a0710144faef19ea5753d74d5ae8eaeb3df3c3e6d76a25fb1aad";
+inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:1736f947498759b018ec310f4795eadd16ee23cce4f56e82c4301af84426bc1e";
 inline constexpr const char* RL_MASK_RULES_SHA = "3f930294d36b217dca01fc51600c0da9d0568e20152fb53c588b6e8ddccf7662";
-inline constexpr const char* RL_ACTION_SPACE_SHA = "5ee0d827b3a19bb2b38bf36f38901cacd7c5f0d002dd99ce0a8b57c0e8d65b77";
+inline constexpr const char* RL_ACTION_SPACE_SHA = "bdf7adc4cc139aca5a628d911446b4ca9fa1e2f41dd63d855984428b48cde01d";
 
 // ---- Observation name list (the materialised ordering) ----
 
@@ -170,13 +196,13 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "cooldowns.ascendance.remains",
   "cooldowns.berserking.remains",
   "cooldowns.crash_lightning.remains",
-  "cooldowns.item_cd_1141.remains",
   "cooldowns.lava_lash.remains",
   "cooldowns.potion.remains",
   "cooldowns.strike.charges_fractional",
   "cooldowns.strike.charges",
   "cooldowns.strike.recharge_time",
   "cooldowns.strike.full_recharge_time",
+  "cooldowns.void_execution_mandate_1250557.remains",
   "cooldowns.voltaic_blaze.remains",
   "cooldowns.voracious_heart_of_ulatek_1297761.remains",
   "target_facts.chain_lightning.found",
@@ -349,6 +375,7 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "legality.13.flag",
   "legality.14.flag",
   "legality.15.flag",
+  "legality.16.flag",
   "proc_chances.stormsurge.value",
   "proc_chances.windfury.value",
   "fight_remains",
@@ -408,6 +435,23 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "hits.lava_lash.flame_shock_spread.at_least_3",
   "hits.lava_lash.flame_shock_spread.at_least_4",
   "hits.lava_lash.flame_shock_spread.at_least_5",
+  "capability.racial_berserking",
+  "capability.trinket_voracious_heart_of_ulatek",
+  "capability.consumable_potion_of_recklessness",
+  "capability.enchant_arcane_mastery",
+  "capability.enchant_berserkers_rage",
+  "capability.embellishment_arcanoweave_lining",
+  "capability.embellishment_hunters_ritual_stone",
+  "capability.item_venomcursed_mastery",
+  "capability.item_venomcursed_ascendance",
+  "capability.weapon_venomfang",
+  "capability.set_bite_of_zuljan_2pc",
+  "capability.tier_mid2_enh_2pc",
+  "capability.tier_mid2_enh_4pc",
+  "capability.omnium_rune_burning_haste",
+  "capability.omnium_core_rune_unleashed_fire",
+  "capability.omnium_rune_lingering",
+  "capability.trinket_void_execution_mandate",
 };
 
 // ---- Per-family observation tables ----
@@ -583,19 +627,19 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_2[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_3[] = {
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
-};
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_4[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
 };
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_5[] = {
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_4[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 300.0, nullptr, 0, false },
 };
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_6[] = {
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_5[] = {
     { "charges_fractional", rl_kind::k_float, 2.0, true, 2.0, false, 1.0, nullptr, 0, false },
     { "charges", rl_kind::k_int, 2.0, true, 2.0, false, 1.0, nullptr, 0, false },
     { "recharge_time", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
     { "full_recharge_time", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_6[] = {
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 120.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_7[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
@@ -607,10 +651,10 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_COOLDOWNS_MEMBERS[] = {
   { "ascendance", "ascendance", RL_OBS_FAMILY_COOLDOWNS_LEAVES_0, 1 },
   { "berserking", "berserking", RL_OBS_FAMILY_COOLDOWNS_LEAVES_1, 1 },
   { "crash_lightning", "crash_lightning", RL_OBS_FAMILY_COOLDOWNS_LEAVES_2, 1 },
-  { "item_cd_1141", "item_cd_1141", RL_OBS_FAMILY_COOLDOWNS_LEAVES_3, 1 },
-  { "lava_lash", "lava_lash", RL_OBS_FAMILY_COOLDOWNS_LEAVES_4, 1 },
-  { "potion", "potion", RL_OBS_FAMILY_COOLDOWNS_LEAVES_5, 1 },
-  { "strike", "strike", RL_OBS_FAMILY_COOLDOWNS_LEAVES_6, 4 },
+  { "lava_lash", "lava_lash", RL_OBS_FAMILY_COOLDOWNS_LEAVES_3, 1 },
+  { "potion", "potion", RL_OBS_FAMILY_COOLDOWNS_LEAVES_4, 1 },
+  { "strike", "strike", RL_OBS_FAMILY_COOLDOWNS_LEAVES_5, 4 },
+  { "void_execution_mandate_1250557", "void_execution_mandate_1250557", RL_OBS_FAMILY_COOLDOWNS_LEAVES_6, 1 },
   { "voltaic_blaze", "voltaic_blaze", RL_OBS_FAMILY_COOLDOWNS_LEAVES_7, 1 },
   { "voracious_heart_of_ulatek_1297761", "voracious_heart_of_ulatek_1297761", RL_OBS_FAMILY_COOLDOWNS_LEAVES_8, 1 },
 };
@@ -970,6 +1014,9 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_14[] = {
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_15[] = {
     { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
 };
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_16[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
 inline constexpr rl_obs_member RL_OBS_FAMILY_LEGALITY_MEMBERS[] = {
   { "00", "00", RL_OBS_FAMILY_LEGALITY_LEAVES_0, 1 },
   { "01", "01", RL_OBS_FAMILY_LEGALITY_LEAVES_1, 1 },
@@ -987,6 +1034,7 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_LEGALITY_MEMBERS[] = {
   { "13", "13", RL_OBS_FAMILY_LEGALITY_LEAVES_13, 1 },
   { "14", "14", RL_OBS_FAMILY_LEGALITY_LEAVES_14, 1 },
   { "15", "15", RL_OBS_FAMILY_LEGALITY_LEAVES_15, 1 },
+  { "16", "16", RL_OBS_FAMILY_LEGALITY_LEAVES_16, 1 },
 };
 
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PROC_CHANCES_LEAVES_0[] = {
@@ -1000,38 +1048,38 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_PROC_CHANCES_MEMBERS[] = {
   { "windfury", "windfury_proc_chance_current", RL_OBS_FAMILY_PROC_CHANCES_LEAVES_1, 1 },
 };
 
-inline constexpr double RL_BUCKETS_SLOT265[] = { 0.0, 2.0 };
-inline constexpr double RL_BUCKETS_SLOT266[] = { 0.0, 3.0 };
-inline constexpr double RL_BUCKETS_SLOT267[] = { 0.0, 4.0 };
-inline constexpr double RL_BUCKETS_SLOT268[] = { 0.0, 5.0 };
-inline constexpr double RL_BUCKETS_SLOT269[] = { 0.0, 2.0 };
-inline constexpr double RL_BUCKETS_SLOT270[] = { 0.0, 3.0 };
-inline constexpr double RL_BUCKETS_SLOT271[] = { 0.0, 4.0 };
-inline constexpr double RL_BUCKETS_SLOT272[] = { 0.0, 5.0 };
-inline constexpr double RL_BUCKETS_SLOT273[] = { 0.0, 2.0 };
-inline constexpr double RL_BUCKETS_SLOT274[] = { 0.0, 3.0 };
-inline constexpr double RL_BUCKETS_SLOT275[] = { 0.0, 4.0 };
-inline constexpr double RL_BUCKETS_SLOT276[] = { 0.0, 5.0 };
-inline constexpr double RL_BUCKETS_SLOT277[] = { 0.0, 1.0 };
-inline constexpr double RL_BUCKETS_SLOT278[] = { 0.0, 2.0 };
-inline constexpr double RL_BUCKETS_SLOT279[] = { 0.0, 3.0 };
-inline constexpr double RL_BUCKETS_SLOT280[] = { 0.0, 4.0 };
-inline constexpr double RL_BUCKETS_SLOT281[] = { 0.0, 5.0 };
-inline constexpr double RL_BUCKETS_SLOT282[] = { 0.0, 1.0 };
-inline constexpr double RL_BUCKETS_SLOT283[] = { 0.0, 2.0 };
-inline constexpr double RL_BUCKETS_SLOT284[] = { 0.0, 3.0 };
-inline constexpr double RL_BUCKETS_SLOT285[] = { 0.0, 4.0 };
-inline constexpr double RL_BUCKETS_SLOT286[] = { 0.0, 5.0 };
-inline constexpr double RL_BUCKETS_SLOT287[] = { 0.0, 1.0 };
-inline constexpr double RL_BUCKETS_SLOT288[] = { 0.0, 2.0 };
-inline constexpr double RL_BUCKETS_SLOT289[] = { 0.0, 3.0 };
-inline constexpr double RL_BUCKETS_SLOT290[] = { 0.0, 4.0 };
-inline constexpr double RL_BUCKETS_SLOT291[] = { 0.0, 5.0 };
-inline constexpr double RL_BUCKETS_SLOT292[] = { 0.0, 1.0 };
-inline constexpr double RL_BUCKETS_SLOT293[] = { 0.0, 2.0 };
-inline constexpr double RL_BUCKETS_SLOT294[] = { 0.0, 3.0 };
-inline constexpr double RL_BUCKETS_SLOT295[] = { 0.0, 4.0 };
-inline constexpr double RL_BUCKETS_SLOT296[] = { 0.0, 5.0 };
+inline constexpr double RL_BUCKETS_SLOT266[] = { 0.0, 2.0 };
+inline constexpr double RL_BUCKETS_SLOT267[] = { 0.0, 3.0 };
+inline constexpr double RL_BUCKETS_SLOT268[] = { 0.0, 4.0 };
+inline constexpr double RL_BUCKETS_SLOT269[] = { 0.0, 5.0 };
+inline constexpr double RL_BUCKETS_SLOT270[] = { 0.0, 2.0 };
+inline constexpr double RL_BUCKETS_SLOT271[] = { 0.0, 3.0 };
+inline constexpr double RL_BUCKETS_SLOT272[] = { 0.0, 4.0 };
+inline constexpr double RL_BUCKETS_SLOT273[] = { 0.0, 5.0 };
+inline constexpr double RL_BUCKETS_SLOT274[] = { 0.0, 2.0 };
+inline constexpr double RL_BUCKETS_SLOT275[] = { 0.0, 3.0 };
+inline constexpr double RL_BUCKETS_SLOT276[] = { 0.0, 4.0 };
+inline constexpr double RL_BUCKETS_SLOT277[] = { 0.0, 5.0 };
+inline constexpr double RL_BUCKETS_SLOT278[] = { 0.0, 1.0 };
+inline constexpr double RL_BUCKETS_SLOT279[] = { 0.0, 2.0 };
+inline constexpr double RL_BUCKETS_SLOT280[] = { 0.0, 3.0 };
+inline constexpr double RL_BUCKETS_SLOT281[] = { 0.0, 4.0 };
+inline constexpr double RL_BUCKETS_SLOT282[] = { 0.0, 5.0 };
+inline constexpr double RL_BUCKETS_SLOT283[] = { 0.0, 1.0 };
+inline constexpr double RL_BUCKETS_SLOT284[] = { 0.0, 2.0 };
+inline constexpr double RL_BUCKETS_SLOT285[] = { 0.0, 3.0 };
+inline constexpr double RL_BUCKETS_SLOT286[] = { 0.0, 4.0 };
+inline constexpr double RL_BUCKETS_SLOT287[] = { 0.0, 5.0 };
+inline constexpr double RL_BUCKETS_SLOT288[] = { 0.0, 1.0 };
+inline constexpr double RL_BUCKETS_SLOT289[] = { 0.0, 2.0 };
+inline constexpr double RL_BUCKETS_SLOT290[] = { 0.0, 3.0 };
+inline constexpr double RL_BUCKETS_SLOT291[] = { 0.0, 4.0 };
+inline constexpr double RL_BUCKETS_SLOT292[] = { 0.0, 5.0 };
+inline constexpr double RL_BUCKETS_SLOT293[] = { 0.0, 1.0 };
+inline constexpr double RL_BUCKETS_SLOT294[] = { 0.0, 2.0 };
+inline constexpr double RL_BUCKETS_SLOT295[] = { 0.0, 3.0 };
+inline constexpr double RL_BUCKETS_SLOT296[] = { 0.0, 4.0 };
+inline constexpr double RL_BUCKETS_SLOT297[] = { 0.0, 5.0 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "fight_remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, true },
     { "active_enemies", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
@@ -1058,41 +1106,58 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "hits.voltaic_blaze.cleave", rl_kind::k_int, 0.0, true, 6.0, false, 1.0, nullptr, 0, false },
     { "hits.voltaic_blaze.new_flame_shocks", rl_kind::k_int, 0.0, true, 6.0, false, 1.0, nullptr, 0, false },
     { "hits.fire_nova", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
-    { "hits.chain_lightning.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT265, 2, false },
-    { "hits.chain_lightning.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT266, 2, false },
-    { "hits.chain_lightning.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT267, 2, false },
-    { "hits.chain_lightning.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT268, 2, false },
-    { "hits.tempest.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT269, 2, false },
-    { "hits.tempest.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT270, 2, false },
-    { "hits.tempest.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT271, 2, false },
-    { "hits.tempest.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT272, 2, false },
-    { "hits.voltaic_blaze.cleave.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT273, 2, false },
-    { "hits.voltaic_blaze.cleave.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT274, 2, false },
-    { "hits.voltaic_blaze.cleave.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT275, 2, false },
-    { "hits.voltaic_blaze.cleave.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT276, 2, false },
-    { "hits.crash_lightning.at_least_1", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT277, 2, false },
-    { "hits.crash_lightning.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT278, 2, false },
-    { "hits.crash_lightning.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT279, 2, false },
-    { "hits.crash_lightning.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT280, 2, false },
-    { "hits.crash_lightning.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT281, 2, false },
-    { "hits.voltaic_blaze.new_flame_shocks.at_least_1", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT282, 2, false },
-    { "hits.voltaic_blaze.new_flame_shocks.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT283, 2, false },
-    { "hits.voltaic_blaze.new_flame_shocks.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT284, 2, false },
-    { "hits.voltaic_blaze.new_flame_shocks.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT285, 2, false },
-    { "hits.voltaic_blaze.new_flame_shocks.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT286, 2, false },
-    { "hits.fire_nova.at_least_1", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT287, 2, false },
-    { "hits.fire_nova.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT288, 2, false },
-    { "hits.fire_nova.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT289, 2, false },
-    { "hits.fire_nova.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT290, 2, false },
-    { "hits.fire_nova.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT291, 2, false },
-    { "hits.lava_lash.flame_shock_spread.at_least_1", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT292, 2, false },
-    { "hits.lava_lash.flame_shock_spread.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT293, 2, false },
-    { "hits.lava_lash.flame_shock_spread.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT294, 2, false },
-    { "hits.lava_lash.flame_shock_spread.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT295, 2, false },
-    { "hits.lava_lash.flame_shock_spread.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT296, 2, false },
+    { "hits.chain_lightning.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT266, 2, false },
+    { "hits.chain_lightning.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT267, 2, false },
+    { "hits.chain_lightning.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT268, 2, false },
+    { "hits.chain_lightning.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT269, 2, false },
+    { "hits.tempest.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT270, 2, false },
+    { "hits.tempest.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT271, 2, false },
+    { "hits.tempest.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT272, 2, false },
+    { "hits.tempest.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT273, 2, false },
+    { "hits.voltaic_blaze.cleave.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT274, 2, false },
+    { "hits.voltaic_blaze.cleave.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT275, 2, false },
+    { "hits.voltaic_blaze.cleave.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT276, 2, false },
+    { "hits.voltaic_blaze.cleave.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT277, 2, false },
+    { "hits.crash_lightning.at_least_1", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT278, 2, false },
+    { "hits.crash_lightning.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT279, 2, false },
+    { "hits.crash_lightning.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT280, 2, false },
+    { "hits.crash_lightning.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT281, 2, false },
+    { "hits.crash_lightning.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT282, 2, false },
+    { "hits.voltaic_blaze.new_flame_shocks.at_least_1", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT283, 2, false },
+    { "hits.voltaic_blaze.new_flame_shocks.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT284, 2, false },
+    { "hits.voltaic_blaze.new_flame_shocks.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT285, 2, false },
+    { "hits.voltaic_blaze.new_flame_shocks.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT286, 2, false },
+    { "hits.voltaic_blaze.new_flame_shocks.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT287, 2, false },
+    { "hits.fire_nova.at_least_1", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT288, 2, false },
+    { "hits.fire_nova.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT289, 2, false },
+    { "hits.fire_nova.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT290, 2, false },
+    { "hits.fire_nova.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT291, 2, false },
+    { "hits.fire_nova.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT292, 2, false },
+    { "hits.lava_lash.flame_shock_spread.at_least_1", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT293, 2, false },
+    { "hits.lava_lash.flame_shock_spread.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT294, 2, false },
+    { "hits.lava_lash.flame_shock_spread.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT295, 2, false },
+    { "hits.lava_lash.flame_shock_spread.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT296, 2, false },
+    { "hits.lava_lash.flame_shock_spread.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT297, 2, false },
+    { "capability.racial_berserking", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "capability.trinket_voracious_heart_of_ulatek", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "capability.consumable_potion_of_recklessness", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "capability.enchant_arcane_mastery", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "capability.enchant_berserkers_rage", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "capability.embellishment_arcanoweave_lining", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "capability.embellishment_hunters_ritual_stone", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "capability.item_venomcursed_mastery", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "capability.item_venomcursed_ascendance", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "capability.weapon_venomfang", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "capability.set_bite_of_zuljan_2pc", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "capability.tier_mid2_enh_2pc", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "capability.tier_mid2_enh_4pc", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "capability.omnium_rune_burning_haste", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "capability.omnium_core_rune_unleashed_fire", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "capability.omnium_rune_lingering", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "capability.trinket_void_execution_mandate", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_obs_member RL_OBS_FAMILY_SCALARS_MEMBERS[] = {
-  { "", "", RL_OBS_FAMILY_SCALARS_LEAVES_0, 57 },
+  { "", "", RL_OBS_FAMILY_SCALARS_LEAVES_0, 74 },
 };
 
 inline constexpr std::size_t RL_OBS_FAMILY_COUNT = 12;
@@ -1107,9 +1172,9 @@ inline constexpr rl_obs_family RL_OBS_FAMILIES[RL_OBS_FAMILY_COUNT] = {
   { rl_family::stats, "stats", rl_family_kind::direct, false, RL_OBS_FAMILY_STATS_MEMBERS, 8, 200, 8 },
   { rl_family::swing_cast, "swing_cast", rl_family_kind::direct, false, RL_OBS_FAMILY_SWING_CAST_MEMBERS, 4, 208, 4 },
   { rl_family::raid_events, "raid_events", rl_family_kind::expression, false, RL_OBS_FAMILY_RAID_EVENTS_MEMBERS, 2, 212, 10 },
-  { rl_family::legality, "legality", rl_family_kind::legality, false, RL_OBS_FAMILY_LEGALITY_MEMBERS, 16, 222, 16 },
-  { rl_family::proc_chances, "proc_chances", rl_family_kind::proc_chance, false, RL_OBS_FAMILY_PROC_CHANCES_MEMBERS, 2, 238, 2 },
-  { rl_family::scalars, "scalars", rl_family_kind::scalar, true, RL_OBS_FAMILY_SCALARS_MEMBERS, 1, 240, 57 },
+  { rl_family::legality, "legality", rl_family_kind::legality, false, RL_OBS_FAMILY_LEGALITY_MEMBERS, 17, 222, 17 },
+  { rl_family::proc_chances, "proc_chances", rl_family_kind::proc_chance, false, RL_OBS_FAMILY_PROC_CHANCES_MEMBERS, 2, 239, 2 },
+  { rl_family::scalars, "scalars", rl_family_kind::scalar, true, RL_OBS_FAMILY_SCALARS_MEMBERS, 1, 241, 74 },
 };
 
 // ---- Action descriptors ----
@@ -1131,6 +1196,7 @@ inline constexpr rl_action_desc RL_ACTIONS[RL_ACTION_DIM] = {
   { 13, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_swing_oh", { rl_wait_anchor_kind::swing, rl_swing_hand::oh }, nullptr },
   { 14, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_maelstrom", { rl_wait_anchor_kind::maelstrom, rl_swing_hand::none }, "maelstrom_weapon" },
   { 15, "potion", rl_action_kind::cast, "potion", nullptr, "potion", { rl_wait_anchor_kind::none, rl_swing_hand::none }, nullptr },
+  { 16, "use_item_void_execution_mandate", rl_action_kind::cast, "void_execution_mandate_1250557", "item_cd_1141", "use_item_void_execution_mandate", { rl_wait_anchor_kind::none, rl_swing_hand::none }, nullptr },
 };
 
 // ---- Buff-gate table ----
@@ -1152,6 +1218,121 @@ inline constexpr rl_talent_gate RL_TALENT_GATES[] = {
   { "ascendance", "ascendance", false },
 };
 inline constexpr std::size_t RL_TALENT_GATE_COUNT = 4;
+
+// ---- Capability table (246.1-02, CAP-01/CAP-02) ----
+
+inline constexpr std::size_t RL_CAPABILITY_COUNT = 17;
+inline constexpr rl_capability RL_CAPABILITIES[RL_CAPABILITY_COUNT] = {
+  { "racial_berserking", 298, "racial_spell", "Berserking", 0, nullptr, 0, 0, 0, 0, 4, 0, 1 },
+  { "trinket_voracious_heart_of_ulatek", 299, "special_effect", nullptr, 1297761, nullptr, 0, 0, 0, 4, 5, 1, 1 },
+  { "consumable_potion_of_recklessness", 300, "potion_enabled", nullptr, 0, nullptr, 0, 0, 0, 9, 6, 2, 1 },
+  { "enchant_arcane_mastery", 301, "special_effect", nullptr, 1236721, nullptr, 0, 0, 0, 15, 1, 3, 0 },
+  { "enchant_berserkers_rage", 302, "special_effect", nullptr, 1236728, nullptr, 0, 0, 0, 16, 1, 3, 0 },
+  { "embellishment_arcanoweave_lining", 303, "special_effect", nullptr, 1283697, nullptr, 0, 0, 0, 17, 1, 3, 0 },
+  { "embellishment_hunters_ritual_stone", 304, "special_effect", nullptr, 1297382, nullptr, 0, 0, 0, 18, 4, 3, 0 },
+  { "item_venomcursed_mastery", 305, "special_effect", nullptr, 1307923, nullptr, 0, 0, 0, 22, 1, 3, 0 },
+  { "item_venomcursed_ascendance", 306, "special_effect", nullptr, 1317582, nullptr, 0, 0, 0, 23, 1, 3, 0 },
+  { "weapon_venomfang", 307, "special_effect", nullptr, 1291718, nullptr, 0, 0, 0, 24, 21, 3, 0 },
+  { "set_bite_of_zuljan_2pc", 308, "set_bonus", nullptr, 0, "MID_BOZ", 2, 0, 0, 45, 0, 3, 0 },
+  { "tier_mid2_enh_2pc", 309, "set_bonus", nullptr, 0, "MID2", 2, 0, 0, 45, 13, 3, 0 },
+  { "tier_mid2_enh_4pc", 310, "set_bonus", nullptr, 0, "MID2", 4, 0, 0, 58, 2, 3, 0 },
+  { "omnium_rune_burning_haste", 311, "special_effect", nullptr, 1279610, nullptr, 0, 0, 1, 60, 2, 3, 0 },
+  { "omnium_core_rune_unleashed_fire", 312, "special_effect", nullptr, 1279599, nullptr, 0, 1, 0, 62, 0, 3, 0 },
+  { "omnium_rune_lingering", 313, "special_effect", nullptr, 1287555, nullptr, 0, 1, 1, 62, 7, 3, 0 },
+  { "trinket_void_execution_mandate", 314, "special_effect", nullptr, 1250557, nullptr, 0, 2, 0, 69, 2, 3, 1 },
+};
+
+inline constexpr std::size_t RL_CAPABILITY_REQUIRES_COUNT = 2;
+inline constexpr const char* RL_CAPABILITY_REQUIRES[RL_CAPABILITY_REQUIRES_COUNT] = {
+  "omnium_core_rune_unleashed_fire",
+  "omnium_core_rune_unleashed_fire",
+};
+
+inline constexpr std::size_t RL_CAPABILITY_GOVERNED_SLOTS_COUNT = 71;
+inline constexpr std::size_t RL_CAPABILITY_GOVERNED_SLOTS[RL_CAPABILITY_GOVERNED_SLOTS_COUNT] = {
+  4,
+  57,
+  177,
+  233,
+  21,
+  22,
+  67,
+  185,
+  232,
+  35,
+  36,
+  37,
+  38,
+  60,
+  237,
+  28,
+  27,
+  2,
+  20,
+  29,
+  34,
+  55,
+  54,
+  53,
+  78,
+  79,
+  80,
+  93,
+  94,
+  95,
+  108,
+  109,
+  110,
+  123,
+  124,
+  125,
+  138,
+  139,
+  140,
+  153,
+  154,
+  155,
+  168,
+  169,
+  170,
+  75,
+  90,
+  105,
+  120,
+  135,
+  150,
+  165,
+  265,
+  288,
+  289,
+  290,
+  291,
+  292,
+  41,
+  42,
+  39,
+  40,
+  81,
+  96,
+  111,
+  126,
+  141,
+  156,
+  171,
+  65,
+  238,
+};
+
+inline constexpr std::size_t RL_CAPABILITY_GOVERNED_ACTIONS_COUNT = 4;
+inline constexpr const char* RL_CAPABILITY_GOVERNED_ACTIONS[RL_CAPABILITY_GOVERNED_ACTIONS_COUNT] = {
+  "berserking",
+  "use_item_voracious_heart_of_ulatek",
+  "potion",
+  "use_item_void_execution_mandate",
+};
+
+inline constexpr double RL_CAPABILITY_FIXED_VALUE = 0.0;
+inline constexpr const char* RL_NET_LAYOUT_SHA = "rl-layout-v1:88892031979acd29b03d6f8f286f6253b3fbee3a1c41ce44779b23316f2d7473";
 
 // ---- Target scorer feature list (Phase 230-02, SCOR-01) ----
 

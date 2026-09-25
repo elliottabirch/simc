@@ -70,6 +70,8 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <set>
+#include <utility>
 
 namespace rl_policy
 {
@@ -90,6 +92,7 @@ const char* body_name( rl_body_type body )
     case rl_body_type::mlp: return "mlp";
     case rl_body_type::dueling: return "dueling";
     case rl_body_type::ln_dueling: return "ln-dueling";
+    case rl_body_type::grouped_ln_dueling: return "grouped-ln-dueling";
   }
   return "unknown";
 }
@@ -109,7 +112,12 @@ constexpr std::uint32_t RLW1_MIN_SUPPORTED_FORMAT_VERSION = 2;
 // as the 2->3 widening did at Phase 222 (Pitfall 15's own lesson) -- every existing v2/v3 blob
 // keeps loading unchanged; a v4 blob additionally carries the mandatory trailing scorer section
 // below.
-constexpr std::uint32_t RLW1_MAX_SUPPORTED_FORMAT_VERSION = 4;
+// 246.1-05 (CAP-01/CAP-02): 4 -> 5 -- widening the accepted SET, never narrowing it (the same
+// Pitfall-15 lesson every prior bump here has followed). Format 5 additionally carries the
+// mandatory trailing STRUCTURE section below, body 3 (grouped-ln-dueling) ONLY -- no scorer
+// section exists at v5 (SCOR-01's v4 scorer and this body's STRUCTURE section never coexist).
+constexpr std::uint32_t RLW1_MAX_SUPPORTED_FORMAT_VERSION = 5;
+constexpr std::uint32_t RLW1_STRUCTURE_FORMAT_VERSION = 5;
 constexpr std::uint32_t RLW1_MAX_LAYERS = 16;
 constexpr std::uint32_t RLW1_MIN_FEATURES = 1;
 constexpr std::uint32_t RLW1_MAX_FEATURES = 4096;
@@ -128,6 +136,16 @@ constexpr std::uint32_t RLW1_MAX_SCORER_SLOTS = 64;
 constexpr std::uint32_t RLW1_MIN_SCORER_FEATURES = 1;
 constexpr std::uint32_t RLW1_MAX_SCORER_FEATURES = RLW1_MAX_FEATURES;
 
+// 246.1-05 (CAP-01/CAP-02) -- v5 STRUCTURE section bounds, mirroring scripts/rl/rlw1.py's own
+// _MAX_GATED/_MAX_BLOCKS/_MAX_BLOCK_SLOTS/_MAX_SPELL_REPEATS/_MAX_SPELL_FACTS/_MAX_PASSTHROUGH
+// constants byte-for-byte -- format-level constants, not derived from a live registry.
+constexpr std::uint32_t RLW1_MAX_GATED = 4096;
+constexpr std::uint32_t RLW1_MAX_BLOCKS = 64;
+constexpr std::uint32_t RLW1_MAX_BLOCK_SLOTS = 4096;
+constexpr std::uint32_t RLW1_MAX_SPELL_REPEATS = 64;
+constexpr std::uint32_t RLW1_MAX_SPELL_FACTS = 256;
+constexpr std::uint32_t RLW1_MAX_PASSTHROUGH = 4096;
+
 std::string decode_fingerprint( const unsigned char* p )
 {
   // Strip trailing NUL padding, mirroring rlw1.py's _decode_fingerprint.
@@ -145,10 +163,11 @@ rl_body_type decode_body_type( std::uint32_t raw, const std::string& path )
     case 0: return rl_body_type::mlp;
     case 1: return rl_body_type::dueling;
     case 2: return rl_body_type::ln_dueling;
+    case 3: return rl_body_type::grouped_ln_dueling;
     default:
       throw sc_runtime_error( fmt::format(
-          "rl_policy::load_rlw1: file '{}' declares body_type={}, must be 0 (mlp), 1 (dueling), or "
-          "2 (ln-dueling)",
+          "rl_policy::load_rlw1: file '{}' declares body_type={}, must be 0 (mlp), 1 (dueling), 2 "
+          "(ln-dueling), or 3 (grouped-ln-dueling)",
           path, raw ) );
   }
 }
@@ -244,6 +263,198 @@ rl_layer parse_one_layer( const std::vector<unsigned char>& data, std::size_t& o
   }
   return layer;
 }
+
+// 246.1-05 (CAP-01/CAP-02): the raw, not-yet-cross-checked v5 STRUCTURE section -- plain local
+// data, assembled into rl_grouped_layout_t only after the caller has validated it against
+// raw_layers (parse_structure_section itself is oblivious to the layer list).
+struct raw_structure_t
+{
+  std::uint32_t n_obs = 0;
+  std::string   layout_sha;
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> gated;
+  std::vector<std::vector<std::uint32_t>>              blocks;
+  std::vector<std::vector<std::uint32_t>>              per_spell;
+  std::vector<std::uint32_t>                           passthrough;
+};
+
+// Reads the v5 STRUCTURE section at `offset` (advanced in place), mirroring scripts/rl/rlw1.py's
+// `_unpack_structure` exactly: a positive length check for EVERY sized read before the read
+// itself (T-210-04), never a try/catch around an over-read. Layout: u32 n_obs; char[80]
+// layout_sha; u32 n_gated + n_gated x (u32 slot, u32 gate_slot); u32 G + per block (u32 n_slots +
+// n_slots x u32 slot); u32 n_repeats, u32 n_facts + n_repeats x n_facts x u32 slot; u32
+// n_passthrough + n_passthrough x u32 slot.
+raw_structure_t parse_structure_section( const std::vector<unsigned char>& data, std::size_t& offset,
+                                          const std::string& path )
+{
+  auto need = [ & ]( std::size_t n, const char* what ) {
+    if ( offset + n > data.size() )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' truncated -- v5 structure {} needs {} bytes at offset "
+          "{}, only {} remain",
+          path, what, n, offset, data.size() - offset ) );
+    }
+  };
+
+  raw_structure_t s;
+
+  need( 4, "n_obs" );
+  std::memcpy( &s.n_obs, data.data() + offset, 4 );
+  offset += 4;
+
+  need( RLW1_SHA_FIELD_BYTES, "layout_sha" );
+  s.layout_sha = decode_fingerprint( data.data() + offset );
+  offset += RLW1_SHA_FIELD_BYTES;
+
+  need( 4, "n_gated" );
+  std::uint32_t n_gated = 0;
+  std::memcpy( &n_gated, data.data() + offset, 4 );
+  offset += 4;
+  if ( n_gated > RLW1_MAX_GATED )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' declares n_gated={}, must be <= {}", path, n_gated,
+        RLW1_MAX_GATED ) );
+  }
+  need( static_cast<std::size_t>( n_gated ) * 8, "gated pairs" );
+  std::uint32_t prev_slot_plus_one = 0;   // slot is unsigned -- track "prev_slot + 1" to detect
+                                           // slot <= prev_slot without an initial -1 sentinel
+  bool first_gated = true;
+  for ( std::uint32_t i = 0; i < n_gated; ++i )
+  {
+    std::uint32_t slot = 0, gate_slot = 0;
+    std::memcpy( &slot, data.data() + offset, 4 );
+    std::memcpy( &gate_slot, data.data() + offset + 4, 4 );
+    offset += 8;
+    if ( !first_gated && slot < prev_slot_plus_one )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' structure gated slots are not strictly increasing at "
+          "slot={}",
+          path, slot ) );
+    }
+    first_gated = false;
+    prev_slot_plus_one = slot + 1;
+    if ( slot >= s.n_obs || gate_slot >= s.n_obs )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' structure gated pair ({}, {}) has a slot >= n_obs={}",
+          path, slot, gate_slot, s.n_obs ) );
+    }
+    s.gated.emplace_back( slot, gate_slot );
+  }
+
+  need( 4, "G" );
+  std::uint32_t n_blocks = 0;
+  std::memcpy( &n_blocks, data.data() + offset, 4 );
+  offset += 4;
+  if ( n_blocks < 1 || n_blocks > RLW1_MAX_BLOCKS )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' declares G={} blocks, must be 1..{}", path, n_blocks,
+        RLW1_MAX_BLOCKS ) );
+  }
+  for ( std::uint32_t bi = 0; bi < n_blocks; ++bi )
+  {
+    need( 4, "block n_slots" );
+    std::uint32_t n_slots = 0;
+    std::memcpy( &n_slots, data.data() + offset, 4 );
+    offset += 4;
+    if ( n_slots == 0 || n_slots > RLW1_MAX_BLOCK_SLOTS )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' block {} declares n_slots={}, must be 1..{}", path, bi,
+          n_slots, RLW1_MAX_BLOCK_SLOTS ) );
+    }
+    need( static_cast<std::size_t>( n_slots ) * 4, "block slots" );
+    std::vector<std::uint32_t> slots( n_slots );
+    for ( std::uint32_t si = 0; si < n_slots; ++si )
+    {
+      std::memcpy( &slots[ si ], data.data() + offset, 4 );
+      offset += 4;
+      if ( slots[ si ] >= s.n_obs )
+      {
+        throw sc_runtime_error( fmt::format(
+            "rl_policy::load_rlw1: file '{}' block {} slot {} >= n_obs={}", path, bi, slots[ si ],
+            s.n_obs ) );
+      }
+    }
+    s.blocks.push_back( std::move( slots ) );
+  }
+
+  need( 8, "n_repeats/n_facts" );
+  std::uint32_t n_repeats = 0, n_facts = 0;
+  std::memcpy( &n_repeats, data.data() + offset, 4 );
+  std::memcpy( &n_facts, data.data() + offset + 4, 4 );
+  offset += 8;
+  if ( n_repeats > RLW1_MAX_SPELL_REPEATS )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' declares n_repeats={}, must be <= {}", path, n_repeats,
+        RLW1_MAX_SPELL_REPEATS ) );
+  }
+  if ( n_facts > RLW1_MAX_SPELL_FACTS )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' declares n_facts={}, must be <= {}", path, n_facts,
+        RLW1_MAX_SPELL_FACTS ) );
+  }
+  for ( std::uint32_t ri = 0; ri < n_repeats; ++ri )
+  {
+    need( static_cast<std::size_t>( n_facts ) * 4, "per_spell row" );
+    std::vector<std::uint32_t> row( n_facts );
+    for ( std::uint32_t fi = 0; fi < n_facts; ++fi )
+    {
+      std::memcpy( &row[ fi ], data.data() + offset, 4 );
+      offset += 4;
+      if ( row[ fi ] >= s.n_obs )
+      {
+        throw sc_runtime_error( fmt::format(
+            "rl_policy::load_rlw1: file '{}' per_spell row {} slot {} >= n_obs={}", path, ri,
+            row[ fi ], s.n_obs ) );
+      }
+    }
+    s.per_spell.push_back( std::move( row ) );
+  }
+
+  need( 4, "n_passthrough" );
+  std::uint32_t n_passthrough = 0;
+  std::memcpy( &n_passthrough, data.data() + offset, 4 );
+  offset += 4;
+  if ( n_passthrough > RLW1_MAX_PASSTHROUGH )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' declares n_passthrough={}, must be <= {}", path,
+        n_passthrough, RLW1_MAX_PASSTHROUGH ) );
+  }
+  need( static_cast<std::size_t>( n_passthrough ) * 4, "passthrough slots" );
+  s.passthrough.resize( n_passthrough );
+  for ( std::uint32_t pi = 0; pi < n_passthrough; ++pi )
+  {
+    std::memcpy( &s.passthrough[ pi ], data.data() + offset, 4 );
+    offset += 4;
+    if ( s.passthrough[ pi ] >= s.n_obs )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' passthrough slot {} >= n_obs={}", path,
+          s.passthrough[ pi ], s.n_obs ) );
+    }
+  }
+
+  const std::set<std::uint32_t> passthrough_set( s.passthrough.begin(), s.passthrough.end() );
+  for ( const auto& [ slot, gate_slot ] : s.gated )
+  {
+    if ( passthrough_set.find( gate_slot ) == passthrough_set.end() )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' structure gate_slot={} (for slot={}) is not in the "
+          "pass-through list",
+          path, gate_slot, slot ) );
+    }
+  }
+
+  return s;
+}
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -294,6 +505,25 @@ rl_weights_t load_rlw1( const std::string& path )
   std::uint32_t body_raw = 0;
   std::memcpy( &body_raw, data.data() + 16, 4 );
   w.body = decode_body_type( body_raw, path );
+  const bool is_grouped = w.body == rl_body_type::grouped_ln_dueling;
+
+  // 246.1-05 (CAP-01/CAP-02): body 3 requires v5 (its STRUCTURE section has no byte layout
+  // below it); v5 requires body 3 (no other body has a STRUCTURE section to parse) -- mirrors
+  // scripts/rl/rlw1.py's read_rlw1 pairing check exactly, both directions.
+  if ( is_grouped && format_version < RLW1_STRUCTURE_FORMAT_VERSION )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' declares body='grouped-ln-dueling' at format_version={}, "
+        "but the STRUCTURE section this body requires is mandatory only at format_version >= {}",
+        path, format_version, RLW1_STRUCTURE_FORMAT_VERSION ) );
+  }
+  if ( !is_grouped && format_version >= RLW1_STRUCTURE_FORMAT_VERSION )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' declares format_version={} (>= {}) but body='{}' is not "
+        "'grouped-ln-dueling' -- the STRUCTURE section is forbidden for every other body",
+        path, format_version, RLW1_STRUCTURE_FORMAT_VERSION, body_name( w.body ) ) );
+  }
 
   w.obs_schema_sha = decode_fingerprint( data.data() + 20 );
   w.mask_rules_sha = decode_fingerprint( data.data() + 100 );
@@ -308,6 +538,13 @@ rl_weights_t load_rlw1( const std::string& path )
         path, n_layers, RLW1_MAX_LAYERS ) );
   }
 
+  // 246.1-05 (CAP-01/CAP-02): parsed into a LOCAL vector, not w.layers directly -- a grouped blob's
+  // wire layer list is `[block_0 .. block_{G-1}, shared, trunk_0 .. trunk_{T-1}, v_head, a_head]`
+  // (rlw1.py's own `_validate_grouped_layers` docstring); the split into w.grouped.block_layers /
+  // w.grouped.spell_layer / w.layers (trunk + heads only) happens further down, once the STRUCTURE
+  // section's own block count G is known. A non-grouped blob's raw_layers becomes w.layers
+  // unchanged (the split is a no-op: G=0, nothing removed from the front).
+  std::vector<rl_layer> raw_layers;
   std::size_t offset = RLW1_HEADER_BYTES;
   for ( std::uint32_t li = 0; li < n_layers; ++li )
   {
@@ -387,7 +624,7 @@ rl_weights_t load_rlw1( const std::string& path )
       offset += static_cast<std::size_t>( bias_bytes );
     }
 
-    w.layers.push_back( std::move( layer ) );
+    raw_layers.push_back( std::move( layer ) );
   }
 
   // NET-01 (Phase 222, arm subsets): the optional trailing input-gather +
@@ -448,12 +685,39 @@ rl_weights_t load_rlw1( const std::string& path )
     offset += 4;
   }
 
+  // 246.1-05 (CAP-01/CAP-02): body 3 requires an identity v3 subset section (no gather -- the
+  // STRUCTURE section's own gate/block routing already selects everything) and all-allowed
+  // actions (no static allow-list -- the per-decision engine mask is the only legality signal a
+  // grouped blob ever sees). Mirrors rlw1.py's write_rlw1/read_rlw1 refusals of the same name.
+  if ( is_grouped )
+  {
+    if ( !w.input_slots.empty() )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' body='grouped-ln-dueling' declares {} input_slots -- "
+          "the v3 subset section must be identity for body 3",
+          path, w.input_slots.size() ) );
+    }
+    const std::uint32_t default_allowed_actions =
+        0xFFFFFFFFu >> ( 32u - static_cast<std::uint32_t>( RL_ACTION_DIM ) );
+    if ( w.allowed_actions != default_allowed_actions )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' body='grouped-ln-dueling' declares allowed_actions={:#x}, "
+          "expected all-allowed {:#x} -- the v3 subset section must be all-allowed for body 3",
+          path, w.allowed_actions, default_allowed_actions ) );
+    }
+  }
+
   // Phase 230-02 (SCOR-01, R-A): the v4 trailing SCORER section -- mandatory at v4, forbidden
   // below it (there is no byte layout for it at v2/v3). T-230-01-01: a positive length check for
   // the fixed-size scalar header + the fingerprint field, BEFORE any read for this section --
   // mirrors scripts/rl/rlw1.py's own read_rlw1 ordering exactly (that module is this loader's
-  // normative counterpart for this format).
-  if ( format_version >= 4 )
+  // normative counterpart for this format). 246.1-05: gated on `== 4` exactly, NOT `>= 4` -- a v5
+  // (grouped-ln-dueling) blob has no scorer section at all (mutually exclusive with the STRUCTURE
+  // section); widening this to `>= 4` after MAX moved to 5 would misread a v5 blob's STRUCTURE
+  // bytes as a scorer section.
+  if ( format_version == 4 )
   {
     constexpr std::size_t SCORER_HEADER_BYTES = 20;  // n_scorer_layers, scorer_exploration,
                                                        // scorer_slots, scorer_features,
@@ -610,6 +874,14 @@ rl_weights_t load_rlw1( const std::string& path )
     w.scorer.feature_scratch.resize( scorer_features + RLW1_V4_AIMING_SPELL_COUNT );
   }
 
+  // 246.1-05 (CAP-01/CAP-02): the v5 STRUCTURE section -- mandatory at format_version >= 5
+  // (== RLW1_STRUCTURE_FORMAT_VERSION, the format-pairing check above already refused every other
+  // combination), forbidden below it -- there is no byte layout for it at v2/v3/v4.
+  raw_structure_t structure;
+  const bool has_structure = format_version >= RLW1_STRUCTURE_FORMAT_VERSION;
+  if ( has_structure )
+    structure = parse_structure_section( data, offset, path );
+
   // Pitfall 14: read_rlw1 (and this loader, pre-222) never compared `offset`
   // to `data.size()` after the layer/section walk -- trailing bytes were
   // silently ignored. Strengthens v2 parsing too: closes it for every
@@ -656,14 +928,105 @@ rl_weights_t load_rlw1( const std::string& path )
         path ) );
   }
 
+  // 246.1-05 (CAP-01/CAP-02): split raw_layers into the grouped blocks/shared-spell layer plus
+  // w.layers (trunk + heads only) -- mirrors rlw1.py's own `_validate_grouped_layers` layer-order
+  // contract `[block_0 .. block_{G-1}, shared, trunk_0 .. trunk_{T-1}, v_head, a_head]`. A
+  // non-grouped blob's raw_layers becomes w.layers unchanged (G=0, nothing removed from the
+  // front). Every check below this point that previously read `w.layers` for a grouped blob would
+  // have been checking the WRONG slice (block_0, not trunk_0) -- this split is what makes the
+  // EXISTING dueling/ln-dueling shape checks below correct for grouped's trunk+heads remainder
+  // with no further branching in them beyond the has_ln-pattern widening a few lines down.
+  if ( is_grouped )
+  {
+    const std::size_t n_blocks = structure.blocks.size();
+    const std::size_t n_facts = structure.per_spell.empty() ? 0 : structure.per_spell.front().size();
+    const std::size_t min_layers = n_blocks + 1 /*shared*/ + 1 /*>=1 trunk*/ + 2 /*heads*/;
+    if ( raw_layers.size() < min_layers )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' body='grouped-ln-dueling' requires at least {} layers "
+          "({} blocks + 1 shared + >=1 trunk + 2 heads), got {}",
+          path, min_layers, n_blocks, raw_layers.size() ) );
+    }
+    for ( std::size_t bi = 0; bi < n_blocks; ++bi )
+    {
+      const std::size_t expected_in = structure.blocks[ bi ].size();
+      if ( raw_layers[ bi ].in_features != expected_in )
+      {
+        throw sc_runtime_error( fmt::format(
+            "rl_policy::load_rlw1: file '{}' block {} in_features={} does not match structure "
+            "block {}'s own {} slots",
+            path, bi, raw_layers[ bi ].in_features, bi, expected_in ) );
+      }
+    }
+    const rl_layer& shared_layer = raw_layers[ n_blocks ];
+    if ( shared_layer.in_features != n_facts )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' shared per-spell layer in_features={} does not match "
+          "structure n_facts={}",
+          path, shared_layer.in_features, n_facts ) );
+    }
+    std::uint32_t expected_trunk0_in = 0;
+    for ( std::size_t bi = 0; bi < n_blocks; ++bi )
+      expected_trunk0_in += raw_layers[ bi ].out_features;
+    expected_trunk0_in += static_cast<std::uint32_t>( structure.per_spell.size() ) * shared_layer.out_features;
+    expected_trunk0_in += static_cast<std::uint32_t>( structure.passthrough.size() );
+    const std::size_t trunk_start = n_blocks + 1;
+    if ( raw_layers[ trunk_start ].in_features != expected_trunk0_in )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' trunk_0.in_features={} does not match the concat "
+          "invariant (sum block outs + n_repeats * shared_out + n_passthrough = {})",
+          path, raw_layers[ trunk_start ].in_features, expected_trunk0_in ) );
+    }
+
+    w.grouped.block_layers.assign( raw_layers.begin(), raw_layers.begin() + static_cast<long>( n_blocks ) );
+    w.grouped.spell_layer = raw_layers[ n_blocks ];
+    w.layers.assign( raw_layers.begin() + static_cast<long>( trunk_start ), raw_layers.end() );
+
+    w.grouped.n_obs = structure.n_obs;
+    w.grouped.layout_sha = structure.layout_sha;
+    w.grouped.block_slots = structure.blocks;
+    w.grouped.per_spell = structure.per_spell;
+    w.grouped.passthrough = structure.passthrough;
+    w.grouped.gate_src.assign( structure.n_obs, structure.n_obs );   // sentinel: n_obs == "gate by 1"
+    for ( const auto& [ slot, gate_slot ] : structure.gated )
+      w.grouped.gate_src[ slot ] = gate_slot;
+
+    // Load-time cross-checks (CAP-02): the blob's own declared width and layout fingerprint must
+    // match THIS build's live generated constants -- a mismatch means this blob was trained
+    // against a different registry/layout than this binary was built against.
+    if ( w.grouped.n_obs != RL_OBS_DIM )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' declares obs width {} (via its STRUCTURE section), does "
+          "not match this build's RL_OBS_DIM={}",
+          path, w.grouped.n_obs, RL_OBS_DIM ) );
+    }
+    if ( w.grouped.layout_sha != RL_NET_LAYOUT_SHA )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' declares layout_sha='{}', does not match this build's "
+          "RL_NET_LAYOUT_SHA='{}'",
+          path, w.grouped.layout_sha, RL_NET_LAYOUT_SHA ) );
+    }
+  }
+  else
+  {
+    w.layers = std::move( raw_layers );
+  }
+
   // Shape sanity against the GENERATED constants -- otherwise a shape
   // mismatch is a buffer overrun in forward() instead of an error message.
   // The first-layer check is against the RESOLVED expected width -- n_slots
   // when a gather is declared, RL_OBS_DIM otherwise -- REPLACING the old
   // bare `== RL_OBS_DIM` check, which cannot be right once a subset can
-  // narrow layer 0's input.
+  // narrow layer 0's input. SKIPPED for a grouped blob (246.1-05): w.layers[0]
+  // is trunk_0, not a width-RL_OBS_DIM input layer -- the equivalent invariant was already
+  // checked above (trunk_0.in_features against the concat width).
   const std::uint32_t expected_in = n_slots ? static_cast<std::uint32_t>( n_slots ) : RL_OBS_DIM;
-  if ( w.layers.front().in_features != expected_in )
+  if ( !is_grouped && w.layers.front().in_features != expected_in )
   {
     throw sc_runtime_error( fmt::format(
         "rl_policy::load_rlw1: file '{}' first layer in_features={} does not match the resolved "
@@ -697,9 +1060,12 @@ rl_weights_t load_rlw1( const std::string& path )
   // has_ln=false on EVERY layer; ln-dueling carries has_ln=true on every
   // HIDDEN layer ONLY (indices [0, hidden_layer_count) -- v_head/a_head are
   // output heads, no norm follows them. Depth-agnostic: derived from
-  // hidden_layer_count(), never a fixed pair of indices.
+  // hidden_layer_count(), never a fixed pair of indices. 246.1-05: grouped_ln_dueling's own
+  // w.layers (trunk + heads only, post-split above) follows the SAME convention -- every trunk
+  // layer carries has_ln=true, exactly like ln-dueling's hidden layers.
   {
-    const bool expect_ln_hidden = w.body == rl_body_type::ln_dueling;
+    const bool expect_ln_hidden =
+        w.body == rl_body_type::ln_dueling || w.body == rl_body_type::grouped_ln_dueling;
     const std::size_t n_hidden_for_ln =
         expect_ln_hidden ? hidden_layer_count( w.body, w.layers.size() ) : 0;
     for ( std::size_t i = 0; i < w.layers.size(); ++i )
@@ -850,6 +1216,36 @@ rl_weights_t load_rlw1( const std::string& path )
     for ( std::size_t i = 0; i < n_hidden; ++i )
       w.hidden_scratch[ i ].resize( w.layers[ i ].out_features );
     w.obs_gather_scratch.resize( n_slots );
+  }
+
+  // 246.1-05 (CAP-01/CAP-02): grouped-body scratch, load-time-sized, never per decision --
+  // mirrors the hidden_scratch discipline immediately above.
+  if ( is_grouped )
+  {
+    rl_grouped_layout_t& g = w.grouped;
+    g.gated_scratch.resize( g.n_obs );
+
+    const std::size_t n_blocks = g.block_layers.size();
+    g.block_gather_scratch.resize( n_blocks );
+    g.block_scratch.resize( n_blocks );
+    for ( std::size_t bi = 0; bi < n_blocks; ++bi )
+    {
+      g.block_gather_scratch[ bi ].resize( g.block_slots[ bi ].size() );
+      g.block_scratch[ bi ].resize( g.block_layers[ bi ].out_features );
+    }
+
+    const std::size_t n_facts = g.per_spell.empty() ? 0 : g.per_spell.front().size();
+    g.spell_gather_scratch.resize( n_facts );
+    g.spell_scratch.resize( g.per_spell.size() );
+    for ( std::size_t si = 0; si < g.per_spell.size(); ++si )
+      g.spell_scratch[ si ].resize( g.spell_layer.out_features );
+
+    std::size_t concat_width = 0;
+    for ( std::size_t bi = 0; bi < n_blocks; ++bi )
+      concat_width += g.block_layers[ bi ].out_features;
+    concat_width += g.per_spell.size() * static_cast<std::size_t>( g.spell_layer.out_features );
+    concat_width += g.passthrough.size();
+    g.concat_scratch.resize( concat_width );
   }
 
   return w;
@@ -1034,19 +1430,98 @@ dot_fn_t select_dot_fn()
 // this is the only TU that defines or calls any of the three bodies above,
 // so there is no cross-TU init-order hazard to reason about.
 const dot_fn_t dot_fn = select_dot_fn();
+
+// 246.1-05 (CAP-01/CAP-02): the grouped body's own input stage -- the gate, the five named
+// blocks, the shared per-spell layer and the pass-through columns, concatenated into
+// `w.grouped.concat_scratch` in block order, then per_spell order (spell order kept, never
+// pooled -- WHICH spell has flame shock up is not interchangeable information), then
+// pass-through. Mirrors `GroupedDuelingBody.forward` (network_bodies.py) exactly: `gated = x *
+// cat([x, ones], dim=1).index_select(1, gate_src)` -- NEVER mutates the caller's `obs` (every op
+// writes into this struct's own load-time-sized scratch). No allocation: every buffer here was
+// sized by load_rlw1. Returns nothing -- callers read `w.grouped.concat_scratch.data()`.
+void compute_grouped_input( const rl_weights_t& w, const float obs[ RL_OBS_DIM ] )
+{
+  const rl_grouped_layout_t& g = w.grouped;
+
+  // The gate: gated[i] = obs[i] * (obs[gate_src[i]] if governed, else 1.0). gate_src[i] == g.n_obs
+  // is the sentinel "point at an appended constant 1" (network_bodies.py's own convention) --
+  // there is no appended element here, the sentinel is simply never dereferenced.
+  for ( std::size_t i = 0; i < g.n_obs; ++i )
+  {
+    const std::uint32_t src = g.gate_src[ i ];
+    const float gate_value = ( src == g.n_obs ) ? 1.0f : obs[ src ];
+    g.gated_scratch[ i ] = obs[ i ] * gate_value;
+  }
+
+  std::size_t concat_pos = 0;
+
+  // Five named blocks: gather this block's own (non-contiguous) slots into its own contiguous
+  // scratch (dot_fn needs contiguous input), run Linear -> LayerNorm -> ReLU, append to concat.
+  for ( std::size_t bi = 0; bi < g.block_layers.size(); ++bi )
+  {
+    const std::vector<std::uint32_t>& slots = g.block_slots[ bi ];
+    std::vector<float>& gather = g.block_gather_scratch[ bi ];
+    for ( std::size_t si = 0; si < slots.size(); ++si )
+      gather[ si ] = g.gated_scratch[ slots[ si ] ];
+
+    const rl_layer& l = g.block_layers[ bi ];
+    std::vector<float>& out = g.block_scratch[ bi ];
+    for ( std::uint32_t o = 0; o < l.out_features; ++o )
+      out[ o ] = l.bias[ o ] + dot_fn( &l.weight[ o * l.in_features ], gather.data(), l.in_features );
+    apply_layer_norm( out, l.gamma, l.beta );   // has_ln is always true for a grouped block layer
+    for ( std::uint32_t o = 0; o < l.out_features; ++o )
+      g.concat_scratch[ concat_pos + o ] = std::max( out[ o ], 0.0f );
+    concat_pos += l.out_features;
+  }
+
+  // The shared per-spell layer, applied IDENTICALLY to each spell's own 15 gathered facts --
+  // SAME weights every repeat, concatenated in spell order (never pooled).
+  for ( std::size_t ri = 0; ri < g.per_spell.size(); ++ri )
+  {
+    const std::vector<std::uint32_t>& slots = g.per_spell[ ri ];
+    for ( std::size_t fi = 0; fi < slots.size(); ++fi )
+      g.spell_gather_scratch[ fi ] = g.gated_scratch[ slots[ fi ] ];
+
+    const rl_layer& l = g.spell_layer;
+    std::vector<float>& out = g.spell_scratch[ ri ];
+    for ( std::uint32_t o = 0; o < l.out_features; ++o )
+      out[ o ] = l.bias[ o ] + dot_fn( &l.weight[ o * l.in_features ], g.spell_gather_scratch.data(), l.in_features );
+    apply_layer_norm( out, l.gamma, l.beta );   // has_ln is always true for the shared spell layer
+    for ( std::uint32_t o = 0; o < l.out_features; ++o )
+      g.concat_scratch[ concat_pos + o ] = std::max( out[ o ], 0.0f );
+    concat_pos += l.out_features;
+  }
+
+  // Pass-through: the capability columns' own gated value, raw (no Linear/LayerNorm) -- so the
+  // trunk sees the setup identity directly, not only after a block's own LayerNorm mix.
+  for ( std::size_t pi = 0; pi < g.passthrough.size(); ++pi )
+    g.concat_scratch[ concat_pos + pi ] = g.gated_scratch[ g.passthrough[ pi ] ];
+}
 } // anonymous namespace
 
 void forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ], const std::uint8_t mask[ RL_ACTION_DIM ],
               float out_q[ RL_ACTION_DIM ] )
 {
+  // 246.1-05 (CAP-01/CAP-02): the grouped body computes its own input stage (gate + five blocks +
+  // shared per-spell layer + pass-through, concatenated) INSTEAD of the plain gather-or-obs
+  // seam below -- w.input_slots is load-time-refused to be empty for this body (the STRUCTURE
+  // section's own block/per-spell/passthrough routing already selects everything RL_OBS_DIM has).
+  // `x` then feeds the SAME hidden-layer loop and dueling combine below, completely unchanged --
+  // w.layers for a grouped blob is already [trunk_0 .. trunk_{T-1}, v_head, a_head] (the load-time
+  // split in load_rlw1), identically shaped to ln-dueling's own layer list.
+  const float* x = obs;
+  if ( w.body == rl_body_type::grouped_ln_dueling )
+  {
+    compute_grouped_input( w, obs );
+    x = w.grouped.concat_scratch.data();
+  }
   // NET-01 (Phase 222, arm subsets): gather the full-width obs into the
   // load-time-sized obs_gather_scratch ONCE, before layer 0, when a subset
   // is declared -- otherwise layer 0 reads obs directly. w.layers.front()'s
   // in_features was validated at load time against exactly this resolved
   // width (n_slots when a gather is declared, RL_OBS_DIM otherwise), so no
   // per-decision bounds check is needed here.
-  const float* x = obs;
-  if ( !w.input_slots.empty() )
+  else if ( !w.input_slots.empty() )
   {
     for ( std::size_t i = 0; i < w.input_slots.size(); ++i )
       w.obs_gather_scratch[ i ] = obs[ w.input_slots[ i ] ];
