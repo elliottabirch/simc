@@ -619,12 +619,24 @@ bool rl_capability_own_value( player_t* p, const rl_capability& cap )
   }
   if ( std::strcmp( cap.sim_kind, "potion_enabled" ) == 0 )
   {
-    // Same `!background` predicate the mask uses below -- reached via `p->find_action` directly
-    // (never g_action_handle_cache, which is filled lazily on first MASK use and must not be a
-    // bind-time dependency) -- the same seam resolve_generic_consumable_buff already uses to
-    // reach the potion action's consumable_buff.
+    // 246.1-05 Task 3 receipt (capability_bind_probe.py, setup A): `!background` ALONE is the
+    // WRONG predicate here -- `potion=disabled` never sets the potion action's `background`
+    // flag (dbc_consumable_base_t::ready() returns false when disabled_consumable(), but the
+    // action stays fully resolvable; consumable.cpp:996-1004). The static, bind-time-stable
+    // property this capability needs is `disabled_consumable()` itself (opt_disabled, resolved
+    // once in dbc_consumable_base_t::init() from the profile's own `potion=` option) -- reached
+    // via `p->find_action` directly (never g_action_handle_cache, which is filled lazily on
+    // first MASK use and must not be a bind-time dependency), the same seam
+    // resolve_generic_consumable_buff already uses to reach the potion action's consumable_buff.
     action_t* a = p->find_action( "potion" );
-    return a != nullptr && !a->background;
+    if ( a == nullptr )
+      return false;
+    if ( auto* consumable = dynamic_cast<dbc_consumable_base_t*>( a ) )
+      return !consumable->disabled_consumable();
+    // Defensive: the "potion" token should always resolve to a dbc_consumable_base_t. If it
+    // ever does not, fall back to resolvability rather than crash -- the mismatch would already
+    // be visible via the mask's own `!background` check on this same action.
+    return !a->background;
   }
   throw sc_runtime_error( fmt::format(
       "rl_policy::rl_capability_own_value: capability '{}' has unknown sim_kind '{}'", cap.id,
