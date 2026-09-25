@@ -996,16 +996,15 @@ void recorder_t::open()
 
 // ---- Replay (253-02, REP-01/D-15/D-16/D-20). Every method below assumes replay_ is non-null --
 // callers (open()/fight_begin()/fight_end()/on_draw()) all check `replay_`/`replay_->window_open`
-// first. Task 1 implements outer-address matching only (rl_rng_replay_address is read and stored
-// for Task 2, which adds the inner branch, the fresh-number rule, exclusions and the re-salt
-// stop). ----
+// first. The address choice was removed in phase 254 (Gate 2 verdict): replay is hard-wired to
+// the outer press address; there is no longer a switch. ----
 
 void recorder_t::replay_init()
 {
   replay_ = std::make_unique<replay_state_t>();
   replay_state_t& rp = *replay_;
   rp.path = root_->rl_rng_replay_file_str;
-  rp.address = root_->rl_rng_replay_address_str.empty() ? "outer" : root_->rl_rng_replay_address_str;
+  rp.address = "outer";  // hard-wired (phase 254 Gate 2 verdict); the address choice was removed
 
   rp.in.open( rp.path, std::ios::in | std::ios::binary );
   if ( !rp.in.is_open() )
@@ -1189,9 +1188,9 @@ std::uint32_t recorder_t::replay_key_index_for_live_roller( std::uint32_t live_i
 
 const press_frame_t& recorder_t::replay_active_frame() const
 {
-  // D-03: which press address replay reads -- default outer, or inner when
-  // rl_rng_replay_address=inner. Read identically at load time (replay_fight_begin(), off the
-  // recording's own inner_* fields) and at draw time (here, off the LIVE current_inner_).
+  // D-03: which press address replay reads -- hard-wired to outer (the address choice was
+  // removed in phase 254, Gate 2 verdict). Read identically at load time (replay_fight_begin(),
+  // off the recording's own outer_* fields) and at draw time (here, off the LIVE current_outer_).
   return replay_->address == "inner" ? current_inner_ : current_outer_;
 }
 
