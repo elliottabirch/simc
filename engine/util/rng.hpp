@@ -130,15 +130,20 @@ struct rl_draw_sink_t
 {
   virtual ~rl_draw_sink_t() = default;
 
-  // Called from real(), after the draw is computed, immediately before it is returned.
+  // Called from real(), after the draw is computed, immediately before it is returned. Returns
+  // the value real() should actually return (tstl-sylvanas phase 253, REP-01/D-16): the returned
+  // value equals `raw` unless `rl_rng_replay` is active AND this fight's table holds an unused
+  // recorded number at this draw's address, in which case the recorded number is returned
+  // instead. Recording-only or off (no rl_rng_replay) always returns `raw` unchanged, so every
+  // recording and every roll stays byte-identical to today whenever replay is not active.
   // `roller_slot` is the calling stream's own rl_roller_id_ member, passed by reference so an
   // unregistered stream can be numbered lazily on its first draw; `draw_counter` is that
   // stream's rl_trace_n_ AFTER this draw (its physical draw ordinal); `roller_override` is the
   // stream's rl_roller_override_ (0 = none, otherwise the logical roller this one draw should
   // be attributed to instead of the stream itself -- a raid event borrowing the shared stream
-  // uses this); `raw` is the value real() is about to return.
-  virtual void on_draw( std::uint32_t& roller_slot, const std::uint64_t& draw_counter,
-                         std::uint32_t roller_override, double raw ) = 0;
+  // uses this); `raw` is the value real() computed the normal way.
+  virtual double on_draw( std::uint32_t& roller_slot, const std::uint64_t& draw_counter,
+                          std::uint32_t roller_override, double raw ) = 0;
 
   // Called from roll( chance ), after the comparison, only when a draw actually happened
   // (chance strictly between 0 and 1 -- see roll()'s early-return branches below).
@@ -414,12 +419,13 @@ inline double basic_rng_t<Engine>::real()
   std::cout << fmt::format( "[RNG] fn=real() engine={} n={} next={} value={}",
                            engine.name(), n, u64raw, u.d - 1.0 ) << std::endl;
 #endif
-  const double value = u.d - 1.0;
-  // Random-roll recorder hook (250-01, D-03/D-04/D-17): pure observation AFTER value is
-  // computed the normal way above -- see rl_draw_sink_t's own doc comment for the promise this
-  // keeps. One pointer check when no recorder is attached.
+  double value = u.d - 1.0;
+  // Random-roll recorder/replay hook (250-01, D-03/D-04/D-17; 253-02, REP-01/D-16): on_draw()
+  // returns the value real() should actually return -- unchanged (`raw`) when replay is off,
+  // else the fight's recorded number at this draw's address when one is unused there. One
+  // pointer check plus a call when a recorder is attached; a plain pointer check otherwise.
   if ( rng::rl_draw_sink )
-    rng::rl_draw_sink->on_draw( rl_roller_id_, rl_trace_n_, rl_roller_override_, value );
+    value = rng::rl_draw_sink->on_draw( rl_roller_id_, rl_trace_n_, rl_roller_override_, value );
   return value;
 }
 

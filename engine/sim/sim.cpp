@@ -4398,6 +4398,11 @@ void sim_t::create_options()
   // Random-roll recorder (tstl-sylvanas phase 250, plan 250-01, REC-01/02/03). See sim.hpp's
   // rl_rng_record_file_str doc comment. Default empty, byte-identical to today's behavior.
   add_option( opt_string( "rl_rng_record", rl_rng_record_file_str ) );
+  // The replay option (tstl-sylvanas phase 253, plan 253-02, REP-01/D-01/D-16). See sim.hpp's
+  // rl_rng_replay_file_str/rl_rng_replay_address_str doc comments. Default empty, byte-identical
+  // to today's behavior when unset.
+  add_option( opt_string( "rl_rng_replay", rl_rng_replay_file_str ) );
+  add_option( opt_string( "rl_rng_replay_address", rl_rng_replay_address_str ) );
   // Iteration-batched scorecard seeding (tstl-sylvanas quick task 260919-scb). See sim.hpp's
   // rl_iteration_seeds doc comment. Default empty, byte-identical to today's behavior.
   add_option( opt_func( "rl_iteration_seeds", parse_rl_iteration_seeds ) );
@@ -5255,7 +5260,66 @@ void sim_t::setup( sim_control_t* c )
           "top-level sim options only, and run those analyses without it." );
     }
 
-    // Root only -- see sim.hpp's rl_rng_recorder member comment.
+  }
+
+  // The replay option (tstl-sylvanas phase 253, plan 253-02, REP-01/D-01). Same refusal shape
+  // and order as the rl_rng_record= block above -- per_source_rng, then threads, then
+  // profilesets, then non-root sim -- before anything is opened (D-16, D-17). An empty
+  // rl_rng_replay_file_str is the same as unset.
+  if ( !rl_rng_replay_file_str.empty() )
+  {
+    if ( !per_source_rng )
+    {
+      throw sc_invalid_sim_argument(
+          "rl_rng_replay requires per_source_rng=1 -- refusing to replay against rollers that are "
+          "not per-source (see rl_rng_record.hpp)." );
+    }
+
+    // Same reasoning as rl_rng_record='s own threads refusal just above: a replayed run must be
+    // the same run as an unreplayed one, so this is refused by name rather than clamped.
+    if ( threads > 1 )
+    {
+      throw sc_invalid_sim_argument(
+          fmt::format( "rl_rng_replay requires threads=1 (effective threads={}) -- refusing "
+                       "rather than forcing one thread, because a replayed run must be the same "
+                       "run as an unreplayed one.",
+                       threads ) );
+    }
+
+    if ( !profileset_map.empty() )
+    {
+      throw sc_runtime_error(
+          fmt::format( "rl_rng_replay= cannot be combined with profilesets ({} defined): each "
+                       "profileset runs in its own sim and would replay the same recording "
+                       "independently. Run one simc process per profile with a distinct "
+                       "rl_rng_replay= path instead.",
+                       profileset_map.size() ) );
+    }
+
+    // Mirrors rl_rng_record='s own non-root refusal just above: only the root sim ever owns the
+    // recorder object.
+    if ( parent )
+    {
+      throw sc_runtime_error(
+          "rl_rng_replay= is set on a non-root sim (a profileset's own option block, or a "
+          "calculate_scale_factors=1/dps_plot_stats=/reforge_plot_stat= child sim): only the "
+          "root sim ever owns the recorder object, so this option would be silently accepted "
+          "while nothing is ever replayed for this sim's fights. Set rl_rng_replay= on the "
+          "top-level sim options only, and run those analyses without it." );
+    }
+
+    // rl_rng_replay and rl_rng_record naming the SAME file would have the recorder's truncating
+    // open (D-13) destroy the very recording being replayed -- refused by name, comparing
+    // canonical paths, only when a replay file is actually named (Pitfall 5). Task 2 adds the
+    // rl_rng_replay_address= refusals; this task only wires the four refusals above plus
+    // construction.
+  }
+
+  // Root only -- see sim.hpp's rl_rng_recorder member comment. Constructed once either option is
+  // non-empty, AFTER both refusal blocks above have already run (D-16: the record block's open
+  // call moves here so a run refused by the replay block never opens a truncating file first).
+  if ( !rl_rng_record_file_str.empty() || !rl_rng_replay_file_str.empty() )
+  {
     rl_rng_record::open_and_write_header( this );
   }
 
