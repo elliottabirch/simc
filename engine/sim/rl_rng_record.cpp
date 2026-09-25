@@ -9,6 +9,22 @@
 // root-owned stream -- see sim.hpp's rl_translog_stream doc comment for why), the five writer
 // entry points sim.cpp calls, and roller registration (plan 250-01 Task 2: player, action,
 // buff, proc callback, proc object; raid events are a later plan).
+//
+// The replay option -- tstl-sylvanas phase 253, plan 253-02 (REP-01/02/03/04, D-01/D-02/D-15/
+// D-16/D-20). rl_rng_replay=<path> is a NO-WRITE MODE of this SAME recorder_t object: whenever
+// EITHER rl_rng_record= or rl_rng_replay= is set, the object exists and tracks the same press
+// frames and roller registry (one address rule serves both), but only the file, entry building,
+// buffering, the RESALT/COUNTER/FIGHT_BEGIN/FIGHT_END entries, the footer and the sidecar run
+// when rl_rng_record= is ALSO set (recorder_t::writing_). At every draw, when a fight window is
+// open, on_draw() looks up the address (outer press kind, the press roller's key string, press
+// number, the drawing roller's key string) in the CURRENT fight's table -- built sequentially,
+// one fight at a time, from the recording named by rl_rng_replay= (D-15: a 10,000-fight
+// recording is tens of GB and cannot be held in memory at once) -- and returns the recorded raw
+// number when one is unused there, else the live number unchanged (real() returns whatever
+// on_draw() returns -- see util/rng.hpp). Rollers are matched between the recording and this run
+// by their sidecar key STRING, never by numeric id (D-02): replay_state_t interns every distinct
+// key string it sees into a small integer once, at load, and looks up each live roller's index
+// lazily on first use.
 
 #include "sim/rl_rng_record.hpp"
 
@@ -26,13 +42,19 @@
 
 #include "fmt/format.h"
 
+#include "rapidjson/document.h"
+
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <map>
+#include <memory>
+#include <set>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace rl_rng_record
 {
@@ -130,6 +152,77 @@ struct roller_entry_t
   std::uint32_t early_return_presses = 0;
 };
 
+// Replay state (253-02, REP-01/D-15/D-16/D-20) -- owned by recorder_t only when
+// rl_rng_replay= is set (recorder_t::replay_). Holds the loader's read position, the interned
+// key-string table, the CURRENT fight's address table (sequential per-fight loading, D-15), and
+// the whole-run totals the "Interfaces this plan adds" stdout line prints.
+struct replay_state_t
+{
+  // Index 0 is a fixed sentinel meaning "no press" -- never assigned to any real key string
+  // (D-16's "a trigger field of 0 means 'no press', not sim|_rng"). Real key strings are
+  // interned starting at 1. KEY_INDEX_UNCACHED/KEY_INDEX_NOT_IN_RECORDING never collide with a
+  // real index (both are far above any realistic roller count).
+  static constexpr std::uint32_t NO_PRESS_KEY_INDEX = 0u;
+  static constexpr std::uint32_t KEY_INDEX_UNCACHED = 0xFFFFFFFEu;
+  static constexpr std::uint32_t KEY_INDEX_NOT_IN_RECORDING = 0xFFFFFFFFu;
+
+  std::string path;
+  std::string address;   // "outer" (default/empty) or "inner" -- Task 1 always reads the outer
+                          // frame regardless; the inner branch is 253-02 Task 2's work (D-03).
+  std::ifstream in;
+  std::uint64_t footer_fight_count = 0;   // the recording's own FOOTER.press (FIGHT_END count)
+  std::uint64_t next_read_offset = 0;     // where the sequential per-fight reader resumes
+  bool exhausted = false;                 // no more fight windows in the recording -- every
+                                           // later fight_begin() finds nothing and stays live
+  bool window_open = false;
+  std::uint64_t fights_served = 0;        // fight windows successfully loaded so far
+
+  // Key interning (D-02): every distinct key string the sidecar declares gets one small index,
+  // in first-seen order. sidecar_id_to_key_index maps the RECORDING's own roller ids (the
+  // sidecar's "id" field) to that index; live_key_index_cache maps THIS RUN's own live roller
+  // ids (recorder_t::rollers_ indices) to the same index space, filled lazily on first use from
+  // the live roller's own key string.
+  std::unordered_map<std::string, std::uint32_t> key_string_to_index;
+  std::vector<std::uint32_t> sidecar_id_to_key_index;
+  std::vector<std::uint32_t> live_key_index_cache;
+
+  // One fight's address table: address -> the recorded raw numbers at that address, in record
+  // order, plus how many have been handed out. Rebuilt from scratch by fight_begin(), read by
+  // on_draw(), closed by fight_end() -- never held for more than one fight at a time (D-15).
+  struct entry_run_t
+  {
+    std::vector<double> raw;
+    std::size_t next_unused = 0;
+  };
+  using address_key_t = std::tuple<std::uint8_t, std::uint32_t, std::uint32_t, std::uint32_t>;
+  std::map<address_key_t, entry_run_t> table;
+
+  // Per-class totals for the "rl_rng_replay class=" stdout lines (Task 1 fills in reused/fresh
+  // from its own single fresh bucket; excluded/after_stop are Task 2's territory and stay 0
+  // here).
+  struct class_counts_t
+  {
+    std::uint64_t reused = 0;
+    std::uint64_t fresh = 0;
+    std::uint64_t excluded = 0;
+    std::uint64_t after_stop = 0;
+  };
+  std::map<roller_class_e, class_counts_t> per_class;
+
+  // Whole-run totals -- the exact fields the "Interfaces this plan adds" stdout totals line
+  // prints, in that order. Task 1 only ever increments reused/fresh_no_address; the rest are
+  // Task 2's territory (D-04/D-17/D-20/REP-04) and stay 0 here, printed as 0 in the interim.
+  std::uint64_t reused = 0;
+  std::uint64_t fresh_no_address = 0;
+  std::uint64_t fresh_used_up = 0;
+  std::uint64_t fresh_roller_not_in_recording = 0;
+  std::uint64_t excluded = 0;
+  std::uint64_t after_stop = 0;
+  std::uint64_t outside_fight = 0;
+  std::uint64_t live_was_recorded = 0;
+  std::uint64_t recorded_unused = 0;
+};
+
 // The recorder object -- owned by sim_t::rl_rng_recorder (root only, unique_ptr, forward
 // declared in sim.hpp). Implements rng::rl_draw_sink_t so basic_rng_t<Engine>::real()/roll()
 // can call into it through the process-wide rng::rl_draw_sink pointer. Every public entry point
@@ -149,14 +242,18 @@ public:
   }
 
   // ---- rng::rl_draw_sink_t ----
-  void on_draw( std::uint32_t& roller_slot, const std::uint64_t& draw_counter,
-                std::uint32_t roller_override, double raw ) override;
+  double on_draw( std::uint32_t& roller_slot, const std::uint64_t& draw_counter,
+                  std::uint32_t roller_override, double raw ) override;
   void on_roll_outcome( std::uint32_t roller, std::uint64_t draw_ordinal, double chance,
                          bool outcome ) override;
   void on_no_draw_roll( std::uint32_t& roller_slot, const std::uint64_t& draw_counter ) override;
 
   // ---- lifecycle, called by the free functions below ----
-  void open_and_write_header();
+  // open() replaces the old open_and_write_header() name (253-02): it now constructs whichever
+  // of writing/replay mode(s) root_'s options ask for -- see this method's own definition for
+  // the writing_/replay_ split. Retained under its original free-function name at the bottom of
+  // this file (open_and_write_header(sim_t*)) to keep sim.cpp's call site unchanged.
+  void open();
   void fight_begin();
   void fight_end();
   void write_footer();
@@ -188,7 +285,22 @@ private:
   void assert_stream_ok( const char* where );
   void write_sidecar();
 
+  // ---- Replay (253-02, REP-01/D-15/D-16). No-op bodies are never reached when replay_ is null
+  // (every call site below checks `replay_` first); see each definition for the exact contract.
+  void replay_init();
+  void replay_fight_begin();
+  void replay_fight_end();
+  std::uint32_t replay_key_index_for_sidecar_roller( std::uint32_t sidecar_id ) const;
+  std::uint32_t replay_key_index_for_live_roller( std::uint32_t live_id );
+  replay_state_t::address_key_t replay_outer_address( std::uint32_t drawing_roller );
+
   sim_t* root_;
+  // True only when rl_rng_record= is set (253-02): gates every write-side concern (the stream,
+  // the buffer, entry building, the sidecar, the footer's record/close/sidecar work). Registration
+  // and the press-frame guards run regardless -- see fight_begin()/fight_end()/on_draw() below.
+  bool writing_ = false;
+  // Non-null only when rl_rng_replay= is set (253-02) -- see replay_state_t's own doc comment.
+  std::unique_ptr<replay_state_t> replay_;
   std::unique_ptr<io::ofstream> stream_;
   std::vector<unsigned char> buffer_;
   std::uint64_t row_count_ = 0;          // total records appended (buffered or already flushed)
@@ -277,8 +389,8 @@ std::uint32_t recorder_t::ensure_registered( std::uint32_t& roller_slot, const s
   return id;
 }
 
-void recorder_t::on_draw( std::uint32_t& roller_slot, const std::uint64_t& draw_counter,
-                           std::uint32_t roller_override, double raw )
+double recorder_t::on_draw( std::uint32_t& roller_slot, const std::uint64_t& draw_counter,
+                             std::uint32_t roller_override, double raw )
 {
   const std::uint32_t stream_id = ensure_registered( roller_slot, draw_counter );
   const std::uint32_t logical = roller_override != 0 ? roller_override : stream_id;
@@ -295,50 +407,89 @@ void recorder_t::on_draw( std::uint32_t& roller_slot, const std::uint64_t& draw_
   // within the SAME (trigger_kind, trigger, press) window.
   ++logical_entry.roll_entries;
 
+  double value = raw;
+
+  // Replay (253-02, REP-01/D-16): a no-write mode of this same object. The table probe happens
+  // BEFORE the writing-only record fields below are built, because when both options are on the
+  // reused value becomes THIS run's own ROLL entry raw field too (D-16's "write the returned
+  // value") -- so a self-replay's recording is byte-identical to the one it replayed.
+  if ( replay_ && replay_->window_open )
+  {
+    const replay_state_t::address_key_t key = replay_outer_address( logical_clamped );
+    const auto it = replay_->table.find( key );
+    replay_state_t::class_counts_t& class_counts = replay_->per_class[ logical_entry.cls ];
+    if ( it != replay_->table.end() && it->second.next_unused < it->second.raw.size() )
+    {
+      value = it->second.raw[ it->second.next_unused ];
+      ++it->second.next_unused;
+      ++replay_->reused;
+      ++class_counts.reused;
+    }
+    else
+    {
+      // Task 1: one bucket for every "no unused recorded number at this address" reason; Task 2
+      // (D-04/D-17/D-20) splits this into fresh_no_address/fresh_used_up/
+      // fresh_roller_not_in_recording and adds the fresh-number rule. `value` stays `raw` here.
+      ++replay_->fresh_no_address;
+      ++class_counts.fresh;
+    }
+  }
+
   // 250-03 (REC-04): position is 0-based WITHIN the active (trigger_kind, trigger, press, roller)
   // window, not a running total per roller -- exactly the key rng_record.py's check() reconciles
   // against. Before this plan wires any press guard, current_outer_/current_inner_ both sit at
   // their default TRIGGER_KIND_NONE/0/0 frame for every roll, so every roller's one window key is
   // (NONE, 0, 0, roller) and position reduces to the prior per-roller running count -- byte-
   // identical to plan 250-01/250-02's behavior for any recording made before a press guard ever
-  // opens.
-  const window_key_t outer_key{ current_outer_.kind, current_outer_.trigger, current_outer_.press, logical_clamped };
-  const std::uint32_t position = outer_window_positions_[ outer_key ]++;
+  // opens. Writing-only (253-02): the ROLL record's own position/inner_position fields are
+  // meaningless without a file to put them in.
+  if ( writing_ )
+  {
+    const window_key_t outer_key{ current_outer_.kind, current_outer_.trigger, current_outer_.press, logical_clamped };
+    const std::uint32_t position = outer_window_positions_[ outer_key ]++;
 
-  const window_key_t inner_key{ current_inner_.kind, current_inner_.trigger, current_inner_.press, logical_clamped };
-  const std::uint32_t inner_position = inner_window_positions_[ inner_key ]++;
+    const window_key_t inner_key{ current_inner_.kind, current_inner_.trigger, current_inner_.press, logical_clamped };
+    const std::uint32_t inner_position = inner_window_positions_[ inner_key ]++;
 
-  record rec{};
-  rec.raw = raw;
-  rec.chance = CHANCE_NONE;
-  rec.time_ms = static_cast<std::int64_t>( root_->current_time().total_millis() );
-  rec.draw_ordinal = draw_counter;
-  rec.roller = logical_clamped;
-  rec.stream = stream_id;
-  rec.trigger = current_outer_.trigger;
-  rec.press = current_outer_.press;
-  rec.position = position;
-  rec.inner_trigger = current_inner_.trigger;
-  rec.inner_press = current_inner_.press;
-  rec.inner_position = inner_position;
-  rec.iteration = current_iteration_field_;
-  rec.kind = KIND_ROLL;
-  rec.trigger_kind = current_outer_.kind;
-  rec.inner_trigger_kind = current_inner_.kind;
-  rec.outcome = OUTCOME_NOT_A_ROLL;
-  rec.label = LABEL_NONE;
-  rec.flags = after_resalt_ ? FLAG_AFTER_RESALT : 0;
+    record rec{};
+    rec.raw = value;
+    rec.chance = CHANCE_NONE;
+    rec.time_ms = static_cast<std::int64_t>( root_->current_time().total_millis() );
+    rec.draw_ordinal = draw_counter;
+    rec.roller = logical_clamped;
+    rec.stream = stream_id;
+    rec.trigger = current_outer_.trigger;
+    rec.press = current_outer_.press;
+    rec.position = position;
+    rec.inner_trigger = current_inner_.trigger;
+    rec.inner_press = current_inner_.press;
+    rec.inner_position = inner_position;
+    rec.iteration = current_iteration_field_;
+    rec.kind = KIND_ROLL;
+    rec.trigger_kind = current_outer_.kind;
+    rec.inner_trigger_kind = current_inner_.kind;
+    rec.outcome = OUTCOME_NOT_A_ROLL;
+    rec.label = LABEL_NONE;
+    rec.flags = after_resalt_ ? FLAG_AFTER_RESALT : 0;
 
-  last_roll_stream_ = stream_id;
-  last_roll_ordinal_ = draw_counter;
-  append( rec );
-  ++fight_roll_entries_;
-  ++roll_entry_total_;
+    last_roll_stream_ = stream_id;
+    last_roll_ordinal_ = draw_counter;
+    append( rec );
+    ++fight_roll_entries_;
+    ++roll_entry_total_;
+  }
+
+  return value;
 }
 
 void recorder_t::on_roll_outcome( std::uint32_t roller, std::uint64_t draw_ordinal, double chance,
                                    bool outcome )
 {
+  // Writing-only (253-02): patches a ROLL entry the buffer holds -- there is nothing to patch in
+  // replay-only mode (no file, no buffer).
+  if ( !writing_ )
+    return;
+
   // `roller` here is the caller's rl_roller_id_ (the physical stream) -- basic_rng_t::roll()
   // deliberately passes the stream, not any override, so this matches the ROLL entry by
   // (stream, draw_ordinal) exactly as 250-01-PLAN.md's on_roll_outcome contract specifies.
@@ -360,6 +511,10 @@ void recorder_t::on_roll_outcome( std::uint32_t roller, std::uint64_t draw_ordin
 void recorder_t::annotate_draw( rng::rng_t& stream, std::uint64_t before, double chance, bool outcome,
                                  std::uint8_t label )
 {
+  // Writing-only (253-02): patches a ROLL entry the buffer holds.
+  if ( !writing_ )
+    return;
+
   // Exactly one draw happened on `stream` since `before` -- a one-result attack table (no crit
   // roll possible) draws nothing and is correctly left un-annotated; more than one draw means
   // this wasn't a single, unambiguous attack-table roll (defensive; not expected from the call
@@ -386,6 +541,11 @@ void recorder_t::annotate_draw( rng::rng_t& stream, std::uint64_t before, double
 
 void recorder_t::label_last_roll( std::uint8_t label, double chance, bool success )
 {
+  // Writing-only (253-02): patches a ROLL entry the buffer holds; the per-label tally below is
+  // also whole-recording bookkeeping that means nothing without a recording.
+  if ( !writing_ )
+    return;
+
   bool matched = false;
   if ( buffer_.size() >= RECORD_SIZE )
   {
@@ -642,35 +802,309 @@ void recorder_t::assert_stream_ok( const char* where )
   }
 }
 
-void recorder_t::open_and_write_header()
+void recorder_t::open()
 {
-  stream_ = std::make_unique<io::ofstream>();
-  stream_->open( root_->rl_rng_record_file_str, std::ios::out | std::ios::trunc | std::ios::binary );
-  if ( !stream_->is_open() )
+  writing_ = !root_->rl_rng_record_file_str.empty();
+
+  if ( writing_ )
   {
-    throw sc_runtime_error(
-        fmt::format( "rl_rng_record=: unable to open '{}' for writing.", root_->rl_rng_record_file_str ) );
+    stream_ = std::make_unique<io::ofstream>();
+    stream_->open( root_->rl_rng_record_file_str, std::ios::out | std::ios::trunc | std::ios::binary );
+    if ( !stream_->is_open() )
+    {
+      throw sc_runtime_error(
+          fmt::format( "rl_rng_record=: unable to open '{}' for writing.", root_->rl_rng_record_file_str ) );
+    }
+
+    file_header h{};
+    std::memcpy( h.magic, MAGIC, sizeof( MAGIC ) );
+    h.format_version = FORMAT_VERSION;
+    h.record_size = RECORD_SIZE;
+    h.header_size = HEADER_SIZE;
+    h.sim_seed = root_->seed;
+    h.flags = ( root_->per_source_rng ? 0x1u : 0u ) | ( root_->deterministic ? 0x2u : 0u ) |
+              ( !root_->rl_iteration_seeds.empty() ? 0x4u : 0u ) | ( root_->average_range ? 0x8u : 0u );
+    h.thread_index = static_cast<std::uint32_t>( root_->thread_index );
+    h.iterations = root_->iterations > 0 ? static_cast<std::uint32_t>( root_->iterations ) : 0u;
+    h.zero36 = 0;
+    std::memset( h.reserved, 0, sizeof( h.reserved ) );
+
+    stream_->write( reinterpret_cast<const char*>( &h ), sizeof( h ) );
+    stream_->flush();
+    assert_stream_ok( "open" );
+  }
+
+  // 253-02 (D-16): replay is loaded here too, whether or not writing_ is also true (record while
+  // replaying is allowed -- D-01).
+  if ( !root_->rl_rng_replay_file_str.empty() )
+    replay_init();
+
+  // Runs in BOTH modes: the registry (and its key strings) is what replay matches addresses
+  // against, whether or not this run is ALSO writing a recording of its own.
+  register_roller( root_->rng(), "sim|_rng", roller_class_e::sim_shared, nullptr );
+  register_roller( root_->solver_explore_rng, "sim|solver_explore_rng", roller_class_e::sim_explore, nullptr );
+}
+
+// ---- Replay (253-02, REP-01/D-15/D-16/D-20). Every method below assumes replay_ is non-null --
+// callers (open()/fight_begin()/fight_end()/on_draw()) all check `replay_`/`replay_->window_open`
+// first. Task 1 implements outer-address matching only (rl_rng_replay_address is read and stored
+// for Task 2, which adds the inner branch, the fresh-number rule, exclusions and the re-salt
+// stop). ----
+
+void recorder_t::replay_init()
+{
+  replay_ = std::make_unique<replay_state_t>();
+  replay_state_t& rp = *replay_;
+  rp.path = root_->rl_rng_replay_file_str;
+  rp.address = root_->rl_rng_replay_address_str.empty() ? "outer" : root_->rl_rng_replay_address_str;
+
+  rp.in.open( rp.path, std::ios::in | std::ios::binary );
+  if ( !rp.in.is_open() )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_rng_replay: cannot read '{}': the file does not exist or cannot be opened.", rp.path ) );
   }
 
   file_header h{};
-  std::memcpy( h.magic, MAGIC, sizeof( MAGIC ) );
-  h.format_version = FORMAT_VERSION;
-  h.record_size = RECORD_SIZE;
-  h.header_size = HEADER_SIZE;
-  h.sim_seed = root_->seed;
-  h.flags = ( root_->per_source_rng ? 0x1u : 0u ) | ( root_->deterministic ? 0x2u : 0u ) |
-            ( !root_->rl_iteration_seeds.empty() ? 0x4u : 0u ) | ( root_->average_range ? 0x8u : 0u );
-  h.thread_index = static_cast<std::uint32_t>( root_->thread_index );
-  h.iterations = root_->iterations > 0 ? static_cast<std::uint32_t>( root_->iterations ) : 0u;
-  h.zero36 = 0;
-  std::memset( h.reserved, 0, sizeof( h.reserved ) );
+  rp.in.read( reinterpret_cast<char*>( &h ), sizeof( h ) );
+  if ( !rp.in || static_cast<std::size_t>( rp.in.gcount() ) != sizeof( h ) )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_rng_replay: cannot read '{}': shorter than the {}-byte header.", rp.path, HEADER_SIZE ) );
+  }
+  if ( std::memcmp( h.magic, MAGIC, sizeof( MAGIC ) ) != 0 )
+  {
+    throw sc_runtime_error( fmt::format( "rl_rng_replay: cannot read '{}': wrong magic.", rp.path ) );
+  }
+  if ( h.format_version != FORMAT_VERSION )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_rng_replay: cannot read '{}': format_version {} is not supported (expected {}).",
+        rp.path, h.format_version, FORMAT_VERSION ) );
+  }
+  if ( h.record_size != RECORD_SIZE || h.header_size != HEADER_SIZE )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_rng_replay: cannot read '{}': record_size/header_size disagree with this build's own "
+        "{}/{}.",
+        rp.path, RECORD_SIZE, HEADER_SIZE ) );
+  }
 
-  stream_->write( reinterpret_cast<const char*>( &h ), sizeof( h ) );
-  stream_->flush();
-  assert_stream_ok( "open_and_write_header" );
+  // Find the FOOTER: it is always the last record in the file (250-01-PLAN.md's own contract) --
+  // seek to the end, read the last RECORD_SIZE bytes, and require it to be a KIND_FOOTER entry.
+  rp.in.seekg( 0, std::ios::end );
+  const std::streamoff file_size = rp.in.tellg();
+  if ( file_size < static_cast<std::streamoff>( HEADER_SIZE ) ||
+       ( static_cast<std::uint64_t>( file_size ) - HEADER_SIZE ) % RECORD_SIZE != 0 )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_rng_replay: cannot read '{}': truncated (not a whole number of {}-byte entries after "
+        "the header).",
+        rp.path, RECORD_SIZE ) );
+  }
 
-  register_roller( root_->rng(), "sim|_rng", roller_class_e::sim_shared, nullptr );
-  register_roller( root_->solver_explore_rng, "sim|solver_explore_rng", roller_class_e::sim_explore, nullptr );
+  record footer{};
+  rp.in.seekg( file_size - static_cast<std::streamoff>( RECORD_SIZE ) );
+  rp.in.read( reinterpret_cast<char*>( &footer ), RECORD_SIZE );
+  if ( footer.kind != KIND_FOOTER )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_rng_replay: cannot read '{}': the last record is not a FOOTER (missing or misplaced).",
+        rp.path ) );
+  }
+  rp.footer_fight_count = footer.press;   // FOOTER's own @44 field: the FIGHT_END count
+
+  // The sidecar: PATH.rollers.json, read with the vendored rapidjson (D-02's key strings).
+  const std::string sidecar_path = rp.path + ".rollers.json";
+  std::ifstream sidecar_stream( sidecar_path, std::ios::in | std::ios::binary );
+  if ( !sidecar_stream.is_open() )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_rng_replay: cannot read '{}': sidecar '{}' does not exist.", rp.path, sidecar_path ) );
+  }
+  const std::string sidecar_text( ( std::istreambuf_iterator<char>( sidecar_stream ) ),
+                                   std::istreambuf_iterator<char>() );
+  rapidjson::Document doc;
+  doc.Parse( sidecar_text.c_str() );
+  if ( doc.HasParseError() || !doc.IsObject() || !doc.HasMember( "rollers" ) || !doc[ "rollers" ].IsArray() )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_rng_replay: cannot read '{}': sidecar '{}' is missing or is not parseable JSON with a "
+        "'rollers' array.",
+        rp.path, sidecar_path ) );
+  }
+
+  const auto& rollers_json = doc[ "rollers" ];
+  for ( const auto& entry : rollers_json.GetArray() )
+  {
+    if ( !entry.IsObject() || !entry.HasMember( "id" ) || !entry[ "id" ].IsUint() ||
+         !entry.HasMember( "key" ) || !entry[ "key" ].IsString() )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_rng_replay: cannot read '{}': sidecar '{}' has a roller entry missing id/key.",
+          rp.path, sidecar_path ) );
+    }
+    const std::uint32_t id = entry[ "id" ].GetUint();
+    const std::string key = entry[ "key" ].GetString();
+
+    std::uint32_t key_index;
+    const auto found = rp.key_string_to_index.find( key );
+    if ( found != rp.key_string_to_index.end() )
+    {
+      key_index = found->second;
+    }
+    else
+    {
+      // Distinct key strings are interned in first-seen order, starting at 1 -- 0 is the fixed
+      // NO_PRESS_KEY_INDEX sentinel, never a real key (D-16).
+      key_index = static_cast<std::uint32_t>( rp.key_string_to_index.size() ) + 1;
+      rp.key_string_to_index.emplace( key, key_index );
+    }
+
+    if ( id >= rp.sidecar_id_to_key_index.size() )
+      rp.sidecar_id_to_key_index.resize( id + 1, replay_state_t::KEY_INDEX_NOT_IN_RECORDING );
+    rp.sidecar_id_to_key_index[ id ] = key_index;
+  }
+
+  // The sequential per-fight reader starts right after the header (D-15).
+  rp.next_read_offset = HEADER_SIZE;
+  rp.in.clear();
+  rp.in.seekg( HEADER_SIZE, std::ios::beg );
+}
+
+std::uint32_t recorder_t::replay_key_index_for_sidecar_roller( std::uint32_t sidecar_id ) const
+{
+  const replay_state_t& rp = *replay_;
+  if ( sidecar_id >= rp.sidecar_id_to_key_index.size() )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_rng_replay: '{}': a recorded entry names roller {} but the sidecar declares only {} "
+        "roller(s).",
+        rp.path, sidecar_id, rp.sidecar_id_to_key_index.size() ) );
+  }
+  return rp.sidecar_id_to_key_index[ sidecar_id ];
+}
+
+std::uint32_t recorder_t::replay_key_index_for_live_roller( std::uint32_t live_id )
+{
+  replay_state_t& rp = *replay_;
+  if ( live_id >= rp.live_key_index_cache.size() )
+    rp.live_key_index_cache.resize( live_id + 1, replay_state_t::KEY_INDEX_UNCACHED );
+
+  std::uint32_t& slot = rp.live_key_index_cache[ live_id ];
+  if ( slot == replay_state_t::KEY_INDEX_UNCACHED )
+  {
+    if ( live_id < rollers_.size() )
+    {
+      const auto found = rp.key_string_to_index.find( rollers_[ live_id ].key );
+      slot = found != rp.key_string_to_index.end() ? found->second
+                                                    : replay_state_t::KEY_INDEX_NOT_IN_RECORDING;
+    }
+    else
+    {
+      slot = replay_state_t::KEY_INDEX_NOT_IN_RECORDING;
+    }
+  }
+  return slot;
+}
+
+replay_state_t::address_key_t recorder_t::replay_outer_address( std::uint32_t drawing_roller )
+{
+  // Task 1: always the outer frame, regardless of rl_rng_replay_address (Task 2 branches on
+  // replay_->address to read the inner frame instead -- D-03).
+  const std::uint8_t kind = current_outer_.kind;
+  const std::uint32_t trigger_key = kind == TRIGGER_KIND_NONE
+      ? replay_state_t::NO_PRESS_KEY_INDEX
+      : replay_key_index_for_live_roller( current_outer_.trigger );
+  const std::uint32_t press = kind == TRIGGER_KIND_NONE ? 0u : current_outer_.press;
+  const std::uint32_t roller_key = replay_key_index_for_live_roller( drawing_roller );
+  return replay_state_t::address_key_t{ kind, trigger_key, press, roller_key };
+}
+
+void recorder_t::replay_fight_begin()
+{
+  replay_state_t& rp = *replay_;
+  rp.table.clear();
+  rp.window_open = false;
+  if ( rp.exhausted )
+    return;
+
+  rp.in.clear();
+  rp.in.seekg( static_cast<std::streamoff>( rp.next_read_offset ) );
+
+  record rec{};
+  bool found_begin = false;
+  while ( rp.in.read( reinterpret_cast<char*>( &rec ), RECORD_SIZE ) )
+  {
+    if ( rec.kind == KIND_FIGHT_BEGIN )
+    {
+      found_begin = true;
+      break;
+    }
+    if ( rec.kind == KIND_FOOTER )
+      break;   // no more fights -- the FOOTER is always last (D-15's trailing-window handling)
+    // Any other kind here means a prior window closed mid-file without reaching this reader's
+    // own bookkeeping -- cannot happen from a recording this reader itself produced; Task 2's
+    // refusal list covers a hand-corrupted file.
+  }
+
+  if ( !found_begin )
+  {
+    // The recording holds no more fight windows -- this and every later fight of this run plays
+    // live (D-15's "the extra reset after the last fight opens no window", generalized to "asked
+    // for more fights than the recording holds"; Task 2 turns the latter into a named refusal at
+    // init instead of a silent fall-through).
+    rp.exhausted = true;
+    rp.next_read_offset = static_cast<std::uint64_t>( rp.in.tellg() );
+    return;
+  }
+
+  bool found_end = false;
+  while ( rp.in.read( reinterpret_cast<char*>( &rec ), RECORD_SIZE ) )
+  {
+    if ( rec.kind == KIND_FIGHT_END )
+    {
+      found_end = true;
+      break;
+    }
+    if ( rec.kind == KIND_ROLL && !( rec.flags & FLAG_AFTER_RESALT ) )
+    {
+      // D-15/D-16: for no press (trigger_kind NONE) the trigger-roller key is the fixed
+      // NO_PRESS_KEY_INDEX sentinel, never the recorded roller-0 key -- "a trigger field of 0
+      // means 'no press', not sim|_rng".
+      const std::uint32_t trigger_key = rec.trigger_kind == TRIGGER_KIND_NONE
+          ? replay_state_t::NO_PRESS_KEY_INDEX
+          : replay_key_index_for_sidecar_roller( rec.trigger );
+      const std::uint32_t press = rec.trigger_kind == TRIGGER_KIND_NONE ? 0u : rec.press;
+      const std::uint32_t roller_key = replay_key_index_for_sidecar_roller( rec.roller );
+      const replay_state_t::address_key_t key{ rec.trigger_kind, trigger_key, press, roller_key };
+      rp.table[ key ].raw.push_back( rec.raw );
+    }
+    // COUNTER, RESALT and after-resalt ROLL entries are skipped -- dropped at load (D-05/D-15).
+  }
+
+  if ( !found_end )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_rng_replay: '{}': fight {}: no FIGHT_END for the window that started reading at offset "
+        "{} -- truncated or malformed recording.",
+        rp.path, rp.fights_served, rp.next_read_offset ) );
+  }
+
+  rp.next_read_offset = static_cast<std::uint64_t>( rp.in.tellg() );
+  rp.window_open = true;
+  ++rp.fights_served;
+}
+
+void recorder_t::replay_fight_end()
+{
+  replay_state_t& rp = *replay_;
+  if ( !rp.window_open )
+    return;
+  for ( const auto& kv : rp.table )
+    rp.recorded_unused += kv.second.raw.size() - kv.second.next_unused;
+  rp.table.clear();
+  rp.window_open = false;
 }
 
 void recorder_t::fight_begin()
@@ -679,7 +1113,9 @@ void recorder_t::fight_begin()
   // time, after the loop exits, with current_iteration unchanged from the last real iteration.
   // That call is not a new fight -- skip it whole (no FIGHT_BEGIN entry, no tally reset) so its
   // incidental draws land in the ALREADY-CLOSED prior fight's accounting instead of opening a
-  // phantom window with no matching FIGHT_END/COUNTER.
+  // phantom window with no matching FIGHT_END/COUNTER. This guard runs in BOTH modes (253-02):
+  // it is what keeps replay from ever trying to load a window for that trailing extra reset
+  // (D-15's "the extra reset after the last fight opens no window").
   if ( root_->current_iteration == last_fight_end_iteration_ )
     return;
 
@@ -689,7 +1125,8 @@ void recorder_t::fight_begin()
   // 250-03 (REC-04): per-fight ROLL position windows. Every rl_press_scope_t properly restores
   // current_outer_/current_inner_ via RAII before the next event fires, so both are already back
   // at their default (no press active) frame here between fights -- reset anyway, defensively,
-  // rather than relying on that invariant holding across every future call site.
+  // rather than relying on that invariant holding across every future call site. Runs in BOTH
+  // modes -- the press frames are what replay's address computation reads too (253-02).
   current_outer_ = press_frame_t{};
   current_inner_ = press_frame_t{};
   current_inner_owner_ = nullptr;
@@ -723,100 +1160,129 @@ void recorder_t::fight_begin()
     r.begin_ordinal = r.draw_counter ? *r.draw_counter : 0;
   }
 
-  record rec{};
-  rec.raw = 0.0;
-  rec.chance = CHANCE_NONE;
-  rec.time_ms = static_cast<std::int64_t>( root_->current_time().total_millis() );
-  rec.iteration = current_iteration_field_;
-  rec.kind = KIND_FIGHT_BEGIN;
-  rec.outcome = OUTCOME_NOT_A_ROLL;
-  append( rec );
-}
-
-void recorder_t::fight_end()
-{
-  for ( std::size_t roller_id = 0; roller_id < rollers_.size(); ++roller_id )
+  // Writing-only (253-02): the FIGHT_BEGIN entry belongs to the recording file.
+  if ( writing_ )
   {
-    roller_entry_t& r = rollers_[ roller_id ];
-    const std::uint64_t end_ordinal = r.draw_counter ? *r.draw_counter : r.begin_ordinal;
-    const bool any_activity = r.execute_presses || r.tick_presses || r.refills || r.no_draw_rolls ||
-                               r.roll_entries || end_ordinal != r.begin_ordinal;
-    if ( !any_activity )
-      continue;
-
-    // COUNTER reuses the ROLL record's byte layout with different field meanings -- see
-    // rl_rng_record.hpp's per-field offset comments and 250-01-PLAN.md's "Recording format"
-    // COUNTER paragraph for the mapping used below (offset -> meaning, not the ROLL name).
     record rec{};
-    rec.time_ms = static_cast<std::int64_t>( r.begin_ordinal );      // @16 begin ordinal
-    rec.draw_ordinal = end_ordinal;                                  // @24 end ordinal
-    rec.roller = static_cast<std::uint32_t>( roller_id );            // @32 roller
-    // A-50 fix (orchestrator ledger, wave 1 review): the reader (rng_record.py check()) reads
-    // COUNTER's @36 `stream` as the roller's OWN physical stream number -- the same value its
-    // ROLL entries carry in `stream` -- and reads the raid-event marker from the @71 `flags`
-    // byte, not from `stream`. The prior code wrote FLAG_LOGICAL_ONLY (0x02) into `stream` for a
-    // raid-event roller and 0 into `stream` for EVERY other roller regardless of its own number,
-    // which collapsed every own-stream roller's COUNTER onto the wrong key (stream 0) and made
-    // `check` report bogus "last ROLL ordinal is not the COUNTER's end" mismatches on wave 1's
-    // own recordings (e.g. patchwerk-t1-c-s1.rec, 133 problems). Fixed at the source, not the
-    // reader: an own-stream roller's COUNTER carries its own stream number and flags 0; a
-    // raid-event (logical-only, no stream of its own) roller carries stream 0 and flags
-    // FLAG_LOGICAL_ONLY -- raid events are Task 2's territory (R-01), but this fix must land now
-    // so Task 1's own recordings pass `check` (the sole gate this task's verify block runs).
-    if ( r.cls == roller_class_e::raid_event )
-    {
-      rec.stream = 0u;                  // @36 -- draws stay on the shared stream (R-01)
-      rec.flags = FLAG_LOGICAL_ONLY;    // @71
-    }
-    else
-    {
-      rec.stream = static_cast<std::uint32_t>( roller_id );  // @36 -- this roller's own stream
-    }
-    rec.trigger = 0;                                                 // @40
-    rec.press = r.execute_presses;                                   // @44 execute presses
-    rec.position = r.tick_presses;                                   // @48 tick presses
-    rec.inner_trigger = r.refills;                                   // @52 refills
-    rec.inner_press = r.no_draw_rolls;                                // @56 no-draw rolls (R-05)
-    rec.inner_position = r.roll_entries;                              // @60 ROLL entries, this roller
+    rec.raw = 0.0;
+    rec.chance = CHANCE_NONE;
+    rec.time_ms = static_cast<std::int64_t>( root_->current_time().total_millis() );
     rec.iteration = current_iteration_field_;
-    rec.kind = KIND_COUNTER;
+    rec.kind = KIND_FIGHT_BEGIN;
     rec.outcome = OUTCOME_NOT_A_ROLL;
     append( rec );
   }
 
-  record fe{};
-  fe.raw = 0.0;
-  fe.chance = CHANCE_NONE;
-  fe.time_ms = static_cast<std::int64_t>( root_->current_time().total_millis() );
-  fe.draw_ordinal = fight_roll_entries_;   // ROLL entries in this fight's window
-  fe.press = fight_counter_entries_;       // COUNTER records this fight
-  fe.iteration = current_iteration_field_;
-  fe.kind = KIND_FIGHT_END;
-  fe.outcome = OUTCOME_NOT_A_ROLL;
-  append( fe );
+  // Replay (253-02, D-15): load THIS fight's window from the recording, sequentially, one fight
+  // at a time -- never the whole recording (a 10,000-fight recording is tens of GB).
+  if ( replay_ )
+    replay_fight_begin();
+}
 
+void recorder_t::fight_end()
+{
+  // Writing-only (253-02): every COUNTER row, the FIGHT_END entry, and the per-fight flush all
+  // belong to the recording file.
+  if ( writing_ )
+  {
+    for ( std::size_t roller_id = 0; roller_id < rollers_.size(); ++roller_id )
+    {
+      roller_entry_t& r = rollers_[ roller_id ];
+      const std::uint64_t end_ordinal = r.draw_counter ? *r.draw_counter : r.begin_ordinal;
+      const bool any_activity = r.execute_presses || r.tick_presses || r.refills || r.no_draw_rolls ||
+                                 r.roll_entries || end_ordinal != r.begin_ordinal;
+      if ( !any_activity )
+        continue;
+
+      // COUNTER reuses the ROLL record's byte layout with different field meanings -- see
+      // rl_rng_record.hpp's per-field offset comments and 250-01-PLAN.md's "Recording format"
+      // COUNTER paragraph for the mapping used below (offset -> meaning, not the ROLL name).
+      record rec{};
+      rec.time_ms = static_cast<std::int64_t>( r.begin_ordinal );      // @16 begin ordinal
+      rec.draw_ordinal = end_ordinal;                                  // @24 end ordinal
+      rec.roller = static_cast<std::uint32_t>( roller_id );            // @32 roller
+      // A-50 fix (orchestrator ledger, wave 1 review): the reader (rng_record.py check()) reads
+      // COUNTER's @36 `stream` as the roller's OWN physical stream number -- the same value its
+      // ROLL entries carry in `stream` -- and reads the raid-event marker from the @71 `flags`
+      // byte, not from `stream`. The prior code wrote FLAG_LOGICAL_ONLY (0x02) into `stream` for a
+      // raid-event roller and 0 into `stream` for EVERY other roller regardless of its own number,
+      // which collapsed every own-stream roller's COUNTER onto the wrong key (stream 0) and made
+      // `check` report bogus "last ROLL ordinal is not the COUNTER's end" mismatches on wave 1's
+      // own recordings (e.g. patchwerk-t1-c-s1.rec, 133 problems). Fixed at the source, not the
+      // reader: an own-stream roller's COUNTER carries its own stream number and flags 0; a
+      // raid-event (logical-only, no stream of its own) roller carries stream 0 and flags
+      // FLAG_LOGICAL_ONLY -- raid events are Task 2's territory (R-01), but this fix must land now
+      // so Task 1's own recordings pass `check` (the sole gate this task's verify block runs).
+      if ( r.cls == roller_class_e::raid_event )
+      {
+        rec.stream = 0u;                  // @36 -- draws stay on the shared stream (R-01)
+        rec.flags = FLAG_LOGICAL_ONLY;    // @71
+      }
+      else
+      {
+        rec.stream = static_cast<std::uint32_t>( roller_id );  // @36 -- this roller's own stream
+      }
+      rec.trigger = 0;                                                 // @40
+      rec.press = r.execute_presses;                                   // @44 execute presses
+      rec.position = r.tick_presses;                                   // @48 tick presses
+      rec.inner_trigger = r.refills;                                   // @52 refills
+      rec.inner_press = r.no_draw_rolls;                                // @56 no-draw rolls (R-05)
+      rec.inner_position = r.roll_entries;                              // @60 ROLL entries, this roller
+      rec.iteration = current_iteration_field_;
+      rec.kind = KIND_COUNTER;
+      rec.outcome = OUTCOME_NOT_A_ROLL;
+      append( rec );
+    }
+
+    record fe{};
+    fe.raw = 0.0;
+    fe.chance = CHANCE_NONE;
+    fe.time_ms = static_cast<std::int64_t>( root_->current_time().total_millis() );
+    fe.draw_ordinal = fight_roll_entries_;   // ROLL entries in this fight's window
+    fe.press = fight_counter_entries_;       // COUNTER records this fight
+    fe.iteration = current_iteration_field_;
+    fe.kind = KIND_FIGHT_END;
+    fe.outcome = OUTCOME_NOT_A_ROLL;
+    append( fe );
+  }
+
+  // Runs in BOTH modes -- the trailing-reset guard at the top of fight_begin() depends on this
+  // being kept current regardless of writing_ (253-02).
   ++fight_count_;
   last_fight_end_iteration_ = root_->current_iteration;
 
-  // Per-fight flush -- one write, one flush, mirrors rl_translog.cpp's record_close() (D-13's
-  // syscall-cost rationale applies here too, not a crash-loss bound).
-  stream_->write( reinterpret_cast<const char*>( buffer_.data() ),
-                   static_cast<std::streamsize>( buffer_.size() ) );
-  stream_->flush();
-  assert_stream_ok( "fight_end" );
-  buffer_.clear();
+  if ( writing_ )
+  {
+    // Per-fight flush -- one write, one flush, mirrors rl_translog.cpp's record_close() (D-13's
+    // syscall-cost rationale applies here too, not a crash-loss bound).
+    stream_->write( reinterpret_cast<const char*>( buffer_.data() ),
+                     static_cast<std::streamsize>( buffer_.size() ) );
+    stream_->flush();
+    assert_stream_ok( "fight_end" );
+    buffer_.clear();
+  }
+
+  // Replay (253-02, D-15): close this fight's window -- tally its unhanded numbers, then free
+  // the table before the next fight_begin() rebuilds it.
+  if ( replay_ )
+    replay_fight_end();
 }
 
 void recorder_t::mark_resalt()
 {
-  record rec{};
-  rec.raw = 0.0;
-  rec.chance = CHANCE_NONE;
-  rec.time_ms = static_cast<std::int64_t>( root_->current_time().total_millis() );
-  rec.iteration = current_iteration_field_;
-  rec.kind = KIND_RESALT;
-  rec.outcome = OUTCOME_NOT_A_ROLL;
-  append( rec );
+  // Writing-only (253-02): the RESALT entry belongs to the recording file. after_resalt_ itself
+  // is set unconditionally -- Task 2 wires replay's own stop behavior off the same flag.
+  if ( writing_ )
+  {
+    record rec{};
+    rec.raw = 0.0;
+    rec.chance = CHANCE_NONE;
+    rec.time_ms = static_cast<std::int64_t>( root_->current_time().total_millis() );
+    rec.iteration = current_iteration_field_;
+    rec.kind = KIND_RESALT;
+    rec.outcome = OUTCOME_NOT_A_ROLL;
+    append( rec );
+  }
   after_resalt_ = true;
 }
 
@@ -911,42 +1377,73 @@ void recorder_t::write_sidecar()
 
 void recorder_t::write_footer()
 {
-  record rec{};
-  rec.raw = 0.0;
-  rec.chance = CHANCE_NONE;
-  rec.time_ms = static_cast<std::int64_t>( root_->current_time().total_millis() );
-  rec.draw_ordinal = roll_entry_total_;                              // total ROLL entries
-  rec.press = fight_count_;                                          // FIGHT_END count
-  rec.position = static_cast<std::uint32_t>( row_count_ + 1 );       // total records, incl. footer
-  rec.iteration = ITERATION_NONE;
-  rec.kind = KIND_FOOTER;
-  rec.outcome = OUTCOME_NOT_A_ROLL;
-  append( rec );
+  if ( writing_ )
+  {
+    record rec{};
+    rec.raw = 0.0;
+    rec.chance = CHANCE_NONE;
+    rec.time_ms = static_cast<std::int64_t>( root_->current_time().total_millis() );
+    rec.draw_ordinal = roll_entry_total_;                              // total ROLL entries
+    rec.press = fight_count_;                                          // FIGHT_END count
+    rec.position = static_cast<std::uint32_t>( row_count_ + 1 );       // total records, incl. footer
+    rec.iteration = ITERATION_NONE;
+    rec.kind = KIND_FOOTER;
+    rec.outcome = OUTCOME_NOT_A_ROLL;
+    append( rec );
 
-  stream_->write( reinterpret_cast<const char*>( buffer_.data() ),
-                   static_cast<std::streamsize>( buffer_.size() ) );
-  stream_->flush();
-  assert_stream_ok( "write_footer" );
-  buffer_.clear();
-  stream_->close();
+    stream_->write( reinterpret_cast<const char*>( buffer_.data() ),
+                     static_cast<std::streamsize>( buffer_.size() ) );
+    stream_->flush();
+    assert_stream_ok( "write_footer" );
+    buffer_.clear();
+    stream_->close();
 
-  write_sidecar();
+    write_sidecar();
 
-  fmt::print( stderr, "rl_rng_record: wrote {} roll entries over {} fights to {}\n", roll_entry_total_,
-              fight_count_, root_->rl_rng_record_file_str );
+    fmt::print( stderr, "rl_rng_record: wrote {} roll entries over {} fights to {}\n", roll_entry_total_,
+                fight_count_, root_->rl_rng_record_file_str );
+  }
+
+  // Replay's own summary (253-02, "Interfaces this plan adds"): one stdout totals line, then one
+  // stdout line per roller class present in this run's own registry. Printed whenever replay_
+  // exists, regardless of writing_ -- a replay-only run has no other way to report its counts.
+  if ( replay_ )
+  {
+    fmt::print(
+        "rl_rng_replay: fights={} reused={} fresh_no_address={} fresh_used_up={} "
+        "fresh_roller_not_in_recording={} excluded={} after_stop={} outside_fight={} "
+        "live_was_recorded={} recorded_unused={} address={} path={}\n",
+        replay_->fights_served, replay_->reused, replay_->fresh_no_address, replay_->fresh_used_up,
+        replay_->fresh_roller_not_in_recording, replay_->excluded, replay_->after_stop,
+        replay_->outside_fight, replay_->live_was_recorded, replay_->recorded_unused,
+        replay_->address, replay_->path );
+
+    std::set<roller_class_e> classes_present;
+    for ( const roller_entry_t& r : rollers_ )
+      classes_present.insert( r.cls );
+    for ( roller_class_e cls : classes_present )
+    {
+      const auto it = replay_->per_class.find( cls );
+      const replay_state_t::class_counts_t counts =
+          it != replay_->per_class.end() ? it->second : replay_state_t::class_counts_t{};
+      fmt::print( "rl_rng_replay class={} reused={} fresh={} excluded={} after_stop={}\n",
+                  class_name( cls ), counts.reused, counts.fresh, counts.excluded, counts.after_stop );
+    }
+  }
 }
 
 // ---- Free functions -- the interface rl_rng_record.hpp declares. Every one is a no-op (one
-// pointer check on root->rl_rng_recorder) when rl_rng_record= is unset. ----
+// pointer check on root->rl_rng_recorder) when neither rl_rng_record= nor rl_rng_replay= is set
+// (253-02 generalizes the prior "rl_rng_record= is unset" contract to either option). ----
 
 void open_and_write_header( sim_t* sim )
 {
   sim_t* root = root_of( sim );
-  if ( root->rl_rng_record_file_str.empty() )
+  if ( root->rl_rng_record_file_str.empty() && root->rl_rng_replay_file_str.empty() )
     return;
 
   root->rl_rng_recorder = std::make_shared<recorder_t>( root );
-  root->rl_rng_recorder->open_and_write_header();
+  root->rl_rng_recorder->open();
   rng::rl_draw_sink = root->rl_rng_recorder.get();
 }
 

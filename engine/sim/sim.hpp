@@ -749,6 +749,24 @@ struct sim_t : private sc_thread_t
   // and drop this pointer, never instantiate its destructor.
   std::string rl_rng_record_file_str;
   std::shared_ptr<rl_rng_record::recorder_t> rl_rng_recorder;
+  // The replay option (tstl-sylvanas phase 253, plan 253-02, REP-01/D-01/D-16). rl_rng_replay=
+  // <path>, off by default (empty string), byte-identical to today's behaviour when unset. A
+  // second fight loads the recording at <path> and, at every roll, reuses the recorded raw
+  // number whose address matches and is unused (D-02/D-15), applying ITS OWN chance to it
+  // (REP-02); otherwise it draws fresh, with the fresh-number rule (D-17) below. Refused by name
+  // in setup() unless per_source_rng=1 and threads=1 both hold, mirroring rl_rng_record='s own
+  // refusal shape -- see sim.cpp's refusal block. Replay is a NO-WRITE MODE of the SAME recorder
+  // object rl_rng_record= uses (rl_rng_recorder above): when either option is set, the object
+  // exists and tracks press frames/registry; only the file, entry building, buffering and the
+  // sidecar run when rl_rng_record= is ALSO set (D-16). Both options may be set at once (record
+  // while replaying), so a chain of pairs can be built.
+  std::string rl_rng_replay_file_str;
+  // Which press address replay reads from a ROLL entry's outer or inner fields (D-03, flagged
+  // A-22): "outer" (default, empty value = outer) or "inner". Accepted only together with
+  // rl_rng_replay= -- refused by name otherwise. Both values ship in this phase; deleting the
+  // unused one is a later phase's work once the default is picked (owner's "new behaviour
+  // becomes the default, delete the old path" rule).
+  std::string rl_rng_replay_address_str;
   // tstl-sylvanas phase 218, plan 218-02 (RIG-01). rl_fight_shape_index=<n>
   // names which declared fight shape (scripts/rl/specs/enhancement.json's
   // episode.fightMix, 1-based) this run was launched under. 0 is the
