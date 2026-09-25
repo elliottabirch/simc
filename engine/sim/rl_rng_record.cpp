@@ -238,7 +238,32 @@ struct replay_state_t
     std::size_t next_unused = 0;
   };
   using address_key_t = std::tuple<std::uint8_t, std::uint32_t, std::uint32_t, std::uint32_t>;
-  std::map<address_key_t, entry_run_t> table;
+
+  // 254-06 Task 2 (REP-06 speed round 1): fixed hash functor for address_key_t, replacing the
+  // tree-ordered std::map with an unordered_map on the two hottest replay operations -- the
+  // per-fight rebuild (replay_fight_begin(), which re-inserts one entry per kept ROLL every
+  // single fight) and the per-draw lookup (on_draw()'s table.find()). Profiled on the
+  // one-address build (254-06, $S/speed/profile-start-replay.txt): replay_fight_begin() alone
+  // cost 5.99% of the replaying run's total instruction count, plus a further slice inside
+  // on_draw()'s own 4.37%, plus roughly 9% of total instructions in malloc/free churn and
+  // std::_Rb_tree_insert_and_rebalance from repeated per-fight node allocation and tree
+  // rebalancing. A hash table gives O(1) amortized insert/find instead of O(log n) tree
+  // operations. Per-key vector order (raw.push_back() in record order) and the fight_end()
+  // unused-count sum (a plain accumulation) are both independent of map iteration/insertion
+  // order, so this is a pure data-structure swap with byte-identical output.
+  struct address_key_hash_t
+  {
+    std::size_t operator()( const address_key_t& k ) const noexcept
+    {
+      const auto& [ kind, trigger, press, roller ] = k;
+      std::size_t h = static_cast<std::size_t>( kind );
+      h = h * 1000003u ^ static_cast<std::size_t>( trigger );
+      h = h * 1000003u ^ static_cast<std::size_t>( press );
+      h = h * 1000003u ^ static_cast<std::size_t>( roller );
+      return h;
+    }
+  };
+  std::unordered_map<address_key_t, entry_run_t, address_key_hash_t> table;
 
   // This fight's full raw-number set (D-17's fresh-number rule): every kept ROLL entry's raw
   // number, EXCLUDED ones included (D-20's "their recorded numbers never enter the table [but]
