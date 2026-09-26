@@ -824,6 +824,22 @@ struct sim_t : private sc_thread_t
   // gives for skipping a mutex there. Read once at run end for the stderr readout (sim.cpp's
   // execute()).
   std::uint64_t solver_hold_windows_override_count = 0;
+  // 260926-f2e (Need 1): forces the in-process transport's decision AT a specific decision
+  // counter `k` to a specific action index, overriding both the net's greedy choice and the
+  // exploration draw. solver_force_decision=<k>:<action_index>[,<k>:<action_index>,...] -- a
+  // comma-separated list, mirroring solver_hold_windows_str's own multi-entry parsing shape
+  // immediately above. Meaningful ONLY together with solver_policy_str (refused in sim.cpp
+  // otherwise, same rule as solver_hold_windows_str). Refused outright when sim->iterations > 1
+  // (see sim.cpp's parse block) -- `k` is `seq - 1` and `seq` is never reset per fight
+  // (solver_control.cpp's reset_iteration()), so a multi-fight launch would make `k` ambiguous.
+  // Empty string (default, or the option simply absent) leaves solver_force_decisions empty,
+  // which choose() treats as "disabled" via one .empty() check on the loop below -- byte-
+  // identical behavior to a run built before this option existed.
+  std::string solver_force_decision_str;
+  // Parsed ONCE in setup() from solver_force_decision_str (empty = disabled). solver_control.cpp
+  // reads this read-only, once per decision -- it never re-parses the string. A flat vector of
+  // (k, action_index) pairs, same reasoning as solver_hold_windows's own flat-vector choice.
+  std::vector<std::pair<std::int64_t, int>> solver_force_decisions;
   // rl_forward_probe sim option (tstl-sylvanas Phase 222, plan 222-04,
   // NET-02's cross-path receipt). Loads a solver_policy= blob (weights are
   // already loaded+validated in setup() above, same as solver_policy=

@@ -1072,6 +1072,29 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       }
     }
 
+    // 260926-f2e (Need 1): solver_force_decision override -- after the exploration draw has had
+    // its (possibly zero) chance to run, before `idx` is read into `action`. This is the one
+    // place in this function where overriding `idx` changes nothing else: q_margin/top_q are
+    // already computed from mask/best/second_best below (unaffected -- they describe the net's
+    // own honest evaluation, not what was executed) and no RNG is consumed downstream of this
+    // point for this decision. Gated only by the NATURAL mask (not select_mask) -- forcing is an
+    // override of selection itself, and should be refused only when true engine legality
+    // disagrees, the same thing the FIFO arm's own forced_deviation.forced() checks.
+    for ( const auto& [ forced_k, forced_action ] : sim->solver_force_decisions )
+    {
+      if ( static_cast<std::int64_t>( seq - 1 ) == forced_k )
+      {
+        if ( !mask[ forced_action ] )
+        {
+          protocol_abort( fmt::format(
+              "solver_force_decision: forced action {} illegal at decision k={} (seq={}) -- the "
+              "engine's own natural mask disagrees", forced_action, forced_k, seq ) );
+        }
+        idx = forced_action;
+        break;
+      }
+    }
+
     const rl_action_desc& action = RL_ACTIONS[ idx ];
 
     // 221-03 (ACT-05/ACT-06, Task 2 point 4): cleared for EVERY decision
