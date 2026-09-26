@@ -4330,6 +4330,11 @@ void sim_t::create_options()
   // fail-closed block beside solver_policy_str's -- see sim.hpp's solver_hold_windows_str doc
   // comment.
   add_option( opt_string( "solver_hold_windows", solver_hold_windows_str ) );
+  // 260926-f2e (Need 1): forces the in-process transport's decision at a specific decision
+  // counter to a specific action index. Parsed and validated below, in its own fail-closed
+  // block immediately after solver_hold_windows_str's own -- see sim.hpp's
+  // solver_force_decision_str doc comment.
+  add_option( opt_string( "solver_force_decision", solver_force_decision_str ) );
   // rl_forward_probe sim option (Phase 222, plan 222-04, NET-02's
   // cross-path receipt). See sim.hpp's rl_forward_probe_str doc comment.
   // Default empty, disabled.
@@ -5130,6 +5135,109 @@ void sim_t::setup( sim_control_t* c )
       throw sc_runtime_error( fmt::format(
           "solver_hold_windows='{}' declared no valid actionIndex:startSeconds:endSeconds "
           "entries.", solver_hold_windows_str ) );
+    }
+  }
+
+  // 260926-f2e (Need 1): solver_force_decision=<k>:<action_index>[,<k>:<action_index>,...].
+  // Own fail-closed block, deliberately placed immediately AFTER solver_hold_windows_str's own
+  // block above, same ordering rationale (this option's own weights-load/format refusals fire
+  // before falling through to unrelated notices below).
+  if ( !solver_force_decision_str.empty() )
+  {
+    // Refusal 1: meaningless without solver_policy= -- there is no in-process decision to
+    // override for the FIFO transport (solver_control=) or for no transport at all. Same rule
+    // as solver_hold_windows_str's own Refusal 1.
+    if ( solver_policy_str.empty() )
+    {
+      throw sc_runtime_error(
+          "solver_force_decision= requires solver_policy= (it overrides the in-process "
+          "transport's own decision in solver_control::choose(); it has no meaning for "
+          "solver_control= (FIFO) or with neither transport set)." );
+    }
+
+    // Refusal (new, not present on solver_hold_windows): `k` only unambiguously names one
+    // decision when the launch contains exactly one fight -- solver_control.cpp's `seq` counter
+    // is never reset per fight (reset_iteration() deliberately leaves it alone), so a
+    // multi-fight launch would make `k` mean something different than the caller assumes.
+    // Fail closed rather than silently accepting an ambiguous `k`.
+    if ( iterations > 1 )
+    {
+      throw sc_runtime_error( fmt::format(
+          "solver_force_decision='{}' requires iterations=1 (or the option simply absent) -- "
+          "`k` is the decision counter `seq - 1`, which is never reset between fights, so it "
+          "is ambiguous whenever a launch runs more than one fight (iterations={}).",
+          solver_force_decision_str, iterations ) );
+    }
+
+    // Format: 'k:action_index,k:action_index,...' -- integer k (>= 0), integer action_index,
+    // exactly one colon per entry. Mirrors solver_hold_windows_str's own named-refusal style.
+    std::stringstream entries_ss( solver_force_decision_str );
+    std::string entry;
+    while ( std::getline( entries_ss, entry, ',' ) )
+    {
+      const auto colon = entry.find( ':' );
+      if ( colon == std::string::npos || colon == 0 || colon == entry.size() - 1 ||
+           entry.find( ':', colon + 1 ) != std::string::npos )
+      {
+        throw sc_runtime_error( fmt::format(
+            "solver_force_decision=: malformed entry '{}' (expected 'k:actionIndex') in '{}'.",
+            entry, solver_force_decision_str ) );
+      }
+      const std::string k_str = entry.substr( 0, colon );
+      const std::string action_str = entry.substr( colon + 1 );
+      std::int64_t k = -1;
+      int action_index = -1;
+      try
+      {
+        std::size_t k_pos = 0, action_pos = 0;
+        k = std::stoll( k_str, &k_pos );
+        action_index = std::stoi( action_str, &action_pos );
+        if ( k_pos != k_str.size() || action_pos != action_str.size() )
+          throw std::invalid_argument( "trailing characters" );
+      }
+      catch ( const std::exception& )
+      {
+        throw sc_runtime_error( fmt::format(
+            "solver_force_decision=: malformed entry '{}' (expected an integer k and an integer "
+            "action index) in '{}'.", entry, solver_force_decision_str ) );
+      }
+      if ( k < 0 )
+      {
+        throw sc_runtime_error( fmt::format(
+            "solver_force_decision=: k must be >= 0, got {} in '{}'.",
+            k, solver_force_decision_str ) );
+      }
+      if ( action_index < 0 || static_cast<std::size_t>( action_index ) >= RL_ACTION_DIM )
+      {
+        throw sc_runtime_error( fmt::format(
+            "solver_force_decision=: action index {} out of range [0, {}) in '{}'.",
+            action_index, RL_ACTION_DIM, solver_force_decision_str ) );
+      }
+      // Refusal 3 (new, not present on solver_hold_windows): a duplicate `k` across entries --
+      // forcing the SAME decision twice to two different actions is genuinely ambiguous (unlike
+      // hold windows' deliberate union semantics for a duplicate action index), so this refuses
+      // by name rather than picking a precedence rule silently.
+      for ( const auto& [ existing_k, existing_action ] : solver_force_decisions )
+      {
+        if ( existing_k == k )
+        {
+          throw sc_runtime_error( fmt::format(
+              "solver_force_decision=: duplicate k={} (already mapped to action {}, cannot also "
+              "map to action {}) in '{}'.",
+              k, existing_action, action_index, solver_force_decision_str ) );
+        }
+      }
+      solver_force_decisions.push_back( { k, action_index } );
+    }
+    if ( solver_force_decisions.empty() )
+    {
+      // An accepted-but-empty declared string ('' is already caught by the outer !empty() guard
+      // above) cannot reach here through the comma split -- std::getline on an all-whitespace/
+      // empty stream yields zero iterations. Refuse by name rather than silently behaving as
+      // "disabled": the caller wrote a non-empty solver_force_decision= that named nothing.
+      throw sc_runtime_error( fmt::format(
+          "solver_force_decision='{}' declared no valid k:actionIndex entries.",
+          solver_force_decision_str ) );
     }
   }
 
