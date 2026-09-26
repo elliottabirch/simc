@@ -25,6 +25,7 @@
 #include "sim/expressions.hpp"
 #include "sim/proc.hpp"
 #include "sim/rl_credit.hpp"
+#include "sim/rl_hit_ledger.hpp"
 #include "sim/rl_target_select.hpp"
 #include "sim/sim.hpp"
 #include "util/generic.hpp"
@@ -2405,7 +2406,16 @@ void action_t::accrue_expected_damage( action_state_t* state )
     return;
 
   if ( is_windfury_occurrence )
+  {
+    // 260925-e1e hit ledger: this hit's own expected pricing is booked
+    // separately, once per occurrence roll, by
+    // shaman_t::trigger_windfury_weapon -- see rl_hit_ledger::record's doc
+    // comment. Logged here with expected=0/excluded=true so a downstream
+    // reader can tell this real hit apart from one whose expected booking
+    // lives on this same call.
+    rl_hit_ledger::record( this, state, 0.0, /*excluded_from_expected=*/true );
     return;
+  }
 
   double crit_bonus = total_crit_bonus( state );
 
@@ -2415,6 +2425,11 @@ void action_t::accrue_expected_damage( action_state_t* state )
 
   double crit_chance = clamp( state->composite_crit_chance(), 0.0, 1.0 );
   double expected_amount = base_noncrit_amount * ( 1.0 + crit_chance * crit_bonus );
+
+  // 260925-e1e hit ledger: both amounts exist right here, computed from the
+  // same action_state_t record_data() (called immediately before this
+  // function, from the same assess_damage) just wrote the real side from.
+  rl_hit_ledger::record( this, state, expected_amount, /*excluded_from_expected=*/false );
 
   // tstl-sylvanas quick task 260918-cbc (Stage A1): route the SAME expected_amount this hook
   // already adds to solver_damage_expected_so_far into the matching credit stream, so

@@ -674,6 +674,23 @@ struct sim_t : private sc_thread_t
   // what makes the single-file `decision_dump=<path>` contract hold.
   std::unique_ptr<io::ofstream> decision_dump_stream;
   mutex_t decision_dump_mutex;
+  // 260925-e1e hit ledger: rl_hit_ledger=<file> writes one line per damage
+  // event, pairing the REAL amount (action_t::record_data) with the
+  // EXPECTED amount booked for it (action_t::accrue_expected_damage) --
+  // both already computed back-to-back from the same action_state_t in
+  // action_t::assess_damage (action.cpp), plus the Windfury occurrence
+  // pricing (shaman_t::trigger_windfury_weapon, sc_shaman.cpp). Empty
+  // string (default) = disabled, zero overhead: the read-and-branch on
+  // this string is the only cost paid on the off path, identical in shape
+  // to decision_dump_file_str/rl_forward_probe_str just above/below.
+  // Debug-only: reads existing state, opens/writes a plain text file,
+  // never rolls RNG and never mutates any player/action/sim state --
+  // see sim/rl_hit_ledger.hpp for the full no-behaviour-change argument.
+  // Stream + mutex live on the ROOT sim_t only, for the exact same
+  // multi-worker single-file reason decision_dump_stream/_mutex do above.
+  std::string rl_hit_ledger_str;
+  std::unique_ptr<io::ofstream> rl_hit_ledger_stream;
+  mutex_t rl_hit_ledger_mutex;
   // Flight recorder (tstl-sylvanas phase 212, plan 212-01, TLOG-01/02/03;
   // fix wave 212-CR-FIX). rl_translog=<path> writes a binary row for every
   // in-process-transport decision, a row for every fight's close-out and a

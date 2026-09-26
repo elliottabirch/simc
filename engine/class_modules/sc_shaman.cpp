@@ -34,6 +34,7 @@
 #include "sim/proc.hpp"
 #include "sim/proc_rng.hpp"
 #include "sim/rl_credit.hpp"
+#include "sim/rl_hit_ledger.hpp"
 #include "sim/rl_target_select.hpp"
 #include "util/string_view.hpp"
 
@@ -12616,6 +12617,11 @@ void shaman_t::trigger_windfury_weapon( const action_state_t* state, double over
     // impacting melee's own cause, `state` still being in scope here.
     rl_credit_route( this, rl_cause_t{ state->rl_cause_seq, state->rl_cause_class }, sim->solver_control_seq,
                       wf_expected_amount, /*expected=*/true );
+    // 260925-e1e hit ledger: the ONLY place windfury damage is priced into
+    // the expected total (see this function's own top-of-file comment) --
+    // logged here, before either roll below, so the print itself never
+    // depends on (or influences) rng() draw order.
+    rl_hit_ledger::record_windfury_occurrence( this, state, wf_expected_amount );
 
     const bool ok = rng().roll( wf_chance );
     rl_count_proc( this, rl_proc::id::windfury, wf_chance, ok );

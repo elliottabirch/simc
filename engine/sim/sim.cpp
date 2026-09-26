@@ -4292,6 +4292,9 @@ void sim_t::create_options()
   add_option( opt_string( "html", html_file_str ) );
   add_option( opt_string( "apl_json", apl_json_file_str ) );
   add_option( opt_string( "decision_dump", decision_dump_file_str ) );
+  // 260925-e1e hit ledger. Default empty = disabled, zero overhead. See
+  // sim.hpp's rl_hit_ledger_str doc comment and sim/rl_hit_ledger.hpp.
+  add_option( opt_string( "rl_hit_ledger", rl_hit_ledger_str ) );
   add_option( opt_string( "solver_control", solver_control_str ) );
   // Phase 200-04 (FORK-01/R-8, D-06/D-07) -- verify-vs-training abstain
   // mode. Validated below, inside the existing solver_control_str
