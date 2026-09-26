@@ -763,6 +763,18 @@ struct sim_t : private sc_thread_t
   std::string rl_rng_replay_file_str;
   // The address choice was removed in phase 254 (Gate 2 verdict): replay always reads the outer
   // press address from a ROLL entry's fields. There is no longer a switch here.
+  // Study-only option (tstl-sylvanas phase 257, plan 257-02, ISO-03/D-15). rl_rng_replay_fresh_
+  // class=<crit|proc|deck|swing|maelstrom|other>, off by default (empty string). Requires
+  // rl_rng_replay= to already be set -- refused by name otherwise, in setup()'s replay refusal
+  // block in sim.cpp. Leaves every recorded roll of the named report class (a C++ port of
+  // scripts/rl/probes/luck_packet_leak.py's classify_fields, decided from the RECORDED roll at
+  // load time, because a roll's label is attached only after its draw returns) fresh under
+  // replay -- treated exactly like a roll with no partner (D-17's fresh-number rule), while every
+  // other roll at that address still reuses fight A's number. NEVER reaches the official scoring
+  // path: scripts/simc-eval/lib/simc_channel.py's assert_sim_options_shape refuses it even with
+  // allow_luck_replay=True, unless the study-only allow_fresh_class_study=True is also passed.
+  // An empty value is the same as unset (mirrors rl_rng_replay_file_str's own rule).
+  std::string rl_rng_replay_fresh_class_str;
   // tstl-sylvanas phase 218, plan 218-02 (RIG-01). rl_fight_shape_index=<n>
   // names which declared fight shape (scripts/rl/specs/enhancement.json's
   // episode.fightMix, 1-based) this run was launched under. 0 is the

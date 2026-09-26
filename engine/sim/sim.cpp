@@ -4405,6 +4405,7 @@ void sim_t::create_options()
   // unset. The address choice was removed in phase 254 (Gate 2 verdict); replay always reads
   // the outer press address.
   add_option( opt_string( "rl_rng_replay", rl_rng_replay_file_str ) );
+  add_option( opt_string( "rl_rng_replay_fresh_class", rl_rng_replay_fresh_class_str ) );
   // Iteration-batched scorecard seeding (tstl-sylvanas quick task 260919-scb). See sim.hpp's
   // rl_iteration_seeds doc comment. Default empty, byte-identical to today's behavior.
   add_option( opt_func( "rl_iteration_seeds", parse_rl_iteration_seeds ) );
@@ -5329,6 +5330,34 @@ void sim_t::setup( sim_control_t* c )
           throw sc_runtime_error( "rl_rng_replay and rl_rng_record name the same file" );
         }
       }
+    }
+  }
+
+  // The fresh-class option (tstl-sylvanas phase 257, plan 257-02, ISO-03/D-15). Study-only:
+  // leaves one report class's recorded rolls fresh under an existing replay. An empty
+  // rl_rng_replay_fresh_class_str is the same as unset (mirrors rl_rng_replay's own rule).
+  if ( !rl_rng_replay_fresh_class_str.empty() )
+  {
+    if ( rl_rng_replay_file_str.empty() )
+    {
+      throw sc_invalid_sim_argument( fmt::format(
+          "rl_rng_replay_fresh_class requires rl_rng_replay=<path> -- it names which report "
+          "class to leave fresh under an EXISTING replay, not a replay source of its own. "
+          "Received rl_rng_replay_fresh_class={} with no rl_rng_replay= set.",
+          rl_rng_replay_fresh_class_str ) );
+    }
+
+    static constexpr std::array<std::string_view, 6> valid_fresh_classes{
+        "crit", "proc", "deck", "swing", "maelstrom", "other" };
+    const bool is_valid_fresh_class =
+        std::find( valid_fresh_classes.begin(), valid_fresh_classes.end(),
+                   rl_rng_replay_fresh_class_str ) != valid_fresh_classes.end();
+    if ( !is_valid_fresh_class )
+    {
+      throw sc_invalid_sim_argument( fmt::format(
+          "rl_rng_replay_fresh_class must be one of crit, proc, deck, swing, maelstrom, other "
+          "(received '{}').",
+          rl_rng_replay_fresh_class_str ) );
     }
   }
 

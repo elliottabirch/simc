@@ -44,8 +44,11 @@
 
 #include "rapidjson/document.h"
 
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -162,6 +165,58 @@ inline bool replay_key_is_excluded( const std::string& key )
   return key == explore_key || key.compare( 0, unregistered_prefix.size(), unregistered_prefix ) == 0;
 }
 
+// Study-only (tstl-sylvanas phase 257, plan 257-02, ISO-03/D-15): a C++ port of
+// scripts/rl/probes/luck_packet_leak.py's classify_fields, used ONLY when
+// rl_rng_replay_fresh_class_str is set, to decide a RECORDED roll's report class from its own
+// recorded fields plus the sidecar roller entry that recorded it. Same rules, same order, same
+// fallback as the Python -- cross-checked by fresh_class_check (M-89 (d)) against the same
+// recording bytes. Never called (and label_names/sidecar_id_class_string/sidecar_id_key_string
+// are never populated) when the option is unset.
+std::string_view report_class_of( std::uint8_t trigger_kind, std::uint8_t label, std::uint8_t outcome,
+                                   const std::string& roller_class, const std::string& roller_key,
+                                   const std::unordered_map<std::uint8_t, std::string>& label_names )
+{
+  if ( trigger_kind == TRIGGER_KIND_REFILL )
+    return "deck";
+
+  const std::string* name = nullptr;
+  if ( label != LABEL_NONE )
+  {
+    const auto it = label_names.find( label );
+    if ( it != label_names.end() )
+      name = &it->second;
+  }
+
+  if ( name != nullptr && *name == "swing_attack_table" )
+    return "swing";
+  if ( name != nullptr && *name == "maelstrom_weapon_gain" )
+    return "maelstrom";
+  if ( name == nullptr && roller_class == "proc_callback" && !roller_key.empty() )
+  {
+    std::string lower_key = roller_key;
+    std::transform( lower_key.begin(), lower_key.end(), lower_key.begin(),
+                     []( unsigned char c ) { return static_cast<char>( std::tolower( c ) ); } );
+    if ( lower_key.find( "maelstrom_weapon" ) != std::string::npos )
+      return "maelstrom";
+  }
+  if ( name != nullptr && *name == "crit_hit" )
+    return "crit";
+  if ( name != nullptr )
+    return "proc";
+
+  const bool is_chance_roll = ( outcome == OUTCOME_FAIL || outcome == OUTCOME_SUCCESS );
+  const bool sim_owns_roller = roller_class == "sim_shared" || roller_class == "sim_explore" ||
+                                roller_class == "raid_event" ||
+                                ( !roller_key.empty() && roller_key.compare( 0, 4, "sim|" ) == 0 );
+  if ( is_chance_roll && !sim_owns_roller )
+    return "proc";
+
+  if ( roller_class == "raid_event" )
+    return "raid_event";
+
+  return "other";
+}
+
 } // anonymous namespace
 
 // Per-roller bookkeeping, indexed by roller number (registry position == roller id, so lookup
@@ -206,6 +261,26 @@ struct replay_state_t
   static constexpr std::uint32_t KEY_INDEX_NOT_IN_RECORDING = 0xFFFFFFFFu;
 
   std::string path;
+  // Study-only (phase 257, D-15): true exactly when sim_t::rl_rng_replay_fresh_class_str is
+  // non-empty. Every fresh-class field below is left empty/default and never consulted when
+  // this is false, so a plain replay run pays nothing extra and is byte-identical to before
+  // this option existed.
+  bool fresh_class_active = false;
+  std::string fresh_class_name;   // the option's own value (one of the 6 accepted classes)
+  // Parsed from the sidecar (ONLY when fresh_class_active), one entry per sidecar id, parallel
+  // to sidecar_id_to_key_index below: the roller's own "class" string and raw "key" string --
+  // needed by report_class_of() (the classify_fields port), which the interned key INDEX alone
+  // cannot answer (it needs the literal key text for the "maelstrom_weapon" substring rule and
+  // the "sim|" prefix rule).
+  std::vector<std::string> sidecar_id_class_string;
+  std::vector<std::string> sidecar_id_key_string;
+  // The sidecar's own labelNames map (int label id -> name), needed to decide a recorded roll's
+  // class from its own `label` byte (classify_fields' `label_names.get(label)`). Only parsed
+  // when fresh_class_active.
+  std::unordered_map<std::uint8_t, std::string> label_names;
+  // Whole-run total of slots left fresh by the option (D-15) -- the fork's own count, compared
+  // by the Python join in fresh_class_check (M-89 (d)) against the same recording.
+  std::uint64_t fresh_class_left = 0;
   std::string address;   // "outer" (default/empty) or "inner" (D-03) -- picks which press frame
                           // (live and recorded alike) on_draw()/the loader read; kept ONLY for the
                           // printed stdout/sidecar value -- the hot-path comparison uses is_inner
@@ -247,6 +322,11 @@ struct replay_state_t
   struct entry_run_t
   {
     std::vector<double> raw;
+    // Study-only (phase 257, D-15): parallel to `raw`, filled ONLY when
+    // fresh_class_active is true -- element i is true when raw[i]'s own recorded roll
+    // (fight A's) belongs to the report class the option names. Empty (never allocated
+    // or indexed) when the option is unset, so on_draw()'s hot path pays nothing extra.
+    std::vector<std::uint8_t> left_fresh;
     std::size_t next_unused = 0;
   };
   using address_key_t = std::tuple<std::uint8_t, std::uint32_t, std::uint32_t, std::uint32_t>;
@@ -318,6 +398,8 @@ struct replay_state_t
     std::uint64_t after_stop = 0;
     std::uint64_t live_was_recorded = 0;
     std::uint64_t recorded_unused = 0;
+    // Study-only (phase 257, D-15): this fight's own count of slots left fresh by the option.
+    std::uint64_t fresh_class_left = 0;
     std::int64_t stop_time_ms = -1;   // -1 when no re-salt happened this fight
   };
   fight_counts_t current_fight;
@@ -582,6 +664,18 @@ double recorder_t::on_draw( std::uint32_t& roller_slot, const std::uint64_t& dra
         {
           ++replay_->fresh_used_up;
           ++fight_counts.fresh_used_up;
+        }
+        else if ( replay_->fresh_class_active && it->second.left_fresh[ it->second.next_unused ] )
+        {
+          // Study-only (phase 257, D-15): this slot's own recorded roll (fight A's) belongs to
+          // the class the option leaves fresh. Consume it exactly like a normal reuse (advance
+          // next_unused, so every LATER roll at this address still keeps its own partner) but do
+          // NOT set matched -- falls through to the unmatched path below, which applies D-17's
+          // fresh-number rule and its own per-class fresh count, precisely as if this slot had no
+          // partner at all.
+          ++it->second.next_unused;
+          ++replay_->fresh_class_left;
+          ++fight_counts.fresh_class_left;
         }
         else
         {
@@ -1049,6 +1143,12 @@ void recorder_t::replay_init()
   rp.path = root_->rl_rng_replay_file_str;
   rp.address = "outer";  // hard-wired (phase 254 Gate 2 verdict); the address choice was removed
   rp.is_inner = false;   // cached alongside rp.address above (254-06 Task 2, REP-06 speed round 2)
+  // Study-only (phase 257, D-15): sim.cpp's setup() has already refused any value outside the
+  // 6 accepted classes, and refused this being set without rl_rng_replay= -- by the time
+  // replay_init() runs (called from open(), after setup()'s refusal blocks), the value is
+  // already validated. An empty string is the same as unset.
+  rp.fresh_class_active = !root_->rl_rng_replay_fresh_class_str.empty();
+  rp.fresh_class_name = root_->rl_rng_replay_fresh_class_str;
 
   rp.in.open( rp.path, std::ios::in | std::ios::binary );
   if ( !rp.in.is_open() )
@@ -1138,6 +1238,30 @@ void recorder_t::replay_init()
         rp.path, sidecar_path ) );
   }
 
+  // Study-only (phase 257, D-15): the fresh-class option needs the sidecar's own labelNames map
+  // (int label id -> name) to decide a recorded roll's class from its `label` byte -- refused by
+  // name when the option is set and the sidecar carries none (an older sidecar, or a hand-built
+  // one for a test). Never required when the option is unset.
+  if ( rp.fresh_class_active )
+  {
+    if ( !doc.HasMember( "labelNames" ) || !doc[ "labelNames" ].IsObject() )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_rng_replay_fresh_class: cannot read '{}': sidecar '{}' has no 'labelNames' object "
+          "(required by rl_rng_replay_fresh_class=).",
+          rp.path, sidecar_path ) );
+    }
+    for ( auto it = doc[ "labelNames" ].MemberBegin(); it != doc[ "labelNames" ].MemberEnd(); ++it )
+    {
+      if ( !it->value.IsString() )
+        continue;
+      const int label_id = std::atoi( it->name.GetString() );
+      if ( label_id < 0 || label_id > 255 )
+        continue;
+      rp.label_names.emplace( static_cast<std::uint8_t>( label_id ), it->value.GetString() );
+    }
+  }
+
   const auto& rollers_json = doc[ "rollers" ];
   for ( const auto& entry : rollers_json.GetArray() )
   {
@@ -1150,6 +1274,21 @@ void recorder_t::replay_init()
     }
     const std::uint32_t id = entry[ "id" ].GetUint();
     const std::string key = entry[ "key" ].GetString();
+    // Study-only (phase 257, D-15): the fresh-class option needs each roller's own "class"
+    // string (report_class_of()'s roller_class parameter) -- refused by name when the option is
+    // set and a roller entry has none.
+    std::string roller_class_string;
+    if ( rp.fresh_class_active )
+    {
+      if ( !entry.HasMember( "class" ) || !entry[ "class" ].IsString() )
+      {
+        throw sc_runtime_error( fmt::format(
+            "rl_rng_replay_fresh_class: cannot read '{}': sidecar '{}' roller {} has no 'class' "
+            "string (required by rl_rng_replay_fresh_class=).",
+            rp.path, sidecar_path, id ) );
+      }
+      roller_class_string = entry[ "class" ].GetString();
+    }
 
     std::uint32_t key_index;
     const auto found = rp.key_string_to_index.find( key );
@@ -1169,12 +1308,22 @@ void recorder_t::replay_init()
     {
       rp.sidecar_id_to_key_index.resize( id + 1, replay_state_t::KEY_INDEX_NOT_IN_RECORDING );
       rp.sidecar_id_excluded.resize( id + 1, false );
+      if ( rp.fresh_class_active )
+      {
+        rp.sidecar_id_class_string.resize( id + 1 );
+        rp.sidecar_id_key_string.resize( id + 1 );
+      }
     }
     rp.sidecar_id_to_key_index[ id ] = key_index;
     // D-20: the exploration stream and any "unregistered|" stream are excluded from replay
     // altogether -- their numbers still enter the fresh-number rule's value set (D-17), just
     // never the address table (Task 2's on_draw/replay_fight_begin both consult this).
     rp.sidecar_id_excluded[ id ] = replay_key_is_excluded( key );
+    if ( rp.fresh_class_active )
+    {
+      rp.sidecar_id_class_string[ id ] = roller_class_string;
+      rp.sidecar_id_key_string[ id ] = key;
+    }
   }
 
   // The sequential per-fight reader starts right after the header (D-15).
@@ -1387,6 +1536,17 @@ void recorder_t::replay_fight_begin()
         const std::uint32_t roller_key = rp.sidecar_id_to_key_index[ rec.roller ];
         const replay_state_t::address_key_t key{ trigger_kind, trigger_key, press_number, roller_key };
         rp.table[ key ].raw.push_back( rec.raw );
+        // Study-only (phase 257, D-15): decide THIS recorded roll's report class from fight A's
+        // own recorded fields at load time (a roll's label is only attached after its draw
+        // returns, so this cannot be decided at draw time) and flag the slot when it matches the
+        // option's class. Parallel to raw's own push_back just above -- same index, same order.
+        if ( rp.fresh_class_active )
+        {
+          const std::string_view roll_class = report_class_of(
+              rec.trigger_kind, rec.label, rec.outcome, rp.sidecar_id_class_string[ rec.roller ],
+              rp.sidecar_id_key_string[ rec.roller ], rp.label_names );
+          rp.table[ key ].left_fresh.push_back( roll_class == rp.fresh_class_name ? 1u : 0u );
+        }
       }
     }
     // COUNTER, RESALT and after-resalt ROLL entries are skipped -- dropped at load (D-05/D-15).
@@ -1706,7 +1866,15 @@ void recorder_t::write_sidecar()
             << ", \"excluded\": " << rp.excluded << ", \"after_stop\": " << rp.after_stop
             << ", \"outside_fight\": " << rp.outside_fight
             << ", \"live_was_recorded\": " << rp.live_was_recorded
-            << ", \"recorded_unused\": " << rp.recorded_unused << "}, \"byClass\": {";
+            << ", \"recorded_unused\": " << rp.recorded_unused;
+    // Study-only (phase 257, D-15): present ONLY when the option is set, so a plain replay's
+    // sidecar stays byte-identical to before this option existed.
+    if ( rp.fresh_class_active )
+    {
+      sidecar << ", \"fresh_class\": \"" << json_escape( rp.fresh_class_name ) << "\""
+              << ", \"fresh_class_left\": " << rp.fresh_class_left;
+    }
+    sidecar << "}, \"byClass\": {";
     bool first_class = true;
     for ( std::size_t class_idx = 0; class_idx < ROLLER_CLASS_COUNT; ++class_idx )
     {
@@ -1737,7 +1905,12 @@ void recorder_t::write_sidecar()
               << ", \"excluded\": " << fc.excluded << ", \"after_stop\": " << fc.after_stop
               << ", \"live_was_recorded\": " << fc.live_was_recorded
               << ", \"recorded_unused\": " << fc.recorded_unused
-              << ", \"stop_time_ms\": " << fc.stop_time_ms << "}";
+              << ", \"stop_time_ms\": " << fc.stop_time_ms;
+      if ( rp.fresh_class_active )
+      {
+        sidecar << ", \"fresh_class_left\": " << fc.fresh_class_left;
+      }
+      sidecar << "}";
     }
     sidecar << "]}";
   }
@@ -1792,6 +1965,14 @@ void recorder_t::write_footer()
         replay_->fresh_roller_not_in_recording, replay_->excluded, replay_->after_stop,
         replay_->outside_fight, replay_->live_was_recorded, replay_->recorded_unused,
         replay_->address, replay_->path );
+
+    // Study-only (phase 257, D-15): ONE new stdout line, printed ONLY when the option is set --
+    // unset, nothing here changes (byte-identical stdout to before this option existed).
+    if ( replay_->fresh_class_active )
+    {
+      fmt::print( "rl_rng_replay fresh_class={} left_fresh={}\n", replay_->fresh_class_name,
+                  replay_->fresh_class_left );
+    }
 
     std::set<roller_class_e> classes_present;
     for ( const roller_entry_t& r : rollers_ )
