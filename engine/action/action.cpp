@@ -256,6 +256,14 @@ struct action_execute_event_t : public player_event_t
 
     action->execute_event = nullptr;
 
+    // Study-only swing trace/pin (tstl-sylvanas phase 257, plan 257-09, D-18, M-111 (c)). A
+    // no-op for anything that is not currently a designated hand. The event has come due;
+    // whether it becomes a `land` row (action_t::execute() below calls swing_attack_executed)
+    // or a `drop` row (the dead-target/channel-pause branches below leave the hand idle or
+    // re-book it without ever reaching action_t::execute()) is not yet known here -- this only
+    // marks the hand pending (section 1 (iv)).
+    rl_rng_record::swing_event_fired( action->sim, action );
+
     // 228-02 (D-14, TGT-03): if the pick read_action_gate_bits/accept_cast resolved this action's
     // target to (rl_target_select) died or went immune between the decision and THIS execute
     // event firing, re-resolve HERE rather than silently dropping the cast (the prior behaviour:
@@ -2234,12 +2242,12 @@ void action_t::execute()
       break;
   }
 
-  // Study-only swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111 (d), (e)). A no-op
-  // for anything that is not currently a pinned hand. MUST run before the repeating self-rebook
-  // immediately below: it clears this hand's just-consumed pinned time (or tallies a
-  // beyond-the-list swing) and advances its own list position -- otherwise that immediate
-  // re-book would see a still-current pinned time and book with zero delay forever.
-  rl_rng_record::swing_pin_note_swing_executed( sim, this );
+  // Study-only swing trace/pin (tstl-sylvanas phase 257, plan 257-09, D-18, M-111 (c)). A no-op
+  // for anything that is not currently a designated hand. MUST run before the repeating
+  // self-rebook immediately below: it resolves this hand's pending firing (swing_event_fired,
+  // action_execute_event_t::execute() above) as a `land` row -- otherwise that immediate
+  // re-book's own book/rebook/restart-kind resolution would see the firing still unresolved.
+  rl_rng_record::swing_attack_executed( sim, this );
 
   if ( repeating && !proc )
     schedule_execute();
@@ -2656,19 +2664,11 @@ void action_t::schedule_execute( action_state_t* state )
 
   time_to_execute = execute_time();
 
-  // Study-only swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111 (d)). A no-op for
-  // anything that is not currently the one designated player's main_hand_attack/off_hand_attack
-  // (the pin is inactive most of the time, and every non-auto-attack action always returns
-  // std::nullopt here). When active, overrides this booking's own time -- either the hand's
-  // EXISTING pinned time (a MOVE: the caller cancelled and is re-booking, per
-  // attack_t::reschedule_auto_attack/player_t::reset_auto_attacks/the Maelstrom Weapon hard-cast
-  // reset/Ascendance's hand-over -- all reach this same line through their own
-  // cancel-then-schedule_execute() sequences) or a brand-new booking's freshly chosen listed
-  // time. Every event operation below still runs exactly as before -- only this ONE value
-  // changes.
-  if ( auto pinned = rl_rng_record::swing_pin_resolve_booking( sim, this ) )
-    time_to_execute = *pinned;
-
+  // Study-only swing trace/pin (tstl-sylvanas phase 257, plan 257-09, D-18): the booking
+  // override (and the trace's own book/rebook/restart row) now lives in
+  // start_action_execute_event() itself -- the ONE constructor of an action's execute event
+  // (action_t::reschedule_execute()'s own cancel-and-recreate branch reaches it too, and must
+  // be covered the same way).
   execute_event = start_action_execute_event( time_to_execute, state );
 
   if ( trigger_gcd > timespan_t::zero() )
@@ -4912,6 +4912,14 @@ double action_t::dot_duration_pct_multiplier( const action_state_t* ) const
 
 event_t* action_t::start_action_execute_event( timespan_t t, action_state_t* state )
 {
+  // Study-only swing trace/pin (tstl-sylvanas phase 257, plan 257-09, D-18, owner ruling A-125):
+  // the ONE constructor of an action's execute event -- booking, cancel-and-rebook, the
+  // faster-swing rebook (attack_t::reschedule_auto_attack), reschedule_execute()'s earlier
+  // branch, and solver_control's own start/re-arm all pass through here, so this is the ONE
+  // place both the trace's own book/rebook/restart row AND the pin's D-18 (b)/(c) override
+  // belong. A cheap passthrough (returns `t` unchanged) for anything that is not currently the
+  // one designated player's own main_hand_attack/off_hand_attack.
+  t = rl_rng_record::swing_event_created( sim, this, t );
   return make_event<action_execute_event_t>( *sim, this, t, state );
 }
 

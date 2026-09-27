@@ -37,6 +37,8 @@
 #include "action/attack.hpp"
 #include "player/player.hpp"
 #include "player/stats.hpp"
+#include "sim/event.hpp"
+#include "sim/event_manager.hpp"
 #include "sim/proc_rng.hpp"
 #include "sim/raid_event.hpp"
 #include "sim/rl_proc_counters.hpp"
@@ -57,8 +59,10 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <memory>
+#include <regex>
 #include <set>
 #include <tuple>
 #include <unordered_map>
@@ -431,42 +435,186 @@ struct replay_state_t
   std::uint64_t recorded_unused = 0;
 };
 
-// Study-only swing-pin state (tstl-sylvanas phase 257, plan 257-07, D-17, M-111). Non-null only
-// when sim_t::rl_swing_pin_file_str is non-empty (which itself requires replay_ to already be
-// set -- sim.cpp's setup() refuses otherwise, so this struct never exists without replay_).
-// root_->rl_swing_pin_mh/_oh were already parsed and validated by sim.cpp; this struct copies
-// them once (fight_begin()) and tracks THIS fight's own per-hand list position, pinned time and
-// counters -- reset at every fight_begin(), matching every other per-fight state in this file.
-struct swing_pin_state_t
+// Study-only swing-trace/swing-pin state (tstl-sylvanas phase 257, plan 257-09, D-18, owner
+// ruling A-125 -- supersedes plan 257-07's own v1 pin-list design; see rl_rng_record.hpp's own
+// doc comment for A-124's finding and why). Non-empty only when sim_t::rl_swing_trace_file_str
+// or sim_t::rl_swing_pin_file_str is non-empty (either requires replay_ to already be set --
+// sim.cpp's setup() refuses otherwise). Reset at every fight_begin(), matching every other
+// per-fight state in this file -- this whole probe harness runs one fight per process, but
+// nothing here assumes that.
+struct swing_trace_state_t
 {
-  // One hand's own state (M-111 (d)). `idx` is the index of the first listed time this hand has
-  // not yet either consumed (its swing executed) or permanently skipped (fell before "now" at a
-  // booking call, M-112's own "unused_listed" -- read back from B's actual swing times, never
-  // counted here). A NEW booking peeks at listed[idx] without consuming it; only
-  // swing_pin_note_swing_executed() (called when the swing actually fires) advances idx --
-  // between those two events, the SAME candidate must never be re-offered, which is exactly what
-  // keeping idx unmoved at booking time, and moving it only at execution time, guarantees.
+  // One hand's own state, mirroring scripts/rl/probes/timing_hold.py's `pin_model` per-hand
+  // state dict field-for-field ("How D-18 is built" section 3) PLUS the booking-rule/`stale`
+  // bookkeeping M-110's `trace_problems` needs (kept together since every funnel below touches
+  // both at once).
   struct hand_t
   {
-    std::vector<std::int64_t> listed;           // fight A's own listed times for this hand, ms
-    std::size_t idx = 0;                        // first not-yet-consumed/skipped index
-    std::optional<std::int64_t> pinned_time_ms; // this hand's CURRENT booked pinned time, if any
-    std::uint64_t pinned_n = 0;                 // M-111 (e): swings executed from a pinned booking
-    std::uint64_t beyond_n = 0;                 // M-111 (e): swings executed from a beyond booking
-    // A-123 (ledger, M-111 (d)/(e) amended): executes with action->repeating == false are
-    // Skyfury's own (spell 462854) in-place repeat (generic::skyfury: repeating=false;
-    // execute(); repeating=true, engine/player/unique_gear.cpp) -- a proc-driven extra attack,
-    // never a swing-clock booking. Counted here, never pinned, never consuming idx or
-    // pinned_time_ms.
-    std::uint64_t repeats = 0;
+    bool waiting = false;         // this hand currently has an event booked (M-110's own state)
+    std::int64_t due_ms = 0;      // meaningful only when waiting
+    bool started = false;         // this hand has had its first-ever operation THIS fight (R7)
+    char last_end_kind = -1;      // the kind of the last land/drop/cancel row (-1: none yet)
+    std::int64_t last_end_ms = 0; // that row's own op_ms
+    bool pending_fired = false;   // the event fired; not yet resolved as `land` or `drop`
+    std::int64_t pending_fired_ms = 0;
+    std::uint64_t repeats = 0;    // A-123: Skyfury's own in-place repeat, never a row
+
+    // Pin-model bookkeeping (D-18 (b)/(c)) -- meaningless (never read) unless pin_active.
+    bool last_own_op_ms_set = false;
+    std::int64_t last_own_op_ms = 0;
+    std::size_t j = 0;
+    bool in_step = true;
   };
 
-  player_t* pinned_player = nullptr; // the one non-pet, non-enemy player; set at fight_begin()
-  hand_t mh;
-  hand_t oh;
-  std::uint64_t pushes_ignored = 0;  // whole-run (M-111 (e))
-  std::uint64_t mid_cast = 0;        // whole-run (M-111 (e))
+  // One row of a trace file -- THIS fight's own (rows below) or fight A's parsed input
+  // (a_mh_rows/a_oh_rows below). `hand` is redundant once split by hand but costs nothing.
+  struct row_t
+  {
+    char hand;
+    std::int64_t op_ms;
+    char kind;
+    std::int64_t due_ms;
+  };
+
+  player_t* designated_player = nullptr; // the one non-pet, non-enemy player; set at fight_begin()
+  bool pin_active = false;               // rl_swing_pin set (implies replay_ and fight_begin() OK)
+  bool trace_active = false;             // rl_swing_trace set
+  hand_t mh, oh;
+  std::vector<row_t> rows; // THIS fight's own trace, in real operation order (both hands)
+
+  // Fight A's parsed input (pin_active only), per hand, plus the sorted-unique breakpoint
+  // milliseconds across BOTH hands -- the rolling check event (section 3) only ever needs to
+  // wake at one of these, never polls.
+  std::vector<row_t> a_mh_rows, a_oh_rows;
+  std::vector<std::int64_t> breakpoints;
+  std::size_t bp_cursor = 0;
+  bool check_armed_ever = false;
+
+  // M-111 (e)'s whole-run pin counters (own_overrides is derived, not stored, at print time).
+  std::uint64_t own_exact = 0, own_as_of = 0, past_value = 0, beyond = 0, own_changed = 0;
+  std::uint64_t injected = 0, injected_short = 0, inject_skipped = 0;
+  std::uint64_t mid_cast = 0;
+  std::uint64_t stale = 0;
+
+  hand_t& hand_state( char hand ) { return hand == SWING_HAND_MH ? mh : oh; }
+  const std::vector<row_t>& a_hand_rows( char hand ) const { return hand == SWING_HAND_MH ? a_mh_rows : a_oh_rows; }
 };
+
+const char* swing_row_kind_name( char kind )
+{
+  switch ( kind )
+  {
+    case SWING_ROW_BOOK: return "book";
+    case SWING_ROW_REBOOK: return "rebook";
+    case SWING_ROW_RESTART: return "restart";
+    case SWING_ROW_RESCHED: return "resched";
+    case SWING_ROW_LAND: return "land";
+    case SWING_ROW_DROP: return "drop";
+    case SWING_ROW_CANCEL: return "cancel";
+    default: return "inject";
+  }
+}
+
+bool swing_row_is_end_kind( char kind )
+{
+  return kind == SWING_ROW_LAND || kind == SWING_ROW_DROP || kind == SWING_ROW_CANCEL;
+}
+
+bool swing_row_is_firing_kind( char kind )
+{
+  return kind == SWING_ROW_LAND || kind == SWING_ROW_DROP;
+}
+
+// M-110 (D-18 (a), "How D-18 is built" section 2). The SAME text format
+// rl_rng_record::recorder_t::swing_trace_write_file() (below) produces -- an INDEPENDENT C++
+// reader, never a call into Python. Applies read_trace's own syntax rules with
+// allow_inject=false always (a pin/fight-A input trace never carries an inject row -- one is
+// refused by name, which is also how a v1 three-line pin list fails, at its header). Throws
+// std::runtime_error with a short reason fragment on any malformed line; the caller (sim_t::
+// setup()) wraps it in the fork's own named refusal message.
+std::string parse_swing_trace_file( const std::vector<std::string>& lines,
+                                     std::vector<char>& hand, std::vector<std::int64_t>& op_ms,
+                                     std::vector<char>& kind, std::vector<std::int64_t>& due_ms )
+{
+  if ( lines.empty() )
+    throw std::runtime_error( "the trace file is empty" );
+
+  static const std::regex header_re( R"(^# rl_swing_trace format=1 actor=(\S+)$)" );
+  static const std::regex row_re(
+      R"(^(mh|oh) (\d+) (book|rebook|restart|resched|inject|land|drop|cancel) (-?\d+)$)" );
+  static const std::regex repeats_re( R"(^repeats (mh|oh) (\d+)$)" );
+  static const std::regex end_re( R"(^end (\d+)$)" );
+
+  std::smatch m;
+  if ( !std::regex_match( lines[ 0 ], m, header_re ) )
+    throw std::runtime_error( "line 1 does not match the expected header format '# rl_swing_trace format=1 actor=<actor>'" );
+  const std::string actor = m[ 1 ].str();
+
+  auto kind_of = []( const std::string& s ) -> char {
+    if ( s == "book" ) return SWING_ROW_BOOK;
+    if ( s == "rebook" ) return SWING_ROW_REBOOK;
+    if ( s == "restart" ) return SWING_ROW_RESTART;
+    if ( s == "resched" ) return SWING_ROW_RESCHED;
+    if ( s == "inject" ) return SWING_ROW_INJECT;
+    if ( s == "land" ) return SWING_ROW_LAND;
+    if ( s == "drop" ) return SWING_ROW_DROP;
+    return SWING_ROW_CANCEL; // "cancel" -- the regex guarantees one of the eight names above
+  };
+
+  std::size_t i = 1;
+  bool have_last = false;
+  std::int64_t last_op_ms = 0;
+  while ( i < lines.size() && std::regex_match( lines[ i ], m, row_re ) )
+  {
+    const std::string hand_s = m[ 1 ].str();
+    const std::int64_t this_op_ms = std::stoll( m[ 2 ].str() );
+    const char this_kind = kind_of( m[ 3 ].str() );
+    const std::int64_t this_due_ms = std::stoll( m[ 4 ].str() );
+
+    if ( this_kind == SWING_ROW_INJECT )
+      throw std::runtime_error( fmt::format( "row {} is an 'inject' row, refused for this input", i ) );
+    if ( have_last && this_op_ms < last_op_ms )
+      throw std::runtime_error( fmt::format(
+          "row {} op_ms {} is smaller than the previous row's {}", i, this_op_ms, last_op_ms ) );
+    if ( swing_row_is_end_kind( this_kind ) && this_due_ms != this_op_ms )
+      throw std::runtime_error(
+          fmt::format( "row {} kind {} has due_ms {} != op_ms {}", i, m[ 3 ].str(), this_due_ms, this_op_ms ) );
+
+    hand.push_back( hand_s == "mh" ? SWING_HAND_MH : SWING_HAND_OH );
+    op_ms.push_back( this_op_ms );
+    kind.push_back( this_kind );
+    due_ms.push_back( this_due_ms );
+
+    last_op_ms = this_op_ms;
+    have_last = true;
+    ++i;
+  }
+
+  const std::size_t row_count = hand.size();
+  for ( const char* which : { "mh", "oh" } )
+  {
+    if ( i >= lines.size() )
+      throw std::runtime_error( fmt::format( "missing a 'repeats {}' line", which ) );
+    if ( !std::regex_match( lines[ i ], m, repeats_re ) || m[ 1 ].str() != which )
+      throw std::runtime_error(
+          fmt::format( "line {} is not the expected 'repeats {} <n>' line", i + 1, which ) );
+    ++i;
+  }
+
+  if ( i >= lines.size() )
+    throw std::runtime_error( "missing the 'end <row count>' line" );
+  if ( !std::regex_match( lines[ i ], m, end_re ) )
+    throw std::runtime_error( fmt::format( "line {} is not the expected 'end <row count>' line", i + 1 ) );
+  const std::size_t end_count = static_cast<std::size_t>( std::stoll( m[ 1 ].str() ) );
+  if ( end_count != row_count )
+    throw std::runtime_error(
+        fmt::format( "'end {}' does not match the parsed row count {}", end_count, row_count ) );
+  ++i;
+  if ( i != lines.size() )
+    throw std::runtime_error( fmt::format( "{} line(s) after 'end'", lines.size() - i ) );
+
+  return actor;
+}
 
 // The recorder object -- owned by sim_t::rl_rng_recorder (root only, unique_ptr, forward
 // declared in sim.hpp). Implements rng::rl_draw_sink_t so basic_rng_t<Engine>::real()/roll()
@@ -507,12 +655,17 @@ public:
                                   const action_t* action );
   void register_raid_event( raid_event_t& event );
 
-  // ---- Swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111) -- called only from the
-  // free functions of the same name at the bottom of this file. ----
-  std::optional<timespan_t> swing_pin_resolve_booking( action_t* action );
-  bool swing_pin_is_pinned( const action_t* action ) const;
-  void swing_pin_note_push_ignored() { ++swing_pin_.pushes_ignored; }
-  void swing_pin_note_swing_executed( action_t* action );
+  // ---- Swing trace / swing pin (tstl-sylvanas phase 257, plan 257-09, D-18) -- called only from
+  // the free functions of the same name at the bottom of this file. See each declaration's own
+  // doc comment in rl_rng_record.hpp. ----
+  timespan_t swing_event_created( action_t* action, timespan_t t );
+  timespan_t swing_event_rescheduled( event_t* e, timespan_t delta_time );
+  void swing_event_canceled( event_t* e );
+  void swing_event_fired( action_t* action );
+  void swing_attack_executed( action_t* action );
+  // Called only from swing_check_event_t::execute() (file-local, below) -- the rolling check
+  // event's own reserved-id firing.
+  void swing_trace_run_checks();
 
   // ---- Press-tag interface (plan 250-03, REC-04) -- called only from rl_press_scope_t's
   // out-of-line ctors/dtor and the free functions at the bottom of this file. ----
@@ -562,12 +715,45 @@ private:
   // that is NOT one of this fight's recorded numbers.
   double replay_take_fresh_number( std::uint32_t live_roller_id );
 
-  // Swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111 (c)/(d)). Returns &swing_pin_.mh
-  // or &swing_pin_.oh when `action` is currently the pinned player's main_hand_attack or
-  // off_hand_attack (checked at the MOMENT of the call, per M-111 (c) -- covers Windlash after
-  // Ascendance's hand-over with no extra logic), nullptr otherwise (including when the swing pin
-  // is not active at all this fight). Every swing-pin entry point above funnels through this.
-  swing_pin_state_t::hand_t* swing_pin_hand_for( const action_t* action );
+  // Swing trace / swing pin identity (D-18, M-111 (c)). Returns true and sets `hand` when
+  // `action` (creation/fire funnels) or `e` (reschedule/cancel funnels, compared as a raw event
+  // pointer VALUE against the designated player's own execute_event fields -- event.cpp has no
+  // action_t* to compare) is currently the ONE designated player's main_hand_attack/
+  // off_hand_attack, checked at the MOMENT of the call -- covers Windlash after Ascendance's
+  // hand-over with no extra logic. False (hand left unset) when the trace/pin is not active at
+  // all this fight, or `action`/`e` names neither hand. Every funnel above funnels through one
+  // of these two.
+  bool swing_trace_hand_of_action( const action_t* action, char& hand ) const;
+  bool swing_trace_hand_of_event( const event_t* e, char& hand ) const;
+
+  // The shared row-emission core (D-18 (b)/(c), mirrors timing_hold.py's own `emit_own`
+  // function field-for-field): resolves this operation's due value (the engine's own natural
+  // due when the pin is inactive; D-18 (b)'s value -- exact match, own_as_of, past_value, or
+  // beyond -- when it is), updates `hand`'s waiting/due/last_end/j/in_step state, appends the
+  // row, and arms the rolling check event on this fight's first-ever call. Returns the due
+  // value (ignored by end-kind callers, which pass has_natural_due=false).
+  std::int64_t swing_trace_emit( char hand, std::int64_t op_ms, char kind, bool has_natural_due,
+                                  std::int64_t natural_due );
+  // D-18 (b)'s literal fallback (own_as_of / past_value / beyond) -- mirrors timing_hold.py's
+  // `_literal_value`. Sets *which to one of "own_as_of"/"past_value"/"beyond".
+  std::int64_t swing_trace_literal_value( char hand, std::int64_t t, std::int64_t engine_now,
+                                           const char** which );
+  void swing_trace_bump_counter( const char* which );
+  // book/rebook/restart kind resolution (section 2's booking rules) -- flushes a pending,
+  // unresolved firing as `drop` first (section 1 (iv)/(v)'s own resolution point) when one is
+  // outstanding.
+  char swing_trace_resolve_creation_kind( char hand, std::int64_t now_ms );
+  void swing_trace_append_row( char hand, std::int64_t op_ms, char kind, std::int64_t due_ms );
+  // Section 3's rolling check event: arms (or re-arms) it for the first breakpoint at or after
+  // now (`initial=true`, called once per fight from swing_trace_emit) or for
+  // breakpoints[bp_cursor] exactly (`initial=false`, called from swing_trace_run_checks() after
+  // advancing the cursor). A guard throws when an ordinary event id nears the reserved one this
+  // event is given (section 3's own 2^31 guard).
+  void swing_trace_arm_check( bool initial );
+  void swing_trace_run_check_for_hand( char hand, std::int64_t t );
+  // Writes THIS fight's own trace file (rl_swing_trace_file_str) at fight_end() -- a no-op when
+  // trace_active is false.
+  void swing_trace_write_file();
 
   sim_t* root_;
   // True only when rl_rng_record= is set (253-02): gates every write-side concern (the stream,
@@ -576,11 +762,12 @@ private:
   bool writing_ = false;
   // Non-null only when rl_rng_replay= is set (253-02) -- see replay_state_t's own doc comment.
   std::unique_ptr<replay_state_t> replay_;
-  // Active only when rl_swing_pin_file_str is set (which itself requires replay_ above) -- see
-  // swing_pin_state_t's own doc comment. Kept as a plain value (never null) so a swing-pin-off
-  // run pays one bool-equivalent check (pinned_player == nullptr) instead of a pointer
-  // dereference guard at every one of the swing-pin entry points' own no-op fast paths.
-  swing_pin_state_t swing_pin_;
+  // Active only when rl_swing_trace_file_str or rl_swing_pin_file_str is set (either requires
+  // replay_ above) -- see swing_trace_state_t's own doc comment. Kept as a plain value (never
+  // null) so a swing-trace/pin-off run pays one pointer-equivalent check (designated_player ==
+  // nullptr) instead of a pointer dereference guard at every one of the funnels' own no-op fast
+  // paths.
+  swing_trace_state_t swing_trace_;
   std::unique_ptr<io::ofstream> stream_;
   std::vector<unsigned char> buffer_;
   std::uint64_t row_count_ = 0;          // total records appended (buffered or already flushed)
@@ -1729,26 +1916,23 @@ void recorder_t::fight_begin()
   if ( replay_ )
     replay_fight_begin();
 
-  // Swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111 (c)/(d)). Reset EVERY fight
-  // (defensive, mirrors every other per-fight reset above -- this whole probe harness runs one
-  // fight per process, but nothing here assumes that). root_->rl_swing_pin_mh/_oh were already
-  // parsed and validated by sim.cpp's setup(); copying them here (rather than reading the root
-  // members directly at booking time) is what lets each fight track its OWN list position from
-  // a clean slate.
-  if ( !root_->rl_swing_pin_file_str.empty() )
+  // Swing trace / swing pin (tstl-sylvanas phase 257, plan 257-09, D-18, M-111 (b)/(c)). Reset
+  // EVERY fight (defensive, mirrors every other per-fight reset above -- this whole probe
+  // harness runs one fight per process, but nothing here assumes that). root_->rl_swing_pin_*
+  // were already parsed and validated by sim.cpp's setup(); copying them here (rather than
+  // reading the root members directly at operation time) is what lets each fight track its OWN
+  // per-hand state from a clean slate.
+  if ( !root_->rl_swing_pin_file_str.empty() || !root_->rl_swing_trace_file_str.empty() )
   {
-    swing_pin_.mh.listed = root_->rl_swing_pin_mh;
-    swing_pin_.mh.idx = 0;
-    swing_pin_.mh.pinned_time_ms.reset();
-    swing_pin_.oh.listed = root_->rl_swing_pin_oh;
-    swing_pin_.oh.idx = 0;
-    swing_pin_.oh.pinned_time_ms.reset();
+    swing_trace_ = swing_trace_state_t{};
+    swing_trace_.pin_active = !root_->rl_swing_pin_file_str.empty();
+    swing_trace_.trace_active = !root_->rl_swing_trace_file_str.empty();
 
-    // M-111 (c): exactly one player that is neither a pet nor an enemy -- pets and enemies book
-    // their own melee through the SAME action_t::schedule_execute()/attack_t::
-    // reschedule_auto_attack() functions this plan hooks, so this identity check is the ONLY
-    // place their exclusion is enforced; every other swing-pin entry point trusts
-    // swing_pin_hand_for()'s own `action->player == pinned_player` comparison.
+    // M-111 (b)/(c): exactly one player that is neither a pet nor an enemy -- pets and enemies
+    // book their own melee through the SAME action_t::start_action_execute_event()/event_t::
+    // reschedule()/cancel() functions this plan hooks, so this identity check is the ONLY place
+    // their exclusion is enforced; every other funnel trusts swing_trace_hand_of_action/event()'s
+    // own `action->player == designated_player` comparison.
     player_t* found = nullptr;
     int qualifying = 0;
     for ( player_t* p : root_->player_no_pet_list )
@@ -1761,14 +1945,39 @@ void recorder_t::fight_begin()
     if ( qualifying != 1 )
     {
       throw sc_runtime_error( fmt::format(
-          "rl_swing_pin needs exactly one player that is neither a pet nor an enemy (found {}).",
-          qualifying ) );
+          "{} needs exactly one player that is neither a pet nor an enemy (found {}).",
+          swing_trace_.pin_active ? "rl_swing_pin" : "rl_swing_trace", qualifying ) );
     }
-    swing_pin_.pinned_player = found;
+    swing_trace_.designated_player = found;
+
+    if ( swing_trace_.pin_active )
+    {
+      if ( root_->rl_swing_pin_actor != found->name_str )
+      {
+        throw sc_runtime_error( fmt::format(
+            "rl_swing_pin trace actor '{}' does not match the one designated player '{}'.",
+            root_->rl_swing_pin_actor, found->name_str ) );
+      }
+
+      for ( std::size_t i = 0; i < root_->rl_swing_pin_hand.size(); ++i )
+      {
+        swing_trace_state_t::row_t row{ root_->rl_swing_pin_hand[ i ], root_->rl_swing_pin_op_ms[ i ],
+                                         root_->rl_swing_pin_kind[ i ], root_->rl_swing_pin_due_ms[ i ] };
+        if ( row.hand == SWING_HAND_MH )
+          swing_trace_.a_mh_rows.push_back( row );
+        else
+          swing_trace_.a_oh_rows.push_back( row );
+      }
+
+      std::vector<std::int64_t> bp( root_->rl_swing_pin_op_ms.begin(), root_->rl_swing_pin_op_ms.end() );
+      std::sort( bp.begin(), bp.end() );
+      bp.erase( std::unique( bp.begin(), bp.end() ), bp.end() );
+      swing_trace_.breakpoints = std::move( bp );
+    }
   }
   else
   {
-    swing_pin_.pinned_player = nullptr;
+    swing_trace_ = swing_trace_state_t{};
   }
 }
 
@@ -1859,102 +2068,472 @@ void recorder_t::fight_end()
   // the table before the next fight_begin() rebuilds it.
   if ( replay_ )
     replay_fight_end();
+
+  // Swing trace (D-18, "How D-18 is built" section 2): the trace file is written ONCE, at fight
+  // end, from memory -- a crash leaves no half file. Runs in BOTH modes (mirrors replay_ above),
+  // AFTER replay_fight_end() so a trace-only run's own fight-end bookkeeping is unaffected by
+  // write order.
+  swing_trace_write_file();
 }
 
-// Swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111 (c)/(d)). See its own doc comment
-// in the class body above.
-swing_pin_state_t::hand_t* recorder_t::swing_pin_hand_for( const action_t* action )
+// Swing trace / swing pin identity (D-18, M-111 (c)). See each declaration's own doc comment in
+// the class body above.
+bool recorder_t::swing_trace_hand_of_action( const action_t* action, char& hand ) const
 {
-  if ( !swing_pin_.pinned_player || !action || action->player != swing_pin_.pinned_player )
-    return nullptr;
+  if ( !swing_trace_.designated_player || !action || action->player != swing_trace_.designated_player )
+    return false;
 
   // Checked "at the moment of the call" (M-111 (c)) -- whichever action player->main_hand_attack
   // / off_hand_attack currently name, never a fixed action_t* remembered from an earlier call.
   // This is exactly what covers Windlash after Ascendance's hand-over with no separate logic:
   // the hand-over reassigns the pointer BEFORE calling schedule_execute() on the new attack.
-  if ( action == static_cast<const action_t*>( swing_pin_.pinned_player->main_hand_attack ) )
-    return &swing_pin_.mh;
-  if ( action == static_cast<const action_t*>( swing_pin_.pinned_player->off_hand_attack ) )
-    return &swing_pin_.oh;
-  return nullptr;
+  if ( action == static_cast<const action_t*>( swing_trace_.designated_player->main_hand_attack ) )
+  {
+    hand = SWING_HAND_MH;
+    return true;
+  }
+  if ( action == static_cast<const action_t*>( swing_trace_.designated_player->off_hand_attack ) )
+  {
+    hand = SWING_HAND_OH;
+    return true;
+  }
+  return false;
 }
 
-std::optional<timespan_t> recorder_t::swing_pin_resolve_booking( action_t* action )
+bool recorder_t::swing_trace_hand_of_event( const event_t* e, char& hand ) const
 {
-  swing_pin_state_t::hand_t* hand = swing_pin_hand_for( action );
-  if ( !hand )
-    return std::nullopt;
+  if ( !swing_trace_.designated_player || !e )
+    return false;
 
-  const std::int64_t now_ms = static_cast<std::int64_t>( root_->current_time().total_millis() );
-
-  // A MOVE (M-111 (d)): the hand already has a pinned time at or after now -- every cancel-then-
-  // rebook sequence that reaches this same call site (reschedule_auto_attack's haste rescale,
-  // delay_auto_attacks/reset_auto_attacks, the Maelstrom Weapon hard-cast reset, Ascendance's
-  // hand-over) keeps that SAME pinned time, never advancing the hand's own list position.
-  if ( hand->pinned_time_ms && *hand->pinned_time_ms >= now_ms )
-    return timespan_t::from_millis( *hand->pinned_time_ms - now_ms );
-
-  // A NEW booking: peek at (never consume) the first not-yet-consumed/skipped listed time.
-  // Anything strictly before now can never be booked -- permanently skip past it (M-112's own
-  // "unused_listed", read back from B's actual swing times, not counted here).
-  while ( hand->idx < hand->listed.size() && hand->listed[ hand->idx ] < now_ms )
-    ++hand->idx;
-
-  if ( hand->idx < hand->listed.size() )
+  const attack_t* mh_attack = swing_trace_.designated_player->main_hand_attack;
+  const attack_t* oh_attack = swing_trace_.designated_player->off_hand_attack;
+  // event.cpp has no action_t* at this call site -- identified by comparing the event POINTER
+  // VALUE itself against the designated player's own execute_event fields, at the moment of the
+  // call (same "no fixed pointer remembered" rule as the action-identity check above).
+  if ( mh_attack && e == static_cast<const action_t*>( mh_attack )->execute_event )
   {
-    hand->pinned_time_ms = hand->listed[ hand->idx ];
-    return timespan_t::from_millis( *hand->pinned_time_ms - now_ms );
+    hand = SWING_HAND_MH;
+    return true;
+  }
+  if ( oh_attack && e == static_cast<const action_t*>( oh_attack )->execute_event )
+  {
+    hand = SWING_HAND_OH;
+    return true;
+  }
+  return false;
+}
+
+std::int64_t recorder_t::swing_trace_literal_value( char hand, std::int64_t t, std::int64_t engine_now,
+                                                      const char** which )
+{
+  // _a_state_asof (D-18 (b)): fight A's state after its LAST row with op_ms <= t -- rows are
+  // parsed non-decreasing by op_ms (parse_swing_trace_file's own rule), so the per-hand
+  // subsequence is non-decreasing too and the loop below may stop at the first row past t.
+  const auto& a_rows = swing_trace_.a_hand_rows( hand );
+  bool a_has = false, a_waiting = false;
+  std::int64_t a_due = 0;
+  for ( const auto& r : a_rows )
+  {
+    if ( r.op_ms > t )
+      break;
+    a_has = true;
+    a_waiting = !swing_row_is_end_kind( r.kind );
+    a_due = r.due_ms;
+  }
+  if ( a_has && a_waiting && a_due > t )
+  {
+    *which = "own_as_of";
+    return a_due;
+  }
+  // _a_first_value_after (R1's "past value" fallback): the first row strictly after t whose
+  // kind is a VALUE kind (an END row after t is never a candidate value -- it names no due).
+  for ( const auto& r : a_rows )
+  {
+    if ( r.op_ms > t && !swing_row_is_end_kind( r.kind ) )
+    {
+      *which = "past_value";
+      return r.due_ms;
+    }
+  }
+  *which = "beyond";
+  return engine_now;
+}
+
+void recorder_t::swing_trace_bump_counter( const char* which )
+{
+  if ( std::strcmp( which, "own_as_of" ) == 0 )
+    ++swing_trace_.own_as_of;
+  else if ( std::strcmp( which, "past_value" ) == 0 )
+    ++swing_trace_.past_value;
+  else
+    ++swing_trace_.beyond;
+}
+
+void recorder_t::swing_trace_append_row( char hand, std::int64_t op_ms, char kind, std::int64_t due_ms )
+{
+  swing_trace_.rows.push_back( { hand, op_ms, kind, due_ms } );
+}
+
+std::int64_t recorder_t::swing_trace_emit( char hand, std::int64_t op_ms, char kind,
+                                            bool has_natural_due, std::int64_t natural_due )
+{
+  swing_trace_state_t::hand_t& h = swing_trace_.hand_state( hand );
+
+  // pin_model's own per-millisecond reset (D-18 (b)/(c)): a fresh own-operation millisecond
+  // starts a fresh in-step run against fight A's own rows of that same millisecond.
+  if ( !h.last_own_op_ms_set || h.last_own_op_ms != op_ms )
+  {
+    h.last_own_op_ms_set = true;
+    h.last_own_op_ms = op_ms;
+    h.j = 0;
+    h.in_step = true;
   }
 
-  // Beyond the list (M-110): the engine's own timing is used: no override.
-  hand->pinned_time_ms.reset();
-  return std::nullopt;
-}
+  const bool is_end = swing_row_is_end_kind( kind );
+  std::int64_t value = has_natural_due ? natural_due : op_ms;
+  bool changed = false;
 
-bool recorder_t::swing_pin_is_pinned( const action_t* action ) const
-{
-  // const_cast is safe here: swing_pin_hand_for() only READS through the returned pointer in
-  // this function (no mutation), and the non-const overload's own signature is what every
-  // mutating caller (swing_pin_resolve_booking, swing_pin_note_swing_executed) needs -- adding a
-  // second const-qualified overload of the lookup itself would duplicate its whole body for a
-  // pointer this function never writes through.
-  swing_pin_state_t::hand_t* hand = const_cast<recorder_t*>( this )->swing_pin_hand_for( action );
-  return hand && hand->pinned_time_ms.has_value();
-}
-
-void recorder_t::swing_pin_note_swing_executed( action_t* action )
-{
-  swing_pin_state_t::hand_t* hand = swing_pin_hand_for( action );
-  if ( !hand )
-    return;
-
-  // A-123: an in-place repeat (action->repeating == false at THIS execute -- Skyfury's own
-  // generic::skyfury sets it false, calls execute(), then restores it true) is a proc-driven
-  // extra attack, never a swing-clock booking. Return BEFORE touching pinned_time_ms/idx/
-  // pinned_n/beyond_n -- the pinned booking (if any) is untouched and will still be consumed by
-  // the ORDINARY repeating execute that follows.
-  if ( !action->repeating )
+  if ( swing_trace_.pin_active )
   {
-    ++hand->repeats;
-    return;
+    const auto& a_rows = swing_trace_.a_hand_rows( hand );
+    std::vector<const swing_trace_state_t::row_t*> a_rows_ms;
+    for ( const auto& r : a_rows )
+      if ( r.op_ms == op_ms )
+        a_rows_ms.push_back( &r );
+
+    bool matched = false;
+    const swing_trace_state_t::row_t* a_row = nullptr;
+    if ( h.in_step && h.j < a_rows_ms.size() )
+    {
+      a_row = a_rows_ms[ h.j ];
+      const bool both_firing = swing_row_is_firing_kind( kind ) && swing_row_is_firing_kind( a_row->kind );
+      matched = ( kind == a_row->kind ) || both_firing;
+    }
+
+    if ( matched )
+    {
+      ++h.j;
+      if ( is_end )
+      {
+        value = op_ms;
+      }
+      else
+      {
+        value = a_row->due_ms;
+        ++swing_trace_.own_exact;
+        changed = has_natural_due && value != natural_due;
+      }
+    }
+    else
+    {
+      h.in_step = false;
+      if ( is_end )
+      {
+        value = op_ms;
+      }
+      else
+      {
+        const std::int64_t engine_now = has_natural_due ? natural_due : op_ms;
+        const char* which = "beyond";
+        value = swing_trace_literal_value( hand, op_ms, engine_now, &which );
+        swing_trace_bump_counter( which );
+        changed = has_natural_due && value != natural_due;
+      }
+    }
   }
 
-  if ( hand->pinned_time_ms )
-  {
-    ++hand->pinned_n;
-    ++hand->idx; // consume it -- the NEXT new booking must never re-offer this same listed time.
-    hand->pinned_time_ms.reset();
+  if ( changed )
+    ++swing_trace_.own_changed;
 
-    // M-111 (e): mid_cast counts PINNED swings only, executing while the player had a cast or
-    // channel in progress -- the exact scenario a pinned hand's ignored pushes (M-111 (d)) make
-    // possible (the engine's own delay_auto_attacks/reset_auto_attacks would normally have
-    // pushed this swing back, but a pinned hand ignores that push per swing_pin_is_pinned()).
-    if ( action->player->executing || action->player->channeling )
-      ++swing_pin_.mid_cast;
+  if ( is_end )
+  {
+    h.waiting = false;
+    h.last_end_kind = kind;
+    h.last_end_ms = op_ms;
   }
   else
   {
-    ++hand->beyond_n;
+    h.waiting = true;
+    h.due_ms = value;
+  }
+
+  swing_trace_append_row( hand, op_ms, kind, value );
+
+  // Section 3: armed once per fight, at the first row this fight ever writes -- never in
+  // fight_begin() (which runs before the event manager's reset).
+  if ( swing_trace_.pin_active && !swing_trace_.check_armed_ever )
+  {
+    swing_trace_.check_armed_ever = true;
+    swing_trace_arm_check( /*initial=*/true );
+  }
+
+  return value;
+}
+
+char recorder_t::swing_trace_resolve_creation_kind( char hand, std::int64_t now_ms )
+{
+  swing_trace_state_t::hand_t& h = swing_trace_.hand_state( hand );
+
+  // Section 1 (iv)/(v)'s own resolution point: a booking that follows an UNRESOLVED firing
+  // (the channel-pause "no swing ran, re-book at once" branch, action.cpp:326-345) is the
+  // moment this plan learns that firing was a `drop`, not a `land` -- flush it first.
+  if ( h.pending_fired )
+  {
+    const std::int64_t drop_ms = h.pending_fired_ms;
+    h.pending_fired = false;
+    swing_trace_emit( hand, drop_ms, SWING_ROW_DROP, /*has_natural_due=*/false, 0 );
+  }
+
+  if ( !h.started )
+    return SWING_ROW_BOOK;
+  if ( h.last_end_kind >= 0 && h.last_end_ms == now_ms )
+    return ( h.last_end_kind == SWING_ROW_CANCEL ) ? SWING_ROW_REBOOK : SWING_ROW_BOOK;
+  return SWING_ROW_RESTART;
+}
+
+timespan_t recorder_t::swing_event_created( action_t* action, timespan_t t )
+{
+  char hand;
+  if ( !swing_trace_hand_of_action( action, hand ) )
+    return t;
+
+  const std::int64_t now_ms = static_cast<std::int64_t>( root_->current_time().total_millis() );
+  const char kind = swing_trace_resolve_creation_kind( hand, now_ms );
+  swing_trace_.hand_state( hand ).started = true;
+  const std::int64_t natural_due = now_ms + static_cast<std::int64_t>( t.total_millis() );
+  const std::int64_t value = swing_trace_emit( hand, now_ms, kind, /*has_natural_due=*/true, natural_due );
+  return swing_trace_.pin_active ? timespan_t::from_millis( value - now_ms ) : t;
+}
+
+timespan_t recorder_t::swing_event_rescheduled( event_t* e, timespan_t delta_time )
+{
+  char hand;
+  if ( !swing_trace_hand_of_event( e, hand ) )
+    return delta_time;
+
+  swing_trace_state_t::hand_t& h = swing_trace_.hand_state( hand );
+  if ( !h.started )
+  {
+    ++swing_trace_.stale;
+    return delta_time;
+  }
+
+  const std::int64_t now_ms = static_cast<std::int64_t>( root_->current_time().total_millis() );
+  const std::int64_t natural_due = now_ms + static_cast<std::int64_t>( delta_time.total_millis() );
+  const std::int64_t value = swing_trace_emit( hand, now_ms, SWING_ROW_RESCHED, /*has_natural_due=*/true, natural_due );
+  return swing_trace_.pin_active ? timespan_t::from_millis( value - now_ms ) : delta_time;
+}
+
+void recorder_t::swing_event_canceled( event_t* e )
+{
+  char hand;
+  if ( !swing_trace_hand_of_event( e, hand ) )
+    return;
+
+  swing_trace_state_t::hand_t& h = swing_trace_.hand_state( hand );
+  if ( !h.started )
+  {
+    ++swing_trace_.stale;
+    return;
+  }
+
+  const std::int64_t now_ms = static_cast<std::int64_t>( root_->current_time().total_millis() );
+  swing_trace_emit( hand, now_ms, SWING_ROW_CANCEL, /*has_natural_due=*/false, 0 );
+}
+
+void recorder_t::swing_event_fired( action_t* action )
+{
+  char hand;
+  if ( !swing_trace_hand_of_action( action, hand ) )
+    return;
+
+  swing_trace_state_t::hand_t& h = swing_trace_.hand_state( hand );
+  if ( !h.started )
+  {
+    ++swing_trace_.stale;
+    return;
+  }
+
+  // The event has come due; whether this becomes a `land` or a `drop` row is not yet known
+  // here (section 1 (iv)) -- mark pending, the hand's own OWN engine state (execute_event) is
+  // already null by the time this funnel is called.
+  const std::int64_t now_ms = static_cast<std::int64_t>( root_->current_time().total_millis() );
+  h.waiting = false;
+  h.pending_fired = true;
+  h.pending_fired_ms = now_ms;
+}
+
+void recorder_t::swing_attack_executed( action_t* action )
+{
+  char hand;
+  if ( !swing_trace_hand_of_action( action, hand ) )
+    return;
+
+  swing_trace_state_t::hand_t& h = swing_trace_.hand_state( hand );
+
+  // A-123: an in-place repeat (action->repeating == false at THIS execute -- Skyfury's own
+  // generic::skyfury sets it false, calls execute(), then restores it true) is a proc-driven
+  // extra attack, never a swing-clock operation. Return BEFORE resolving any pending firing --
+  // the real swing's own pending state (if any) belongs to the ORDINARY repeating execute that
+  // follows, not to this one.
+  if ( !action->repeating )
+  {
+    ++h.repeats;
+    return;
+  }
+
+  if ( !h.pending_fired )
+  {
+    // Defensive: every genuine repeating-attack execute is preceded by swing_event_fired at the
+    // SAME synchronous call (action.cpp:257 then :2242) -- this should never happen. Counted
+    // stale rather than fabricating a `land` row with no matching firing.
+    ++swing_trace_.stale;
+    return;
+  }
+
+  const std::int64_t fired_ms = h.pending_fired_ms;
+  h.pending_fired = false;
+  swing_trace_emit( hand, fired_ms, SWING_ROW_LAND, /*has_natural_due=*/false, 0 );
+
+  // M-111 (e): mid_cast counts landings while the player had a cast or channel in progress.
+  if ( action->player->executing || action->player->channeling )
+    ++swing_trace_.mid_cast;
+}
+
+// Section 3's rolling check event. Constructed with its `id` preset to the largest `unsigned`
+// value (reserved) BEFORE event_t::schedule() is called -- event_manager_t::add_event only ever
+// assigns an id when `e->id == 0` (event_manager.cpp:117-118), so this id is never reassigned.
+// Same-time events run in (time, id) order (event_manager.cpp:146-148); with the largest
+// possible id, this event ALWAYS sorts after every ordinary event of its own millisecond,
+// including ones created during that millisecond -- exactly what section 3 requires ("the check
+// runs after fight B's own operations of that millisecond"). Only one is ever alive at a time
+// (a per-breakpoint event scheduled at fight start would keep thousands waiting and lengthen
+// event_manager_t::add_event's own same-slice insertion scan, section 3's own rationale for a
+// SINGLE rolling event over one per breakpoint).
+struct swing_check_event_t final : public event_t
+{
+  swing_check_event_t( sim_t& s, timespan_t delta ) : event_t( s )
+  {
+    id = std::numeric_limits<unsigned>::max();
+    schedule( delta );
+  }
+
+  const char* name() const override
+  {
+    return "SwingTraceCheck";
+  }
+
+  void execute() override
+  {
+    sim_t* root = root_of( &sim() );
+    if ( root->rl_rng_recorder )
+      root->rl_rng_recorder->swing_trace_run_checks();
+  }
+};
+
+void recorder_t::swing_trace_arm_check( bool initial )
+{
+  if ( swing_trace_.breakpoints.empty() )
+    return;
+
+  const std::int64_t now_ms = static_cast<std::int64_t>( root_->current_time().total_millis() );
+  if ( initial )
+  {
+    swing_trace_.bp_cursor = static_cast<std::size_t>(
+        std::lower_bound( swing_trace_.breakpoints.begin(), swing_trace_.breakpoints.end(), now_ms ) -
+        swing_trace_.breakpoints.begin() );
+  }
+  if ( swing_trace_.bp_cursor >= swing_trace_.breakpoints.size() )
+    return;
+
+  // Section 3's own 2^31 guard: ordinary ids start at 1 and grow by one per event
+  // (event_manager_t::add_event), so this only ever fires if a single fight somehow schedules
+  // over two billion events -- refuse rather than risk an ordinary id ever reaching the
+  // check event's own reserved id (std::numeric_limits<unsigned>::max()).
+  if ( root_->event_mgr.global_event_id >= ( 1u << 31 ) )
+  {
+    throw sc_runtime_error(
+        "rl_swing_pin: ordinary event id count reached 2^31 -- refusing to arm the rolling check "
+        "event with a reserved id that could collide." );
+  }
+
+  const std::int64_t target_ms = swing_trace_.breakpoints[ swing_trace_.bp_cursor ];
+  make_event<swing_check_event_t>( *root_, *root_, timespan_t::from_millis( target_ms - now_ms ) );
+}
+
+void recorder_t::swing_trace_run_check_for_hand( char hand, std::int64_t t )
+{
+  const auto& a_rows = swing_trace_.a_hand_rows( hand );
+  std::size_t count_at_t = 0;
+  for ( const auto& r : a_rows )
+    if ( r.op_ms == t )
+      ++count_at_t;
+  if ( count_at_t == 0 )
+    return;
+
+  swing_trace_state_t::hand_t& h = swing_trace_.hand_state( hand );
+  const bool same_ms_as_own = h.last_own_op_ms_set && h.last_own_op_ms == t;
+  if ( same_ms_as_own && h.j >= count_at_t )
+    return;
+
+  bool a_has = false, a_waiting = false;
+  std::int64_t a_due = 0;
+  for ( const auto& r : a_rows )
+  {
+    if ( r.op_ms > t )
+      break;
+    a_has = true;
+    a_waiting = !swing_row_is_end_kind( r.kind );
+    a_due = r.due_ms;
+  }
+  if ( !a_has || !a_waiting || a_due <= t || !h.waiting )
+  {
+    ++swing_trace_.inject_skipped;
+    return;
+  }
+  if ( h.due_ms == a_due )
+    return;
+
+  if ( same_ms_as_own )
+    ++swing_trace_.injected_short;
+  else
+    ++swing_trace_.injected;
+  swing_trace_append_row( hand, t, SWING_ROW_INJECT, a_due );
+  h.due_ms = a_due;
+}
+
+void recorder_t::swing_trace_run_checks()
+{
+  const std::int64_t t = swing_trace_.breakpoints[ swing_trace_.bp_cursor ];
+  swing_trace_run_check_for_hand( SWING_HAND_MH, t );
+  swing_trace_run_check_for_hand( SWING_HAND_OH, t );
+  ++swing_trace_.bp_cursor;
+  swing_trace_arm_check( /*initial=*/false );
+}
+
+void recorder_t::swing_trace_write_file()
+{
+  if ( !swing_trace_.trace_active )
+    return;
+
+  std::ofstream out( root_->rl_swing_trace_file_str, std::ios::out | std::ios::trunc );
+  if ( !out.is_open() )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_swing_trace: cannot write the trace file '{}' at fight end.", root_->rl_swing_trace_file_str ) );
+  }
+  out << "# rl_swing_trace format=1 actor=" << swing_trace_.designated_player->name_str << "\n";
+  for ( const auto& row : swing_trace_.rows )
+  {
+    out << ( row.hand == SWING_HAND_MH ? "mh " : "oh " ) << row.op_ms << " "
+        << swing_row_kind_name( row.kind ) << " " << row.due_ms << "\n";
+  }
+  out << "repeats mh " << swing_trace_.mh.repeats << "\n";
+  out << "repeats oh " << swing_trace_.oh.repeats << "\n";
+  out << "end " << swing_trace_.rows.size() << "\n";
+  if ( !out )
+  {
+    throw sc_runtime_error( fmt::format( "rl_swing_trace: write to '{}' failed.", root_->rl_swing_trace_file_str ) );
   }
 }
 
@@ -2135,23 +2714,38 @@ void recorder_t::write_sidecar()
     }
     sidecar << "]}";
 
-    // Study-only (tstl-sylvanas phase 257, plan 257-07, D-17): a SEPARATE top-level sidecar key
-    // (never nested under "replay" -- M-111 (f) names it its own block), present ONLY when the
-    // option is set, so a plain replay's sidecar stays byte-identical to before this option
-    // existed. Same field set as write_footer()'s own stdout line below.
-    if ( swing_pin_.pinned_player )
+    // Study-only (tstl-sylvanas phase 257, plan 257-09, D-18): TWO SEPARATE top-level sidecar
+    // keys (never nested under "replay" -- M-111 (e) names each its own block), each present
+    // ONLY when its own option is set, so a plain replay's sidecar stays byte-identical to
+    // before either option existed. Same field sets as write_footer()'s own stdout lines below.
+    if ( swing_trace_.trace_active )
+    {
+      std::size_t mh_rows = 0, oh_rows = 0;
+      for ( const auto& row : swing_trace_.rows )
+        ( row.hand == SWING_HAND_MH ? mh_rows : oh_rows )++;
+      sidecar << ", \"swing_trace\": {"
+              << "\"rows\": " << swing_trace_.rows.size() << ", \"mh_rows\": " << mh_rows
+              << ", \"oh_rows\": " << oh_rows << ", \"mh_repeats\": " << swing_trace_.mh.repeats
+              << ", \"oh_repeats\": " << swing_trace_.oh.repeats
+              << ", \"mid_cast\": " << swing_trace_.mid_cast << ", \"stale\": " << swing_trace_.stale
+              << ", \"path\": \"" << json_escape( root_->rl_swing_trace_file_str ) << "\"}";
+    }
+    if ( swing_trace_.pin_active )
     {
       sidecar << ", \"swing_pin\": {"
-              << "\"mh_listed\": " << swing_pin_.mh.listed.size()
-              << ", \"oh_listed\": " << swing_pin_.oh.listed.size()
-              << ", \"mh_pinned\": " << swing_pin_.mh.pinned_n
-              << ", \"oh_pinned\": " << swing_pin_.oh.pinned_n
-              << ", \"mh_beyond\": " << swing_pin_.mh.beyond_n
-              << ", \"oh_beyond\": " << swing_pin_.oh.beyond_n
-              << ", \"mh_repeats\": " << swing_pin_.mh.repeats
-              << ", \"oh_repeats\": " << swing_pin_.oh.repeats
-              << ", \"pushes_ignored\": " << swing_pin_.pushes_ignored
-              << ", \"mid_cast\": " << swing_pin_.mid_cast
+              << "\"own_overrides\": "
+              << ( swing_trace_.own_exact + swing_trace_.own_as_of + swing_trace_.past_value )
+              << ", \"own_exact\": " << swing_trace_.own_exact
+              << ", \"own_as_of\": " << swing_trace_.own_as_of
+              << ", \"past_value\": " << swing_trace_.past_value
+              << ", \"beyond\": " << swing_trace_.beyond
+              << ", \"own_changed\": " << swing_trace_.own_changed
+              << ", \"injected\": " << swing_trace_.injected
+              << ", \"injected_short\": " << swing_trace_.injected_short
+              << ", \"inject_skipped\": " << swing_trace_.inject_skipped
+              << ", \"mh_repeats\": " << swing_trace_.mh.repeats
+              << ", \"oh_repeats\": " << swing_trace_.oh.repeats
+              << ", \"mid_cast\": " << swing_trace_.mid_cast << ", \"stale\": " << swing_trace_.stale
               << ", \"path\": \"" << json_escape( root_->rl_swing_pin_file_str ) << "\"}";
     }
   }
@@ -2220,19 +2814,32 @@ void recorder_t::write_footer()
       fmt::print( "rl_rng_replay fresh_from_ms={}\n", replay_->fresh_from_ms );
     }
 
-    // Study-only (tstl-sylvanas phase 257, plan 257-07, D-17): ONE new stdout line, printed
-    // ONLY when the option is set (M-111 (f)) -- unset, nothing here changes (byte-identical
-    // stdout to before this option existed). Same field set as write_sidecar()'s own
-    // "swing_pin" block above.
-    if ( swing_pin_.pinned_player )
+    // Study-only (tstl-sylvanas phase 257, plan 257-09, D-18): TWO new stdout lines, each
+    // printed ONLY when its own option is set (M-111 (e)) -- unset, nothing here changes
+    // (byte-identical stdout to before either option existed). Same field sets as
+    // write_sidecar()'s own "swing_trace"/"swing_pin" blocks above.
+    if ( swing_trace_.trace_active )
     {
-      fmt::print( "rl_swing_pin mh_listed={} oh_listed={} mh_pinned={} oh_pinned={} "
-                  "mh_beyond={} oh_beyond={} mh_repeats={} oh_repeats={} pushes_ignored={} "
-                  "mid_cast={} path={}\n",
-                  swing_pin_.mh.listed.size(), swing_pin_.oh.listed.size(), swing_pin_.mh.pinned_n,
-                  swing_pin_.oh.pinned_n, swing_pin_.mh.beyond_n, swing_pin_.oh.beyond_n,
-                  swing_pin_.mh.repeats, swing_pin_.oh.repeats,
-                  swing_pin_.pushes_ignored, swing_pin_.mid_cast, root_->rl_swing_pin_file_str );
+      std::size_t mh_rows = 0, oh_rows = 0;
+      for ( const auto& row : swing_trace_.rows )
+        ( row.hand == SWING_HAND_MH ? mh_rows : oh_rows )++;
+      fmt::print( "rl_swing_trace rows={} mh_rows={} oh_rows={} mh_repeats={} oh_repeats={} "
+                  "mid_cast={} stale={} path={}\n",
+                  swing_trace_.rows.size(), mh_rows, oh_rows, swing_trace_.mh.repeats,
+                  swing_trace_.oh.repeats, swing_trace_.mid_cast, swing_trace_.stale,
+                  root_->rl_swing_trace_file_str );
+    }
+    if ( swing_trace_.pin_active )
+    {
+      fmt::print( "rl_swing_pin own_overrides={} own_exact={} own_as_of={} past_value={} beyond={} "
+                  "own_changed={} injected={} injected_short={} inject_skipped={} mh_repeats={} "
+                  "oh_repeats={} mid_cast={} stale={} path={}\n",
+                  swing_trace_.own_exact + swing_trace_.own_as_of + swing_trace_.past_value,
+                  swing_trace_.own_exact, swing_trace_.own_as_of, swing_trace_.past_value,
+                  swing_trace_.beyond, swing_trace_.own_changed, swing_trace_.injected,
+                  swing_trace_.injected_short, swing_trace_.inject_skipped, swing_trace_.mh.repeats,
+                  swing_trace_.oh.repeats, swing_trace_.mid_cast, swing_trace_.stale,
+                  root_->rl_swing_pin_file_str );
     }
 
     std::set<roller_class_e> classes_present;
@@ -2329,40 +2936,48 @@ bool active( const sim_t* sim )
   return static_cast<bool>( root->rl_rng_recorder );
 }
 
-// ---- Swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111). See each declaration's own
-// doc comment in rl_rng_record.hpp. Every one is a no-op / std::nullopt / false the moment
-// root->rl_rng_recorder is null -- byte-identical to before this option existed.
+// ---- Swing trace / swing pin (tstl-sylvanas phase 257, plan 257-09, D-18). See each
+// declaration's own doc comment in rl_rng_record.hpp. Every one is a passthrough / no-op the
+// moment root->rl_rng_recorder is null -- byte-identical to before either option existed.
 
-std::optional<timespan_t> swing_pin_resolve_booking( sim_t* sim, action_t* action )
+timespan_t swing_event_created( sim_t* sim, action_t* action, timespan_t t )
 {
   sim_t* root = root_of( sim );
   if ( !root->rl_rng_recorder )
-    return std::nullopt;
-  return root->rl_rng_recorder->swing_pin_resolve_booking( action );
+    return t;
+  return root->rl_rng_recorder->swing_event_created( action, t );
 }
 
-bool swing_pin_is_pinned( sim_t* sim, const action_t* action )
+timespan_t swing_event_rescheduled( sim_t* sim, event_t* e, timespan_t delta_time )
 {
   sim_t* root = root_of( sim );
   if ( !root->rl_rng_recorder )
-    return false;
-  return root->rl_rng_recorder->swing_pin_is_pinned( action );
+    return delta_time;
+  return root->rl_rng_recorder->swing_event_rescheduled( e, delta_time );
 }
 
-void swing_pin_note_push_ignored( sim_t* sim )
+void swing_event_canceled( sim_t* sim, event_t* e )
 {
   sim_t* root = root_of( sim );
   if ( !root->rl_rng_recorder )
     return;
-  root->rl_rng_recorder->swing_pin_note_push_ignored();
+  root->rl_rng_recorder->swing_event_canceled( e );
 }
 
-void swing_pin_note_swing_executed( sim_t* sim, action_t* action )
+void swing_event_fired( sim_t* sim, action_t* action )
 {
   sim_t* root = root_of( sim );
   if ( !root->rl_rng_recorder )
     return;
-  root->rl_rng_recorder->swing_pin_note_swing_executed( action );
+  root->rl_rng_recorder->swing_event_fired( action );
+}
+
+void swing_attack_executed( sim_t* sim, action_t* action )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder )
+    return;
+  root->rl_rng_recorder->swing_attack_executed( action );
 }
 
 // ---- rl_press_scope_t (plan 250-03, REC-04). Out-of-line ctors/dtor -- needs recorder_t

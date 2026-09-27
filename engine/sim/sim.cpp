@@ -1483,68 +1483,6 @@ struct compare_name
   }
 };
 
-// Study-only pin-file parser (tstl-sylvanas phase 257, plan 257-07, D-17, M-110/M-111 (b)). The
-// file's own three-line format (a "# rl_swing_pin v1 ..." comment line, then exactly one
-// "mh <ms> <ms> ..." line and one "oh <ms> ..." line, in either order -- comment lines may
-// appear anywhere and are skipped) is produced by scripts/rl/probes/timing_hold.py's own
-// write_pin_list -- this is an INDEPENDENT C++ reader of the SAME format, never a call into
-// that Python. Throws std::runtime_error with a short reason fragment on any malformed line;
-// the caller (sim_t::setup()) wraps it in the fork's own named refusal message.
-void parse_swing_pin_lines( const std::vector<std::string>& lines,
-                             std::vector<std::int64_t>& mh, std::vector<std::int64_t>& oh )
-{
-  bool have_mh = false, have_oh = false;
-  for ( const std::string& raw_line : lines )
-  {
-    if ( raw_line.empty() || raw_line[ 0 ] == '#' )
-      continue;
-
-    std::istringstream tokens( raw_line );
-    std::string hand_tag;
-    tokens >> hand_tag;
-    if ( hand_tag != "mh" && hand_tag != "oh" )
-      throw std::runtime_error( fmt::format( "unrecognised line '{}'", raw_line ) );
-
-    std::vector<std::int64_t>& target = ( hand_tag == "mh" ) ? mh : oh;
-    bool& have_flag = ( hand_tag == "mh" ) ? have_mh : have_oh;
-    if ( have_flag )
-      throw std::runtime_error( fmt::format( "duplicate '{}' line", hand_tag ) );
-    have_flag = true;
-
-    std::string tok;
-    bool any_token = false;
-    while ( tokens >> tok )
-    {
-      any_token = true;
-      // Whole non-negative integer only -- no sign, no decimal point, no trailing junk.
-      const bool all_digits =
-          !tok.empty() && std::all_of( tok.begin(), tok.end(), []( char c ) { return c >= '0' && c <= '9'; } );
-      if ( !all_digits )
-        throw std::runtime_error( fmt::format( "'{}' line has a non-whole-number token '{}'", hand_tag, tok ) );
-
-      std::int64_t value;
-      try
-      {
-        value = std::stoll( tok );
-      }
-      catch ( const std::exception& )
-      {
-        throw std::runtime_error( fmt::format( "'{}' line token '{}' does not parse", hand_tag, tok ) );
-      }
-      if ( !target.empty() && value <= target.back() )
-        throw std::runtime_error( fmt::format( "'{}' line is not strictly increasing at {}", hand_tag, value ) );
-      target.push_back( value );
-    }
-    if ( !any_token )
-      throw std::runtime_error( fmt::format( "'{}' line has an empty list", hand_tag ) );
-  }
-
-  if ( !have_mh )
-    throw std::runtime_error( "missing 'mh' line" );
-  if ( !have_oh )
-    throw std::runtime_error( "missing 'oh' line" );
-}
-
 } // UNNAMED NAMESPACE ===================================================
 
 // Standard progress method, normal mode sims use the single (first) index, single actor batch
@@ -4472,9 +4410,10 @@ void sim_t::create_options()
   // rl_rng_replay_fresh_from_ms_str doc comment. Default empty (0), byte-identical to plan
   // 257-02's own unextended fresh-class behavior when unset.
   add_option( opt_string( "rl_rng_replay_fresh_from_ms", rl_rng_replay_fresh_from_ms_str ) );
-  // Study-only (tstl-sylvanas phase 257, plan 257-07, D-17). See sim.hpp's rl_swing_pin_file_str
+  // Study-only (tstl-sylvanas phase 257, plan 257-09, D-18). See sim.hpp's rl_swing_pin_file_str
   // doc comment. Default empty (unset), byte-identical to today's behavior.
   add_option( opt_string( "rl_swing_pin", rl_swing_pin_file_str ) );
+  add_option( opt_string( "rl_swing_trace", rl_swing_trace_file_str ) );
   // Iteration-batched scorecard seeding (tstl-sylvanas quick task 260919-scb). See sim.hpp's
   // rl_iteration_seeds doc comment. Default empty, byte-identical to today's behavior.
   add_option( opt_func( "rl_iteration_seeds", parse_rl_iteration_seeds ) );
@@ -5464,17 +5403,19 @@ void sim_t::setup( sim_control_t* c )
     rl_rng_replay_fresh_from_ms = parsed_fresh_from_ms;
   }
 
-  // Study-only option (tstl-sylvanas phase 257, plan 257-07, D-17). See sim.hpp's
-  // rl_swing_pin_file_str doc comment. An empty value is the same as unset. M-111 (b)'s three
-  // named refusal messages are the three throws immediately below, in order.
+  // Study-only options (tstl-sylvanas phase 257, plan 257-09, D-18, owner ruling A-125). See
+  // sim.hpp's rl_swing_pin_file_str doc comment. An empty value is the same as unset. M-111 (b)'s
+  // seven named refusal messages are the seven throws immediately below, in order: rl_swing_pin's
+  // own four first, then rl_swing_trace's own three (the same-file check runs before EITHER file
+  // is opened for writing, so a valid pin file's own bytes are never at risk from it).
   if ( !rl_swing_pin_file_str.empty() )
   {
     if ( rl_rng_replay_file_str.empty() )
     {
       throw sc_invalid_sim_argument( fmt::format(
-          "rl_swing_pin requires rl_rng_replay=<path> -- it books the one player's white swings "
-          "at a previously recorded fight's own times UNDER an existing replay, not a replay "
-          "source of its own. Received rl_swing_pin={} with no rl_rng_replay= set.",
+          "rl_swing_pin requires rl_rng_replay=<path> -- it replays a previously recorded fight's "
+          "own swing trace UNDER an existing replay, not a replay source of its own. Received "
+          "rl_swing_pin={} with no rl_rng_replay= set.",
           rl_swing_pin_file_str ) );
     }
 
@@ -5501,7 +5442,8 @@ void sim_t::setup( sim_control_t* c )
 
     try
     {
-      parse_swing_pin_lines( pin_lines, rl_swing_pin_mh, rl_swing_pin_oh );
+      rl_swing_pin_actor = rl_rng_record::parse_swing_trace_file(
+          pin_lines, rl_swing_pin_hand, rl_swing_pin_op_ms, rl_swing_pin_kind, rl_swing_pin_due_ms );
     }
     catch ( const std::exception& e )
     {
@@ -5509,15 +5451,48 @@ void sim_t::setup( sim_control_t* c )
           "rl_swing_pin pin file is malformed ({}): {}", rl_swing_pin_file_str, e.what() ) );
     }
 
-    // M-111 (d)'s fourth refusal -- not one of the three battery cases above (not exercised by
-    // any proof battery, per this plan's own SUMMARY "Not verified" list), but still a hard
-    // refusal: the pin already books the very first main-hand swing at its own listed time, so a
+    // M-111 (d)'s fourth refusal -- not one of the battery cases above (not exercised by any
+    // proof battery, per this plan's own SUMMARY "Not verified" list), but still a hard refusal:
+    // the pin already books the very first main-hand swing at its own trace's due time, so a
     // forced initial offset would fight the pin over who books that first event.
     if ( initial_swing_offset >= 0.0 )
     {
       throw sc_invalid_sim_argument(
           "rl_swing_pin cannot be combined with initial_swing_offset -- the pin already books "
-          "the very first main-hand swing at its own listed time." );
+          "the very first main-hand swing at its own trace's due time." );
+    }
+  }
+
+  if ( !rl_swing_trace_file_str.empty() )
+  {
+    if ( rl_rng_replay_file_str.empty() )
+    {
+      throw sc_invalid_sim_argument( fmt::format(
+          "rl_swing_trace requires rl_rng_replay=<path> -- it writes the one designated player's "
+          "own swing clock UNDER an existing replay, not a replay source of its own. Received "
+          "rl_swing_trace={} with no rl_rng_replay= set.",
+          rl_swing_trace_file_str ) );
+    }
+
+    // Checked BEFORE either file is opened for writing (this study-only option's own writer
+    // opens rl_swing_trace_file_str in truncate mode below) -- a pin file that happens to share
+    // its path with the trace file must never be truncated by this check running too late.
+    if ( !rl_swing_pin_file_str.empty() && rl_swing_trace_file_str == rl_swing_pin_file_str )
+    {
+      throw sc_invalid_sim_argument( fmt::format(
+          "rl_swing_trace must not name the same file as rl_swing_pin -- rl_swing_pin={} would be "
+          "truncated by rl_swing_trace's own writer before this fight ever reads it.",
+          rl_swing_pin_file_str ) );
+    }
+
+    // The path is opened for writing (truncate) HERE, at setup, so a bad path is refused before
+    // any fight runs -- the file itself is written again (with the fight's own trace) at
+    // fight_end() (rl_rng_record.cpp's recorder_t::swing_trace_write_file()).
+    std::ofstream trace_probe( rl_swing_trace_file_str, std::ios::out | std::ios::trunc );
+    if ( !trace_probe.is_open() )
+    {
+      throw sc_invalid_sim_argument(
+          fmt::format( "rl_swing_trace cannot write the trace file '{}'.", rl_swing_trace_file_str ) );
     }
   }
 
