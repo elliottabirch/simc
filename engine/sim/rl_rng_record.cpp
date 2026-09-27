@@ -2541,7 +2541,19 @@ void recorder_t::swing_trace_write_file()
         "rl_swing_trace: cannot write the trace file '{}' at fight end.", root_->rl_swing_trace_file_str ) );
   }
   out << "# rl_swing_trace format=1 actor=" << swing_trace_.designated_player->name_str << "\n";
-  for ( const auto& row : swing_trace_.rows )
+  // A-131: a hand's pending land/drop row is resolved late (at that hand's own next
+  // operation) and appended to swing_trace_.rows at that later real-time position, not at
+  // its own historical op_ms. Each hand's own sequence stays in order, but the two hands'
+  // rows interleaved in append order are not globally op_ms-ordered when both hands defer
+  // to the same later real time. Write a STABLE sort by op_ms so equal op_ms values keep
+  // their insertion (append) order -- this does not touch swing_trace_.rows itself, which
+  // the pin still reads in append order; it affects only the bytes written to the file.
+  std::vector<swing_trace_state_t::row_t> ordered_rows( swing_trace_.rows );
+  std::stable_sort( ordered_rows.begin(), ordered_rows.end(),
+      []( const swing_trace_state_t::row_t& a, const swing_trace_state_t::row_t& b ) {
+        return a.op_ms < b.op_ms;
+      } );
+  for ( const auto& row : ordered_rows )
   {
     out << ( row.hand == SWING_HAND_MH ? "mh " : "oh " ) << row.op_ms << " "
         << swing_row_kind_name( row.kind ) << " " << row.due_ms << "\n";
