@@ -43,6 +43,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 #include <random>
 #include <sstream>
@@ -4309,6 +4310,13 @@ void sim_t::create_options()
   // block immediately after solver_hold_windows_str's own -- see sim.hpp's
   // solver_force_decision_str doc comment.
   add_option( opt_string( "solver_force_decision", solver_force_decision_str ) );
+  // S1 (260927-s1-spend-timing): forbids lightning_bolt/tempest (the third Lightning-family
+  // spender is untouched) below n stacks of Maelstrom Weapon. 0..10 range-checked and
+  // non-integer input refused right here by
+  // opt_int's own min/max converter -- see sim.hpp's solver_min_maelstrom_spend doc comment for
+  // why no separate hand-rolled parse block is needed (unlike solver_force_decision_str above).
+  // Name resolution against RL_ACTIONS happens below, in its own fail-closed block.
+  add_option( opt_int( "solver_min_maelstrom_spend", solver_min_maelstrom_spend, 0, 10 ) );
   // rl_forward_probe sim option (Phase 222, plan 222-04, NET-02's
   // cross-path receipt). See sim.hpp's rl_forward_probe_str doc comment.
   // Default empty, disabled.
@@ -5195,6 +5203,41 @@ void sim_t::setup( sim_control_t* c )
       throw sc_runtime_error( fmt::format(
           "solver_force_decision='{}' declared no valid k:actionIndex entries.",
           solver_force_decision_str ) );
+    }
+  }
+
+  // S1 (260927-s1-spend-timing): resolve lightning_bolt/tempest indices ONCE by name from
+  // RL_ACTIONS -- never a hard-coded index (own doc comment, sim.hpp). Only runs when the option
+  // is actually on (0/absent stays exactly as fast as a run built before this option existed: one
+  // int comparison, zero array walk). Own fail-closed block, placed immediately after
+  // solver_force_decision_str's own above, same ordering rationale as that block's own comment.
+  if ( solver_min_maelstrom_spend > 0 )
+  {
+    for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+    {
+      if ( RL_ACTIONS[ i ].token == nullptr )
+        continue;
+      if ( solver_min_maelstrom_spend_lightning_bolt_idx < 0 &&
+           std::strcmp( RL_ACTIONS[ i ].token, "lightning_bolt" ) == 0 )
+        solver_min_maelstrom_spend_lightning_bolt_idx = static_cast<int>( i );
+      else if ( solver_min_maelstrom_spend_tempest_idx < 0 &&
+                std::strcmp( RL_ACTIONS[ i ].token, "tempest" ) == 0 )
+        solver_min_maelstrom_spend_tempest_idx = static_cast<int>( i );
+    }
+    // Refuse by name rather than silently disabling the override or masking the wrong action --
+    // a future registry regeneration that renamed or dropped either token must be a loud failure
+    // here, not a quiet no-op three call frames away in solver_control.cpp.
+    if ( solver_min_maelstrom_spend_lightning_bolt_idx < 0 ||
+         solver_min_maelstrom_spend_tempest_idx < 0 )
+    {
+      throw sc_runtime_error( fmt::format(
+          "solver_min_maelstrom_spend={}: could not resolve required action token(s) by name in "
+          "RL_ACTIONS -- lightning_bolt {}, tempest {} (this option requires both to be present "
+          "in the loaded registry's action table; the third Lightning-family action is "
+          "deliberately never resolved or touched by this option).",
+          solver_min_maelstrom_spend,
+          solver_min_maelstrom_spend_lightning_bolt_idx < 0 ? "NOT FOUND" : "found",
+          solver_min_maelstrom_spend_tempest_idx < 0 ? "NOT FOUND" : "found" ) );
     }
   }
 
