@@ -958,6 +958,25 @@ struct sim_t : private sc_thread_t
   // reads this read-only, once per decision -- it never re-parses the string. A flat vector of
   // (k, action_index) pairs, same reasoning as solver_hold_windows's own flat-vector choice.
   std::vector<std::pair<std::int64_t, int>> solver_force_decisions;
+  // S1 (260927-s1-spend-timing, todo 2026-09-27-s1-maelstrom-spend-timing-override-probe.md):
+  // forbids the two named Maelstrom Weapon spenders -- lightning_bolt and tempest ONLY; the
+  // third Lightning-family spender is NEVER touched by this option, the owner's standing rule
+  // "never mask Chain Lightning at one target" holds by construction -- from the natural mask
+  // (solver_control.cpp, in the same in-process choose() block as solver_hold_windows/
+  // solver_force_decision above) whenever the player's current Maelstrom Weapon stack count is
+  // below n. int 0..10; 0 (default)
+  // or the option simply absent = off, byte-identical to a run built before this option existed.
+  // Values outside [0, 10] or non-integer input are refused at parse (opt_int's own min/max +
+  // conversion refusal, sim.cpp's add_option call) -- no separate hand-rolled parse block needed,
+  // unlike solver_force_decision_str's comma-separated shape above.
+  int solver_min_maelstrom_spend = 0;
+  // Resolved ONCE in setup() from RL_ACTIONS by token name -- NEVER a hard-coded index, so a
+  // future registry regeneration that reorders RL_ACTIONS cannot silently point this at the wrong
+  // action. -1 means "unresolved" (either the feature is off, so resolution never ran, or -- had
+  // the resolve loop found no match -- setup() would already have refused by name rather than
+  // leaving these at -1). solver_control.cpp reads these read-only, once per decision.
+  int solver_min_maelstrom_spend_lightning_bolt_idx = -1;
+  int solver_min_maelstrom_spend_tempest_idx = -1;
   // rl_forward_probe sim option (tstl-sylvanas Phase 222, plan 222-04,
   // NET-02's cross-path receipt). Loads a solver_policy= blob (weights are
   // already loaded+validated in setup() above, same as solver_policy=

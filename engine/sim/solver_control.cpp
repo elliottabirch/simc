@@ -889,6 +889,33 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
         mask[ i ] = static_cast<std::uint8_t>( mask[ i ] & ( ( allowed >> static_cast<std::uint32_t>( i ) ) & 1u ) );
     }
 
+    // S1 (260927-s1-spend-timing, todo 2026-09-27-s1-maelstrom-spend-timing-override-probe.md):
+    // engine-side spend-threshold override -- forbids lightning_bolt and tempest ONLY; the third
+    // Lightning-family action is NEVER touched anywhere in this block, the owner's standing rule
+    // "never mask Chain Lightning at one target" holds by construction, not by threshold. Fires
+    // whenever the player's current Maelstrom Weapon stack count is below solver_min_maelstrom_spend.
+    // Deliberately placed AFTER the allow-list AND directly above (so a narrow arm's own subset
+    // can never re-legalize what this forbids) and BEFORE the all-illegal refusal below (that
+    // refusal still guards the genuinely-pathological all-illegal case; this override alone
+    // cannot manufacture one on its own -- the wait actions and every non-Lightning-family cast
+    // stay untouched). Reads the SAME buff object the observation encoder fills for obs slot 32
+    // (rl_state_t::buffs, populated once in read_state() above) via find_buff() -- never a
+    // re-derivation, so this can never disagree with what the net itself sees as its own stack
+    // count. sim->solver_min_maelstrom_spend == 0 (default, or the option simply absent) is a
+    // single int comparison and skips the whole block -- byte-identical to a run built before
+    // this option existed (proof (a), ABSENT = IDENTICAL). The two action indices were resolved
+    // ONCE by name from RL_ACTIONS in sim.cpp's setup() (never a hard-coded index here).
+    if ( sim->solver_min_maelstrom_spend > 0 )
+    {
+      const rl_policy::buff_reading* mw = state.find_buff( "maelstrom_weapon" );
+      const double mw_stacks = ( mw != nullptr && mw->has_stacks ) ? mw->stacks : 0.0;
+      if ( mw_stacks < static_cast<double>( sim->solver_min_maelstrom_spend ) )
+      {
+        mask[ sim->solver_min_maelstrom_spend_lightning_bolt_idx ] = 0;
+        mask[ sim->solver_min_maelstrom_spend_tempest_idx ] = 0;
+      }
+    }
+
     // 222-07 (CR-04): the allow-list AND above can manufacture an
     // all-illegal mask that build_mask's own upstream refusal already
     // passed -- 222-RESEARCH.md's Pitfall 16 names this exactly ("a
