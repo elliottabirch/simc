@@ -281,6 +281,12 @@ struct replay_state_t
   // Whole-run total of slots left fresh by the option (D-15) -- the fork's own count, compared
   // by the Python join in fresh_class_check (M-89 (d)) against the same recording.
   std::uint64_t fresh_class_left = 0;
+  // Gap closure of 257-05's own crash (tstl-sylvanas phase 257, plan 257-08): the option's own
+  // value (whole milliseconds), copied from sim_t::rl_rng_replay_fresh_from_ms once at
+  // replay_init() time (already validated by sim.cpp's setup()). 0 (the default, unset) means
+  // "from the first roll" -- on_draw()'s own time gate below is then always true, byte-identical
+  // to plan 257-02's own unextended fresh-class behaviour.
+  std::int64_t fresh_from_ms = 0;
   std::string address;   // "outer" (default/empty) or "inner" (D-03) -- picks which press frame
                           // (live and recorded alike) on_draw()/the loader read; kept ONLY for the
                           // printed stdout/sidecar value -- the hot-path comparison uses is_inner
@@ -665,7 +671,14 @@ double recorder_t::on_draw( std::uint32_t& roller_slot, const std::uint64_t& dra
           ++replay_->fresh_used_up;
           ++fight_counts.fresh_used_up;
         }
-        else if ( replay_->fresh_class_active && it->second.left_fresh[ it->second.next_unused ] )
+        else if ( replay_->fresh_class_active && it->second.left_fresh[ it->second.next_unused ]
+                  // Gap closure of 257-05's own crash (tstl-sylvanas phase 257, plan 257-08):
+                  // this slot's own class is only left fresh once fight B's OWN current time
+                  // reaches the option's floor -- root_->current_time() is THIS run's live fight
+                  // clock, the same source every other time_ms field in this file reads. 0 (the
+                  // default, unset) makes this always true, so an unset fresh_from_ms is
+                  // byte-identical to plan 257-02's own behaviour (left fresh from roll 0).
+                  && static_cast<std::int64_t>( root_->current_time().total_millis() ) >= replay_->fresh_from_ms )
         {
           // Study-only (phase 257, D-15): this slot's own recorded roll (fight A's) belongs to
           // the class the option leaves fresh. Consume it exactly like a normal reuse (advance
@@ -1149,6 +1162,10 @@ void recorder_t::replay_init()
   // already validated. An empty string is the same as unset.
   rp.fresh_class_active = !root_->rl_rng_replay_fresh_class_str.empty();
   rp.fresh_class_name = root_->rl_rng_replay_fresh_class_str;
+  // Gap closure of 257-05's own crash (tstl-sylvanas phase 257, plan 257-08): already validated
+  // by sim.cpp's setup() (non-negative, requires fresh_class_active) by the time replay_init()
+  // runs. 0 (unset) is the default and means "from the first roll".
+  rp.fresh_from_ms = root_->rl_rng_replay_fresh_from_ms;
 
   rp.in.open( rp.path, std::ios::in | std::ios::binary );
   if ( !rp.in.is_open() )
@@ -1872,7 +1889,11 @@ void recorder_t::write_sidecar()
     if ( rp.fresh_class_active )
     {
       sidecar << ", \"fresh_class\": \"" << json_escape( rp.fresh_class_name ) << "\""
-              << ", \"fresh_class_left\": " << rp.fresh_class_left;
+              << ", \"fresh_class_left\": " << rp.fresh_class_left
+              // Gap closure of 257-05's own crash (phase 257, plan 257-08): present ONLY
+              // alongside fresh_class (never on its own), so a plain fresh-class run whose
+              // fresh_from_ms was never set still reads 0 here -- explicit, not omitted.
+              << ", \"fresh_from_ms\": " << rp.fresh_from_ms;
     }
     sidecar << "}, \"byClass\": {";
     bool first_class = true;
@@ -1972,6 +1993,11 @@ void recorder_t::write_footer()
     {
       fmt::print( "rl_rng_replay fresh_class={} left_fresh={}\n", replay_->fresh_class_name,
                   replay_->fresh_class_left );
+      // Gap closure of 257-05's own crash (tstl-sylvanas phase 257, plan 257-08): a SEPARATE
+      // stdout line, so the pre-existing "fresh_class=... left_fresh=..." line (and its own
+      // end-anchored regex in cause_isolation.py's check_fresh_class_output) stays byte-for-byte
+      // unchanged -- only a caller that also checks THIS line learns the fresh-from floor.
+      fmt::print( "rl_rng_replay fresh_from_ms={}\n", replay_->fresh_from_ms );
     }
 
     std::set<roller_class_e> classes_present;
