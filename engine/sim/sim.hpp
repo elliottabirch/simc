@@ -797,6 +797,25 @@ struct sim_t : private sc_thread_t
   // allow_luck_replay=True, unless the study-only allow_fresh_class_study=True is also passed.
   // An empty value is the same as unset (mirrors rl_rng_replay_file_str's own rule).
   std::string rl_rng_replay_fresh_class_str;
+  // Study-only option (tstl-sylvanas phase 257, plan 257-08, gap closure of 257-05's own crash).
+  // rl_rng_replay_fresh_from_ms=<whole milliseconds>, off by default (empty string). Requires
+  // rl_rng_replay_fresh_class= to already be set -- refused by name otherwise, in setup()'s
+  // replay refusal block in sim.cpp, directly after that block's own refusals; refused when the
+  // parsed value is negative. Starts the fresh class's OWN fresh window at a given fight time
+  // instead of the very first roll: every recorded roll of the named class is still REUSED
+  // (matched, exactly like plain replay) until fight time reaches this many whole milliseconds,
+  // and only left fresh (D-17's fresh-number rule) from then on -- so fight B's own history
+  // BEFORE that time matches fight A's exactly, and a phase-254-recorded forced action at a call
+  // before the floor stays legal. An empty string is the SAME as 0 -- from the first roll,
+  // byte-identical to plan 257-02's own unextended fresh-class behaviour. NEVER reaches the
+  // official scoring path: covered by the SAME assert_sim_options_shape/allow_fresh_class_study
+  // gate as rl_rng_replay_fresh_class_str above (scripts/simc-eval/lib/simc_channel.py).
+  std::string rl_rng_replay_fresh_from_ms_str;
+  // The parsed, validated integer form of rl_rng_replay_fresh_from_ms_str above -- 0 when the
+  // string is empty (unset, "from the first roll"). Set once in setup()'s replay refusal block,
+  // after the empty/parse/negative checks below; rl_rng_record.cpp's on_draw reads THIS field,
+  // never the raw string.
+  int rl_rng_replay_fresh_from_ms = 0;
   // tstl-sylvanas phase 218, plan 218-02 (RIG-01). rl_fight_shape_index=<n>
   // names which declared fight shape (scripts/rl/specs/enhancement.json's
   // episode.fightMix, 1-based) this run was launched under. 0 is the

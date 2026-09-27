@@ -4406,6 +4406,10 @@ void sim_t::create_options()
   // the outer press address.
   add_option( opt_string( "rl_rng_replay", rl_rng_replay_file_str ) );
   add_option( opt_string( "rl_rng_replay_fresh_class", rl_rng_replay_fresh_class_str ) );
+  // Gap closure of 257-05's own crash (tstl-sylvanas phase 257, plan 257-08). See sim.hpp's
+  // rl_rng_replay_fresh_from_ms_str doc comment. Default empty (0), byte-identical to plan
+  // 257-02's own unextended fresh-class behavior when unset.
+  add_option( opt_string( "rl_rng_replay_fresh_from_ms", rl_rng_replay_fresh_from_ms_str ) );
   // Iteration-batched scorecard seeding (tstl-sylvanas quick task 260919-scb). See sim.hpp's
   // rl_iteration_seeds doc comment. Default empty, byte-identical to today's behavior.
   add_option( opt_func( "rl_iteration_seeds", parse_rl_iteration_seeds ) );
@@ -5359,6 +5363,40 @@ void sim_t::setup( sim_control_t* c )
           "(received '{}').",
           rl_rng_replay_fresh_class_str ) );
     }
+  }
+
+  // Gap closure of 257-05's own crash (tstl-sylvanas phase 257, plan 257-08). Study-only: starts
+  // the fresh-class option's own fresh window at a given fight time instead of the very first
+  // roll. An empty rl_rng_replay_fresh_from_ms_str is the same as unset (0 -- from the first
+  // roll), mirroring rl_rng_replay_fresh_class_str's own rule immediately above.
+  if ( !rl_rng_replay_fresh_from_ms_str.empty() )
+  {
+    if ( rl_rng_replay_fresh_class_str.empty() )
+    {
+      throw sc_invalid_sim_argument( fmt::format(
+          "rl_rng_replay_fresh_from_ms requires rl_rng_replay_fresh_class=<class> -- it starts "
+          "that class's own fresh window at a given fight time, not a fresh class of its own. "
+          "Received rl_rng_replay_fresh_from_ms={} with no rl_rng_replay_fresh_class= set.",
+          rl_rng_replay_fresh_from_ms_str ) );
+    }
+
+    int parsed_fresh_from_ms;
+    try
+    {
+      parsed_fresh_from_ms = util::to_int( rl_rng_replay_fresh_from_ms_str );
+    }
+    catch ( const std::exception& e )
+    {
+      throw sc_invalid_sim_argument( fmt::format(
+          "rl_rng_replay_fresh_from_ms must be a whole number of milliseconds (received '{}'): {}",
+          rl_rng_replay_fresh_from_ms_str, e.what() ) );
+    }
+    if ( parsed_fresh_from_ms < 0 )
+    {
+      throw sc_invalid_sim_argument( fmt::format(
+          "rl_rng_replay_fresh_from_ms must not be negative (received {}).", parsed_fresh_from_ms ) );
+    }
+    rl_rng_replay_fresh_from_ms = parsed_fresh_from_ms;
   }
 
   // Root only -- see sim.hpp's rl_rng_recorder member comment. Constructed once either option is
