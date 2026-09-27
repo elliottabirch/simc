@@ -453,6 +453,12 @@ struct swing_pin_state_t
     std::optional<std::int64_t> pinned_time_ms; // this hand's CURRENT booked pinned time, if any
     std::uint64_t pinned_n = 0;                 // M-111 (e): swings executed from a pinned booking
     std::uint64_t beyond_n = 0;                 // M-111 (e): swings executed from a beyond booking
+    // A-123 (ledger, M-111 (d)/(e) amended): executes with action->repeating == false are
+    // Skyfury's own (spell 462854) in-place repeat (generic::skyfury: repeating=false;
+    // execute(); repeating=true, engine/player/unique_gear.cpp) -- a proc-driven extra attack,
+    // never a swing-clock booking. Counted here, never pinned, never consuming idx or
+    // pinned_time_ms.
+    std::uint64_t repeats = 0;
   };
 
   player_t* pinned_player = nullptr; // the one non-pet, non-enemy player; set at fight_begin()
@@ -1922,6 +1928,17 @@ void recorder_t::swing_pin_note_swing_executed( action_t* action )
   if ( !hand )
     return;
 
+  // A-123: an in-place repeat (action->repeating == false at THIS execute -- Skyfury's own
+  // generic::skyfury sets it false, calls execute(), then restores it true) is a proc-driven
+  // extra attack, never a swing-clock booking. Return BEFORE touching pinned_time_ms/idx/
+  // pinned_n/beyond_n -- the pinned booking (if any) is untouched and will still be consumed by
+  // the ORDINARY repeating execute that follows.
+  if ( !action->repeating )
+  {
+    ++hand->repeats;
+    return;
+  }
+
   if ( hand->pinned_time_ms )
   {
     ++hand->pinned_n;
@@ -2131,6 +2148,8 @@ void recorder_t::write_sidecar()
               << ", \"oh_pinned\": " << swing_pin_.oh.pinned_n
               << ", \"mh_beyond\": " << swing_pin_.mh.beyond_n
               << ", \"oh_beyond\": " << swing_pin_.oh.beyond_n
+              << ", \"mh_repeats\": " << swing_pin_.mh.repeats
+              << ", \"oh_repeats\": " << swing_pin_.oh.repeats
               << ", \"pushes_ignored\": " << swing_pin_.pushes_ignored
               << ", \"mid_cast\": " << swing_pin_.mid_cast
               << ", \"path\": \"" << json_escape( root_->rl_swing_pin_file_str ) << "\"}";
@@ -2208,9 +2227,11 @@ void recorder_t::write_footer()
     if ( swing_pin_.pinned_player )
     {
       fmt::print( "rl_swing_pin mh_listed={} oh_listed={} mh_pinned={} oh_pinned={} "
-                  "mh_beyond={} oh_beyond={} pushes_ignored={} mid_cast={} path={}\n",
+                  "mh_beyond={} oh_beyond={} mh_repeats={} oh_repeats={} pushes_ignored={} "
+                  "mid_cast={} path={}\n",
                   swing_pin_.mh.listed.size(), swing_pin_.oh.listed.size(), swing_pin_.mh.pinned_n,
                   swing_pin_.oh.pinned_n, swing_pin_.mh.beyond_n, swing_pin_.oh.beyond_n,
+                  swing_pin_.mh.repeats, swing_pin_.oh.repeats,
                   swing_pin_.pushes_ignored, swing_pin_.mid_cast, root_->rl_swing_pin_file_str );
     }
 
