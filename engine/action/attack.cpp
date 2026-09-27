@@ -373,27 +373,6 @@ void attack_t::reschedule_auto_attack( double old_swing_haste )
     return;
   }
 
-  // Study-only swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111 (d)): a haste rescale never touches a pinned hand's already-booked TIME -- it
-  // keeps that SAME pinned time, unconditionally, until the swing itself executes. But the
-  // engine's own SEQUENCE of event operations must still happen (M-111 (d)'s own words: "every
-  // add, cancel and reschedule still happens, in the same order, so event ids are renewed
-  // exactly where the engine renews them; only the time argument is replaced"): the natural,
-  // unpinned engine calls reschedule()/cancel+recreate here on every haste change, which always
-  // assigns event_t::reschedule's own NEW id (event.cpp 49-51) regardless of whether the time
-  // value itself changes. Skipping that renewal entirely (returning with no event operation at
-  // all, as this branch used to) leaves the pinned swing's event id one generation behind the
-  // natural world's, which changes same-millisecond tie-break ORDER against any other event at
-  // the identical time (event_manager.cpp 145-148: ties break by id after time) -- a real,
-  // measured divergence (this tracer's own finding), not a hypothetical. Reschedule to the
-  // SAME remaining time (a zero-length delta) so nothing about the fire time moves, but the id
-  // still renews exactly where the natural path would have renewed it.
-  if ( rl_rng_record::swing_pin_is_pinned( sim, this ) )
-  {
-    if ( execute_event )
-      execute_event->reschedule( execute_event->remains() );
-    return;
-  }
-
   // Note that if attack -> swing_haste() > old_swing_haste, this could
   // probably be handled by rescheduling, but the code is slightly simpler if
   // we just cancel the event and make a new one.

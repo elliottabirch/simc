@@ -39,6 +39,7 @@ struct action_t;
 struct action_state_t;
 struct raid_event_t;
 struct proc_rng_t;
+struct event_t;
 
 namespace rng
 {
@@ -422,45 +423,95 @@ void register_raid_event( sim_t* sim, raid_event_t& event );
 // is off.
 bool active( const sim_t* sim );
 
-// ---- Swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111). Study-only; refused on the
-// scoring path (simc_channel.py). Every function below is a no-op / std::nullopt / false (one
+// ---- Swing trace / swing pin (tstl-sylvanas phase 257, plan 257-09, D-18, owner ruling A-125 --
+// supersedes plan 257-07's own v1 pin-list design, A-124's finding: simc moves a swing LAZILY
+// (event_t::reschedule only records a new due time; occurs() shows it, event.hpp:75), so a
+// booked "final landing time" is provisional, not the time the engine actually shows at any
+// earlier instant -- the v1 list-of-final-times pin therefore woke fight B 20-130ms away from
+// fight A. D-18 replaces it with a per-hand OPERATION TRACE (every add/reschedule/cancel/fire,
+// with the due time the engine showed right after it) and a pin that replays that trace AS OF
+// each of fight B's own operations, not as a list of final times. Study-only; refused on the
+// scoring path (simc_channel.py). Every function below is a no-op / passthrough / false (one
 // pointer check on root->rl_rng_recorder, then a player-identity check) unless
-// sim_t::rl_swing_pin_file_str is set AND the exactly-one-player check at fight begin passed. ----
+// sim_t::rl_swing_trace_file_str or sim_t::rl_swing_pin_file_str is set AND the
+// exactly-one-player check at fight begin passed. ----
 
-// Called from action_t::schedule_execute(), right where time_to_execute is computed (BEFORE
-// start_action_execute_event() uses it) -- for EVERY action, not only auto-attacks; the
-// player-identity check inside makes this a cheap no-op for anything that is not currently the
-// one designated player's main_hand_attack/off_hand_attack. Returns the OVERRIDE relative time
-// to book: either the hand's EXISTING pinned time (a MOVE -- the speed rescale in
-// attack_t::reschedule_auto_attack, player_t::delay_auto_attacks/reset_auto_attacks, the
-// Maelstrom Weapon hard-cast reset, Ascendance's hand-over -- all reach this same call site
-// through their own cancel-then-schedule_execute() sequences, and all must keep the SAME
-// pinned time, M-111 (d)), or a brand-NEW booking's freshly chosen listed time. Returns
-// std::nullopt when the pin is inactive for this action, or this hand has fallen beyond the end
-// of its own list -- the caller's own natural time_to_execute is used unchanged either way.
-std::optional<timespan_t> swing_pin_resolve_booking( sim_t* sim, action_t* action );
+// The trace file's own row kinds (M-110's format, "How D-18 is built" section 2) -- shared
+// between sim.cpp's setup()-time parser (into sim_t::rl_swing_pin_kind's parallel array, which
+// cannot itself be a vector<char> of these named constants only because sim.hpp must not
+// include this header) and every funnel below. SWING_ROW_INJECT never appears in a PARSED pin
+// trace (M-110's read_trace, allow_inject=false for every fight-A/pin-input trace); it is
+// written only into a PINNED fight's OWN trace file by the funnels below.
+inline constexpr char SWING_ROW_BOOK = 0;
+inline constexpr char SWING_ROW_REBOOK = 1;
+inline constexpr char SWING_ROW_RESTART = 2;
+inline constexpr char SWING_ROW_RESCHED = 3;
+inline constexpr char SWING_ROW_LAND = 4;
+inline constexpr char SWING_ROW_DROP = 5;
+inline constexpr char SWING_ROW_CANCEL = 6;
+inline constexpr char SWING_ROW_INJECT = 7;
+inline constexpr char SWING_HAND_MH = 0;
+inline constexpr char SWING_HAND_OH = 1;
 
-// True exactly when `action` is currently a pinned hand (the swing pin active for this action's
-// player, `action` is that player's CURRENT main_hand_attack or off_hand_attack) AND that hand
-// has an active pinned time right now -- never true once the hand has fallen beyond its own
-// list. Consulted by attack_t::reschedule_auto_attack (an immediate no-op return -- the haste
-// rescale never touches a pinned hand) and by player_t::delay_auto_attacks/reset_auto_attacks
-// (skip the push/delay entirely and tally it via swing_pin_note_push_ignored below) so a pinned
-// hand's booked time is moved by nothing but swing_pin_resolve_booking's own logic (M-111 (d)).
-bool swing_pin_is_pinned( sim_t* sim, const action_t* action );
+// Study-only pin-trace parser (M-110, D-18 (a)). The SAME text format `rl_rng_record::
+// write_swing_trace_file` (rl_rng_record.cpp, called from fight_end()) produces -- an
+// INDEPENDENT C++ reader, never a call into Python. Applies read_trace's own syntax rules with
+// allow_inject=false always (a pin/fight-A input trace never carries an inject row -- one is
+// refused by name, which is also how a v1 three-line pin list fails, at its header). Throws
+// std::runtime_error with a short reason fragment on any malformed line; the caller (sim_t::
+// setup()) wraps it in the fork's own named refusal message. Returns the header's own actor
+// name; appends one entry per parsed row to the four parallel arrays (never clearing them
+// first -- the caller passes fresh, empty vectors).
+std::string parse_swing_trace_file( const std::vector<std::string>& lines,
+                                     std::vector<char>& hand, std::vector<std::int64_t>& op_ms,
+                                     std::vector<char>& kind, std::vector<std::int64_t>& due_ms );
 
-// Tallies one ignored push against the whole-run pushes_ignored counter (M-111 (e)) -- called
-// from player_t::delay_auto_attacks/reset_auto_attacks exactly when swing_pin_is_pinned() above
-// was true and the push/delay was therefore skipped rather than applied.
-void swing_pin_note_push_ignored( sim_t* sim );
+// Called from action_t::start_action_execute_event(), BEFORE make_event() constructs the new
+// execute event -- for EVERY action, not only auto-attacks; the player-identity check inside
+// makes this a cheap passthrough for anything that is not currently the one designated player's
+// main_hand_attack/off_hand_attack. Returns the delta to book: `t` unchanged when the trace/pin
+// is inactive for this action; when rl_swing_trace is active, `t` unchanged (the trace only
+// OBSERVES this booking -- a book/rebook/restart row, per D-18 (a)); when rl_swing_pin is ALSO
+// active, the pin's own D-18 (b)/(c) value in place of `t` (never touching WHICH event
+// operation happens, only its time argument, per M-111 (d)'s inherited invariant).
+timespan_t swing_event_created( sim_t* sim, action_t* action, timespan_t t );
+
+// Called from the top of event_t::reschedule(), BEFORE _sim.event_mgr.global_event_id is
+// consumed for this reschedule -- a passthrough for anything that is not currently one of the
+// designated player's own execute_event pointers (identified by comparing `e` itself, a cheap
+// pointer-value check, against player->main_hand_attack->execute_event / off_hand_attack->
+// execute_event AT THE MOMENT OF THE CALL -- covers Windlash after Ascendance's hand-over with
+// no separate logic, exactly like the v1 pin's own action-identity check, one level indirect).
+// Returns the delta_time to use in place of the caller's own.
+timespan_t swing_event_rescheduled( sim_t* sim, event_t* e, timespan_t delta_time );
+
+// Called from the top of event_t::cancel( event_t*& ), for a non-null, not-yet-canceled event
+// -- BEFORE `e->canceled = true` -- a no-op for anything that is not currently one of the
+// designated player's own execute_event pointers (same identity check as above). Writes a
+// `cancel` row (trace-active) / advances the pin's own per-hand state (pin-active); no return
+// value -- the cancel itself is never overridden, only observed.
+void swing_event_canceled( sim_t* sim, event_t* e );
+
+// Called from action_execute_event_t::execute(), immediately AFTER `action->execute_event =
+// nullptr;` -- a no-op unless `action` is currently a designated hand. The event has come due;
+// whether it becomes a `land` row (action_t::execute() runs and calls swing_attack_executed
+// below) or a `drop` row (the dead-target/channel-pause branches leave the hand idle or re-book
+// it without ever reaching action_t::execute()) is not yet known here, so this funnel only
+// marks the hand PENDING at this millisecond -- the next funnel call for this hand (whichever
+// comes first: swing_attack_executed's own land, or a later swing_event_created's own book/
+// rebook/restart) resolves the pending row as `land` or `drop` respectively before writing its
+// own row, per "How D-18 is built" section 1 (iv)/(v).
+void swing_event_fired( sim_t* sim, action_t* action );
 
 // Called from action_t::execute(), immediately BEFORE its own repeating self-rebook tail call
 // (`if ( repeating && !proc ) schedule_execute();`) -- a no-op unless `action` is currently a
-// pinned hand. Clears that hand's just-consumed pinned time (tallying one pinned swing) or
-// tallies one beyond-the-list swing when the hand had none, advances the hand's own list
-// position past whatever it just consumed, and tallies mid_cast when the player had a cast or
-// channel in progress at this exact moment (M-111 (d), (e)). Must run BEFORE the self-rebook, or
-// that immediate re-book would see a still-current pinned time and book with zero delay forever.
-void swing_pin_note_swing_executed( sim_t* sim, action_t* action );
+// designated hand. An in-place repeat (action->repeating == false -- Skyfury's own generic::
+// skyfury sets it false, calls execute(), then restores it true, A-123) is a proc-driven extra
+// attack, never a swing-clock operation: tallies one repeat and returns BEFORE resolving any
+// pending firing. Otherwise resolves this hand's pending firing (set by swing_event_fired
+// above) as a `land` row, and tallies mid_cast when the player had a cast or channel in
+// progress at this exact moment (M-111 (e)). Must run BEFORE the self-rebook, exactly like the
+// v1 pin's own site, or that immediate re-book would see the pending firing still unresolved.
+void swing_attack_executed( sim_t* sim, action_t* action );
 
 } // namespace rl_rng_record

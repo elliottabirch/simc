@@ -6,6 +6,7 @@
 #include "event.hpp"
 #include "player/actor.hpp"
 #include "sim.hpp" // replace with event manager dependency
+#include "sim/rl_rng_record.hpp"
 
 // ==========================================================================
 // Event
@@ -48,6 +49,15 @@ void* event_t::operator new( std::size_t size, sim_t& sim )
 
 void event_t::reschedule( timespan_t delta_time )
 {
+  // Study-only swing trace/pin (tstl-sylvanas phase 257, plan 257-09, D-18, owner ruling A-125):
+  // observes/overrides ONLY the one designated player's own mh/oh execute_event -- a cheap
+  // passthrough for every other event the moment the option is inactive (root->rl_rng_recorder
+  // null) or `this` names neither hand (rl_rng_record.cpp's own identity check). Runs at the TOP
+  // of this function, before delta_time is consumed below, so a pin override lands on the SAME
+  // reschedule operation the engine was already performing -- the operation itself (and so
+  // every event id, assigned right after) is always the engine's own.
+  delta_time = rl_rng_record::swing_event_rescheduled( &_sim, this, delta_time );
+
   id = ++_sim.event_mgr.global_event_id;
   delta_time += _sim.event_mgr.current_time;
 
@@ -74,6 +84,13 @@ void event_t::cancel( event_t*& e )
 {
   if ( !e )
     return;
+
+  // Study-only swing trace/pin (tstl-sylvanas phase 257, plan 257-09, D-18): a cheap passthrough
+  // for every event but the one designated player's own mh/oh execute_event -- observes the
+  // cancel (a `cancel` row/state transition), never overrides it (a cancel has no time argument
+  // to override). Runs BEFORE `e->canceled` is set below, for a non-null, not-yet-canceled event.
+  if ( !e->canceled )
+    rl_rng_record::swing_event_canceled( &e->_sim, e );
 
 #ifdef ACTOR_EVENT_BOOKKEEPING
   if ( e->_sim.debug && e->actor && !e->canceled )
