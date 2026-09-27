@@ -14888,13 +14888,24 @@ void player_t::reset_auto_attacks( timespan_t delay, proc_t* proc )
     main_hand_attack->schedule_execute();
     if ( delay > timespan_t::zero() && main_hand_attack->execute_event )
     {
-      // Study-only swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111 (d), (e)): a
-      // pinned hand ignores this extra delay entirely -- the cancel-then-schedule_execute()
-      // above already kept the SAME pinned time (swing_pin_resolve_booking's own MOVE branch);
-      // applying the delay on top would move it away from that pinned time.
+      // Study-only swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111 (d), (e)):
+      // a pinned hand ignores this extra delay's TIME entirely -- the
+      // cancel-then-schedule_execute() above already kept the SAME pinned time
+      // (swing_pin_resolve_booking's own MOVE branch); applying the delay on top would move it
+      // away from that pinned time. But the natural, unpinned path STILL performs a SECOND
+      // event operation here (this reschedule(), on top of the cancel+schedule_execute() above)
+      // -- M-111 (d)'s own words: "every add, cancel and reschedule still happens, in the same
+      // order, so event ids are renewed exactly where the engine renews them; only the time
+      // argument is replaced". Skipping this second renewal entirely (as this branch used to)
+      // leaves the pinned swing's event id one generation behind the natural world's, changing
+      // same-millisecond tie-break order against any other event at the identical time
+      // (event_manager.cpp 145-148) -- a real, measured divergence (this tracer's own finding).
+      // Reschedule to the SAME remaining time (zero-length delta): the fire time does not move,
+      // but the id still renews exactly where the natural path would have renewed it.
       if ( rl_rng_record::swing_pin_is_pinned( sim, main_hand_attack ) )
       {
         rl_rng_record::swing_pin_note_push_ignored( sim );
+        main_hand_attack->execute_event->reschedule( main_hand_attack->execute_event->remains() );
       }
       else
       {
@@ -14909,11 +14920,12 @@ void player_t::reset_auto_attacks( timespan_t delay, proc_t* proc )
     off_hand_attack->schedule_execute();
     if ( delay > timespan_t::zero() && off_hand_attack->execute_event )
     {
-      // Study-only swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111 (d), (e)): see
-      // the main-hand branch above.
+      // Study-only swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111 (d), (e)):
+      // see the main-hand branch above.
       if ( rl_rng_record::swing_pin_is_pinned( sim, off_hand_attack ) )
       {
         rl_rng_record::swing_pin_note_push_ignored( sim );
+        off_hand_attack->execute_event->reschedule( off_hand_attack->execute_event->remains() );
       }
       else
       {
@@ -14935,12 +14947,18 @@ void player_t::delay_auto_attacks( timespan_t delay, proc_t* proc )
 
   if ( main_hand_attack && main_hand_attack->execute_event )
   {
-    // Study-only swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111 (d), (e)): a
-    // pinned hand ignores this delay entirely -- its booked time may only move through
-    // swing_pin_resolve_booking's own logic.
+    // Study-only swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111 (d), (e)): a pinned hand ignores this delay's TIME entirely -- its booked time may
+    // only move through swing_pin_resolve_booking's own logic. But the natural, unpinned path
+    // STILL calls reschedule() here on every delay -- M-111 (d)'s own words: "every add, cancel
+    // and reschedule still happens ... only the time argument is replaced". Skipping the
+    // reschedule call entirely (as this branch used to) leaves the event id one generation
+    // behind the natural world's, changing same-millisecond tie-break order against any other
+    // event at the identical time (event_manager.cpp 145-148) -- a real, measured divergence
+    // (this tracer's own finding). Reschedule to the SAME remaining time (zero-length delta).
     if ( rl_rng_record::swing_pin_is_pinned( sim, main_hand_attack ) )
     {
       rl_rng_record::swing_pin_note_push_ignored( sim );
+      main_hand_attack->execute_event->reschedule( main_hand_attack->execute_event->remains() );
     }
     else
     {
@@ -14952,11 +14970,11 @@ void player_t::delay_auto_attacks( timespan_t delay, proc_t* proc )
 
   if ( off_hand_attack && off_hand_attack->execute_event )
   {
-    // Study-only swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111 (d), (e)): see the
-    // main-hand branch above.
+    // Study-only swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111 (d), (e)): see the main-hand branch above.
     if ( rl_rng_record::swing_pin_is_pinned( sim, off_hand_attack ) )
     {
       rl_rng_record::swing_pin_note_push_ignored( sim );
+      off_hand_attack->execute_event->reschedule( off_hand_attack->execute_event->remains() );
     }
     else
     {
