@@ -740,6 +740,17 @@ struct sim_t : private sc_thread_t
   // record_close() (right after that fight's close row), closed with a footer in write_footer().
   // Root-owned, same single-writer reason as rl_translog_stream above.
   std::unique_ptr<io::ofstream> rl_translog_attr_stream;
+  // 260927-d1 (D1 patchwerk disagreement census, Stage 1 Task 2): the per-decision APL-choice
+  // sidecar (`<rl_translog_file_str>.apl`, format 1 -- see rl_translog.hpp's APL CHOICE SIDECAR
+  // section). Opened alongside the main stream in open_and_write_header() ONLY when
+  // solver_record_apl_choice=1, appended to once per decision in record_decision() (immediately,
+  // not batched at fight close -- unlike rl_translog_attr_stream above), closed with a footer in
+  // write_footer(). Root-owned, same single-writer reason as rl_translog_stream above. Null
+  // (never opened) when solver_record_apl_choice is false/absent, the default.
+  std::unique_ptr<io::ofstream> rl_translog_apl_stream;
+  // Running count of decision rows written to rl_translog_apl_stream this process -- read back by
+  // write_footer() to stamp the sidecar's own footer record. Root-owned, same reason as above.
+  std::uint32_t rl_translog_apl_decisions = 0;
   // 260924-tlz (write-time zstd, owner ruling 2026-09-24, R-TLZ): the main translog stream
   // above (`rl_translog_stream`) now carries COMPRESSED bytes -- the row layout itself is
   // unchanged (no FORMAT_VERSION bump), only what gets written to disk. `rl_translog_zstd_cstream`
@@ -977,6 +988,15 @@ struct sim_t : private sc_thread_t
   // leaving these at -1). solver_control.cpp reads these read-only, once per decision.
   int solver_min_maelstrom_spend_lightning_bolt_idx = -1;
   int solver_min_maelstrom_spend_tempest_idx = -1;
+  // 260927-d1 (D1 patchwerk disagreement census, Stage 1 Task 2): records the engine's own APL
+  // pick (the `apl_choice` parameter solver_control::choose() already receives) to a SIDECAR file
+  // beside the main translog -- `<rl_translog_file_str>.apl`, format 1, see rl_translog.hpp's APL
+  // CHOICE SIDECAR section. bool, default false/absent -- byte-identical to a run built before
+  // this option existed (no new stream opened, record_decision()'s new trailing parameter unused).
+  // Requires rl_translog= (refused by name in sim.cpp's init() otherwise -- the sidecar has no
+  // base path of its own). Read-only after setup(); solver_control.cpp checks this once per
+  // decision to decide whether to pass apl_choice's name through to record_decision().
+  bool solver_record_apl_choice = false;
   // rl_forward_probe sim option (tstl-sylvanas Phase 222, plan 222-04,
   // NET-02's cross-path receipt). Loads a solver_policy= blob (weights are
   // already loaded+validated in setup() above, same as solver_policy=

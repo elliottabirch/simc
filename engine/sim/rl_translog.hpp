@@ -1011,6 +1011,99 @@ static_assert( offsetof( footer_record, zero_f ) == 16 );
 
 } // namespace rl_attr
 
+// ---- APL CHOICE SIDECAR (tstl-sylvanas quick task 260927-d1, Stage 1 Task 2) ----
+//
+// `<rl_translog_file_str>.apl`, same directory, same base name plus `.apl`. Opened alongside the
+// main stream and the `.attr` sidecar in open_and_write_header() -- but ONLY when
+// sim_t::solver_record_apl_choice is true (default false: no file, byte-identical to a run built
+// before this option existed). Unlike `.attr` above (batched, one FIGHT+DECISION block per fight,
+// written at record_close()), this sidecar is written IMMEDIATELY, one DECISION record per
+// decision, from inside record_decision() itself -- the same call already appending the main
+// translog row -- because the value being recorded (`apl_choice`'s name) is a `choose()`-local
+// parameter with no per-player accumulator to read back from later, unlike `.attr`'s
+// rl_own_real/rl_own_exp. Little-endian throughout, matching the translog's own convention (this
+// process only ever runs on little-endian hosts -- see file_header's own precedent above). This is
+// a SEPARATE format from both the translog's own and rl_attr's (rl_apl_choice::FORMAT_VERSION/
+// RECORD_SIZE below are independent literals) -- adding this sidecar touches neither existing
+// on-disk layout, and it is additive-only: option absent writes nothing new anywhere (Stage 1's
+// own proof (a)).
+namespace rl_apl_choice
+{
+
+inline constexpr char MAGIC[ 4 ] = { 'R', 'L', 'A', 'P' };
+inline constexpr std::uint32_t FORMAT_VERSION = 1u;
+inline constexpr std::uint32_t RECORD_SIZE = 64u;
+inline constexpr std::uint32_t HEADER_SIZE = 32u;
+
+inline constexpr std::uint32_t KIND_DECISION = 1u;
+inline constexpr std::uint32_t KIND_FOOTER = 2u;
+
+// Longest name observed across the enhancement Stormbringer profile's own action list is
+// "use_item_voracious_heart_of_ulatek" (35 chars) -- 47 bytes leaves headroom for any
+// equal-or-shorter-length action name in any other profile this sidecar might ever run against,
+// with room for the trailing NUL (`< 48`, matching file_header::obs_schema_sha's own "< 80"/
+// "< 72" convention immediately above rl_attr). A name that somehow exceeds this is truncated,
+// never refused -- this sidecar is a diagnostic aid, not a protocol the engine's own correctness
+// depends on.
+// 56, not 48: decision_record's other two fields (kind, seq) are 4 bytes each = 8 bytes, and the
+// struct is alignas(8) (below) to match every other sidecar struct in this file's 8-byte-aligned
+// convention -- 8 + NAME_BUF_SIZE must equal RECORD_SIZE (64) exactly, so NAME_BUF_SIZE is 56, not
+// the 48 a naive "just big enough for the longest name" read would suggest.
+inline constexpr std::size_t NAME_BUF_SIZE = 56u;
+
+// 32 bytes.
+struct alignas( 8 ) file_header
+{
+  char magic[ 4 ];                    // @0  -- MAGIC, not NUL-terminated
+  std::uint32_t format_version;       // @4  -- FORMAT_VERSION
+  std::uint32_t record_size;          // @8  -- RECORD_SIZE
+  std::uint32_t header_size;          // @12 -- HEADER_SIZE
+  std::uint8_t zero16[ 16 ];          // @16
+};
+static_assert( sizeof( file_header ) == HEADER_SIZE, "rl_apl_choice::file_header must be exactly HEADER_SIZE bytes" );
+static_assert( alignof( file_header ) == 8, "rl_apl_choice::file_header must be 8-aligned" );
+static_assert( offsetof( file_header, magic ) == 0 );
+static_assert( offsetof( file_header, format_version ) == 4 );
+static_assert( offsetof( file_header, record_size ) == 8 );
+static_assert( offsetof( file_header, header_size ) == 12 );
+static_assert( offsetof( file_header, zero16 ) == 16 );
+
+// One per decision, write order == decision order (the same record_decision() call that appends
+// the main translog row appends this one, immediately after). `name` is NUL-terminated and
+// zero-padded; empty (all zero) means apl_choice was null at this decision (no APL pick -- e.g.
+// the profile's own priority list ran out, which should not happen in practice but is not treated
+// as an error here; the Python reader counts it as its own "null" bucket, distinct from
+// "unmapped").
+struct alignas( 8 ) decision_record
+{
+  std::uint32_t kind;                  // @0  -- KIND_DECISION
+  std::uint32_t seq;                   // @4  -- the decision row's own seq, same value the main
+                                        //        translog row and the FIFO wire's "seq" field carry
+  char name[ NAME_BUF_SIZE ];          // @8
+};
+static_assert( sizeof( decision_record ) == RECORD_SIZE, "rl_apl_choice::decision_record must be exactly RECORD_SIZE bytes" );
+static_assert( alignof( decision_record ) == 8, "rl_apl_choice::decision_record must be 8-aligned" );
+static_assert( offsetof( decision_record, kind ) == 0 );
+static_assert( offsetof( decision_record, seq ) == 4 );
+static_assert( offsetof( decision_record, name ) == 8 );
+
+// Once, at translog close (write_footer()). Mirrors rl_attr::footer_record's own zero-fill
+// convention for every field besides the count.
+struct alignas( 8 ) footer_record
+{
+  std::uint32_t kind;                  // @0  -- KIND_FOOTER
+  std::uint32_t n_decisions;           // @4  -- count of DECISION records written (== the root
+                                        //        sim_t's rl_translog_apl_decisions)
+  std::uint8_t zero[ RECORD_SIZE - 8 ];  // @8
+};
+static_assert( sizeof( footer_record ) == RECORD_SIZE, "rl_apl_choice::footer_record must be exactly RECORD_SIZE bytes" );
+static_assert( alignof( footer_record ) == 8, "rl_apl_choice::footer_record must be 8-aligned" );
+static_assert( offsetof( footer_record, kind ) == 0 );
+static_assert( offsetof( footer_record, n_decisions ) == 4 );
+static_assert( offsetof( footer_record, zero ) == 8 );
+
+} // namespace rl_apl_choice
+
 // ---- Writer interface. All five are no-ops when rl_translog= is unset. ----
 
 // Root only -- called once, from sim_t::setup(). Opens the stream and
@@ -1073,7 +1166,16 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq,
                        bool held,
                        const float* candidate_features = nullptr, std::uint16_t candidate_mask = 0,
                        std::uint8_t candidate_count = 0,
-                       std::uint8_t chosen_candidate_slot = CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK );
+                       std::uint8_t chosen_candidate_slot = CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
+                       // 260927-d1 (D1 census, Stage 1 Task 2): apl_choice's own name() at this
+                       // decision, or nullptr when apl_choice was null (no APL pick) -- caller-
+                       // resolved (solver_control.cpp's choose() already holds the action_t*, this
+                       // file is a writer, not a decision-maker, D-12). Written to the `.apl`
+                       // sidecar ONLY when sim_t::solver_record_apl_choice is true; ignored (no
+                       // cost beyond the one bool check) otherwise. Defaulted so this is additive
+                       // at both existing call sites' call-compatibility, though both are updated
+                       // to pass it explicitly.
+                       const char* apl_choice_name = nullptr );
 
 // Called from sim_t::combat_end(), after datacollection_end(). Builds and
 // appends the close row, then flushes the buffered rows for this fight to
