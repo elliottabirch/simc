@@ -26,9 +26,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "util/timespan.hpp"
 
 struct sim_t;
 struct player_t;
@@ -418,5 +421,46 @@ void register_raid_event( sim_t* sim, raid_event_t& event );
 // Cheap query for a call site that wants to skip building a key string entirely when recording
 // is off.
 bool active( const sim_t* sim );
+
+// ---- Swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111). Study-only; refused on the
+// scoring path (simc_channel.py). Every function below is a no-op / std::nullopt / false (one
+// pointer check on root->rl_rng_recorder, then a player-identity check) unless
+// sim_t::rl_swing_pin_file_str is set AND the exactly-one-player check at fight begin passed. ----
+
+// Called from action_t::schedule_execute(), right where time_to_execute is computed (BEFORE
+// start_action_execute_event() uses it) -- for EVERY action, not only auto-attacks; the
+// player-identity check inside makes this a cheap no-op for anything that is not currently the
+// one designated player's main_hand_attack/off_hand_attack. Returns the OVERRIDE relative time
+// to book: either the hand's EXISTING pinned time (a MOVE -- the speed rescale in
+// attack_t::reschedule_auto_attack, player_t::delay_auto_attacks/reset_auto_attacks, the
+// Maelstrom Weapon hard-cast reset, Ascendance's hand-over -- all reach this same call site
+// through their own cancel-then-schedule_execute() sequences, and all must keep the SAME
+// pinned time, M-111 (d)), or a brand-NEW booking's freshly chosen listed time. Returns
+// std::nullopt when the pin is inactive for this action, or this hand has fallen beyond the end
+// of its own list -- the caller's own natural time_to_execute is used unchanged either way.
+std::optional<timespan_t> swing_pin_resolve_booking( sim_t* sim, action_t* action );
+
+// True exactly when `action` is currently a pinned hand (the swing pin active for this action's
+// player, `action` is that player's CURRENT main_hand_attack or off_hand_attack) AND that hand
+// has an active pinned time right now -- never true once the hand has fallen beyond its own
+// list. Consulted by attack_t::reschedule_auto_attack (an immediate no-op return -- the haste
+// rescale never touches a pinned hand) and by player_t::delay_auto_attacks/reset_auto_attacks
+// (skip the push/delay entirely and tally it via swing_pin_note_push_ignored below) so a pinned
+// hand's booked time is moved by nothing but swing_pin_resolve_booking's own logic (M-111 (d)).
+bool swing_pin_is_pinned( sim_t* sim, const action_t* action );
+
+// Tallies one ignored push against the whole-run pushes_ignored counter (M-111 (e)) -- called
+// from player_t::delay_auto_attacks/reset_auto_attacks exactly when swing_pin_is_pinned() above
+// was true and the push/delay was therefore skipped rather than applied.
+void swing_pin_note_push_ignored( sim_t* sim );
+
+// Called from action_t::execute(), immediately BEFORE its own repeating self-rebook tail call
+// (`if ( repeating && !proc ) schedule_execute();`) -- a no-op unless `action` is currently a
+// pinned hand. Clears that hand's just-consumed pinned time (tallying one pinned swing) or
+// tallies one beyond-the-list swing when the hand had none, advances the hand's own list
+// position past whatever it just consumed, and tallies mid_cast when the player had a cast or
+// channel in progress at this exact moment (M-111 (d), (e)). Must run BEFORE the self-rebook, or
+// that immediate re-book would see a still-current pinned time and book with zero delay forever.
+void swing_pin_note_swing_executed( sim_t* sim, action_t* action );
 
 } // namespace rl_rng_record

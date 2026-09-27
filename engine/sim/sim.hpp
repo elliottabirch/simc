@@ -816,6 +816,32 @@ struct sim_t : private sc_thread_t
   // after the empty/parse/negative checks below; rl_rng_record.cpp's on_draw reads THIS field,
   // never the raw string.
   int rl_rng_replay_fresh_from_ms = 0;
+  // Study-only option (tstl-sylvanas phase 257, plan 257-07, D-17). rl_swing_pin=<path>: books
+  // the one player's white swings (main_hand_attack/off_hand_attack, whichever action those
+  // pointers name at each booking -- Windlash after Ascendance's hand-over included) at the
+  // times listed in a small text file (a previously recorded fight's own swing times, M-110),
+  // instead of at the times that player's own attack speed would give. Requires
+  // rl_rng_replay= to already be set -- refused by name otherwise, in setup()'s replay refusal
+  // block in sim.cpp, directly after plan 257-08's own block above; refused when the file
+  // cannot be opened/read or is malformed (M-111 (b)); refused when combined with
+  // initial_swing_offset >= 0.0 (M-111 (d)). Refused a THIRD way only at fight begin, once
+  // players exist: when there is not exactly one player that is neither a pet nor an enemy
+  // (rl_rng_record.cpp's recorder_t::fight_begin(), M-111 (c)) -- not a setup()-time check,
+  // because the roster is not guaranteed to exist yet when setup() runs. An empty value is the
+  // same as unset (mirrors rl_rng_replay_file_str's own rule). NEVER reaches the official
+  // scoring path: refused unconditionally by scripts/simc-eval/lib/simc_channel.py's
+  // assert_sim_options_shape unless the study-only allow_swing_pin_study=True is also passed.
+  // Unset, every output byte (including rng.rec) is unchanged; rng.rec's bytes never depend on
+  // this option whether it is set or not (no header flag, no new entry -- M-111 (f)) -- only a
+  // NEW stdout line and, when rl_rng_record= is ALSO set, a new sidecar block appear when set.
+  std::string rl_swing_pin_file_str;
+  // The parsed pin lists (M-110's file format: a "# rl_swing_pin v1 ..." comment line, then one
+  // "mh <ms> <ms> ..." line and one "oh <ms> ..." line), populated once in setup()'s replay
+  // refusal block, right after rl_swing_pin_file_str's own refusals -- empty when unset.
+  // rl_rng_record.cpp's recorder_t reads these at fight begin (copying them into its own
+  // per-fight cursor state), never the raw string or the file again.
+  std::vector<std::int64_t> rl_swing_pin_mh;
+  std::vector<std::int64_t> rl_swing_pin_oh;
   // tstl-sylvanas phase 218, plan 218-02 (RIG-01). rl_fight_shape_index=<n>
   // names which declared fight shape (scripts/rl/specs/enhancement.json's
   // episode.fightMix, 1-based) this run was launched under. 0 is the
