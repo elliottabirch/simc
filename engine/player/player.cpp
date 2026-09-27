@@ -14888,7 +14888,18 @@ void player_t::reset_auto_attacks( timespan_t delay, proc_t* proc )
     main_hand_attack->schedule_execute();
     if ( delay > timespan_t::zero() && main_hand_attack->execute_event )
     {
-      main_hand_attack->execute_event->reschedule( main_hand_attack->execute_event->remains() + delay );
+      // Study-only swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111 (d), (e)): a
+      // pinned hand ignores this extra delay entirely -- the cancel-then-schedule_execute()
+      // above already kept the SAME pinned time (swing_pin_resolve_booking's own MOVE branch);
+      // applying the delay on top would move it away from that pinned time.
+      if ( rl_rng_record::swing_pin_is_pinned( sim, main_hand_attack ) )
+      {
+        rl_rng_record::swing_pin_note_push_ignored( sim );
+      }
+      else
+      {
+        main_hand_attack->execute_event->reschedule( main_hand_attack->execute_event->remains() + delay );
+      }
     }
   }
 
@@ -14898,7 +14909,16 @@ void player_t::reset_auto_attacks( timespan_t delay, proc_t* proc )
     off_hand_attack->schedule_execute();
     if ( delay > timespan_t::zero() && off_hand_attack->execute_event )
     {
-      off_hand_attack->execute_event->reschedule( off_hand_attack->execute_event->remains() + delay );
+      // Study-only swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111 (d), (e)): see
+      // the main-hand branch above.
+      if ( rl_rng_record::swing_pin_is_pinned( sim, off_hand_attack ) )
+      {
+        rl_rng_record::swing_pin_note_push_ignored( sim );
+      }
+      else
+      {
+        off_hand_attack->execute_event->reschedule( off_hand_attack->execute_event->remains() + delay );
+      }
     }
   }
 }
@@ -14915,16 +14935,35 @@ void player_t::delay_auto_attacks( timespan_t delay, proc_t* proc )
 
   if ( main_hand_attack && main_hand_attack->execute_event )
   {
-    sim->print_debug( "Delaying MH auto attack swing timer by {} to {}", delay, main_hand_attack->execute_event->remains() + delay );
-    main_hand_attack->execute_event->reschedule( main_hand_attack->execute_event->remains() + delay );
-    delayed = true;
+    // Study-only swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111 (d), (e)): a
+    // pinned hand ignores this delay entirely -- its booked time may only move through
+    // swing_pin_resolve_booking's own logic.
+    if ( rl_rng_record::swing_pin_is_pinned( sim, main_hand_attack ) )
+    {
+      rl_rng_record::swing_pin_note_push_ignored( sim );
+    }
+    else
+    {
+      sim->print_debug( "Delaying MH auto attack swing timer by {} to {}", delay, main_hand_attack->execute_event->remains() + delay );
+      main_hand_attack->execute_event->reschedule( main_hand_attack->execute_event->remains() + delay );
+      delayed = true;
+    }
   }
 
   if ( off_hand_attack && off_hand_attack->execute_event )
   {
-    sim->print_debug( "Delaying OH auto attack swing timer by {} to {}", delay, off_hand_attack->execute_event->remains() + delay );
-    off_hand_attack->execute_event->reschedule( off_hand_attack->execute_event->remains() + delay );
-    delayed = true;
+    // Study-only swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111 (d), (e)): see the
+    // main-hand branch above.
+    if ( rl_rng_record::swing_pin_is_pinned( sim, off_hand_attack ) )
+    {
+      rl_rng_record::swing_pin_note_push_ignored( sim );
+    }
+    else
+    {
+      sim->print_debug( "Delaying OH auto attack swing timer by {} to {}", delay, off_hand_attack->execute_event->remains() + delay );
+      off_hand_attack->execute_event->reschedule( off_hand_attack->execute_event->remains() + delay );
+      delayed = true;
+    }
   }
 
   if ( proc && delayed )

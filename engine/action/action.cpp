@@ -2234,6 +2234,13 @@ void action_t::execute()
       break;
   }
 
+  // Study-only swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111 (d), (e)). A no-op
+  // for anything that is not currently a pinned hand. MUST run before the repeating self-rebook
+  // immediately below: it clears this hand's just-consumed pinned time (or tallies a
+  // beyond-the-list swing) and advances its own list position -- otherwise that immediate
+  // re-book would see a still-current pinned time and book with zero delay forever.
+  rl_rng_record::swing_pin_note_swing_executed( sim, this );
+
   if ( repeating && !proc )
     schedule_execute();
 
@@ -2648,6 +2655,19 @@ void action_t::schedule_execute( action_state_t* state )
   sim->print_log( "{} schedules execute for {}", *player, *this );
 
   time_to_execute = execute_time();
+
+  // Study-only swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111 (d)). A no-op for
+  // anything that is not currently the one designated player's main_hand_attack/off_hand_attack
+  // (the pin is inactive most of the time, and every non-auto-attack action always returns
+  // std::nullopt here). When active, overrides this booking's own time -- either the hand's
+  // EXISTING pinned time (a MOVE: the caller cancelled and is re-booking, per
+  // attack_t::reschedule_auto_attack/player_t::reset_auto_attacks/the Maelstrom Weapon hard-cast
+  // reset/Ascendance's hand-over -- all reach this same line through their own
+  // cancel-then-schedule_execute() sequences) or a brand-new booking's freshly chosen listed
+  // time. Every event operation below still runs exactly as before -- only this ONE value
+  // changes.
+  if ( auto pinned = rl_rng_record::swing_pin_resolve_booking( sim, this ) )
+    time_to_execute = *pinned;
 
   execute_event = start_action_execute_event( time_to_execute, state );
 

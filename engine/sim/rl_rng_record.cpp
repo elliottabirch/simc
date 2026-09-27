@@ -30,6 +30,11 @@
 
 #include "action/action.hpp"
 #include "action/action_state.hpp"
+// Study-only swing pin (tstl-sylvanas phase 257, plan 257-07, D-17): swing_pin_hand_for() below
+// compares an action_t* against player_t::main_hand_attack/off_hand_attack (declared attack_t*
+// in player.hpp), which needs attack_t's complete definition to verify the derived-to-base
+// pointer adjustment for that comparison -- a plain forward declaration is not enough.
+#include "action/attack.hpp"
 #include "player/player.hpp"
 #include "player/stats.hpp"
 #include "sim/proc_rng.hpp"
@@ -426,6 +431,37 @@ struct replay_state_t
   std::uint64_t recorded_unused = 0;
 };
 
+// Study-only swing-pin state (tstl-sylvanas phase 257, plan 257-07, D-17, M-111). Non-null only
+// when sim_t::rl_swing_pin_file_str is non-empty (which itself requires replay_ to already be
+// set -- sim.cpp's setup() refuses otherwise, so this struct never exists without replay_).
+// root_->rl_swing_pin_mh/_oh were already parsed and validated by sim.cpp; this struct copies
+// them once (fight_begin()) and tracks THIS fight's own per-hand list position, pinned time and
+// counters -- reset at every fight_begin(), matching every other per-fight state in this file.
+struct swing_pin_state_t
+{
+  // One hand's own state (M-111 (d)). `idx` is the index of the first listed time this hand has
+  // not yet either consumed (its swing executed) or permanently skipped (fell before "now" at a
+  // booking call, M-112's own "unused_listed" -- read back from B's actual swing times, never
+  // counted here). A NEW booking peeks at listed[idx] without consuming it; only
+  // swing_pin_note_swing_executed() (called when the swing actually fires) advances idx --
+  // between those two events, the SAME candidate must never be re-offered, which is exactly what
+  // keeping idx unmoved at booking time, and moving it only at execution time, guarantees.
+  struct hand_t
+  {
+    std::vector<std::int64_t> listed;           // fight A's own listed times for this hand, ms
+    std::size_t idx = 0;                        // first not-yet-consumed/skipped index
+    std::optional<std::int64_t> pinned_time_ms; // this hand's CURRENT booked pinned time, if any
+    std::uint64_t pinned_n = 0;                 // M-111 (e): swings executed from a pinned booking
+    std::uint64_t beyond_n = 0;                 // M-111 (e): swings executed from a beyond booking
+  };
+
+  player_t* pinned_player = nullptr; // the one non-pet, non-enemy player; set at fight_begin()
+  hand_t mh;
+  hand_t oh;
+  std::uint64_t pushes_ignored = 0;  // whole-run (M-111 (e))
+  std::uint64_t mid_cast = 0;        // whole-run (M-111 (e))
+};
+
 // The recorder object -- owned by sim_t::rl_rng_recorder (root only, unique_ptr, forward
 // declared in sim.hpp). Implements rng::rl_draw_sink_t so basic_rng_t<Engine>::real()/roll()
 // can call into it through the process-wide rng::rl_draw_sink pointer. Every public entry point
@@ -464,6 +500,13 @@ public:
   std::uint32_t register_roller( rng::rng_t& stream, std::string_view key, roller_class_e cls,
                                   const action_t* action );
   void register_raid_event( raid_event_t& event );
+
+  // ---- Swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111) -- called only from the
+  // free functions of the same name at the bottom of this file. ----
+  std::optional<timespan_t> swing_pin_resolve_booking( action_t* action );
+  bool swing_pin_is_pinned( const action_t* action ) const;
+  void swing_pin_note_push_ignored() { ++swing_pin_.pushes_ignored; }
+  void swing_pin_note_swing_executed( action_t* action );
 
   // ---- Press-tag interface (plan 250-03, REC-04) -- called only from rl_press_scope_t's
   // out-of-line ctors/dtor and the free functions at the bottom of this file. ----
@@ -513,6 +556,13 @@ private:
   // that is NOT one of this fight's recorded numbers.
   double replay_take_fresh_number( std::uint32_t live_roller_id );
 
+  // Swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111 (c)/(d)). Returns &swing_pin_.mh
+  // or &swing_pin_.oh when `action` is currently the pinned player's main_hand_attack or
+  // off_hand_attack (checked at the MOMENT of the call, per M-111 (c) -- covers Windlash after
+  // Ascendance's hand-over with no extra logic), nullptr otherwise (including when the swing pin
+  // is not active at all this fight). Every swing-pin entry point above funnels through this.
+  swing_pin_state_t::hand_t* swing_pin_hand_for( const action_t* action );
+
   sim_t* root_;
   // True only when rl_rng_record= is set (253-02): gates every write-side concern (the stream,
   // the buffer, entry building, the sidecar, the footer's record/close/sidecar work). Registration
@@ -520,6 +570,11 @@ private:
   bool writing_ = false;
   // Non-null only when rl_rng_replay= is set (253-02) -- see replay_state_t's own doc comment.
   std::unique_ptr<replay_state_t> replay_;
+  // Active only when rl_swing_pin_file_str is set (which itself requires replay_ above) -- see
+  // swing_pin_state_t's own doc comment. Kept as a plain value (never null) so a swing-pin-off
+  // run pays one bool-equivalent check (pinned_player == nullptr) instead of a pointer
+  // dereference guard at every one of the swing-pin entry points' own no-op fast paths.
+  swing_pin_state_t swing_pin_;
   std::unique_ptr<io::ofstream> stream_;
   std::vector<unsigned char> buffer_;
   std::uint64_t row_count_ = 0;          // total records appended (buffered or already flushed)
@@ -1667,6 +1722,48 @@ void recorder_t::fight_begin()
   // at a time -- never the whole recording (a 10,000-fight recording is tens of GB).
   if ( replay_ )
     replay_fight_begin();
+
+  // Swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111 (c)/(d)). Reset EVERY fight
+  // (defensive, mirrors every other per-fight reset above -- this whole probe harness runs one
+  // fight per process, but nothing here assumes that). root_->rl_swing_pin_mh/_oh were already
+  // parsed and validated by sim.cpp's setup(); copying them here (rather than reading the root
+  // members directly at booking time) is what lets each fight track its OWN list position from
+  // a clean slate.
+  if ( !root_->rl_swing_pin_file_str.empty() )
+  {
+    swing_pin_.mh.listed = root_->rl_swing_pin_mh;
+    swing_pin_.mh.idx = 0;
+    swing_pin_.mh.pinned_time_ms.reset();
+    swing_pin_.oh.listed = root_->rl_swing_pin_oh;
+    swing_pin_.oh.idx = 0;
+    swing_pin_.oh.pinned_time_ms.reset();
+
+    // M-111 (c): exactly one player that is neither a pet nor an enemy -- pets and enemies book
+    // their own melee through the SAME action_t::schedule_execute()/attack_t::
+    // reschedule_auto_attack() functions this plan hooks, so this identity check is the ONLY
+    // place their exclusion is enforced; every other swing-pin entry point trusts
+    // swing_pin_hand_for()'s own `action->player == pinned_player` comparison.
+    player_t* found = nullptr;
+    int qualifying = 0;
+    for ( player_t* p : root_->player_no_pet_list )
+    {
+      if ( p->is_enemy() )
+        continue;
+      ++qualifying;
+      found = p;
+    }
+    if ( qualifying != 1 )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_swing_pin needs exactly one player that is neither a pet nor an enemy (found {}).",
+          qualifying ) );
+    }
+    swing_pin_.pinned_player = found;
+  }
+  else
+  {
+    swing_pin_.pinned_player = nullptr;
+  }
 }
 
 void recorder_t::fight_end()
@@ -1756,6 +1853,92 @@ void recorder_t::fight_end()
   // the table before the next fight_begin() rebuilds it.
   if ( replay_ )
     replay_fight_end();
+}
+
+// Swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111 (c)/(d)). See its own doc comment
+// in the class body above.
+swing_pin_state_t::hand_t* recorder_t::swing_pin_hand_for( const action_t* action )
+{
+  if ( !swing_pin_.pinned_player || !action || action->player != swing_pin_.pinned_player )
+    return nullptr;
+
+  // Checked "at the moment of the call" (M-111 (c)) -- whichever action player->main_hand_attack
+  // / off_hand_attack currently name, never a fixed action_t* remembered from an earlier call.
+  // This is exactly what covers Windlash after Ascendance's hand-over with no separate logic:
+  // the hand-over reassigns the pointer BEFORE calling schedule_execute() on the new attack.
+  if ( action == static_cast<const action_t*>( swing_pin_.pinned_player->main_hand_attack ) )
+    return &swing_pin_.mh;
+  if ( action == static_cast<const action_t*>( swing_pin_.pinned_player->off_hand_attack ) )
+    return &swing_pin_.oh;
+  return nullptr;
+}
+
+std::optional<timespan_t> recorder_t::swing_pin_resolve_booking( action_t* action )
+{
+  swing_pin_state_t::hand_t* hand = swing_pin_hand_for( action );
+  if ( !hand )
+    return std::nullopt;
+
+  const std::int64_t now_ms = static_cast<std::int64_t>( root_->current_time().total_millis() );
+
+  // A MOVE (M-111 (d)): the hand already has a pinned time at or after now -- every cancel-then-
+  // rebook sequence that reaches this same call site (reschedule_auto_attack's haste rescale,
+  // delay_auto_attacks/reset_auto_attacks, the Maelstrom Weapon hard-cast reset, Ascendance's
+  // hand-over) keeps that SAME pinned time, never advancing the hand's own list position.
+  if ( hand->pinned_time_ms && *hand->pinned_time_ms >= now_ms )
+    return timespan_t::from_millis( *hand->pinned_time_ms - now_ms );
+
+  // A NEW booking: peek at (never consume) the first not-yet-consumed/skipped listed time.
+  // Anything strictly before now can never be booked -- permanently skip past it (M-112's own
+  // "unused_listed", read back from B's actual swing times, not counted here).
+  while ( hand->idx < hand->listed.size() && hand->listed[ hand->idx ] < now_ms )
+    ++hand->idx;
+
+  if ( hand->idx < hand->listed.size() )
+  {
+    hand->pinned_time_ms = hand->listed[ hand->idx ];
+    return timespan_t::from_millis( *hand->pinned_time_ms - now_ms );
+  }
+
+  // Beyond the list (M-110): the engine's own timing is used: no override.
+  hand->pinned_time_ms.reset();
+  return std::nullopt;
+}
+
+bool recorder_t::swing_pin_is_pinned( const action_t* action ) const
+{
+  // const_cast is safe here: swing_pin_hand_for() only READS through the returned pointer in
+  // this function (no mutation), and the non-const overload's own signature is what every
+  // mutating caller (swing_pin_resolve_booking, swing_pin_note_swing_executed) needs -- adding a
+  // second const-qualified overload of the lookup itself would duplicate its whole body for a
+  // pointer this function never writes through.
+  swing_pin_state_t::hand_t* hand = const_cast<recorder_t*>( this )->swing_pin_hand_for( action );
+  return hand && hand->pinned_time_ms.has_value();
+}
+
+void recorder_t::swing_pin_note_swing_executed( action_t* action )
+{
+  swing_pin_state_t::hand_t* hand = swing_pin_hand_for( action );
+  if ( !hand )
+    return;
+
+  if ( hand->pinned_time_ms )
+  {
+    ++hand->pinned_n;
+    ++hand->idx; // consume it -- the NEXT new booking must never re-offer this same listed time.
+    hand->pinned_time_ms.reset();
+
+    // M-111 (e): mid_cast counts PINNED swings only, executing while the player had a cast or
+    // channel in progress -- the exact scenario a pinned hand's ignored pushes (M-111 (d)) make
+    // possible (the engine's own delay_auto_attacks/reset_auto_attacks would normally have
+    // pushed this swing back, but a pinned hand ignores that push per swing_pin_is_pinned()).
+    if ( action->player->executing || action->player->channeling )
+      ++swing_pin_.mid_cast;
+  }
+  else
+  {
+    ++hand->beyond_n;
+  }
 }
 
 void recorder_t::mark_resalt()
@@ -1934,6 +2117,24 @@ void recorder_t::write_sidecar()
       sidecar << "}";
     }
     sidecar << "]}";
+
+    // Study-only (tstl-sylvanas phase 257, plan 257-07, D-17): a SEPARATE top-level sidecar key
+    // (never nested under "replay" -- M-111 (f) names it its own block), present ONLY when the
+    // option is set, so a plain replay's sidecar stays byte-identical to before this option
+    // existed. Same field set as write_footer()'s own stdout line below.
+    if ( swing_pin_.pinned_player )
+    {
+      sidecar << ", \"swing_pin\": {"
+              << "\"mh_listed\": " << swing_pin_.mh.listed.size()
+              << ", \"oh_listed\": " << swing_pin_.oh.listed.size()
+              << ", \"mh_pinned\": " << swing_pin_.mh.pinned_n
+              << ", \"oh_pinned\": " << swing_pin_.oh.pinned_n
+              << ", \"mh_beyond\": " << swing_pin_.mh.beyond_n
+              << ", \"oh_beyond\": " << swing_pin_.oh.beyond_n
+              << ", \"pushes_ignored\": " << swing_pin_.pushes_ignored
+              << ", \"mid_cast\": " << swing_pin_.mid_cast
+              << ", \"path\": \"" << json_escape( root_->rl_swing_pin_file_str ) << "\"}";
+    }
   }
 
   sidecar << "}";
@@ -1998,6 +2199,19 @@ void recorder_t::write_footer()
       // end-anchored regex in cause_isolation.py's check_fresh_class_output) stays byte-for-byte
       // unchanged -- only a caller that also checks THIS line learns the fresh-from floor.
       fmt::print( "rl_rng_replay fresh_from_ms={}\n", replay_->fresh_from_ms );
+    }
+
+    // Study-only (tstl-sylvanas phase 257, plan 257-07, D-17): ONE new stdout line, printed
+    // ONLY when the option is set (M-111 (f)) -- unset, nothing here changes (byte-identical
+    // stdout to before this option existed). Same field set as write_sidecar()'s own
+    // "swing_pin" block above.
+    if ( swing_pin_.pinned_player )
+    {
+      fmt::print( "rl_swing_pin mh_listed={} oh_listed={} mh_pinned={} oh_pinned={} "
+                  "mh_beyond={} oh_beyond={} pushes_ignored={} mid_cast={} path={}\n",
+                  swing_pin_.mh.listed.size(), swing_pin_.oh.listed.size(), swing_pin_.mh.pinned_n,
+                  swing_pin_.oh.pinned_n, swing_pin_.mh.beyond_n, swing_pin_.oh.beyond_n,
+                  swing_pin_.pushes_ignored, swing_pin_.mid_cast, root_->rl_swing_pin_file_str );
     }
 
     std::set<roller_class_e> classes_present;
@@ -2092,6 +2306,42 @@ bool active( const sim_t* sim )
   while ( root->parent )
     root = root->parent;
   return static_cast<bool>( root->rl_rng_recorder );
+}
+
+// ---- Swing pin (tstl-sylvanas phase 257, plan 257-07, D-17, M-111). See each declaration's own
+// doc comment in rl_rng_record.hpp. Every one is a no-op / std::nullopt / false the moment
+// root->rl_rng_recorder is null -- byte-identical to before this option existed.
+
+std::optional<timespan_t> swing_pin_resolve_booking( sim_t* sim, action_t* action )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder )
+    return std::nullopt;
+  return root->rl_rng_recorder->swing_pin_resolve_booking( action );
+}
+
+bool swing_pin_is_pinned( sim_t* sim, const action_t* action )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder )
+    return false;
+  return root->rl_rng_recorder->swing_pin_is_pinned( action );
+}
+
+void swing_pin_note_push_ignored( sim_t* sim )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder )
+    return;
+  root->rl_rng_recorder->swing_pin_note_push_ignored();
+}
+
+void swing_pin_note_swing_executed( sim_t* sim, action_t* action )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder )
+    return;
+  root->rl_rng_recorder->swing_pin_note_swing_executed( action );
 }
 
 // ---- rl_press_scope_t (plan 250-03, REC-04). Out-of-line ctors/dtor -- needs recorder_t
