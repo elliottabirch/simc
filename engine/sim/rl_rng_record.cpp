@@ -2494,6 +2494,22 @@ void recorder_t::swing_trace_run_check_for_hand( char hand, std::int64_t t )
   if ( same_ms_as_own && h.j >= count_at_t )
     return;
 
+  // A-133 (D-18 (c)): a dead-target drop's own row is DEFERRED -- swing_event_fired marks the
+  // hand pending (h.pending_fired/h.pending_fired_ms) synchronously at the millisecond it
+  // fires, but swing_trace_emit (and so h.last_own_op_ms/h.j) runs only later, at
+  // swing_trace_resolve_creation_kind's flush when the hand is next booked -- still with
+  // drop_ms == h.pending_fired_ms, the ORIGINAL millisecond (section 1 (iv)/(v)). This rolling
+  // check event, with its reserved id, always runs before that later flush, so at THIS
+  // millisecond it cannot yet see the match swing_trace_emit will eventually record. A pending
+  // firing at exactly t IS that match, already decided, just not yet written: pin_model (the
+  // reference model) reads fight B's own FINISHED trace file, where this row already carries
+  // op_ms == t, and matches it there before ever reaching the breakpoint check, giving
+  // inject_skipped 0 (M-111 (f)) -- this check must agree without waiting for the deferred
+  // emit, rather than falling through to the stopped-clock branch below and counting a skip
+  // for a row that is, in fact, already in step.
+  if ( h.pending_fired && h.pending_fired_ms == t )
+    return;
+
   bool a_has = false, a_waiting = false;
   std::int64_t a_due = 0;
   for ( const auto& r : a_rows )
