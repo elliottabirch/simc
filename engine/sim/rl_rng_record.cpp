@@ -2069,10 +2069,28 @@ void recorder_t::fight_end()
   if ( replay_ )
     replay_fight_end();
 
+  // Swing pin (D-18, section 3): flush any breakpoint the rolling check event never reached.
+  // The check event is deliberately scheduled with the LARGEST possible id so it sorts after
+  // every ordinary event of its own millisecond (event_manager.cpp:146-148) -- but combat_end
+  // can be triggered by an ordinary event at that SAME millisecond, and the event manager never
+  // calls execute() on events still queued once combat is over. Fight_end() runs before the
+  // event manager's own flush/reset (this file's own fight_begin()/fight_end() doc comments),
+  // so every one of fight B's own operations for this fight has already happened -- running the
+  // remaining breakpoints' checks synchronously here, off the static breakpoint list and each
+  // hand's own FINAL state, is exactly equivalent to the check event that never got to fire (no
+  // "now" is read; R4's own stop/no-swing-waiting rule applies identically either way).
+  while ( swing_trace_.pin_active && swing_trace_.bp_cursor < swing_trace_.breakpoints.size() )
+  {
+    const std::int64_t t = swing_trace_.breakpoints[ swing_trace_.bp_cursor ];
+    swing_trace_run_check_for_hand( SWING_HAND_MH, t );
+    swing_trace_run_check_for_hand( SWING_HAND_OH, t );
+    ++swing_trace_.bp_cursor;
+  }
+
   // Swing trace (D-18, "How D-18 is built" section 2): the trace file is written ONCE, at fight
   // end, from memory -- a crash leaves no half file. Runs in BOTH modes (mirrors replay_ above),
-  // AFTER replay_fight_end() so a trace-only run's own fight-end bookkeeping is unaffected by
-  // write order.
+  // AFTER replay_fight_end() and the flush above so a trace-only run's own fight-end bookkeeping
+  // is unaffected by write order and every flushed inject row (if any) is included.
   swing_trace_write_file();
 }
 
