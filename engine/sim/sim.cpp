@@ -4317,6 +4317,11 @@ void sim_t::create_options()
   // why no separate hand-rolled parse block is needed (unlike solver_force_decision_str above).
   // Name resolution against RL_ACTIONS happens below, in its own fail-closed block.
   add_option( opt_int( "solver_min_maelstrom_spend", solver_min_maelstrom_spend, 0, 10 ) );
+  // 260927-d1 (D1 patchwerk disagreement census, Stage 1 Task 2): records the engine's own APL
+  // pick per decision to the `.apl` sidecar. Requires rl_translog= -- validated below, in its own
+  // fail-closed block immediately after solver_min_maelstrom_spend's own above. See sim.hpp's
+  // solver_record_apl_choice doc comment.
+  add_option( opt_bool( "solver_record_apl_choice", solver_record_apl_choice ) );
   // rl_forward_probe sim option (Phase 222, plan 222-04, NET-02's
   // cross-path receipt). See sim.hpp's rl_forward_probe_str doc comment.
   // Default empty, disabled.
@@ -5239,6 +5244,19 @@ void sim_t::setup( sim_control_t* c )
           solver_min_maelstrom_spend_lightning_bolt_idx < 0 ? "NOT FOUND" : "found",
           solver_min_maelstrom_spend_tempest_idx < 0 ? "NOT FOUND" : "found" ) );
     }
+  }
+
+  // 260927-d1 (D1 patchwerk disagreement census, Stage 1 Task 2): solver_record_apl_choice=1 has
+  // no base path of its own -- the sidecar is named `<rl_translog_file_str>.apl` -- so requesting
+  // it without rl_translog= would otherwise be a silent no-op (open_and_write_header() returns
+  // immediately whenever rl_translog_file_str is empty, before this option is ever consulted).
+  // Refuse by name rather than silently doing nothing, same discipline as every other option
+  // validated in this block.
+  if ( solver_record_apl_choice && rl_translog_file_str.empty() )
+  {
+    throw sc_runtime_error(
+        "solver_record_apl_choice=1 requires rl_translog= (the .apl sidecar has no base path of "
+        "its own)." );
   }
 
   if ( !solver_control_mode_str.empty() && solver_control_str.empty() )

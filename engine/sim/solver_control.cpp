@@ -1291,7 +1291,13 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
                                      chosen_target_actor_index, false,
                                      exploratory || candidate_exploratory, row_held,
                                      candidate_block_features, candidate_block_mask,
-                                     candidate_block_count, candidate_block_chosen_slot );
+                                     candidate_block_count, candidate_block_chosen_slot,
+                                     // 260927-d1 (D1 census, Stage 1 Task 2): the engine's own
+                                     // APL pick at this decision, same action_t* the FIFO wire's
+                                     // own "apl_choice" field names (solver_control.cpp:656-657
+                                     // above) -- nullptr when the option is off, matching every
+                                     // other "off" path's zero-cost convention.
+                                     sim->solver_record_apl_choice && apl_choice ? apl_choice->name() : nullptr );
       // 212-CR-FIX WR-06: accept_cast() can refuse a not-ready action via
       // protocol_abort() (a throw), which unwinds past combat_end()'s
       // record_close() hook entirely for this fight -- without this catch,
@@ -1357,7 +1363,11 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // for -- always the sentinel.
     rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, top_q,
                                    rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK, wr.floored, exploratory,
-                                   row_held );
+                                   row_held, nullptr, 0, 0,
+                                   rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
+                                   // 260927-d1 (D1 census, Stage 1 Task 2): same as the cast
+                                   // branch above.
+                                   sim->solver_record_apl_choice && apl_choice ? apl_choice->name() : nullptr );
     // 212-CR-FIX WR-06: same reasoning as the cast branch above -- flush on
     // an abort out of accept_wait() so the decision row already appended
     // survives it.

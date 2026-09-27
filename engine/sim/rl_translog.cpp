@@ -495,6 +495,37 @@ void open_and_write_header( sim_t* sim )
           "rl_translog=: write to '{}' failed writing the header.", attr_path ) );
     }
   }
+
+  // 260927-d1 (D1 census, Stage 1 Task 2): the `.apl` sidecar -- opened here, ONLY when
+  // solver_record_apl_choice=1, alongside the main stream and the `.attr` sidecar above (same "a
+  // bad path refuses at startup" rationale). Option absent/false: this whole block is skipped, no
+  // file is created, byte-identical to a run built before this option existed -- see
+  // rl_translog.hpp's APL CHOICE SIDECAR section.
+  if ( root->solver_record_apl_choice )
+  {
+    const std::string apl_path = root->rl_translog_file_str + ".apl";
+    root->rl_translog_apl_stream = std::make_unique<io::ofstream>();
+    root->rl_translog_apl_stream->open( apl_path, std::ios::out | std::ios::trunc | std::ios::binary );
+    if ( !root->rl_translog_apl_stream->is_open() )
+    {
+      throw sc_runtime_error( fmt::format( "rl_translog=: unable to open '{}' for writing.", apl_path ) );
+    }
+
+    rl_apl_choice::file_header ph{};
+    std::memcpy( ph.magic, rl_apl_choice::MAGIC, sizeof( rl_apl_choice::MAGIC ) );
+    ph.format_version = rl_apl_choice::FORMAT_VERSION;
+    ph.record_size = rl_apl_choice::RECORD_SIZE;
+    ph.header_size = rl_apl_choice::HEADER_SIZE;
+    std::memset( ph.zero16, 0, sizeof( ph.zero16 ) );
+
+    root->rl_translog_apl_stream->write( reinterpret_cast<const char*>( &ph ), sizeof( ph ) );
+    root->rl_translog_apl_stream->flush();
+    if ( !*root->rl_translog_apl_stream )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_translog=: write to '{}' failed writing the header.", apl_path ) );
+    }
+  }
 }
 
 void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float obs[ RL_OBS_DIM ],
@@ -502,7 +533,8 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float ob
                        float top_q, std::uint16_t chosen_target_actor_index, bool wait_floored,
                        bool exploratory, bool held,
                        const float* candidate_features, std::uint16_t candidate_mask,
-                       std::uint8_t candidate_count, std::uint8_t chosen_candidate_slot )
+                       std::uint8_t candidate_count, std::uint8_t chosen_candidate_slot,
+                       const char* apl_choice_name )
 {
   sim_t* root = root_of( sim );
   if ( root->rl_translog_file_str.empty() )
@@ -603,6 +635,30 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float ob
   // record_close()'s .attr DECISION records read this back rather than assuming a gapless seq
   // run within the fight.
   root->rl_translog_pending_seqs.push_back( seq );
+
+  // 260927-d1 (D1 census, Stage 1 Task 2): the `.apl` sidecar's own DECISION record, written
+  // IMMEDIATELY (unlike `.attr` above, which batches at fight close) -- see rl_translog.hpp's APL
+  // CHOICE SIDECAR section for why. No-op (one bool check, no allocation) when the option is off.
+  if ( root->rl_translog_apl_stream )
+  {
+    rl_apl_choice::decision_record ar{};
+    ar.kind = rl_apl_choice::KIND_DECISION;
+    ar.seq = static_cast<std::uint32_t>( seq );  // same narrowing convention as r.seq above
+    std::memset( ar.name, 0, sizeof( ar.name ) );
+    if ( apl_choice_name != nullptr )
+    {
+      std::strncpy( ar.name, apl_choice_name, sizeof( ar.name ) - 1 );
+    }
+    root->rl_translog_apl_stream->write( reinterpret_cast<const char*>( &ar ), sizeof( ar ) );
+    root->rl_translog_apl_stream->flush();
+    if ( !*root->rl_translog_apl_stream )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_translog=: write to '{}.apl' failed at decision seq={}.",
+          root->rl_translog_file_str, seq ) );
+    }
+    ++root->rl_translog_apl_decisions;
+  }
 }
 
 void record_close( sim_t* sim )
@@ -874,6 +930,29 @@ void write_footer( sim_t* sim )
           "rl_translog=: write to '{}.attr' failed writing the footer.", root->rl_translog_file_str ) );
     }
     root->rl_translog_attr_stream->close();
+  }
+
+  // 260927-d1 (D1 census, Stage 1 Task 2): the `.apl` sidecar's own FOOTER record, then close it
+  // -- mirrors the `.attr` sidecar's own footer-then-close sequence immediately above.
+  // n_decisions is the count of DECISION records this run actually wrote (root->
+  // rl_translog_apl_decisions, incremented once per record_decision() call while the stream is
+  // open), NOT the main translog's own decision count -- the two are expected to agree by
+  // construction (both increment once per record_decision() call) but this sidecar names its own
+  // count rather than borrowing the main stream's, so a reader can catch the two disagreeing.
+  if ( root->rl_translog_apl_stream )
+  {
+    rl_apl_choice::footer_record pfr{};
+    pfr.kind = rl_apl_choice::KIND_FOOTER;
+    pfr.n_decisions = root->rl_translog_apl_decisions;
+    std::memset( pfr.zero, 0, sizeof( pfr.zero ) );
+    root->rl_translog_apl_stream->write( reinterpret_cast<const char*>( &pfr ), sizeof( pfr ) );
+    root->rl_translog_apl_stream->flush();
+    if ( !*root->rl_translog_apl_stream )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_translog=: write to '{}.apl' failed writing the footer.", root->rl_translog_file_str ) );
+    }
+    root->rl_translog_apl_stream->close();
   }
 }
 
