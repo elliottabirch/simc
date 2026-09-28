@@ -655,6 +655,14 @@ bool rl_capability_own_value( player_t* p, const rl_capability& cap )
           "rl_policy::rl_capability_own_value: capability '{}' has unknown sim_pieces {}", cap.id,
           cap.sim_pieces ) );
 
+    // `player_t::sets` is nullptr for pets, guardians and enemy actors (player.cpp:1154 --
+    // `( !is_pet() && !is_enemy() ) ? new set_bonus_t( this ) : nullptr`). Those actors
+    // legitimately reach the capability code on the FIFO transport (solver_control::choose ->
+    // decision_dump::write_state_fields -> bind_slots / read_action_gate_bits runs for every
+    // player_t, e.g. the RL actor's lightning wolves), and a pet wears no set bonus: false, not a
+    // null dereference. The RL actor itself always has `sets`, so its bits are unchanged.
+    if ( p->sets == nullptr )
+      return false;
     return p->sets->has_set_bonus( p->specialization(), set, bonus );
   }
   if ( std::strcmp( cap.sim_kind, "potion_enabled" ) == 0 )
