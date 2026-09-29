@@ -297,7 +297,17 @@ inline constexpr std::uint32_t FORMAT_VERSION = 10u;  // 260918-cbc: credit-by-c
 // compile (tstl 220-03, OBS-06; formula updated 260901-pb1 Task 3 for version 5, updated again
 // 228-09 for version 6, updated again 230-04 for version 7, updated again 260917-pcn for
 // version 9 -- see top-of-file comment).
-inline constexpr std::uint32_t RECORD_SIZE = 2304u;  // 246.1-05 (CAP-01/CAP-02, width-only
+inline constexpr std::uint32_t RECORD_SIZE = 2320u;  // 260928-tb9 (width-only re-bless): 2304 -> 2320 -- RL_OBS_DIM
+                                                       // moves 315 -> 319 (four player_buffs columns for the Void
+                                                       // Execution Mandate trinket: its haste buff and its Impending
+                                                       // Execution crit buff, stacks + remains each, spells
+                                                       // 1250557/1263357, governed by capability
+                                                       // trinket_void_execution_mandate). roundup8(45 + 4*319 +
+                                                       // 4*8*23 + 4) = roundup8(2061) = 2064, + 160 proc block
+                                                       // + 96 credit block = 2320. Confirmed by the static_assert
+                                                       // immediately below, not hand-verified. FORMAT_VERSION stays
+                                                       // 10; encoderVersion stays 6 (width-only move).
+                                                       // 246.1-05 (CAP-01/CAP-02, width-only
                                                        // re-bless): 2232 -> 2304 -- RL_OBS_DIM
                                                        // moves 297 -> 315 (the 17-entry capability
                                                        // table's own `capability.<id>` scalars;
@@ -387,9 +397,9 @@ inline constexpr std::uint32_t PROC_BLOCK_OFFSET =
         4u * static_cast<std::uint32_t>( RL_TARGET_SLOTS ) * static_cast<std::uint32_t>( RL_TARGET_FEATURES ) +
         4u + 7u ) / 8u ) * 8u;
 inline constexpr std::uint32_t PROC_BLOCK_SIZE = 8u * rl_proc::COUNT;
-static_assert( PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE == 2208u,
+static_assert( PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE == 2224u,
                "PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE must equal the version-9 row size at the "
-               "246.1-05 (width-only re-bless, RL_OBS_DIM=315) obs width (2208) -- "
+               "260928-tb9 (width-only re-bless, RL_OBS_DIM=319) obs width (2224) -- "
                "CREDIT_BLOCK_OFFSET below is pinned to that exact value" );
 // 260918-cbc: the version-9 row size (unchanged formula) is where the new credit-by-cause
 // block starts; CREDIT_BLOCK_SIZE is the block's own byte count (two double[STREAM_COUNT]

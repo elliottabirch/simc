@@ -125,12 +125,12 @@ struct rl_capability
 inline constexpr const char* RL_REGISTRY_ID = "enhancement";
 inline constexpr const char* RL_ACTOR_NAME = "MID2_Shaman_Enhancement_Stormbringer";
 inline constexpr int RL_ENCODER_VERSION = 6;
-inline constexpr std::size_t RL_OBS_DIM = 315;
+inline constexpr std::size_t RL_OBS_DIM = 319;
 inline constexpr std::size_t RL_ACTION_DIM = 17;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
-inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:1736f947498759b018ec310f4795eadd16ee23cce4f56e82c4301af84426bc1e";
+inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:04513facfa7880932e3714766a717bb8081eeff5ada7d435d2da5fbf2af03949";
 inline constexpr const char* RL_MASK_RULES_SHA = "3f930294d36b217dca01fc51600c0da9d0568e20152fb53c588b6e8ddccf7662";
 inline constexpr const char* RL_ACTION_SPACE_SHA = "bdf7adc4cc139aca5a628d911446b4ca9fa1e2f41dd63d855984428b48cde01d";
 
@@ -167,6 +167,8 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "player_buffs.frenzied_focus.remains",
   "player_buffs.genius_insight.remains",
   "player_buffs.hasty_ritual.remains",
+  "player_buffs.impending_execution.stacks",
+  "player_buffs.impending_execution.remains",
   "player_buffs.lightning_strikes.stacks",
   "player_buffs.lightning_strikes.remains",
   "player_buffs.maelstrom_weapon.stacks",
@@ -193,6 +195,8 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "player_buffs.venomcursed_ascendance.remains",
   "player_buffs.venomcursed_mastery.remains",
   "player_buffs.versatile_ritual.remains",
+  "player_buffs.void_execution_mandate.stacks",
+  "player_buffs.void_execution_mandate.remains",
   "cooldowns.ascendance.remains",
   "cooldowns.berserking.remains",
   "cooldowns.crash_lightning.remains",
@@ -519,14 +523,15 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_15[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_16[] = {
+    { "stacks", rl_kind::k_int, 0.0, true, 15.0, false, 1.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_17[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 3.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_17[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 10.0, false, 1.0, nullptr, 0, false },
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
-};
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_18[] = {
+    { "stacks", rl_kind::k_int, 0.0, true, 10.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_19[] = {
@@ -542,43 +547,50 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_22[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_23[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 20.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_24[] = {
+    { "stacks", rl_kind::k_int, 0.0, true, 20.0, false, 1.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_25[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 5.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
 };
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_25[] = {
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
-};
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_26[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_27[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 12.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_28[] = {
+    { "stacks", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 12.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_29[] = {
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 12.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_30[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_30[] = {
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_31[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 15.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
-};
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_31[] = {
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_32[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_33[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_34[] = {
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_35[] = {
+    { "stacks", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
 };
 inline constexpr rl_obs_member RL_OBS_FAMILY_PLAYER_BUFFS_MEMBERS[] = {
   { "arc_discharge", "arc_discharge", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_0, 2 },
@@ -597,24 +609,26 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_PLAYER_BUFFS_MEMBERS[] = {
   { "frenzied_focus", "frenzied_focus", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_13, 1 },
   { "genius_insight", "genius_insight", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_14, 1 },
   { "hasty_ritual", "hasty_ritual", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_15, 1 },
-  { "lightning_strikes", "lightning_strikes", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_16, 2 },
-  { "maelstrom_weapon", "maelstrom_weapon", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_17, 2 },
-  { "masterful_ritual", "masterful_ritual", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_18, 1 },
-  { "potion_of_recklessness_Crit", "potion_of_recklessness_Crit", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_19, 1 },
-  { "potion_of_recklessness_Haste", "potion_of_recklessness_Haste", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_20, 1 },
-  { "potion_of_recklessness_Mastery", "potion_of_recklessness_Mastery", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_21, 1 },
-  { "potion_of_recklessness_Vers", "potion_of_recklessness_Vers", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_22, 1 },
-  { "rune_of_burning_haste", "rune_of_burning_haste", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_23, 2 },
-  { "short_circuit", "short_circuit", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_24, 2 },
-  { "storm_swell", "storm_swell", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_25, 1 },
-  { "storm_unleashed", "storm_unleashed", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_26, 2 },
-  { "stormblast", "stormblast", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_27, 2 },
-  { "stormsurge", "stormsurge", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_28, 1 },
-  { "tempest", "tempest", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_29, 2 },
-  { "unlimited_power", "unlimited_power", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_30, 2 },
-  { "venomcursed_ascendance", "venomcursed_ascendance", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_31, 1 },
-  { "venomcursed_mastery", "venomcursed_mastery", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_32, 1 },
-  { "versatile_ritual", "versatile_ritual", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_33, 1 },
+  { "impending_execution", "impending_execution", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_16, 2 },
+  { "lightning_strikes", "lightning_strikes", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_17, 2 },
+  { "maelstrom_weapon", "maelstrom_weapon", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_18, 2 },
+  { "masterful_ritual", "masterful_ritual", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_19, 1 },
+  { "potion_of_recklessness_Crit", "potion_of_recklessness_Crit", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_20, 1 },
+  { "potion_of_recklessness_Haste", "potion_of_recklessness_Haste", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_21, 1 },
+  { "potion_of_recklessness_Mastery", "potion_of_recklessness_Mastery", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_22, 1 },
+  { "potion_of_recklessness_Vers", "potion_of_recklessness_Vers", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_23, 1 },
+  { "rune_of_burning_haste", "rune_of_burning_haste", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_24, 2 },
+  { "short_circuit", "short_circuit", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_25, 2 },
+  { "storm_swell", "storm_swell", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_26, 1 },
+  { "storm_unleashed", "storm_unleashed", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_27, 2 },
+  { "stormblast", "stormblast", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_28, 2 },
+  { "stormsurge", "stormsurge", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_29, 1 },
+  { "tempest", "tempest", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_30, 2 },
+  { "unlimited_power", "unlimited_power", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_31, 2 },
+  { "venomcursed_ascendance", "venomcursed_ascendance", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_32, 1 },
+  { "venomcursed_mastery", "venomcursed_mastery", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_33, 1 },
+  { "versatile_ritual", "versatile_ritual", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_34, 1 },
+  { "void_execution_mandate", "void_execution_mandate", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_35, 2 },
 };
 
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_0[] = {
@@ -1048,10 +1062,6 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_PROC_CHANCES_MEMBERS[] = {
   { "windfury", "windfury_proc_chance_current", RL_OBS_FAMILY_PROC_CHANCES_LEAVES_1, 1 },
 };
 
-inline constexpr double RL_BUCKETS_SLOT266[] = { 0.0, 2.0 };
-inline constexpr double RL_BUCKETS_SLOT267[] = { 0.0, 3.0 };
-inline constexpr double RL_BUCKETS_SLOT268[] = { 0.0, 4.0 };
-inline constexpr double RL_BUCKETS_SLOT269[] = { 0.0, 5.0 };
 inline constexpr double RL_BUCKETS_SLOT270[] = { 0.0, 2.0 };
 inline constexpr double RL_BUCKETS_SLOT271[] = { 0.0, 3.0 };
 inline constexpr double RL_BUCKETS_SLOT272[] = { 0.0, 4.0 };
@@ -1060,26 +1070,30 @@ inline constexpr double RL_BUCKETS_SLOT274[] = { 0.0, 2.0 };
 inline constexpr double RL_BUCKETS_SLOT275[] = { 0.0, 3.0 };
 inline constexpr double RL_BUCKETS_SLOT276[] = { 0.0, 4.0 };
 inline constexpr double RL_BUCKETS_SLOT277[] = { 0.0, 5.0 };
-inline constexpr double RL_BUCKETS_SLOT278[] = { 0.0, 1.0 };
-inline constexpr double RL_BUCKETS_SLOT279[] = { 0.0, 2.0 };
-inline constexpr double RL_BUCKETS_SLOT280[] = { 0.0, 3.0 };
-inline constexpr double RL_BUCKETS_SLOT281[] = { 0.0, 4.0 };
-inline constexpr double RL_BUCKETS_SLOT282[] = { 0.0, 5.0 };
-inline constexpr double RL_BUCKETS_SLOT283[] = { 0.0, 1.0 };
-inline constexpr double RL_BUCKETS_SLOT284[] = { 0.0, 2.0 };
-inline constexpr double RL_BUCKETS_SLOT285[] = { 0.0, 3.0 };
-inline constexpr double RL_BUCKETS_SLOT286[] = { 0.0, 4.0 };
-inline constexpr double RL_BUCKETS_SLOT287[] = { 0.0, 5.0 };
-inline constexpr double RL_BUCKETS_SLOT288[] = { 0.0, 1.0 };
-inline constexpr double RL_BUCKETS_SLOT289[] = { 0.0, 2.0 };
-inline constexpr double RL_BUCKETS_SLOT290[] = { 0.0, 3.0 };
-inline constexpr double RL_BUCKETS_SLOT291[] = { 0.0, 4.0 };
-inline constexpr double RL_BUCKETS_SLOT292[] = { 0.0, 5.0 };
-inline constexpr double RL_BUCKETS_SLOT293[] = { 0.0, 1.0 };
-inline constexpr double RL_BUCKETS_SLOT294[] = { 0.0, 2.0 };
-inline constexpr double RL_BUCKETS_SLOT295[] = { 0.0, 3.0 };
-inline constexpr double RL_BUCKETS_SLOT296[] = { 0.0, 4.0 };
-inline constexpr double RL_BUCKETS_SLOT297[] = { 0.0, 5.0 };
+inline constexpr double RL_BUCKETS_SLOT278[] = { 0.0, 2.0 };
+inline constexpr double RL_BUCKETS_SLOT279[] = { 0.0, 3.0 };
+inline constexpr double RL_BUCKETS_SLOT280[] = { 0.0, 4.0 };
+inline constexpr double RL_BUCKETS_SLOT281[] = { 0.0, 5.0 };
+inline constexpr double RL_BUCKETS_SLOT282[] = { 0.0, 1.0 };
+inline constexpr double RL_BUCKETS_SLOT283[] = { 0.0, 2.0 };
+inline constexpr double RL_BUCKETS_SLOT284[] = { 0.0, 3.0 };
+inline constexpr double RL_BUCKETS_SLOT285[] = { 0.0, 4.0 };
+inline constexpr double RL_BUCKETS_SLOT286[] = { 0.0, 5.0 };
+inline constexpr double RL_BUCKETS_SLOT287[] = { 0.0, 1.0 };
+inline constexpr double RL_BUCKETS_SLOT288[] = { 0.0, 2.0 };
+inline constexpr double RL_BUCKETS_SLOT289[] = { 0.0, 3.0 };
+inline constexpr double RL_BUCKETS_SLOT290[] = { 0.0, 4.0 };
+inline constexpr double RL_BUCKETS_SLOT291[] = { 0.0, 5.0 };
+inline constexpr double RL_BUCKETS_SLOT292[] = { 0.0, 1.0 };
+inline constexpr double RL_BUCKETS_SLOT293[] = { 0.0, 2.0 };
+inline constexpr double RL_BUCKETS_SLOT294[] = { 0.0, 3.0 };
+inline constexpr double RL_BUCKETS_SLOT295[] = { 0.0, 4.0 };
+inline constexpr double RL_BUCKETS_SLOT296[] = { 0.0, 5.0 };
+inline constexpr double RL_BUCKETS_SLOT297[] = { 0.0, 1.0 };
+inline constexpr double RL_BUCKETS_SLOT298[] = { 0.0, 2.0 };
+inline constexpr double RL_BUCKETS_SLOT299[] = { 0.0, 3.0 };
+inline constexpr double RL_BUCKETS_SLOT300[] = { 0.0, 4.0 };
+inline constexpr double RL_BUCKETS_SLOT301[] = { 0.0, 5.0 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "fight_remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, true },
     { "active_enemies", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
@@ -1106,38 +1120,38 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "hits.voltaic_blaze.cleave", rl_kind::k_int, 0.0, true, 6.0, false, 1.0, nullptr, 0, false },
     { "hits.voltaic_blaze.new_flame_shocks", rl_kind::k_int, 0.0, true, 6.0, false, 1.0, nullptr, 0, false },
     { "hits.fire_nova", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
-    { "hits.chain_lightning.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT266, 2, false },
-    { "hits.chain_lightning.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT267, 2, false },
-    { "hits.chain_lightning.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT268, 2, false },
-    { "hits.chain_lightning.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT269, 2, false },
-    { "hits.tempest.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT270, 2, false },
-    { "hits.tempest.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT271, 2, false },
-    { "hits.tempest.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT272, 2, false },
-    { "hits.tempest.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT273, 2, false },
-    { "hits.voltaic_blaze.cleave.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT274, 2, false },
-    { "hits.voltaic_blaze.cleave.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT275, 2, false },
-    { "hits.voltaic_blaze.cleave.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT276, 2, false },
-    { "hits.voltaic_blaze.cleave.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT277, 2, false },
-    { "hits.crash_lightning.at_least_1", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT278, 2, false },
-    { "hits.crash_lightning.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT279, 2, false },
-    { "hits.crash_lightning.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT280, 2, false },
-    { "hits.crash_lightning.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT281, 2, false },
-    { "hits.crash_lightning.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT282, 2, false },
-    { "hits.voltaic_blaze.new_flame_shocks.at_least_1", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT283, 2, false },
-    { "hits.voltaic_blaze.new_flame_shocks.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT284, 2, false },
-    { "hits.voltaic_blaze.new_flame_shocks.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT285, 2, false },
-    { "hits.voltaic_blaze.new_flame_shocks.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT286, 2, false },
-    { "hits.voltaic_blaze.new_flame_shocks.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT287, 2, false },
-    { "hits.fire_nova.at_least_1", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT288, 2, false },
-    { "hits.fire_nova.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT289, 2, false },
-    { "hits.fire_nova.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT290, 2, false },
-    { "hits.fire_nova.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT291, 2, false },
-    { "hits.fire_nova.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT292, 2, false },
-    { "hits.lava_lash.flame_shock_spread.at_least_1", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT293, 2, false },
-    { "hits.lava_lash.flame_shock_spread.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT294, 2, false },
-    { "hits.lava_lash.flame_shock_spread.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT295, 2, false },
-    { "hits.lava_lash.flame_shock_spread.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT296, 2, false },
-    { "hits.lava_lash.flame_shock_spread.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT297, 2, false },
+    { "hits.chain_lightning.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT270, 2, false },
+    { "hits.chain_lightning.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT271, 2, false },
+    { "hits.chain_lightning.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT272, 2, false },
+    { "hits.chain_lightning.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT273, 2, false },
+    { "hits.tempest.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT274, 2, false },
+    { "hits.tempest.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT275, 2, false },
+    { "hits.tempest.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT276, 2, false },
+    { "hits.tempest.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT277, 2, false },
+    { "hits.voltaic_blaze.cleave.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT278, 2, false },
+    { "hits.voltaic_blaze.cleave.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT279, 2, false },
+    { "hits.voltaic_blaze.cleave.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT280, 2, false },
+    { "hits.voltaic_blaze.cleave.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT281, 2, false },
+    { "hits.crash_lightning.at_least_1", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT282, 2, false },
+    { "hits.crash_lightning.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT283, 2, false },
+    { "hits.crash_lightning.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT284, 2, false },
+    { "hits.crash_lightning.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT285, 2, false },
+    { "hits.crash_lightning.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT286, 2, false },
+    { "hits.voltaic_blaze.new_flame_shocks.at_least_1", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT287, 2, false },
+    { "hits.voltaic_blaze.new_flame_shocks.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT288, 2, false },
+    { "hits.voltaic_blaze.new_flame_shocks.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT289, 2, false },
+    { "hits.voltaic_blaze.new_flame_shocks.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT290, 2, false },
+    { "hits.voltaic_blaze.new_flame_shocks.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT291, 2, false },
+    { "hits.fire_nova.at_least_1", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT292, 2, false },
+    { "hits.fire_nova.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT293, 2, false },
+    { "hits.fire_nova.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT294, 2, false },
+    { "hits.fire_nova.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT295, 2, false },
+    { "hits.fire_nova.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT296, 2, false },
+    { "hits.lava_lash.flame_shock_spread.at_least_1", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT297, 2, false },
+    { "hits.lava_lash.flame_shock_spread.at_least_2", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT298, 2, false },
+    { "hits.lava_lash.flame_shock_spread.at_least_3", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT299, 2, false },
+    { "hits.lava_lash.flame_shock_spread.at_least_4", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT300, 2, false },
+    { "hits.lava_lash.flame_shock_spread.at_least_5", rl_kind::k_bucket, -1.0, false, 1.0, false, 1.0, RL_BUCKETS_SLOT301, 2, false },
     { "capability.racial_berserking", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "capability.trinket_voracious_heart_of_ulatek", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "capability.consumable_potion_of_recklessness", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -1163,18 +1177,18 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_SCALARS_MEMBERS[] = {
 inline constexpr std::size_t RL_OBS_FAMILY_COUNT = 12;
 
 inline constexpr rl_obs_family RL_OBS_FAMILIES[RL_OBS_FAMILY_COUNT] = {
-  { rl_family::player_buffs, "player_buffs", rl_family_kind::buff, false, RL_OBS_FAMILY_PLAYER_BUFFS_MEMBERS, 34, 0, 56 },
-  { rl_family::cooldowns, "cooldowns", rl_family_kind::cooldown, false, RL_OBS_FAMILY_COOLDOWNS_MEMBERS, 9, 56, 12 },
-  { rl_family::target_facts, "target_facts", rl_family_kind::target_fact, false, RL_OBS_FAMILY_TARGET_FACTS_MEMBERS, 7, 68, 105 },
-  { rl_family::shapes, "shapes", rl_family_kind::shape_fact, false, RL_OBS_FAMILY_SHAPES_MEMBERS, 1, 173, 3 },
-  { rl_family::action_leaves, "action_leaves", rl_family_kind::action_expression, false, RL_OBS_FAMILY_ACTION_LEAVES_MEMBERS, 10, 176, 12 },
-  { rl_family::deck, "deck", rl_family_kind::expression, false, RL_OBS_FAMILY_DECK_MEMBERS, 12, 188, 12 },
-  { rl_family::stats, "stats", rl_family_kind::direct, false, RL_OBS_FAMILY_STATS_MEMBERS, 8, 200, 8 },
-  { rl_family::swing_cast, "swing_cast", rl_family_kind::direct, false, RL_OBS_FAMILY_SWING_CAST_MEMBERS, 4, 208, 4 },
-  { rl_family::raid_events, "raid_events", rl_family_kind::expression, false, RL_OBS_FAMILY_RAID_EVENTS_MEMBERS, 2, 212, 10 },
-  { rl_family::legality, "legality", rl_family_kind::legality, false, RL_OBS_FAMILY_LEGALITY_MEMBERS, 17, 222, 17 },
-  { rl_family::proc_chances, "proc_chances", rl_family_kind::proc_chance, false, RL_OBS_FAMILY_PROC_CHANCES_MEMBERS, 2, 239, 2 },
-  { rl_family::scalars, "scalars", rl_family_kind::scalar, true, RL_OBS_FAMILY_SCALARS_MEMBERS, 1, 241, 74 },
+  { rl_family::player_buffs, "player_buffs", rl_family_kind::buff, false, RL_OBS_FAMILY_PLAYER_BUFFS_MEMBERS, 36, 0, 60 },
+  { rl_family::cooldowns, "cooldowns", rl_family_kind::cooldown, false, RL_OBS_FAMILY_COOLDOWNS_MEMBERS, 9, 60, 12 },
+  { rl_family::target_facts, "target_facts", rl_family_kind::target_fact, false, RL_OBS_FAMILY_TARGET_FACTS_MEMBERS, 7, 72, 105 },
+  { rl_family::shapes, "shapes", rl_family_kind::shape_fact, false, RL_OBS_FAMILY_SHAPES_MEMBERS, 1, 177, 3 },
+  { rl_family::action_leaves, "action_leaves", rl_family_kind::action_expression, false, RL_OBS_FAMILY_ACTION_LEAVES_MEMBERS, 10, 180, 12 },
+  { rl_family::deck, "deck", rl_family_kind::expression, false, RL_OBS_FAMILY_DECK_MEMBERS, 12, 192, 12 },
+  { rl_family::stats, "stats", rl_family_kind::direct, false, RL_OBS_FAMILY_STATS_MEMBERS, 8, 204, 8 },
+  { rl_family::swing_cast, "swing_cast", rl_family_kind::direct, false, RL_OBS_FAMILY_SWING_CAST_MEMBERS, 4, 212, 4 },
+  { rl_family::raid_events, "raid_events", rl_family_kind::expression, false, RL_OBS_FAMILY_RAID_EVENTS_MEMBERS, 2, 216, 10 },
+  { rl_family::legality, "legality", rl_family_kind::legality, false, RL_OBS_FAMILY_LEGALITY_MEMBERS, 17, 226, 17 },
+  { rl_family::proc_chances, "proc_chances", rl_family_kind::proc_chance, false, RL_OBS_FAMILY_PROC_CHANCES_MEMBERS, 2, 243, 2 },
+  { rl_family::scalars, "scalars", rl_family_kind::scalar, true, RL_OBS_FAMILY_SCALARS_MEMBERS, 1, 245, 74 },
 };
 
 // ---- Action descriptors ----
@@ -1223,23 +1237,23 @@ inline constexpr std::size_t RL_TALENT_GATE_COUNT = 4;
 
 inline constexpr std::size_t RL_CAPABILITY_COUNT = 17;
 inline constexpr rl_capability RL_CAPABILITIES[RL_CAPABILITY_COUNT] = {
-  { "racial_berserking", 298, "racial_spell", "Berserking", 0, nullptr, 0, 0, 0, 0, 4, 0, 1 },
-  { "trinket_voracious_heart_of_ulatek", 299, "special_effect", nullptr, 1297761, nullptr, 0, 0, 0, 4, 5, 1, 1 },
-  { "consumable_potion_of_recklessness", 300, "potion_enabled", nullptr, 0, nullptr, 0, 0, 0, 9, 6, 2, 1 },
-  { "enchant_arcane_mastery", 301, "special_effect", nullptr, 1236721, nullptr, 0, 0, 0, 15, 1, 3, 0 },
-  { "enchant_berserkers_rage", 302, "special_effect", nullptr, 1236728, nullptr, 0, 0, 0, 16, 1, 3, 0 },
-  { "embellishment_arcanoweave_lining", 303, "special_effect", nullptr, 1283697, nullptr, 0, 0, 0, 17, 1, 3, 0 },
-  { "embellishment_hunters_ritual_stone", 304, "special_effect", nullptr, 1297382, nullptr, 0, 0, 0, 18, 4, 3, 0 },
-  { "item_venomcursed_mastery", 305, "special_effect", nullptr, 1307923, nullptr, 0, 0, 0, 22, 1, 3, 0 },
-  { "item_venomcursed_ascendance", 306, "special_effect", nullptr, 1317582, nullptr, 0, 0, 0, 23, 1, 3, 0 },
-  { "weapon_venomfang", 307, "special_effect", nullptr, 1291718, nullptr, 0, 0, 0, 24, 21, 3, 0 },
-  { "set_bite_of_zuljan_2pc", 308, "set_bonus", nullptr, 0, "MID_BOZ", 2, 0, 0, 45, 0, 3, 0 },
-  { "tier_mid2_enh_2pc", 309, "set_bonus", nullptr, 0, "MID2", 2, 0, 0, 45, 13, 3, 0 },
-  { "tier_mid2_enh_4pc", 310, "set_bonus", nullptr, 0, "MID2", 4, 0, 0, 58, 2, 3, 0 },
-  { "omnium_rune_burning_haste", 311, "special_effect", nullptr, 1279610, nullptr, 0, 0, 1, 60, 2, 3, 0 },
-  { "omnium_core_rune_unleashed_fire", 312, "special_effect", nullptr, 1279599, nullptr, 0, 1, 0, 62, 0, 3, 0 },
-  { "omnium_rune_lingering", 313, "special_effect", nullptr, 1287555, nullptr, 0, 1, 1, 62, 7, 3, 0 },
-  { "trinket_void_execution_mandate", 314, "special_effect", nullptr, 1250557, nullptr, 0, 2, 0, 69, 2, 3, 1 },
+  { "racial_berserking", 302, "racial_spell", "Berserking", 0, nullptr, 0, 0, 0, 0, 4, 0, 1 },
+  { "trinket_voracious_heart_of_ulatek", 303, "special_effect", nullptr, 1297761, nullptr, 0, 0, 0, 4, 5, 1, 1 },
+  { "consumable_potion_of_recklessness", 304, "potion_enabled", nullptr, 0, nullptr, 0, 0, 0, 9, 6, 2, 1 },
+  { "enchant_arcane_mastery", 305, "special_effect", nullptr, 1236721, nullptr, 0, 0, 0, 15, 1, 3, 0 },
+  { "enchant_berserkers_rage", 306, "special_effect", nullptr, 1236728, nullptr, 0, 0, 0, 16, 1, 3, 0 },
+  { "embellishment_arcanoweave_lining", 307, "special_effect", nullptr, 1283697, nullptr, 0, 0, 0, 17, 1, 3, 0 },
+  { "embellishment_hunters_ritual_stone", 308, "special_effect", nullptr, 1297382, nullptr, 0, 0, 0, 18, 4, 3, 0 },
+  { "item_venomcursed_mastery", 309, "special_effect", nullptr, 1307923, nullptr, 0, 0, 0, 22, 1, 3, 0 },
+  { "item_venomcursed_ascendance", 310, "special_effect", nullptr, 1317582, nullptr, 0, 0, 0, 23, 1, 3, 0 },
+  { "weapon_venomfang", 311, "special_effect", nullptr, 1291718, nullptr, 0, 0, 0, 24, 21, 3, 0 },
+  { "set_bite_of_zuljan_2pc", 312, "set_bonus", nullptr, 0, "MID_BOZ", 2, 0, 0, 45, 0, 3, 0 },
+  { "tier_mid2_enh_2pc", 313, "set_bonus", nullptr, 0, "MID2", 2, 0, 0, 45, 13, 3, 0 },
+  { "tier_mid2_enh_4pc", 314, "set_bonus", nullptr, 0, "MID2", 4, 0, 0, 58, 2, 3, 0 },
+  { "omnium_rune_burning_haste", 315, "special_effect", nullptr, 1279610, nullptr, 0, 0, 1, 60, 2, 3, 0 },
+  { "omnium_core_rune_unleashed_fire", 316, "special_effect", nullptr, 1279599, nullptr, 0, 1, 0, 62, 0, 3, 0 },
+  { "omnium_rune_lingering", 317, "special_effect", nullptr, 1287555, nullptr, 0, 1, 1, 62, 7, 3, 0 },
+  { "trinket_void_execution_mandate", 318, "special_effect", nullptr, 1250557, nullptr, 0, 2, 0, 69, 6, 3, 1 },
 };
 
 inline constexpr std::size_t RL_CAPABILITY_REQUIRES_COUNT = 2;
@@ -1248,79 +1262,83 @@ inline constexpr const char* RL_CAPABILITY_REQUIRES[RL_CAPABILITY_REQUIRES_COUNT
   "omnium_core_rune_unleashed_fire",
 };
 
-inline constexpr std::size_t RL_CAPABILITY_GOVERNED_SLOTS_COUNT = 71;
+inline constexpr std::size_t RL_CAPABILITY_GOVERNED_SLOTS_COUNT = 75;
 inline constexpr std::size_t RL_CAPABILITY_GOVERNED_SLOTS[RL_CAPABILITY_GOVERNED_SLOTS_COUNT] = {
   4,
-  57,
-  177,
-  233,
+  61,
+  181,
+  237,
   21,
   22,
-  67,
-  185,
-  232,
-  35,
-  36,
+  71,
+  189,
+  236,
   37,
   38,
-  60,
-  237,
+  39,
+  40,
+  64,
+  241,
   28,
   27,
   2,
   20,
   29,
-  34,
+  36,
+  57,
+  56,
   55,
-  54,
-  53,
-  78,
+  82,
+  83,
+  84,
+  97,
+  98,
+  99,
+  112,
+  113,
+  114,
+  127,
+  128,
+  129,
+  142,
+  143,
+  144,
+  157,
+  158,
+  159,
+  172,
+  173,
+  174,
   79,
-  80,
-  93,
   94,
-  95,
-  108,
   109,
-  110,
-  123,
   124,
-  125,
-  138,
   139,
-  140,
-  153,
   154,
-  155,
-  168,
   169,
-  170,
-  75,
-  90,
-  105,
-  120,
-  135,
-  150,
-  165,
-  265,
-  288,
-  289,
-  290,
-  291,
+  269,
   292,
+  293,
+  294,
+  295,
+  296,
+  43,
+  44,
   41,
   42,
-  39,
-  40,
-  81,
-  96,
-  111,
-  126,
-  141,
-  156,
-  171,
-  65,
-  238,
+  85,
+  100,
+  115,
+  130,
+  145,
+  160,
+  175,
+  30,
+  31,
+  58,
+  59,
+  69,
+  242,
 };
 
 inline constexpr std::size_t RL_CAPABILITY_GOVERNED_ACTIONS_COUNT = 4;
@@ -1332,7 +1350,7 @@ inline constexpr const char* RL_CAPABILITY_GOVERNED_ACTIONS[RL_CAPABILITY_GOVERN
 };
 
 inline constexpr double RL_CAPABILITY_FIXED_VALUE = 0.0;
-inline constexpr const char* RL_NET_LAYOUT_SHA = "rl-layout-v1:88892031979acd29b03d6f8f286f6253b3fbee3a1c41ce44779b23316f2d7473";
+inline constexpr const char* RL_NET_LAYOUT_SHA = "rl-layout-v1:00d7df3c76879e5fcfc5457b440f975671954dd3f375fd3e0ec1d77674f5526f";
 
 // ---- Target scorer feature list (Phase 230-02, SCOR-01) ----
 
