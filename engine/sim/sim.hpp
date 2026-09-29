@@ -953,6 +953,26 @@ struct sim_t : private sc_thread_t
   // gives for skipping a mutex there. Read once at run end for the stderr readout (sim.cpp's
   // execute()).
   std::uint64_t solver_hold_windows_override_count = 0;
+  // tstl-sylvanas 260929-bystander: engaged-but-idle enemies at FIXED coordinates.
+  // solver_bystander_positions=x:y[,x:y...] (absolute yards, at most 12 entries) creates that many
+  // extra ordinary enemies (Bystander_1..N) after every other enemy, at exactly those coordinates,
+  // in every fight of the process. They are real enemy_t actors, so they count in active_enemies
+  // and in the fight-wide enemy aggregates; the training writer places them behind the player so
+  // the range/facing filters never pick them and no melee/cone/8-yd effect reaches them.
+  // player_t::acquire_target (the engine's own retarget) skips them (see player.cpp). Empty
+  // string (default, or the option simply absent) creates nothing -- byte-identical behavior to
+  // a build without the option. Refused in setup() unless distance_targeting_enabled=1,
+  // facing_enabled=1 and threads=1.
+  std::string solver_bystander_positions_str;
+  // Debug/receipt readout: when on, combat_end() prints one stderr line per enemy actor with the
+  // damage it took this iteration (bystanders included), so a receipt can prove nobody hit them.
+  bool solver_bystander_trace = false;
+  // Parsed ONCE in setup() from solver_bystander_positions_str (empty = none).
+  std::vector<std::pair<double, double>> solver_bystander_positions;
+  // The created bystander actors, in creation order (filled in init()).
+  std::vector<player_t*> rl_bystanders;
+  // True for a player created from solver_bystander_positions (linear scan; at most 12 entries).
+  bool is_rl_bystander( const player_t* p ) const;
   // 260926-f2e (Need 1): forces the in-process transport's decision AT a specific decision
   // counter `k` to a specific action index, overriding both the net's greedy choice and the
   // exploration draw. solver_force_decision=<k>:<action_index>[,<k>:<action_index>,...] -- a

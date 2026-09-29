@@ -2257,9 +2257,29 @@ void sim_t::combat_begin()
 
 // sim_t::combat_end ========================================================
 
+bool sim_t::is_rl_bystander( const player_t* p ) const
+{
+  return range::contains( rl_bystanders, p );
+}
+
 void sim_t::combat_end()
 {
   print_debug( "Combat End" );
+
+  // tstl-sylvanas 260929-bystander: per-enemy damage readout (opt-in). Every enemy actor is listed,
+  // including raid-event adds (pets of the boss, not in target_list), so a non-bystander's
+  // non-zero line proves the ledger is live even where the boss is immune all fight.
+  if ( solver_bystander_trace )
+  {
+    for ( const auto* a : actor_list )
+    {
+      if ( a->is_enemy() )
+        fmt::print( stderr,
+                    "[RL_BYSTANDER] iteration={} name={} bystander={} x={:.2f} y={:.2f} dmg_taken={}\n",
+                    current_iteration, a->name(), is_rl_bystander( a ) ? 1 : 0, a->x_position, a->y_position,
+                    a->iteration_dmg_taken );
+    }
+  }
 
   for ( auto* t : target_list )
   {
@@ -3196,6 +3216,30 @@ void sim_t::init()
     {
       throw sc_initialization_error( fmt::format( "Unable to create tank enemy {}.", target_list.size() ) );
     }
+  }
+
+  // tstl-sylvanas 260929-bystander: engaged idle enemies at fixed coordinates. Created AFTER every
+  // other enemy so target_list.front() (the fallback target) is never a bystander. init_distance_
+  // targeting keeps explicit default positions (player.cpp), so these stay exactly where put.
+  if ( !solver_bystander_positions.empty() )
+  {
+    int bystander_index = 1;
+    for ( const auto& pos : solver_bystander_positions )
+    {
+      active_player = nullptr;
+      active_player = module_t::enemy()->create_player( this, "Bystander_" + util::to_string( bystander_index ) );
+      if ( !active_player )
+      {
+        throw sc_initialization_error( fmt::format( "Unable to create bystander enemy {}.", bystander_index ) );
+      }
+      active_player->default_x_position = pos.first;
+      active_player->default_y_position = pos.second;
+      rl_bystanders.push_back( active_player );
+      bystander_index++;
+    }
+    // D10 silent-ignore guard: an older binary ignores the unknown option with only a warning,
+    // so the launch probe looks for this line (once per process).
+    fmt::print( stderr, "[RL_BYSTANDER] created={}\n", rl_bystanders.size() );
   }
 
   if ( max_player_level < 0 )
@@ -4337,6 +4381,11 @@ void sim_t::create_options()
   // fail-closed block beside solver_policy_str's -- see sim.hpp's solver_hold_windows_str doc
   // comment.
   add_option( opt_string( "solver_hold_windows", solver_hold_windows_str ) );
+  // tstl-sylvanas 260929-bystander: engaged idle enemies at fixed coordinates (created in init(),
+  // parsed and refused below in setup()) plus the per-enemy damage readout. See sim.hpp's
+  // solver_bystander_positions_str doc comment.
+  add_option( opt_string( "solver_bystander_positions", solver_bystander_positions_str ) );
+  add_option( opt_bool( "solver_bystander_trace", solver_bystander_trace ) );
   // 260926-f2e (Need 1): forces the in-process transport's decision at a specific decision
   // counter to a specific action index. Parsed and validated below, in its own fail-closed
   // block immediately after solver_hold_windows_str's own -- see sim.hpp's
@@ -5154,6 +5203,76 @@ void sim_t::setup( sim_control_t* c )
       throw sc_runtime_error( fmt::format(
           "solver_hold_windows='{}' declared no valid actionIndex:startSeconds:endSeconds "
           "entries.", solver_hold_windows_str ) );
+    }
+  }
+
+  // tstl-sylvanas 260929-bystander: solver_bystander_positions=x:y[,x:y...]. Own fail-closed
+  // block immediately after solver_hold_windows_str's own. Every refusal names the option and
+  // the FULL declared string.
+  if ( !solver_bystander_positions_str.empty() )
+  {
+    if ( !distance_targeting_enabled )
+    {
+      throw sc_runtime_error( fmt::format(
+          "solver_bystander_positions='{}' requires distance_targeting_enabled=1 (without it every "
+          "enemy sits at the same distance and the positions mean nothing).",
+          solver_bystander_positions_str ) );
+    }
+    if ( !facing_enabled )
+    {
+      throw sc_runtime_error( fmt::format(
+          "solver_bystander_positions='{}' requires facing_enabled=1 (the guarantee that nothing "
+          "targets a bystander rests on the in-front filter).", solver_bystander_positions_str ) );
+    }
+    if ( threads > 1 )
+    {
+      throw sc_runtime_error( fmt::format(
+          "solver_bystander_positions='{}' requires threads=1 (a child sim would not carry the "
+          "bystander enemies), got threads={}.", solver_bystander_positions_str, threads ) );
+    }
+    std::stringstream bystander_ss( solver_bystander_positions_str );
+    std::string bystander_entry;
+    while ( std::getline( bystander_ss, bystander_entry, ',' ) )
+    {
+      const auto colon = bystander_entry.find( ':' );
+      bool ok = colon != std::string::npos && colon > 0 && colon + 1 < bystander_entry.size() &&
+                bystander_entry.find( ':', colon + 1 ) == std::string::npos;
+      double bx = 0.0, by = 0.0;
+      if ( ok )
+      {
+        try
+        {
+          std::size_t used_x = 0, used_y = 0;
+          const std::string sx = bystander_entry.substr( 0, colon );
+          const std::string sy = bystander_entry.substr( colon + 1 );
+          bx = std::stod( sx, &used_x );
+          by = std::stod( sy, &used_y );
+          ok = used_x == sx.size() && used_y == sy.size() && std::isfinite( bx ) && std::isfinite( by );
+        }
+        catch ( const std::exception& )
+        {
+          ok = false;
+        }
+      }
+      if ( !ok )
+      {
+        throw sc_runtime_error( fmt::format(
+            "solver_bystander_positions=: malformed entry '{}' (expected x:y with two finite "
+            "numbers) in '{}'.", bystander_entry, solver_bystander_positions_str ) );
+      }
+      solver_bystander_positions.emplace_back( bx, by );
+    }
+    if ( solver_bystander_positions.empty() )
+    {
+      throw sc_runtime_error( fmt::format(
+          "solver_bystander_positions='{}' declared no valid x:y entries.",
+          solver_bystander_positions_str ) );
+    }
+    if ( solver_bystander_positions.size() > 12 )
+    {
+      throw sc_runtime_error( fmt::format(
+          "solver_bystander_positions=: {} entries exceed the maximum of 12 in '{}'.",
+          solver_bystander_positions.size(), solver_bystander_positions_str ) );
     }
   }
 

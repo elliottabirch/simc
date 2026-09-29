@@ -14974,6 +14974,11 @@ void player_t::acquire_target( retarget_source event, player_t* context )
   // TODO: Fancier system
   for ( auto enemy : sim->target_non_sleeping_list )
   {
+    // tstl-sylvanas 260929-bystander (D3): never retarget onto a bystander. On trash-route the boss is
+    // immune from t=0.1 with retarget=1, so without this the player would auto-attack a bystander.
+    if ( sim->is_rl_bystander( enemy ) )
+      continue;
+
     if ( enemy->debuffs.invulnerable != nullptr && enemy->debuffs.invulnerable->check() )
     {
       if ( first_invuln_target == nullptr )
