@@ -316,6 +316,14 @@ bool generic_filter( const action_t* a, player_t* candidate, bool harmful )
   return true;
 }
 
+// tstl-sylvanas 260928-tb8: observation-only non-boss mask for trash pulls. Engine mechanics keep
+// player_t::is_boss() untouched (the shaman APL never reads it; the only mechanical use is dungeon-style
+// priority damage), so only what the net and the decision dump see changes.
+bool obs_is_boss( const player_t* enemy )
+{
+  return enemy->is_boss() && enemy->sim->fight_style != FIGHT_STYLE_TRASH_PACK;
+}
+
 enemy_fact build_enemy_fact( const action_t* a, player_t* candidate )
 {
   enemy_fact f;
@@ -342,7 +350,7 @@ enemy_fact build_enemy_fact( const action_t* a, player_t* candidate )
   // assume away). Byte identity on a 600s shape confirms this changes nothing today.
   f.time_to_die = std::min( candidate->time_to_percent( 0 ).total_seconds(), 600.0 );
   f.health_pct  = candidate->health_percentage();
-  f.is_boss     = candidate->is_boss();
+  f.is_boss     = obs_is_boss( candidate );  // tstl-sylvanas 260928-tb8
 
   // WR-04 (260902/cr4): `find_dot` -- a non-allocating scan of the candidate's existing dot_list --
   // instead of `get_dot`, which CREATES a dot_t on every candidate that has never been Flame

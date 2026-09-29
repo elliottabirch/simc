@@ -2662,6 +2662,12 @@ void sim_t::init_fight_style()
       raid_events_str.clear();
       break;
 
+    // tstl-sylvanas 260928-tb8: non-boss trash pull -- no scheduled events (like Patchwerk); the is_boss
+    // observation mask and the per-enemy respawn pool spread key off this style elsewhere.
+    case FIGHT_STYLE_TRASH_PACK:
+      raid_events_str.clear();
+      break;
+
     case FIGHT_STYLE_CASTING_PATCHWERK:
       raid_events_str += "/casting,cooldown=500,duration=500";
       break;

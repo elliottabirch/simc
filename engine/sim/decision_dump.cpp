@@ -1194,7 +1194,7 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
       out << "{\"actor_index\":" << t->actor_index << ",\"actor_spawn_index\":" << t->actor_spawn_index
           << ",\"x\":" << t->x_position << ",\"y\":" << t->y_position
           << ",\"combat_reach\":" << t->combat_reach << ",\"time_to_die\":" << ttd
-          << ",\"is_boss\":" << ( t->is_boss() ? "true" : "false" ) << "}";
+          << ",\"is_boss\":" << ( rl_target_select::obs_is_boss( t ) ? "true" : "false" ) << "}";
     }
     out << "]";
     // The removed turn-action legality-predicate JSON key (R6-27, 233.1-01) was here -- deleted

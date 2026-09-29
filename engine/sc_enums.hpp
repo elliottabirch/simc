@@ -1406,6 +1406,7 @@ enum fight_style_e
   FIGHT_STYLE_BEASTLORD,
   FIGHT_STYLE_HELTER_SKELTER,
   FIGHT_STYLE_ULTRAXION,
+  FIGHT_STYLE_TRASH_PACK,  // tstl-sylvanas 260928-tb8: RL-only non-boss trash pull (appended so existing values keep their numbers)
   FIGHT_STYLE_MAX
 };
 

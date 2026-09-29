@@ -165,6 +165,11 @@ bool generic_filter( const action_t* a, player_t* candidate, bool harmful );
 // other field on enemy_fact ever depended on the action's own prior pick.
 enemy_fact build_enemy_fact( const action_t* a, player_t* candidate );
 
+// tstl-sylvanas 260928-tb8: the observation-side "is this enemy a boss" bit. Non-boss mask for trash
+// pulls (fight_style=TrashPack reads 0 for every enemy); every other fight style reads the engine's
+// player_t::is_boss(). Engine mechanics keep player_t::is_boss() untouched.
+bool obs_is_boss( const player_t* enemy );
+
 // 228-07 (TGT-07, D-21): builds the FULL candidate set for one targeted action -- every enemy
 // `generic_filter` would pass -- as complete `enemy_fact` records, in
 // `sim->target_non_sleeping_list` order. Reuses `generic_filter`/`build_enemy_fact` VERBATIM (the

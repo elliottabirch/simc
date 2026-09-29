@@ -104,6 +104,15 @@ struct enemy_t : public player_t
   double armor_coefficient( int level, tank_dummy_e diff );
   // 260923-hp: respawn-on-death health model.
   bool respawns() const { return sim->solver_respawn_health > 0.0; }
+  // tstl-sylvanas 260928-tb8: under fight_style=TrashPack enemy k of N gets 0.5 + k/(N-1) times the respawn
+  // pool (Fluffy_Pillow 0.5x .. last Dummy_Enemy 1.5x, mean exactly 1.0), so lives spread instead of all
+  // ending together. No random draw, so paired seeds stay aligned. 1.0 for every other fight style.
+  double trash_pack_health_factor() const
+  {
+    if ( sim->fight_style != FIGHT_STYLE_TRASH_PACK || sim->desired_targets < 2 )
+      return 1.0;
+    return 0.5 + double( std::min<size_t>( enemy_id, sim->desired_targets - 1 ) ) / double( sim->desired_targets - 1 );
+  }
   double life_dmg_taken() const { return iteration_dmg_taken - life_dmg_taken_base; }
   void respawn();
   std::unique_ptr<expr_t> create_expression( util::string_view expression_str ) override;
@@ -1460,7 +1469,7 @@ void enemy_t::init_resources( bool /* force */ )
 {
   double health_adjust = sim->iteration_time_adjust();
 
-  resources.base[ RESOURCE_HEALTH ] = respawns() ? sim->solver_respawn_health : initial_health * health_adjust;
+  resources.base[ RESOURCE_HEALTH ] = respawns() ? sim->solver_respawn_health * trash_pack_health_factor() : initial_health * health_adjust;
 
   player_t::init_resources( true );
 
