@@ -1354,7 +1354,7 @@ inline constexpr const char* RL_NET_LAYOUT_SHA = "rl-layout-v1:00d7df3c76879e5fc
 
 // ---- Target scorer feature list (Phase 230-02, SCOR-01) ----
 
-inline constexpr std::size_t RL_TARGET_SLOTS = 8;
+inline constexpr std::size_t RL_TARGET_SLOTS = 16;
 inline constexpr std::size_t RL_TARGET_FEATURES = 23;
 inline constexpr const char* RL_TARGET_FEATURE_SHA = "tgt-feat-v1:4b2264a75433cfae96133e1a34adeb55b85a529f19f0245ecb3c796379c83ee9";
 
@@ -1383,4 +1383,93 @@ inline constexpr const char* RL_TARGET_FEATURE_NAMES[RL_TARGET_FEATURES] = {
   "vb_new_flame_shocks_within_10yd",
   "lava_lash_spread_within_12yd",
 };
+
+// ---- Aim head declaration (Phase 259) ----
+
+#define RL_TARGET_FACT_LIST(X) \
+  X(distance) \
+  X(in_reach) \
+  X(in_range) \
+  X(in_front) \
+  X(alive) \
+  X(immune) \
+  X(immunity_remaining) \
+  X(time_to_die) \
+  X(health_pct) \
+  X(is_boss) \
+  X(flame_shock_remaining) \
+  X(neighbours_within_radius) \
+  X(is_current_target) \
+  X(burning_core_remaining) \
+  X(lightning_rod_stacks) \
+  X(lightning_rod_remaining) \
+  X(venomfang_remaining) \
+  X(venomfang_debuff_stacks) \
+  X(venomfang_debuff_remaining) \
+  X(rune_of_unleashed_fire_lingering_remaining) \
+  X(chain_hop_count) \
+  X(vb_new_flame_shocks_within_10yd) \
+  X(lava_lash_spread_within_12yd)
+
+struct rl_aim_fact_desc
+{
+  const char* name;
+  rl_kind     kind;
+  bool        has_div;
+  double      div;
+  bool        has_clip_div;
+  double      clip_div;
+  int         capability;  // index into RL_CAPABILITIES, or -1 when ungated
+};
+
+inline constexpr rl_aim_fact_desc RL_AIM_FACT_DESCS[RL_TARGET_FEATURES] = {
+  { "distance", rl_kind::k_seconds, false, 1.0, true, 60.0, -1 },
+  { "in_reach", rl_kind::k_int, true, 1.0, false, 1.0, -1 },
+  { "in_range", rl_kind::k_int, true, 1.0, false, 1.0, -1 },
+  { "in_front", rl_kind::k_int, true, 1.0, false, 1.0, -1 },
+  { "alive", rl_kind::k_int, true, 1.0, false, 1.0, -1 },
+  { "immune", rl_kind::k_int, true, 1.0, false, 1.0, -1 },
+  { "immunity_remaining", rl_kind::k_seconds, false, 1.0, true, 60.0, -1 },
+  { "time_to_die", rl_kind::k_seconds, false, 1.0, true, 60.0, -1 },
+  { "health_pct", rl_kind::k_float, true, 100.0, false, 1.0, -1 },
+  { "is_boss", rl_kind::k_int, true, 1.0, false, 1.0, -1 },
+  { "flame_shock_remaining", rl_kind::k_seconds, false, 1.0, true, 25.0, -1 },
+  { "neighbours_within_radius", rl_kind::k_seconds, false, 1.0, true, 16.0, -1 },
+  { "is_current_target", rl_kind::k_int, true, 1.0, false, 1.0, -1 },
+  { "burning_core_remaining", rl_kind::k_seconds, false, 1.0, true, 6.0, 11 },
+  { "lightning_rod_stacks", rl_kind::k_int, true, 1.0, false, 1.0, -1 },
+  { "lightning_rod_remaining", rl_kind::k_seconds, false, 1.0, true, 8.0, -1 },
+  { "venomfang_remaining", rl_kind::k_seconds, false, 1.0, true, 8.0, 9 },
+  { "venomfang_debuff_stacks", rl_kind::k_int, true, 20.0, false, 1.0, 9 },
+  { "venomfang_debuff_remaining", rl_kind::k_seconds, false, 1.0, true, 6.0, 9 },
+  { "rune_of_unleashed_fire_lingering_remaining", rl_kind::k_seconds, false, 1.0, true, 30.0, 15 },
+  { "chain_hop_count", rl_kind::k_seconds, false, 1.0, true, 5.0, -1 },
+  { "vb_new_flame_shocks_within_10yd", rl_kind::k_seconds, false, 1.0, true, 6.0, -1 },
+  { "lava_lash_spread_within_12yd", rl_kind::k_seconds, false, 1.0, true, 5.0, -1 },
+};
+
+inline constexpr std::size_t RL_AIM_CONTEXT_COUNT = 6;
+inline constexpr std::size_t RL_AIM_CONTEXT_OBS_SLOTS[RL_AIM_CONTEXT_COUNT] = { 311, 313, 317, 34, 23, 52 };
+inline constexpr const char* RL_AIM_CONTEXT_NAMES[RL_AIM_CONTEXT_COUNT] = {
+  "capability.weapon_venomfang",
+  "capability.tier_mid2_enh_2pc",
+  "capability.omnium_rune_lingering",
+  "player_buffs.maelstrom_weapon.stacks",
+  "player_buffs.doom_winds.remains",
+  "player_buffs.tempest.remains",
+};
+
+inline constexpr std::size_t RL_AIM_SPELL_COUNT = 7;
+inline constexpr const char* RL_AIM_SPELLS[RL_AIM_SPELL_COUNT] = {
+  "stormstrike",
+  "lightning_bolt",
+  "chain_lightning",
+  "tempest",
+  "windstrike",
+  "lava_lash",
+  "voltaic_blaze",
+};
+
+inline constexpr std::size_t RL_AIM_INPUT_COUNT = 29;
+inline constexpr const char* RL_AIM_SHA = "aim-v1:d42f83a8d4f67e359264091e5b6a4b7275a70f19b03a8f86bd293069bc26c3cd";
 
