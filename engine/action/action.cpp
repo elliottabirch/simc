@@ -2322,7 +2322,8 @@ void action_t::tick( dot_t* d )
     // DOT_TICK just below/around this call (dot_tick_event_t::execute()'s outer frame) --
     // inherit its seq, force the class.
     tick_state->rl_cause_seq   = d->state->rl_cause_seq;
-    tick_state->rl_cause_class = RL_CAUSE_DOT_TICK;
+    // Phase 259 (259-11): keep the RL_CAUSE_DECK_MARK bit the dot's own stamp carries (rl_credit::dot_tick_class).
+    tick_state->rl_cause_class = rl_credit::dot_tick_class( d->state->rl_cause_class );
     // 250-03 (REC-04): stamp tick_state with the CURRENT press (this dot tick's own tick press,
     // opened around this call by dot.cpp's dot_tick_event_t::execute()/check_tick_zero()) so the
     // tick action's later (deferred) execute() restores the tick press as ITS outer press --
@@ -2363,7 +2364,8 @@ void action_t::tick( dot_t* d )
     // BOTH of that function's dot->tick() call sites (the skill-check gate and the
     // no-skill-check-required path), so a proc fired synchronously from EITHER one inherits
     // PROC_OF_DOT, not just the second. This call already runs inside that outer frame.
-    d->state->rl_cause_class = RL_CAUSE_DOT_TICK;
+    // Phase 259 (259-11): RL_CAUSE_DECK_MARK survives the class force (rl_credit::dot_tick_class).
+    d->state->rl_cause_class = rl_credit::dot_tick_class( d->state->rl_cause_class );
     assess_damage( amount_type( d->state, true ), d->state );
 
     if ( sim->debug )

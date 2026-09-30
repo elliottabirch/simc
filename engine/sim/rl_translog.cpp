@@ -86,7 +86,9 @@ void rl_credit_route( player_t* p, rl_cause_t cause, std::uint64_t now_seq, doub
   assert( cause.seq < 0 || static_cast<std::uint64_t>( cause.seq ) <= now_seq );
 
   std::uint32_t index;
-  switch ( cause.cls )
+  // Phase 259 (259-11): the class is read with the deck mark masked off, so realised and expected
+  // routing is bit-identical to a run that never marks anything.
+  switch ( rl_cause_base( cause.cls ) )
   {
     case RL_CAUSE_CAST:
     case RL_CAUSE_PROC_OF_CAST:
@@ -129,6 +131,19 @@ void rl_credit_route( player_t* p, rl_cause_t cause, std::uint64_t now_seq, doub
       if ( vec.size() <= idx )
         vec.resize( idx + 1, 0.0 );
       vec[ idx ] += amount;
+
+      // Phase 259 (plan 259-11, owner Q15/Q16, fork option P): the expected own credit that travels
+      // under a deck-hit mark is ALSO kept apart, per decision. `rl_own_exp` above still receives it
+      // (every total and the translog rows are exactly as before); the per-fight pass in
+      // record_close() later replaces this marked part by the decision's share of the fight's
+      // pooled deck payout. Pure bookkeeping: no random number, no event.
+      if ( expected && ( cause.cls & RL_CAUSE_DECK_MARK ) != 0 )
+      {
+        auto& marked = p->rl_own_exp_marked;
+        if ( marked.size() <= idx )
+          marked.resize( idx + 1, 0.0 );
+        marked[ idx ] += amount;
+      }
     }
     else if ( !expected )
     {

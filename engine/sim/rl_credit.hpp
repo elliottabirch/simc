@@ -46,7 +46,8 @@ struct action_t;
 // `enum class`) with explicit RL_CAUSE_* names, matching the un-scoped
 // style action_state_t's own result_e/block_result_e fields already use,
 // so a reader can compare `state->rl_cause_class == RL_CAUSE_DOT_TICK`
-// without a cast.
+// without a cast. Phase 259: the stored byte may also carry the RL_CAUSE_DECK_MARK flag bit (below),
+// so the stored byte is compared only through rl_cause_base() -- never raw.
 enum rl_cause_class : std::uint8_t
 {
   RL_CAUSE_CAST          = 0,  // a decision's own foreground cast
@@ -57,6 +58,22 @@ enum rl_cause_class : std::uint8_t
   RL_CAUSE_PROC_OF_AUTO  = 5,  // fired synchronously inside an AUTO's execute/impact scope
   RL_CAUSE_ORPHAN        = 6,  // no cause context -- timer/buff-driven, or a lost stack
 };
+
+// Phase 259 (plan 259-11, owner Q15/Q16, fork research option P): a FLAG BIT on the class byte, not a
+// class. Set on a cause whose damage is the payout of a Doom Winds deck hit (sc_shaman.cpp's
+// consume_maelstrom_weapon), so the per-fight pass in rl_translog.cpp can find that damage by the
+// cause it travels under -- never by action name (an Ascendance press runs the same Doom Winds code).
+// It rides every stamp copy and every promote() (below) and is carried across every DOT_TICK rebuild
+// via rl_credit::dot_tick_class(). The class value itself is always read through rl_cause_base():
+// nothing may compare or switch on a raw class byte, because a marked byte is not equal to any
+// rl_cause_class enumerator. Bit 7 is above every class value (the highest is ORPHAN == 6).
+inline constexpr std::uint8_t RL_CAUSE_DECK_MARK = 0x80;
+
+// The class with the deck mark masked off -- the ONLY form a switch / comparison may use.
+inline constexpr std::uint8_t rl_cause_base( std::uint8_t cls )
+{
+  return static_cast<std::uint8_t>( cls & static_cast<std::uint8_t>( ~RL_CAUSE_DECK_MARK ) );
+}
 
 // A stamp: which decision caused this, and what kind of event it was.
 // `seq == -1` means "never stamped" (should not reach a sink; the sink
@@ -134,7 +151,7 @@ inline rl_cause_t promote( const rl_cause_t& cause )
 {
   rl_cause_t out;
   out.seq = cause.seq;
-  switch ( cause.cls )
+  switch ( rl_cause_base( cause.cls ) )
   {
     case RL_CAUSE_CAST:
     case RL_CAUSE_PROC_OF_CAST: out.cls = RL_CAUSE_PROC_OF_CAST; break;
@@ -144,7 +161,18 @@ inline rl_cause_t promote( const rl_cause_t& cause )
     case RL_CAUSE_PROC_OF_AUTO: out.cls = RL_CAUSE_PROC_OF_AUTO; break;
     default: out.cls = RL_CAUSE_ORPHAN; break;
   }
+  // Phase 259: the deck mark survives promotion (every proc of a marked cause is marked too).
+  out.cls = static_cast<std::uint8_t>( out.cls | ( cause.cls & RL_CAUSE_DECK_MARK ) );
   return out;
+}
+
+// The class every periodic tick of a buff/DoT is stamped with: DOT_TICK, keeping the deck mark of
+// whatever class the applying stamp carried (`applied_cls`). Phase 259 (Pitfall 5): without this
+// the Doom Winds ticks -- most of a deck hit's payout -- would be rebuilt as a plain DOT_TICK and
+// drop out of the marked stream.
+inline constexpr std::uint8_t dot_tick_class( std::uint8_t applied_cls )
+{
+  return static_cast<std::uint8_t>( RL_CAUSE_DOT_TICK | ( applied_cls & RL_CAUSE_DECK_MARK ) );
 }
 
 // Six cumulative per-fight credit streams, in this fixed index order --

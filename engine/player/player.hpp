@@ -499,6 +499,14 @@ struct player_t : public actor_t
   // rl_credit above in datacollection_begin(). Pure observer: read but never written by anything
   // that also touches the RNG, an event, or a schedule.
   std::vector<double> rl_own_real, rl_own_exp;
+  // Phase 259 (plan 259-11, owner Q15/Q16, fork research option P -- the deck-draw pricing). Both are
+  // per-fight, indexed like rl_own_exp (seq - rl_fight_first_seq), grown lazily, reset beside it.
+  //   rl_own_exp_marked[k] = the part of rl_own_exp[k] that came from a deck-hit cause (the damage of
+  //     a Doom Winds fired by a deck draw, found by RL_CAUSE_DECK_MARK on its cause stamp).
+  //   rl_deck_p[k]         = decision k's expected number of deck hits, summed over every
+  //     consume_maelstrom_weapon call it caused (analytic from card counts; nothing is drawn).
+  // record_close() turns them into the .attr `own_exp` / `deck_p` / `deck_pool_exp` fields.
+  std::vector<double> rl_own_exp_marked, rl_deck_p;
   // The seq of this fight's first decision row, captured in record_decision() (rl_translog.cpp)
   // the moment that row is written. 0 is a valid seq (the very first decision of the whole
   // process), so a separate boolean marks "no decision recorded yet this fight" rather than

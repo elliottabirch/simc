@@ -1132,7 +1132,7 @@ void dot_t::dot_tick_event_t::execute()
   // applied the dot). `owner` is nullptr -- this is not an action's own execute() dispatch.
   {
     rl_cause_scope_t rl_cause_guard(
-        dot->current_action->player, rl_cause_t{ dot->state->rl_cause_seq, RL_CAUSE_DOT_TICK } );
+        dot->current_action->player, rl_cause_t{ dot->state->rl_cause_seq, rl_credit::dot_tick_class( dot->state->rl_cause_class ) } );  // Phase 259: keeps RL_CAUSE_DECK_MARK
     // 250-03 (REC-04): this scheduled tick's OWN tick press, covering the same skill-check gate
     // AND no-skill-check-required path the cause guard above spans (before the skill-check roll,
     // so that roll itself carries the tick's own press).

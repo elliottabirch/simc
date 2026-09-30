@@ -6439,6 +6439,8 @@ void player_t::datacollection_begin()
   // starts this fight's own indices at 0 rather than carrying over a previous fight's length.
   rl_own_real.clear();
   rl_own_exp.clear();
+  rl_own_exp_marked.clear();  // Phase 259 (259-11): reset beside rl_own_exp
+  rl_deck_p.clear();
   rl_fight_first_seq = 0;
   rl_fight_first_seq_set = false;
   rl_attr_pre_fight_real = 0.0;
