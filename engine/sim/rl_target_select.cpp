@@ -17,6 +17,7 @@
 #include "util/util.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstring>
@@ -712,54 +713,85 @@ void compute_chain_hop_counts( double radius, int cap, const std::vector<player_
   }
 }
 
+// 259-07 (Q2, Q19, R3, R4; fork B3/B4): which of the 23 declared facts read the capability fixed
+// value for THIS actor -- a fact whose governing capability's effective bit is 0 (venomfang
+// weapon, Unleashed Fire lingering rune, the tier 2-piece: RL_AIM_FACT_DESCS[i].capability).
+// Constant for the actor's whole fight (talents, gear and set bonuses are fixed once the actor
+// is initialised), so it is computed ONCE per actor, never per slot or per decision, from the
+// observation's own memoised capability bits (rl_policy::capability_effective_bit) -- the gated
+// facts and the observation's governed columns can therefore never disagree. select() looks the
+// gate up once per decision and hands it to every slot's fill.
+struct aim_fact_gate
+{
+  std::array<bool, RL_TARGET_FEATURES> governed_off{};
+};
+std::unordered_map<const player_t*, aim_fact_gate> g_aim_fact_gate_cache;
+
+const aim_fact_gate& aim_fact_gate_for( player_t* p )
+{
+  auto it = g_aim_fact_gate_cache.find( p );
+  if ( it != g_aim_fact_gate_cache.end() )
+    return it->second;
+  aim_fact_gate gate;
+  for ( std::size_t i = 0; i < RL_TARGET_FEATURES; ++i )
+  {
+    const int capability = RL_AIM_FACT_DESCS[ i ].capability;
+    gate.governed_off[ i ] =
+        capability >= 0 && !rl_policy::capability_effective_bit( p, static_cast<std::size_t>( capability ) );
+  }
+  return g_aim_fact_gate_cache.emplace( p, gate ).first->second;
+}
+
+// One fact, scaled and gated exactly as the registry declares (and as scripts/rl/
+// target_features.py's scale_fact/encode_fact_row do, bit for bit): the raw value rounded to
+// float32 (the value production logged), the observation's own arithmetic in float64
+// (rl_policy::apply_leaf_scale), the result rounded to float32; a fact whose capability bit is 0
+// reads RL_CAPABILITY_FIXED_VALUE whatever the raw value.
+float scaled_fact( float raw, std::size_t i, const aim_fact_gate& gate )
+{
+  if ( gate.governed_off[ i ] )
+    return static_cast<float>( RL_CAPABILITY_FIXED_VALUE );
+  const rl_aim_fact_desc& d = RL_AIM_FACT_DESCS[ i ];
+  return static_cast<float>( rl_policy::apply_leaf_scale( static_cast<double>( raw ), d.kind, d.has_div,
+                                                          d.div, d.has_clip_div, d.clip_div ) );
+}
+
 // 233.1-03 (R6-13, OV-5): extracted verbatim from the old preference_scorer's own fill loop
 // (230-02; folded into run_target_head, 240-05 Task 2) so the rules path can fill its own scratch
-// buffer with it too -- pure, no rl_scorer_t dependency. Order-locked to target_features.py's own
-// derivation (struct enemy_fact's declaration order, EXCLUDING candidate/actor_index/
-// actor_spawn_index -- an identity number as a feature would make the score depend on enumeration
-// order), EXACTLY as run_target_head's own comment states: this is a refactor, never a
-// re-ordering. A reordering on either side of the RLW1 wire is still caught by the feature
-// fingerprint refusal at load (RL_TARGET_FEATURE_SHA) for the head path, and by this function's
-// own trailing assert for both callers.
-void fill_candidate_features( const action_t*, const enemy_fact& fact, float* out )
+// buffer with it too -- pure, no rl_scorer_t dependency.
+//
+// 259-07: the fill order is now the registry's own declaration, `RL_TARGET_FACT_LIST` (generated
+// into rl_policy_constants.h): expanding it below makes the compiler prove every declared fact is
+// a real `enemy_fact` member, in declared order -- a reorder or a rename in the registry fails to
+// compile here rather than silently mis-ordering a wire. Each fact is SCALED into the registry's
+// range and capability-gated (see scaled_fact above); the rules never read this scaled block (they
+// rank on `enemy_fact`'s raw values -- build_enemy_fact's 600 s time-to-die cap stays, the 60 s
+// cap lives only in the scaling's clipDiv).
+void fill_candidate_features( const action_t*, const enemy_fact& fact, float* out,
+                              const aim_fact_gate& gate )
 {
   std::size_t i = 0;
-  out[ i++ ] = static_cast<float>( fact.distance );
-  out[ i++ ] = fact.in_reach ? 1.0f : 0.0f;
-  out[ i++ ] = fact.in_range ? 1.0f : 0.0f;
-  out[ i++ ] = fact.in_front ? 1.0f : 0.0f;
-  out[ i++ ] = fact.alive ? 1.0f : 0.0f;
-  out[ i++ ] = fact.immune ? 1.0f : 0.0f;
-  out[ i++ ] = static_cast<float>( fact.immunity_remaining );
-  out[ i++ ] = static_cast<float>( fact.time_to_die );
-  out[ i++ ] = static_cast<float>( fact.health_pct );
-  out[ i++ ] = fact.is_boss ? 1.0f : 0.0f;
-  out[ i++ ] = static_cast<float>( fact.flame_shock_remaining );
-  out[ i++ ] = static_cast<float>( fact.neighbours_within_radius );
-  out[ i++ ] = fact.is_current_target ? 1.0f : 0.0f;
-  out[ i++ ] = static_cast<float>( fact.burning_core_remaining );
-  out[ i++ ] = static_cast<float>( fact.lightning_rod_stacks );
-  out[ i++ ] = static_cast<float>( fact.lightning_rod_remaining );
-  out[ i++ ] = static_cast<float>( fact.venomfang_remaining );
-  out[ i++ ] = static_cast<float>( fact.venomfang_debuff_stacks );
-  out[ i++ ] = static_cast<float>( fact.venomfang_debuff_remaining );
-  out[ i++ ] = static_cast<float>( fact.rune_of_unleashed_fire_lingering_remaining );
-
-  // 260914-rbp Task 1 Step 6a (R15): the three targeting-lens features (enemy_fact's own trailing
-  // fields, added this task -- see that struct's declaration comment). The Task 2 regen this
-  // comment used to wait on (RL_TARGET_FEATURES 20 -> 23) landed in Task 2b -- every caller
-  // (g_rules_feature_scratch, candidate_block_slot::features, the loaded scorer's own
-  // feature_scratch) is sized to 23 now, so the bounds guards these three writes used to need are
-  // dead weight (ME-5, Task 2c): every caller sizes `out` from RL_TARGET_FEATURES itself, so an
-  // out-of-bounds write here is a fill-order bug the assert below already catches, not a real
-  // runtime hazard a per-write guard needs to silence.
-  out[ i++ ] = static_cast<float>( fact.chain_hop_count );
-  out[ i++ ] = static_cast<float>( fact.vb_new_flame_shocks_within_10yd );
-  out[ i++ ] = static_cast<float>( fact.lava_lash_spread_within_12yd );
+#define RL_FILL_TARGET_FACT( NAME )                                              \
+  out[ i ] = scaled_fact( static_cast<float>( fact.NAME ), i, gate );           \
+  ++i;
+  RL_TARGET_FACT_LIST( RL_FILL_TARGET_FACT )
+#undef RL_FILL_TARGET_FACT
 
   assert( i == RL_TARGET_FEATURES &&
           "fill_candidate_features's fill order does not match RL_TARGET_FEATURES" );
 }
+
+// The number of facts the registry's X-macro list declares must equal the compiled width.
+constexpr std::size_t aim_fact_list_count()
+{
+  std::size_t n = 0;
+#define RL_COUNT_TARGET_FACT( NAME ) ++n;
+  RL_TARGET_FACT_LIST( RL_COUNT_TARGET_FACT )
+#undef RL_COUNT_TARGET_FACT
+  return n;
+}
+static_assert( aim_fact_list_count() == RL_TARGET_FEATURES,
+               "RL_TARGET_FACT_LIST must declare exactly RL_TARGET_FEATURES facts (259-07)" );
 
 // 240-05 Task 2 (must_haves: "the head's argmax must reuse this, not invent one"): the ONE tie
 // ladder both select()'s own rule pick (below) and run_target_head's head pick use -- extracted
@@ -855,6 +887,9 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
   // filled for a one-candidate decision.
   if ( g_rules_feature_scratch.size() != RL_TARGET_FEATURES )
     g_rules_feature_scratch.assign( RL_TARGET_FEATURES, 0.0f );
+  // 259-07 (R3): the capability gate for the candidate table's facts -- one lookup per decision
+  // (constant per actor), handed to every slot's fill below.
+  const aim_fact_gate& capture_gate = aim_fact_gate_for( a->player );
 
   // BL-01 (232-13) / ME-4 (232-15b): resolve the Thorim's-branch geometry ONCE per decision, HERE
   // -- before the per-candidate scoring loop below. `resolve_thorims_branch_geometry` calls
@@ -937,7 +972,7 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
       // own deliberately-uncorrected zero neighbours_within_radius for the two Thorim's-aware
       // melee strikes), and fill it into the rules-path scratch buffer beside g_candidate_buffer.
       enemy_fact capture_fact = build_enemy_fact( a, c );
-      fill_candidate_features( a, capture_fact, g_rules_feature_scratch.data() );
+      fill_candidate_features( a, capture_fact, g_rules_feature_scratch.data(), capture_gate );
       candidate_block_slot& slot = g_candidate_block_table[ a ];
       std::memcpy( slot.features.data() + slot_index * RL_TARGET_FEATURES,
                    g_rules_feature_scratch.data(), RL_TARGET_FEATURES * sizeof( float ) );

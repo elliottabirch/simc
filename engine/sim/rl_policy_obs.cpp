@@ -734,6 +734,27 @@ bool rl_capability_effective_value( player_t* p, std::size_t idx,
   return value;
 }
 
+// 259-07 (Q2, Q19, R3): capability `idx`'s effective bit for actor `p`, memoised for the actor's
+// whole run (the detectors read talents, gear and set bonuses -- all fixed once the actor is
+// initialised). Same single-sim/single-thread precondition as every other per-actor cache in
+// this file (g_slot_table_cache, g_action_handle_cache), asserted at the fill site. Read by the
+// candidate table's gating in rl_target_select.cpp so a capability-governed fact reads the fixed
+// value exactly when the observation's own governed slots do.
+bool capability_effective_bit( player_t* p, std::size_t idx )
+{
+  assert( p->sim->threads == 1 && p->sim->profileset_map.empty() &&
+          "rl_policy capability-bit cache is single-sim/single-thread by construction (259-07)" );
+  static std::unordered_map<const player_t*, std::array<int, RL_CAPABILITY_COUNT>> g_capability_bits;
+  auto it = g_capability_bits.find( p );
+  if ( it == g_capability_bits.end() )
+  {
+    std::array<int, RL_CAPABILITY_COUNT> memo;
+    memo.fill( -1 );
+    it = g_capability_bits.emplace( p, memo ).first;
+  }
+  return rl_capability_effective_value( p, idx, it->second );
+}
+
 // 246.1-05 (CAP-02): if a governed action of a zero-EFFECTIVE-bit capability is EVER marked
 // legal (resolvable && ready -- see build_mask's own R0 comment: for a `kind == cast` action
 // this pair IS the whole mask verdict), the engine and the capability table have diverged --
@@ -1002,27 +1023,30 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
 // identical between the two structs, so this is a type swap only.
 // ---------------------------------------------------------------------------
 
-namespace
-{
-double apply_scale( double raw, rl_kind kind, const rl_leaf_desc& f )
+// 259-07 (Q2, R3): the observation's scaling rule, exposed ONCE so the aim head's candidate table
+// is scaled by the very same arithmetic (declared in rl_policy.hpp). MOVED here from the
+// anonymous-namespace apply_scale below with its arithmetic unchanged -- every observation value
+// is bit-identical to before; apply_scale is now a one-line forward to this function.
+double apply_leaf_scale( double raw, rl_kind kind, bool has_div, double div, bool has_clip_div,
+                         double clip_div )
 {
   switch ( kind )
   {
     case rl_kind::k_int:
     case rl_kind::k_float:
     {
-      const double div = f.has_div ? f.div : 1.0;
-      return raw / div;
+      const double d = has_div ? div : 1.0;
+      return raw / d;
     }
     case rl_kind::k_seconds:
     {
-      if ( f.has_clip_div )
+      if ( has_clip_div )
       {
-        const double clipped = std::max( std::min( raw, f.clip_div ), 0.0 );
-        return clipped / f.clip_div;
+        const double clipped = std::max( std::min( raw, clip_div ), 0.0 );
+        return clipped / clip_div;
       }
-      const double div = f.has_div ? f.div : 1.0;
-      return raw / div;
+      const double d = has_div ? div : 1.0;
+      return raw / d;
     }
     case rl_kind::k_bucket:
       // Bucket fields are dispatched by the caller before this function is
@@ -1031,6 +1055,13 @@ double apply_scale( double raw, rl_kind kind, const rl_leaf_desc& f )
       return raw;
   }
   return raw;
+}
+
+namespace
+{
+double apply_scale( double raw, rl_kind kind, const rl_leaf_desc& f )
+{
+  return apply_leaf_scale( raw, kind, f.has_div, f.div, f.has_clip_div, f.clip_div );
 }
 
 double encode_bucket_ordinal( double raw, const double* buckets, std::size_t n )

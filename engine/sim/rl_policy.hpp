@@ -345,6 +345,23 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground, bool is_d
 // construction, never a second hand-copied name list (OBS-02).
 const slot_table& bind_slots( player_t* p );
 
+// 259-07 (Q2, R3, R6): three seams the aim head shares with the observation so the two can never
+// drift.
+//
+// apply_leaf_scale: the observation's ONE scaling rule (k_seconds with a clip -> clamp(raw, 0,
+// clip)/clip; otherwise raw/div). The candidate table's facts are scaled through this same
+// function (rl_target_select.cpp, fill_candidate_features) with the registry's own descriptor
+// values, so the observation, the candidate table, the head and the trainer read identical
+// floats. MOVED out of rl_policy_obs.cpp's anonymous namespace, arithmetic unchanged.
+double apply_leaf_scale( double raw, rl_kind kind, bool has_div, double div, bool has_clip_div,
+                         double clip_div );
+
+// capability_effective_bit: capability `capability_index`'s EFFECTIVE bit (own detector AND every
+// required capability) for actor `p`, memoised per actor -- the same value the observation's
+// capability.<id> column and its governed-slot rebind read. Constant for the actor's whole
+// fight, so the candidate table's gating costs one lookup per fact, never a detector walk.
+bool capability_effective_bit( player_t* p, std::size_t capability_index );
+
 // ---- Stage 2 ----
 // build_mask/build_wait remain PURE over the rl_state_t POD (unchanged --
 // 260831-mk7 does not touch this purity contract; it adds a PARAMETER to
