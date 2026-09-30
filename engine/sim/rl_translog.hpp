@@ -1260,7 +1260,11 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq,
                        // cost beyond the one bool check) otherwise. Defaulted so this is additive
                        // at both existing call sites' call-compatibility, though both are updated
                        // to pass it explicitly.
-                       const char* apl_choice_name = nullptr );
+                       const char* apl_choice_name = nullptr,
+                       // 259-05b (R5): true when the random-aim dial fired at THIS decision --
+                       // written as FLAG_AIM_EXPLORED (bit 6). `exploratory` above keeps meaning
+                       // the BUTTON dial only.
+                       bool aim_explored = false );
 
 // Called from sim_t::combat_end(), after datacollection_end(). Builds and
 // appends the close row, then flushes the buffered rows for this fight to

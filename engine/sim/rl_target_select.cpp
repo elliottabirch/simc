@@ -44,6 +44,35 @@ constexpr const char* TARGETED_TOKENS[] = {
   "windstrike",  "lava_lash",      "voltaic_blaze",   "primordial_storm",
 };
 
+// 259-05b (fork open question 3): every spell the aim head's one-hot names (RL_AIM_SPELLS, the
+// registry-generated list) must be one of the targeted tokens above -- the head can only ever
+// aim a spell this module resolves a pick for. Proved at COMPILE time (strictly stronger than a
+// load-time assert: a build that violates it does not exist). The loader separately pins the
+// file's declared count and registry sha against the same generated tables.
+constexpr bool aim_token_equal( const char* a, const char* b )
+{
+  while ( *a != '\0' && *a == *b )
+  {
+    ++a;
+    ++b;
+  }
+  return *a == *b;
+}
+constexpr bool aim_spells_all_targeted()
+{
+  for ( std::size_t k = 0; k < RL_AIM_SPELL_COUNT; ++k )
+  {
+    bool found = false;
+    for ( const char* token : TARGETED_TOKENS )
+      found = found || aim_token_equal( RL_AIM_SPELLS[ k ], token );
+    if ( !found )
+      return false;
+  }
+  return true;
+}
+static_assert( aim_spells_all_targeted(),
+               "every RL_AIM_SPELLS token must appear in TARGETED_TOKENS (259-05b)" );
+
 // Per-player monotonic decision counter (228-02's own stamp -- see rl_target_select.hpp's header
 // comment for why neither the handle cache's key nor solver_control's `seq` can serve this role).
 std::unordered_map<const player_t*, std::uint64_t> g_decision_stamp;
@@ -1136,8 +1165,24 @@ void run_target_head( const action_t* resolved )
   if ( !resolved )
     return;
   const sim_t* sim = resolved->player->sim;
-  if ( !sim->solver_policy_weights || !sim->solver_policy_weights->has_scorer ||
+  if ( !sim->solver_policy_weights || !sim->solver_policy_weights->has_aim_head ||
        sim->target_scorer_force_rules )
+    return;
+
+  // 259-05b: the head scores only the spells its one-hot names (RL_AIM_SPELLS, seven today --
+  // primordial_storm is targeted but has no column). A chosen action outside that list keeps the
+  // rules' own aim, exactly as if no head were loaded; replaces the old eight-token assert, which
+  // could not hold for a seven-spell section.
+  std::size_t aim_spell_index = RL_AIM_SPELL_COUNT;
+  for ( std::size_t k = 0; k < RL_AIM_SPELL_COUNT; ++k )
+  {
+    if ( resolved->name_str == RL_AIM_SPELLS[ k ] )
+    {
+      aim_spell_index = k;
+      break;
+    }
+  }
+  if ( aim_spell_index == RL_AIM_SPELL_COUNT )
     return;
 
   auto it = g_candidate_block_table.find( resolved );
@@ -1159,15 +1204,9 @@ void run_target_head( const action_t* resolved )
 
   candidate_block_slot& slot = it->second;
   rl_policy::rl_weights_t& w = *resolved->player->sim->solver_policy_weights;
-  rl_policy::rl_scorer_t&  s = w.scorer;
+  rl_policy::rl_aim_t&     s = w.aim;
   float* feats = s.feature_scratch.data();
-
-  // CK1-1 (mirrors the removed preference_scorer's own assert): exactly eight targeted spells get
-  // a one-hot column -- this module's own TARGETED_TOKENS[] and the wire format's aiming-spell
-  // width must agree.
-  const std::size_t n_tok = targeted_action_token_count();
-  assert( n_tok == 8 && "CK1-1: exactly eight targeted spells get a one-hot column" );
-  const char* const* toks = targeted_action_tokens();
+  const std::size_t aim_width = RL_AIM_INPUT_COUNT + RL_AIM_SPELL_COUNT;
 
   player_t*    current_target = resolved->player->target;
   player_t*    best           = nullptr;
@@ -1181,11 +1220,14 @@ void run_target_head( const action_t* resolved )
     // place.
     if ( !( slot.mask & static_cast<std::uint16_t>( 1u << slot_index ) ) )
       continue;
+    // Input layout (259-05b): [facts (RL_TARGET_FEATURES) | context (zero until plan 259-07
+    // wires it) | aiming-spell one-hot (RL_AIM_SPELL_COUNT)] -- RL_AIM_INPUT_COUNT floats of
+    // facts+context, then the one-hot, the same order the loader's first-layer width check pins.
+    std::memset( feats, 0, aim_width * sizeof( float ) );
     std::memcpy( feats, slot.features.data() + slot_index * RL_TARGET_FEATURES,
                  RL_TARGET_FEATURES * sizeof( float ) );
-    for ( std::size_t k = 0; k < n_tok; ++k )
-      feats[ RL_TARGET_FEATURES + k ] = ( resolved->name_str == toks[ k ] ) ? 1.0f : 0.0f;
-    const double score = static_cast<double>( rl_policy::forward_scorer( s, feats ) );
+    feats[ RL_AIM_INPUT_COUNT + aim_spell_index ] = 1.0f;
+    const double score = static_cast<double>( rl_policy::forward_aim( s, feats ) );
     player_t*    c     = slot.actors[ slot_index ];
     if ( candidate_is_better( score, c, best_score, best, current_target ) )
     {

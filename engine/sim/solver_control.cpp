@@ -1216,10 +1216,10 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       std::uint16_t candidate_block_mask        = 0;
       std::uint8_t  candidate_block_count       = 0;
       std::uint8_t  candidate_block_chosen_slot = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
-      // 230-04 (SCOR-02, R-B): set true when the candidate dial (immediately below) actually
-      // fired -- OR'd into the row's own FLAG_EXPLORATORY bit alongside the action dial's
-      // `exploratory` above, since the bit means "a random draw fired here", not "which one".
-      bool candidate_exploratory = false;
+      // 230-04 (SCOR-02, R-B) / 259-05b (R5): set true when the random-aim dial (immediately below)
+      // actually fired -- written as the row's own FLAG_AIM_EXPLORED bit (bit 6), NEVER
+      // FLAG_EXPLORATORY, which means the button dial only.
+      bool candidate_aim_explored = false;
       {
         const bool is_rl_actor = std::strcmp( p->name(), RL_ACTOR_NAME ) == 0 && !p->is_pet();
         if ( p->sim->target_select_enabled && is_rl_actor )
@@ -1273,7 +1273,14 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
             if ( found && pick != nullptr && candidate_block_features != nullptr &&
                  candidate_block_count > 1 && sim->solver_policy_weights )
             {
-              const float candidate_exploration = sim->solver_policy_weights->scorer.exploration;
+              // 259-05b (R5, R9): the dial's rate comes from the loaded file's AIM section
+              // (`aim.exploration`), available whenever a section is present -- a dial-only
+              // section included, which is how the rules arm fires it -- and 0 otherwise. The
+              // button dial's own rate (`exploration`) is a separate field and never read here.
+              const float candidate_exploration =
+                  sim->solver_policy_weights->has_aim_section
+                      ? sim->solver_policy_weights->aim.exploration
+                      : 0.0f;
               if ( candidate_exploration > 0.0f &&
                    sim->solver_explore_rng.real() < candidate_exploration )
               {
@@ -1291,7 +1298,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
                     chosen_target_actor_index =
                         static_cast<std::uint16_t>( legal[ draw ].actor_index );
                     candidate_block_chosen_slot = draw_slot;
-                    candidate_exploratory       = true;
+                    candidate_aim_explored       = true;
                   }
                 }
               }
@@ -1301,7 +1308,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       }
       rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, top_q,
                                      chosen_target_actor_index, false,
-                                     exploratory || candidate_exploratory, row_held,
+                                     exploratory, row_held,
                                      candidate_block_features, candidate_block_mask,
                                      candidate_block_count, candidate_block_chosen_slot,
                                      // 260927-d1 (D1 census, Stage 1 Task 2): the engine's own
@@ -1309,7 +1316,9 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
                                      // own "apl_choice" field names (solver_control.cpp:656-657
                                      // above) -- nullptr when the option is off, matching every
                                      // other "off" path's zero-cost convention.
-                                     sim->solver_record_apl_choice && apl_choice ? apl_choice->name() : nullptr );
+                                     sim->solver_record_apl_choice && apl_choice ? apl_choice->name() : nullptr,
+                                     // 259-05b (R5): the random-aim dial's own flag (bit 6).
+                                     candidate_aim_explored );
       // 212-CR-FIX WR-06: accept_cast() can refuse a not-ready action via
       // protocol_abort() (a throw), which unwinds past combat_end()'s
       // record_close() hook entirely for this fight -- without this catch,

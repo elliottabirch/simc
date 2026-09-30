@@ -968,7 +968,7 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
   // this call, so its own aim stays exactly the rule's (D8(a)). `targeted_actions_count` is
   // naturally 0 off the decision boundary (the loop above only appends inside its own boundary
   // branch), so no separate `is_decision_boundary` check is needed here.
-  if ( p->sim->solver_policy_weights && p->sim->solver_policy_weights->has_scorer &&
+  if ( p->sim->solver_policy_weights && p->sim->solver_policy_weights->has_aim_head &&
        !p->sim->target_scorer_force_rules )
   {
     for ( std::size_t k = 0; k < targeted_actions_count; ++k )

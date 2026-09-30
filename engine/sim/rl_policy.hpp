@@ -435,37 +435,33 @@ struct rl_layer
   std::vector<float>  beta;    // [out], only when has_ln
 };
 
-// Phase 230-02 (SCOR-01, R-A): the RLW1 v4 trailing SCORER section -- a SECOND, independent
-// parameter set (never a `body` variant: `body` selects a layer-SPLIT convention over the ONE
-// rotation parameter set, the scorer is a wholly separate net). Always mlp-shaped (`_layer_split`
-// / `hidden_layer_count(rl_body_type::mlp, ...)`, reused verbatim -- never a second hidden
-// convention): n_layers >= 2, every layer's has_ln == false, first layer's in_features ==
-// `features + RLW1_V4_AIMING_SPELL_COUNT` (the eight targeted spells' one-hot, CK1-1), last
-// layer's out_features == 1 (one score per candidate). `context_width` is declared but PINNED to
-// 0 in this phase (R-C: the shared observation vector does not exist at the moment a pick is
-// computed) -- a non-zero value is refused by name at load. `slots` is the TRAINING side's own
-// declared candidate-slot bound (R-B) -- the engine's own overflow refusal (rl_target_select.cpp)
-// compares the generic filter's live candidate count against THIS value, never a hardcoded
-// engine constant, so a blob trained against a different slot count fails loudly rather than
-// silently.
-struct rl_scorer_t
+// Phase 259 (plan 259-05b, owner Q6): the RLW1 v6 AIM section -- a SECOND, independent parameter
+// set (never a `body` variant: `body` selects a layer-SPLIT convention over the ONE rotation
+// parameter set, the aim head is a wholly separate net). Replaces the retired v4 scorer section.
+// Always mlp-shaped (`hidden_layer_count(rl_body_type::mlp, ...)`, reused verbatim -- never a
+// second hidden convention): either 0 layers (a DIAL-ONLY section: it carries the random-aim rate
+// and no head, so the fork aims by the rules and still fires the dial -- the rules comparison
+// arm) or n_layers >= 2, every layer's has_ln == false, first layer's in_features ==
+// `input_count + spell_count`, last layer's out_features == 1 (one score per candidate slot).
+// `slots`, `input_count`, `spell_count` and `registry_sha` are the file's own declaration of what
+// the head was built for; the loader refuses any that differ from the compiled RL_TARGET_SLOTS /
+// RL_AIM_INPUT_COUNT / RL_AIM_SPELL_COUNT / RL_AIM_SHA (rl_policy_constants.h), by name.
+// `obs_source` 0 = the spell net's target inputs describe the RULES' pick, 1 = the HEAD's pick.
+struct rl_aim_t
 {
-  float          exploration    = 0.0f;  // the scorer's OWN epsilon dial over CANDIDATES -- mirrors
-                                          // rl_weights_t::exploration's own [0.0,1.0]-finite bound
-  std::uint32_t  slots          = 0;     // 1..64 -- the training side's declared candidate-slot count
-  std::uint32_t  features       = 0;     // 1..RLW1_MAX_FEATURES -- the per-candidate feature count
-  std::uint32_t  context_width  = 0;     // MUST be 0 in this phase (R-C) -- non-zero refused by name
-  std::string    feature_sha;            // "tgt-feat-v1:<64hex>" -- cross-checked against
-                                          // RL_TARGET_FEATURE_SHA (rl_policy_constants.h) at load
-  std::vector<rl_layer> layers;          // mlp-shaped, n_layers >= 2 (one hidden layer minimum + the
-                                          // single-output layer) -- expected_layer_count(mlp) == 2
+  float          exploration   = 0.0f;  // the random-aim dial's rate -- finite, 0..1 (the BUTTON
+                                         // dial's rl_weights_t::exploration is a separate field)
+  std::uint32_t  slots         = 0;     // the head's declared candidate-slot count
+  std::uint32_t  input_count   = 0;     // per-candidate input width (facts + context)
+  std::uint32_t  spell_count   = 0;     // width of the aiming-spell one-hot
+  std::uint32_t  obs_source    = 0;     // 0 rules, 1 head (see above)
+  std::string    registry_sha;          // "aim-v1:<64hex>" -- cross-checked against RL_AIM_SHA at load
+  std::vector<rl_layer> layers;         // empty (dial-only) or mlp-shaped, n_layers >= 2
 
-  // Load-time-sized scratch (same single-thread/no-per-decision-allocation reasoning as
-  // rl_weights_t::hidden_scratch above): hidden_scratch[i] holds scorer hidden layer i's
-  // post-ReLU activations; feature_scratch holds the per-candidate input vector
-  // (rl_target_select's scorer preference fills it: the declared feature list's order, then the
-  // eight-wide aiming-spell one-hot) -- `features + RLW1_V4_AIMING_SPELL_COUNT` wide, sized once
-  // at load, reused every scoring call, never reallocated per decision.
+  // Load-time-sized scratch (single-thread, no per-decision allocation): hidden_scratch[i] holds
+  // aim hidden layer i's post-ReLU activations; feature_scratch holds the per-slot input buffers,
+  // `RL_TARGET_SLOTS * (input_count + spell_count)` floats, sized once at load and reused every
+  // scoring call.
   mutable std::vector<std::vector<float>> hidden_scratch;
   mutable std::vector<float>              feature_scratch;
 };
@@ -532,14 +528,16 @@ struct rl_weights_t
   std::string   action_space_sha;        // bare 64 hex
   std::vector<rl_layer> layers;          // n_layers >= the body's own minimum (2 mlp / 3 dueling+)
 
-  // Phase 230-02 (SCOR-01, R-A/R-K): present only when format_version == 4 -- a rotation-only v3
-  // blob loads with has_scorer == false and `scorer` left default-constructed. The run-time
-  // switch this presence bit drives lives in rl_target_select.cpp's preference_for() (D-02): a
-  // scorer-bearing blob takes the scored path, UNLESS sim->target_scorer_force_rules (default
-  // off, sim.hpp/sim.cpp) forces the rules path so the previous phase's rules-arm numbers can be
-  // re-run byte-identically on this binary (230-SWAP-RECEIPT.md's Task 3 proof).
-  bool          has_scorer = false;
-  rl_scorer_t   scorer;
+  // Phase 259 (plan 259-05b): present only when format_version >= 6 AND the file's `aim_present`
+  // is 1 -- a rotation-only blob loads with has_aim_section == false and `aim` left
+  // default-constructed. `has_aim_section` means the random-aim dial's rate is available
+  // (`aim.exploration`, a dial-only section included); `has_aim_head` means the section carries
+  // layers (the head is consulted). The run-time switch on top of these lives in
+  // rl_target_select.cpp's run_target_head: a head-bearing blob aims by the head UNLESS
+  // sim->target_scorer_force_rules (default off, sim.hpp/sim.cpp) forces the rules' aim.
+  bool          has_aim_section = false;
+  bool          has_aim_head    = false;
+  rl_aim_t      aim;
 
   // Phase 222 (NET-01, arm subsets): an optional input GATHER and a static
   // action ALLOW-LIST, both carried on the blob (RLW1 v3's trailing
@@ -605,14 +603,13 @@ void         forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ],
                        const std::uint8_t mask[ RL_ACTION_DIM ], float out_q[ RL_ACTION_DIM ] );
 int          masked_argmax( const float q[ RL_ACTION_DIM ], const std::uint8_t mask[ RL_ACTION_DIM ] );
 
-// Phase 230-02 (SCOR-01): the scorer's own forward pass -- one hidden-layer stack (ReLU, the SAME
-// activation forward()'s mlp branch uses -- no second activation formula) then a single 1-wide
-// linear output layer, no masking (a scorer forward pass scores exactly ONE candidate; `select()`
-// in rl_target_select.cpp calls this once per candidate and argmaxes the results itself, mirroring
-// every other preference_fn's own contract). `in` must point at `s.features +
-// RLW1_V4_AIMING_SPELL_COUNT` floats -- the caller (rl_target_select's scorer preference) fills
-// `s.feature_scratch` itself and passes `s.feature_scratch.data()`.
-float forward_scorer( const rl_scorer_t& s, const float* in );
+// Phase 259 (plan 259-05b): the aim head's own forward pass -- one hidden-layer stack (ReLU, the
+// SAME activation forward()'s mlp branch uses -- no second activation formula) then a single
+// 1-wide linear output layer, no masking (a forward pass scores exactly ONE candidate slot;
+// run_target_head in rl_target_select.cpp calls this once per legal slot and argmaxes the results
+// itself). Draws no random numbers. `in` must point at `a.input_count + a.spell_count` floats --
+// the caller fills `a.feature_scratch` itself and passes its data pointer.
+float forward_aim( const rl_aim_t& a, const float* in );
 
 // 260914-rbp Task 2c (ADD-2): clears rl_policy_obs.cpp's own per-actor g_hits_action_handle_cache
 // (the hits.* family's find_action() handle cache) -- declared here, defined in rl_policy_obs.cpp,

@@ -406,10 +406,19 @@ void open_and_write_header( sim_t* sim )
     h.exploration = 0.0f;
     h.round_index = 0;
   }
-  // Version 11 (phase 259, plan 259-05): the aim header fields exist but are written zero here
-  // (no aim section is read yet); plan 259-05b stamps them from the loaded weights' aim section.
+  // Version 11 (phase 259, plans 259-05 / 259-05b): the loaded weights' aim state, stamped from
+  // the file's aim section and the comparator switch. 0.0 / 0 with no weights or no section.
   h.aim_exploration = 0.0f;
   h.aim_state = 0;
+  if ( root->solver_policy_weights && root->solver_policy_weights->has_aim_section )
+  {
+    const rl_policy::rl_weights_t& aw = *root->solver_policy_weights;
+    h.aim_exploration = aw.aim.exploration;
+    h.aim_state = AIM_STATE_SECTION | ( aw.has_aim_head ? AIM_STATE_HEAD : 0u ) |
+                  ( aw.aim.obs_source == 1 ? AIM_STATE_OBS_HEAD : 0u );
+  }
+  if ( root->target_scorer_force_rules )
+    h.aim_state |= AIM_STATE_FORCE_RULES;
   // tstl-sylvanas phase 218, plan 218-02 (RIG-01): source the header's
   // fight-shape word from the sim option instead of hardcoding zero. 0
   // stays reachable -- it is sim_t::rl_fight_shape_index's own default,
@@ -546,7 +555,7 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float ob
                        bool exploratory, bool held,
                        const float* candidate_features, std::uint16_t candidate_mask,
                        std::uint8_t candidate_count, std::uint8_t chosen_candidate_slot,
-                       const char* apl_choice_name )
+                       const char* apl_choice_name, bool aim_explored )
 {
   sim_t* root = root_of( sim );
   if ( root->rl_translog_file_str.empty() )
@@ -621,7 +630,8 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float ob
   // NATURAL mask (D3); this bit is the only place a hold is visible in the row at all.
   r.flags = static_cast<std::uint8_t>( ( wait_floored ? FLAG_WAIT_FLOORED : 0 ) |
                                         ( exploratory ? FLAG_EXPLORATORY : 0 ) |
-                                        ( held ? FLAG_HELD : 0 ) );
+                                        ( held ? FLAG_HELD : 0 ) |
+                                        ( aim_explored ? FLAG_AIM_EXPLORED : 0 ) );
   r.thread = static_cast<std::uint8_t>( sim->thread_index );
   r.kind = KIND_DECISION;
   // Version 9 (260917-pcn): the per-fight cumulative proc-roll observer totals at this
