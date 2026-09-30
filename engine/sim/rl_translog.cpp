@@ -406,6 +406,10 @@ void open_and_write_header( sim_t* sim )
     h.exploration = 0.0f;
     h.round_index = 0;
   }
+  // Version 11 (phase 259, plan 259-05): the aim header fields exist but are written zero here
+  // (no aim section is read yet); plan 259-05b stamps them from the loaded weights' aim section.
+  h.aim_exploration = 0.0f;
+  h.aim_state = 0;
   // tstl-sylvanas phase 218, plan 218-02 (RIG-01): source the header's
   // fight-shape word from the sim option instead of hardcoding zero. 0
   // stays reachable -- it is sim_t::rl_fight_shape_index's own default,
@@ -570,6 +574,10 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float ob
     r.candidate_mask = candidate_mask;
     r.candidate_count = candidate_count;
     r.chosen_candidate_slot = chosen_candidate_slot;
+    // Version 11 (259-05): no head aims on this code path yet, so the slot the rules picked and
+    // the slot the observation described are both the block's own rule-chosen slot.
+    r.rules_candidate_slot = chosen_candidate_slot;
+    r.observed_candidate_slot = chosen_candidate_slot;
   }
   else
   {
@@ -577,6 +585,8 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float ob
     r.candidate_mask = 0;
     r.candidate_count = 0;
     r.chosen_candidate_slot = CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
+    r.rules_candidate_slot = CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
+    r.observed_candidate_slot = CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
   }
   // 212-CR-FIX NT-02: narrowed 64->32 bits silently, unlike iteration/thread
   // above and below, which assert_write_site_ranges() refuses loudly rather
@@ -614,7 +624,6 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float ob
                                         ( held ? FLAG_HELD : 0 ) );
   r.thread = static_cast<std::uint8_t>( sim->thread_index );
   r.kind = KIND_DECISION;
-  r.reserved = 0;
   // Version 9 (260917-pcn): the per-fight cumulative proc-roll observer totals at this
   // decision boundary -- see rl_proc_counters.hpp and rl_translog.hpp's top-of-file comment.
   std::memcpy( r.proc_attempts, p->rl_proc_counters.attempts, sizeof( r.proc_attempts ) );
@@ -713,6 +722,7 @@ void record_close( sim_t* sim )
   r.thread = static_cast<std::uint8_t>( sim->thread_index );
   r.kind = KIND_CLOSE;
   r.reserved = 0;
+  r.reserved2 = 0;
   // Version 9 (260917-pcn): the fight's own FINAL proc-roll observer totals, from the same
   // solo actor `p` (not root) -- see rl_translog.hpp's top-of-file comment.
   std::memcpy( r.proc_attempts, p->rl_proc_counters.attempts, sizeof( r.proc_attempts ) );
@@ -769,6 +779,7 @@ void record_close( sim_t* sim )
     fr.n_decisions = n_decisions;
     fr.zero = 0;
     fr.sum_own_real = sum_own_real;
+    fr.deck_pool_exp = 0.0;  // .attr version 2 (259-05): filled by plan 259-11's deck-draw pass
     root->rl_translog_attr_stream->write( reinterpret_cast<const char*>( &fr ), sizeof( fr ) );
 
     for ( std::uint32_t i = 0; i < n_decisions; ++i )
@@ -781,6 +792,7 @@ void record_close( sim_t* sim )
       dr.seq = static_cast<std::uint32_t>( s );  // 212-CR-FIX NT-02's own narrowing convention
       dr.own_real = idx < p->rl_own_real.size() ? p->rl_own_real[ idx ] : 0.0;
       dr.own_exp = idx < p->rl_own_exp.size() ? p->rl_own_exp[ idx ] : 0.0;
+      dr.deck_p = 0.0;  // .attr version 2 (259-05): filled by plan 259-11's deck-draw pass
       root->rl_translog_attr_stream->write( reinterpret_cast<const char*>( &dr ), sizeof( dr ) );
     }
 
@@ -897,6 +909,7 @@ void write_footer( sim_t* sim )
   r.thread = static_cast<std::uint8_t>( sim->thread_index );
   r.kind = KIND_FOOTER;
   r.reserved = 0;
+  r.reserved2 = 0;
   // Version 9 (260917-pcn): no fight owns the footer -- written zero.
   std::memset( r.zero_proc_block, 0, sizeof( r.zero_proc_block ) );
   // Version 10 (260918-cbc): no fight owns the footer -- written zero.
@@ -930,6 +943,7 @@ void write_footer( sim_t* sim )
     afr.zero1 = 0;
     afr.zero2 = 0;
     afr.zero_f = 0.0;
+    afr.zero_f2 = 0.0;  // .attr version 2 (259-05)
     root->rl_translog_attr_stream->write( reinterpret_cast<const char*>( &afr ), sizeof( afr ) );
     root->rl_translog_attr_stream->flush();
     if ( !*root->rl_translog_attr_stream )

@@ -259,6 +259,34 @@
 // below (rl_attr namespace) for the on-disk layout, and rl_translog.cpp's record_decision()/
 // record_close()/write_footer() for the writer. Pure observer, same as every credit-by-cause
 // addition above it: no roll, no event, no dispatch change.
+//
+// Version 11 (phase 259, plan 259-05 -- "the head aims again"): the aim head
+// returns on top of production's version-10 row, at `RL_TARGET_SLOTS = 16` (was 8; the
+// registry-generated header, rl_policy_constants.h, carries the new value and the aim tables).
+// Four layout moves, every one a pure EXTENSION of the version-10 geometry except the slot
+// count, whose move reshapes the candidate block and so orphans every version-10 file (the
+// reader refuses on an exact version mismatch, same rule as every prior bump):
+//   1. the `reserved` byte @48+4W+4SF of a decision row becomes `rules_candidate_slot` -- the
+//      candidate slot the RULES picked for the chosen action (0xFF = no block, the
+//      CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK sentinel); `chosen_candidate_slot` keeps meaning the
+//      slot the row's action actually aimed at. A new byte `observed_candidate_slot` @49+4W+4SF
+//      (one of the three padding bytes that used to sit before the 8-aligned proc block) names
+//      the slot the OBSERVATION described for the chosen action before any random aim. Close and
+//      footer rows keep `reserved` at @48 and name the new byte `reserved2` @49, both zero.
+//   2. two flag bits: FLAG_AIM_EXPLORED (bit 6, the random-aim dial fired) and
+//      FLAG_OBS_HEAD_AIMED (bit 7, the observation's target facts described the head's picks).
+//      FLAG_EXPLORATORY (bit 3) now means the BUTTON dial only.
+//   3. the file header grows 256 -> 264 bytes: `float aim_exploration` @256 (the aim rate the
+//      loaded weights file's aim section declared; 0.0 with no section or no file) and
+//      `uint32 aim_state` @260 (bit 0 section present, bit 1 has layers, bit 2 observation
+//      head, bit 3 force-rules). The writer stamps both zero in plan 259-05; plan 259-05b
+//      stamps them from the loaded aim section.
+//   4. `PROC_BLOCK_OFFSET` becomes `roundup8(45 + 4W + 4SF + 5)` (one more byte is used before
+//      the block). At W=319, S=16, F=23: roundup8(45 + 1276 + 1472 + 5) = roundup8(2798) = 2800;
+//      the proc block (160) ends at 2960; the credit block (96) ends at 3056 == RECORD_SIZE.
+// The candidate block keeps all 23 facts per slot in RL_TARGET_FACT_LIST order; plan 259-07
+// changes WHAT is written (scaled and gated), never the shape. The `.attr` sidecar moves to its
+// own version 2 in the same phase (see the rl_attr namespace below): records grow 24 -> 32 bytes.
 
 #pragma once
 
@@ -283,21 +311,29 @@ namespace rl_translog
 // trailing NUL is part of the magic itself.
 inline constexpr char MAGIC[ 4 ] = { 'R', 'L', 'T', 'L' };
 inline constexpr std::uint32_t ENDIAN_CANARY = 0x01020304u;
-inline constexpr std::uint32_t FORMAT_VERSION = 10u;  // 260918-cbc: credit-by-cause block
-                                                        // appended (see top-of-file version-10
-                                                        // comment); 8 is RESERVED by the unmerged
-                                                        // dual-head branch
+inline constexpr std::uint32_t FORMAT_VERSION = 11u;  // 259-05: 16 slots, rules/observed slots,
+                                                        // aim flags, header aim fields (see
+                                                        // top-of-file version-11 comment); 10 was
+                                                        // 260918-cbc's credit-by-cause block
 // RECORD_SIZE stays an integer LITERAL, not a computed expression --
 // scripts/rl/obs_transport_coupling.selftest.py parses this file's own
 // source text for an `ast.Constant`-shaped literal on both sides of the
 // language boundary, and a computed expression here would break that
 // parse. The static_assert immediately below is what keeps the literal
-// honest: RECORD_SIZE(W) = roundup8(45 + 4*W + 4*RL_TARGET_SLOTS*RL_TARGET_FEATURES + 4) +
+// honest: RECORD_SIZE(W) = roundup8(45 + 4*W + 4*RL_TARGET_SLOTS*RL_TARGET_FEATURES + 5) +
 // 8*rl_proc::COUNT, so a mistyped literal cannot silently drift from the formula and still
 // compile (tstl 220-03, OBS-06; formula updated 260901-pb1 Task 3 for version 5, updated again
 // 228-09 for version 6, updated again 230-04 for version 7, updated again 260917-pcn for
 // version 9 -- see top-of-file comment).
-inline constexpr std::uint32_t RECORD_SIZE = 2320u;  // 260928-tb9 (width-only re-bless): 2304 -> 2320 -- RL_OBS_DIM
+inline constexpr std::uint32_t RECORD_SIZE = 3056u;  // 259-05 (format 11, top-of-file version-11
+                                                       // comment): 2320 -> 3056 -- RL_TARGET_SLOTS
+                                                       // moves 8 -> 16 and one more byte is used
+                                                       // before the proc block. roundup8(45 + 4*319
+                                                       // + 4*16*23 + 5) = roundup8(2798) = 2800,
+                                                       // + 160 proc block + 96 credit block = 3056.
+                                                       // Confirmed by the static_assert immediately
+                                                       // below, not hand-verified.
+                                                       // 260928-tb9 (width-only re-bless): 2304 -> 2320 -- RL_OBS_DIM
                                                        // moves 315 -> 319 (four player_buffs columns for the Void
                                                        // Execution Mandate trinket: its haste buff and its Impending
                                                        // Execution crit buff, stacks + remains each, spells
@@ -395,12 +431,13 @@ inline constexpr std::uint32_t RECORD_SIZE = 2320u;  // 260928-tb9 (width-only r
 inline constexpr std::uint32_t PROC_BLOCK_OFFSET =
     ( ( 45u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) +
         4u * static_cast<std::uint32_t>( RL_TARGET_SLOTS ) * static_cast<std::uint32_t>( RL_TARGET_FEATURES ) +
-        4u + 7u ) / 8u ) * 8u;
+        5u + 7u ) / 8u ) * 8u;  // 259-05: +5 (was +4) -- observed_candidate_slot takes one more byte
 inline constexpr std::uint32_t PROC_BLOCK_SIZE = 8u * rl_proc::COUNT;
-static_assert( PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE == 2224u,
-               "PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE must equal the version-9 row size at the "
-               "260928-tb9 (width-only re-bless, RL_OBS_DIM=319) obs width (2224) -- "
-               "CREDIT_BLOCK_OFFSET below is pinned to that exact value" );
+static_assert( PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE == 2960u,
+               "PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE must equal the version-11 pre-credit row size at "
+               "the 259-05 obs width (RL_OBS_DIM=319) and 16 target slots (2960; was 2224 at 8 slots "
+               "and 260928-tb9's width, version 10) -- CREDIT_BLOCK_OFFSET below is pinned to that "
+               "exact value" );
 // 260918-cbc: the version-9 row size (unchanged formula) is where the new credit-by-cause
 // block starts; CREDIT_BLOCK_SIZE is the block's own byte count (two double[STREAM_COUNT]
 // arrays -- see rl_credit.hpp's rl_credit_streams_t). Declared after PROC_BLOCK_SIZE so the
@@ -409,10 +446,10 @@ static_assert( PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE == 2224u,
 inline constexpr std::uint32_t CREDIT_BLOCK_OFFSET = PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE;
 inline constexpr std::uint32_t CREDIT_BLOCK_SIZE = 8u * 2u * rl_credit::STREAM_COUNT;
 static_assert( RECORD_SIZE == CREDIT_BLOCK_OFFSET + CREDIT_BLOCK_SIZE,
-               "RECORD_SIZE must be roundup8(45 + 4*RL_OBS_DIM + 4*RL_TARGET_SLOTS*RL_TARGET_FEATURES + 4) + "
+               "RECORD_SIZE must be roundup8(45 + 4*RL_OBS_DIM + 4*RL_TARGET_SLOTS*RL_TARGET_FEATURES + 5) + "
                "8*rl_proc::COUNT + 16*rl_credit::STREAM_COUNT" );
 static_assert( RL_OBS_DIM >= 2, "footer_record's zero40[RL_OBS_DIM-1] needs at least one element" );
-inline constexpr std::uint32_t HEADER_SIZE = 256u;
+inline constexpr std::uint32_t HEADER_SIZE = 264u;  // 259-05: 256 -> 264 (aim_exploration @256, aim_state @260)
 
 // 228-09 (D-23/TGT-08): the chosen-target sentinel meaning "no pick" --
 // a wait decision, an untargeted cast, or a targeted cast whose pick was
@@ -469,6 +506,17 @@ inline constexpr std::uint8_t FLAG_WAIT_FLOORED = 1u << 2;
 inline constexpr std::uint8_t FLAG_EXPLORATORY = 1u << 3;
 inline constexpr std::uint8_t FLAG_COLLECTED = 1u << 4;
 inline constexpr std::uint8_t FLAG_HELD = 1u << 5;   // 260922-mfh (D4)
+// 259-05 (version 11): the aim dial and the observation-source flag. FLAG_EXPLORATORY (bit 3)
+// now means the BUTTON dial only; the random-aim dial has its own bit so a reader can tell the
+// two apart.
+inline constexpr std::uint8_t FLAG_AIM_EXPLORED = 1u << 6;     // the random-aim dial fired this decision
+inline constexpr std::uint8_t FLAG_OBS_HEAD_AIMED = 1u << 7;   // the observation's target facts described the head's picks
+
+// 259-05 (version 11): file_header::aim_state bits.
+inline constexpr std::uint32_t AIM_STATE_SECTION = 1u << 0;      // an aim section is present in the loaded weights file
+inline constexpr std::uint32_t AIM_STATE_HEAD = 1u << 1;         // the aim section has layers (n_aim_layers > 0)
+inline constexpr std::uint32_t AIM_STATE_OBS_HEAD = 1u << 2;     // its aim_obs_source is 1
+inline constexpr std::uint32_t AIM_STATE_FORCE_RULES = 1u << 3;  // target_scorer_force_rules = 1
 
 // ---- Row layouts (212-RESEARCH M-1, ruling 212-G1, AS RELAID for version 2
 // by quick task 260826-38t, AS RELAID AGAIN for version 3 by this session's
@@ -550,7 +598,12 @@ struct decision_record
                                //         identity -- see chosen_target_actor_index above), or
                                //         CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK.
   std::uint8_t kind;          // @47+4W+4SF -- KIND_DECISION
-  std::uint8_t reserved;      // @48+4W+4SF -- written zero
+  std::uint8_t rules_candidate_slot;      // @48+4W+4SF -- version 11 (259-05; was `reserved`): the
+                               //         candidate slot the RULES picked for the chosen action, or
+                               //         CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK (0xFF) with no block
+  std::uint8_t observed_candidate_slot;   // @49+4W+4SF -- version 11 (259-05; was padding): the slot the
+                               //         observation described for the chosen action before any
+                               //         random aim, or 0xFF with no block
   // Version 9 (260917-pcn): the per-fight CUMULATIVE proc-roll observer block, struct-of-arrays,
   // alignas(8) so it starts exactly at PROC_BLOCK_OFFSET (= the version-7 row size) at any width W.
   // A window's counts are consecutive-row differences, exactly like `damage`. Sits AFTER `reserved`
@@ -609,7 +662,8 @@ struct close_record
   std::uint8_t zero_chosen_candidate_slot;   // @46+4W+4SF -- version 7 (230-04): written zero,
                                           //         sits at decision_record's own chosen_candidate_slot offset
   std::uint8_t kind;                         // @47+4W+4SF -- KIND_CLOSE
-  std::uint8_t reserved;                      // @48+4W+4SF -- written zero
+  std::uint8_t reserved;                      // @48+4W+4SF -- written zero (decision_record's rules_candidate_slot)
+  std::uint8_t reserved2;                     // @49+4W+4SF -- version 11: written zero (decision_record's observed_candidate_slot)
   // Version 9 (260917-pcn): the per-fight FINAL proc-roll observer totals -- named the same as
   // decision_record's own fields (not a zero-twin) so a reader gets the fight's closing counts.
   alignas( 8 ) std::uint16_t proc_attempts[ rl_proc::COUNT ];   // @PROC_BLOCK_OFFSET
@@ -673,7 +727,8 @@ struct footer_record
   std::uint8_t zero_chosen_candidate_slot; // @46+4W+4SF -- version 7 (230-04): written zero, sits
                                           //         at decision_record's own chosen_candidate_slot offset
   std::uint8_t kind;                     // @47+4W+4SF -- KIND_FOOTER
-  std::uint8_t reserved;                 // @48+4W+4SF -- written zero
+  std::uint8_t reserved;                 // @48+4W+4SF -- written zero (decision_record's rules_candidate_slot)
+  std::uint8_t reserved2;                // @49+4W+4SF -- version 11: written zero (decision_record's observed_candidate_slot)
   // Version 9 (260917-pcn): written zero -- no fight owns the footer.
   alignas( 8 ) std::uint8_t zero_proc_block[ PROC_BLOCK_SIZE ];  // @PROC_BLOCK_OFFSET
   // Version 10 (260918-cbc): written zero -- no fight owns the footer, matching the proc
@@ -726,6 +781,11 @@ struct alignas( 8 ) file_header
   char obs_schema_sha[ 80 ];          // @32  -- RL_OBS_SCHEMA_SHA, "rl-obs-v1:<64 hex>"
   char mask_rules_sha[ 72 ];          // @112 -- RL_MASK_RULES_SHA, bare 64 hex
   char action_space_sha[ 72 ];        // @184 -- RL_ACTION_SPACE_SHA, bare 64 hex
+  float aim_exploration;              // @256 -- version 11 (259-05): the aim rate the loaded weights
+                                        //         file's aim section declared; 0.0 with no section or
+                                        //         no file. Written 0.0 in plan 259-05 (plan 259-05b
+                                        //         stamps it from the loaded aim section)
+  std::uint32_t aim_state;            // @260 -- version 11: AIM_STATE_* bits; written 0 in plan 259-05
 };
 
 // ---- Compile-time proof (D-20): the build itself is the proof ----
@@ -778,7 +838,8 @@ static_assert( offsetof( decision_record, thread ) == 44u + 4u * RL_OBS_DIM + 4u
 static_assert( offsetof( decision_record, candidate_count ) == 45u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 static_assert( offsetof( decision_record, chosen_candidate_slot ) == 46u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 static_assert( offsetof( decision_record, kind ) == 47u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
-static_assert( offsetof( decision_record, reserved ) == 48u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( decision_record, rules_candidate_slot ) == 48u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( decision_record, observed_candidate_slot ) == 49u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 
 // close_record field offsets -- version 7, same W/SF-parametrised form.
 static_assert( offsetof( close_record, final_damage_total ) == 0 );
@@ -798,6 +859,7 @@ static_assert( offsetof( close_record, zero_candidate_count ) == 45u + 4u * RL_O
 static_assert( offsetof( close_record, zero_chosen_candidate_slot ) == 46u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 static_assert( offsetof( close_record, kind ) == 47u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 static_assert( offsetof( close_record, reserved ) == 48u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( close_record, reserved2 ) == 49u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 
 // footer_record field offsets -- version 7, same W/SF-parametrised form.
 static_assert( offsetof( footer_record, engine_run_aggregate ) == 0 );
@@ -819,6 +881,7 @@ static_assert( offsetof( footer_record, zero_candidate_count ) == 45u + 4u * RL_
 static_assert( offsetof( footer_record, zero_chosen_candidate_slot ) == 46u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 static_assert( offsetof( footer_record, kind ) == 47u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 static_assert( offsetof( footer_record, reserved ) == 48u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( footer_record, reserved2 ) == 49u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 
 // file_header field offsets
 static_assert( offsetof( file_header, magic ) == 0 );
@@ -832,6 +895,8 @@ static_assert( offsetof( file_header, fight_shape_index ) == 28 );
 static_assert( offsetof( file_header, obs_schema_sha ) == 32 );
 static_assert( offsetof( file_header, mask_rules_sha ) == 112 );
 static_assert( offsetof( file_header, action_space_sha ) == 184 );
+static_assert( offsetof( file_header, aim_exploration ) == 256 );
+static_assert( offsetof( file_header, aim_state ) == 260 );
 
 // Cross-kind assertions (D-02's entire premise: a reader can classify a
 // row before it interprets it, because `kind` and `reserved` sit at the
@@ -839,9 +904,11 @@ static_assert( offsetof( file_header, action_space_sha ) == 184 );
 static_assert( offsetof( decision_record, kind ) == offsetof( close_record, kind ) );
 static_assert( offsetof( close_record, kind ) == offsetof( footer_record, kind ) );
 static_assert( offsetof( decision_record, kind ) == 47u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
-static_assert( offsetof( decision_record, reserved ) == offsetof( close_record, reserved ) );
+static_assert( offsetof( decision_record, rules_candidate_slot ) == offsetof( close_record, reserved ) );
+static_assert( offsetof( decision_record, observed_candidate_slot ) == offsetof( close_record, reserved2 ) );
 static_assert( offsetof( close_record, reserved ) == offsetof( footer_record, reserved ) );
-static_assert( offsetof( decision_record, reserved ) == 48u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( close_record, reserved2 ) == offsetof( footer_record, reserved2 ) );
+static_assert( offsetof( decision_record, rules_candidate_slot ) == 48u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 // 228-09 (version 6): the new chosen-target field also lands at the same offset across all
 // three row shapes -- decision_record's own NAMED field, close/footer's zero-written twins.
 static_assert( offsetof( decision_record, chosen_target_actor_index ) == offsetof( close_record, zero_chosen_target ) );
@@ -936,8 +1003,8 @@ namespace rl_attr
 {
 
 inline constexpr char MAGIC[ 4 ] = { 'R', 'L', 'A', 'T' };
-inline constexpr std::uint32_t FORMAT_VERSION = 1u;
-inline constexpr std::uint32_t RECORD_SIZE = 24u;
+inline constexpr std::uint32_t FORMAT_VERSION = 2u;  // 259-05: records 24 -> 32 bytes, each gains a double @24
+inline constexpr std::uint32_t RECORD_SIZE = 32u;
 inline constexpr std::uint32_t HEADER_SIZE = 32u;
 
 inline constexpr std::uint32_t KIND_FIGHT = 1u;
@@ -973,6 +1040,8 @@ struct fight_record
   std::uint32_t n_decisions;   // @8  -- exactly n_decisions DECISION records follow, seq ascending
   std::uint32_t zero;          // @12
   alignas( 8 ) double sum_own_real;  // @16 -- sum(own_real) over this fight's DECISION records
+  double deck_pool_exp;              // @24 -- version 2 (259-05): this fight's marked expected own credit
+                                      //         redistributed by the deck-draw pass; 0.0 until plan 259-11
 };
 static_assert( sizeof( fight_record ) == RECORD_SIZE, "rl_attr::fight_record must be exactly RECORD_SIZE bytes" );
 static_assert( alignof( fight_record ) == 8, "rl_attr::fight_record must be 8-aligned" );
@@ -981,6 +1050,7 @@ static_assert( offsetof( fight_record, iteration ) == 4 );
 static_assert( offsetof( fight_record, n_decisions ) == 8 );
 static_assert( offsetof( fight_record, zero ) == 12 );
 static_assert( offsetof( fight_record, sum_own_real ) == 16 );
+static_assert( offsetof( fight_record, deck_pool_exp ) == 24 );
 
 // One per decision of the fight it follows, seq ascending (write order == decision order --
 // rl_translog_pending_seqs, sim.hpp, is captured in write order by record_decision()).
@@ -993,6 +1063,8 @@ struct decision_record
   std::uint32_t seq;    // @4  -- the decision row's own seq (sim->solver_control_seq at that boundary)
   alignas( 8 ) double own_real;  // @8
   double own_exp;                // @16
+  double deck_p;                 // @24 -- version 2 (259-05): this press's expected number of deck hits;
+                                  //         0.0 until plan 259-11
 };
 static_assert( sizeof( decision_record ) == RECORD_SIZE, "rl_attr::decision_record must be exactly RECORD_SIZE bytes" );
 static_assert( alignof( decision_record ) == 8, "rl_attr::decision_record must be 8-aligned" );
@@ -1000,6 +1072,7 @@ static_assert( offsetof( decision_record, kind ) == 0 );
 static_assert( offsetof( decision_record, seq ) == 4 );
 static_assert( offsetof( decision_record, own_real ) == 8 );
 static_assert( offsetof( decision_record, own_exp ) == 16 );
+static_assert( offsetof( decision_record, deck_p ) == 24 );
 
 // Once, at translog close (write_footer()). No fight owns the footer -- both fields besides
 // n_fights are written zero, mirroring rl_translog::footer_record's own zero-fill convention.
@@ -1010,6 +1083,7 @@ struct footer_record
   std::uint32_t zero1;     // @8
   std::uint32_t zero2;     // @12
   alignas( 8 ) double zero_f;  // @16
+  double zero_f2;              // @24 -- version 2 (259-05): written zero
 };
 static_assert( sizeof( footer_record ) == RECORD_SIZE, "rl_attr::footer_record must be exactly RECORD_SIZE bytes" );
 static_assert( alignof( footer_record ) == 8, "rl_attr::footer_record must be 8-aligned" );
@@ -1018,6 +1092,7 @@ static_assert( offsetof( footer_record, n_fights ) == 4 );
 static_assert( offsetof( footer_record, zero1 ) == 8 );
 static_assert( offsetof( footer_record, zero2 ) == 12 );
 static_assert( offsetof( footer_record, zero_f ) == 16 );
+static_assert( offsetof( footer_record, zero_f2 ) == 24 );
 
 } // namespace rl_attr
 
