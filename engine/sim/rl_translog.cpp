@@ -23,9 +23,12 @@
 
 #include <zstd.h>
 
+#include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 // Pure observer for the RL transition log's per-proc counter block
 // (tstl-sylvanas quick task 260917-pcn). Routes a pet's roll to its owner,
@@ -808,13 +811,80 @@ void record_close( sim_t* sim )
         sum_own_real += p->rl_own_real[ idx ];
     }
 
+    // Phase 259 (plan 259-11, owner Q15/Q16, binding resolution R12, fork research option P): the
+    // per-fight DECK-DRAW POOL PASS. A deck hit's payout (marked on its cause stamp, see
+    // RL_CAUSE_DECK_MARK in rl_credit.hpp) is credited to whichever press happened to cause a hit --
+    // a coin flip per press. Here, once per fight and before anything is written, that marked part
+    // is pooled and shared out by each press's EXPECTED number of deck hits:
+    //   own_exp[k] <- own_exp[k] - marked[k] + p[k] * pool / sum(p),   pool = sum(marked).
+    // Every press keeps everything that was not a deck payout; the pool is the fight's realised
+    // average payout per expected hit times each press's expected hits. The pass consumes no random
+    // number, never touches own_real, and preserves the fight's sum of own_exp, so the repo's
+    // per-fight identity (sum own_exp + background + orphan == final_damage_expected_total) stays
+    // exact. A fight with draws but no hit prices its draws at zero; every draw in a fight shares
+    // one per-chance price (both stated to the owner in DECISIONS.md).
+    std::vector<double> attr_own_exp( n_decisions, 0.0 );
+    std::vector<double> attr_deck_p( n_decisions, 0.0 );
+    std::vector<double> attr_marked( n_decisions, 0.0 );
+    double deck_sum_before = 0.0, deck_sum_marked = 0.0, deck_sum_p = 0.0;
+    for ( std::uint32_t i = 0; i < n_decisions; ++i )
+    {
+      const std::uint64_t s = root->rl_translog_pending_seqs[ i ];
+      const std::size_t idx = static_cast<std::size_t>( s - p->rl_fight_first_seq );
+      attr_own_exp[ i ] = idx < p->rl_own_exp.size() ? p->rl_own_exp[ idx ] : 0.0;
+      attr_marked[ i ] = idx < p->rl_own_exp_marked.size() ? p->rl_own_exp_marked[ idx ] : 0.0;
+      attr_deck_p[ i ] = idx < p->rl_deck_p.size() ? p->rl_deck_p[ idx ] : 0.0;
+      deck_sum_before += attr_own_exp[ i ];
+      deck_sum_marked += attr_marked[ i ];
+      deck_sum_p += attr_deck_p[ i ];
+    }
+    const double deck_pool = deck_sum_marked;
+    const bool deck_census = std::getenv( "RL_DECK_POOL_CENSUS" ) != nullptr;
+    if ( deck_sum_p > 0.0 )
+    {
+      if ( deck_census )
+      {
+        // Diagnostic only (env-gated, prints, never mutates): the pre-pass numbers of every press
+        // that drew or carried marked credit, so the marked share of a hit press can be read off.
+        for ( std::uint32_t i = 0; i < n_decisions; ++i )
+        {
+          if ( attr_deck_p[ i ] > 0.0 || attr_marked[ i ] != 0.0 )
+            fmt::print( stderr, "RL_DECK_POOL iteration={} seq={} p={} own_exp_pre={} marked={}\n", r.iteration,
+                        root->rl_translog_pending_seqs[ i ], attr_deck_p[ i ], attr_own_exp[ i ], attr_marked[ i ] );
+        }
+        fmt::print( stderr, "RL_DECK_POOL_FIGHT iteration={} pool={} sum_p={}\n", r.iteration, deck_pool, deck_sum_p );
+      }
+      for ( std::uint32_t i = 0; i < n_decisions; ++i )
+        attr_own_exp[ i ] = attr_own_exp[ i ] - attr_marked[ i ] + attr_deck_p[ i ] * deck_pool / deck_sum_p;
+    }
+    else if ( deck_pool != 0.0 )
+    {
+      // A deck hit without any draw chance is impossible: marked credit exists only under a hit's
+      // own scope, and a hit needs a success card left in the cards the consume drew from.
+      throw sc_runtime_error( fmt::format(
+          "rl_translog=: fight {} has a deck pool of {} marked expected credit but no decision with a "
+          "deck draw chance (sum deck_p == 0) -- the deck-draw pricing accounting is broken; refusing "
+          "to write a label that would silently drop that credit.",
+          r.iteration, deck_pool ) );
+    }
+    double deck_sum_after = 0.0;
+    for ( std::uint32_t i = 0; i < n_decisions; ++i )
+      deck_sum_after += attr_own_exp[ i ];
+    if ( std::fabs( deck_sum_after - deck_sum_before ) > 1e-9 * std::max( 1.0, std::fabs( deck_sum_before ) ) )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_translog=: fight {} deck-draw pool pass moved the fight's sum of own_exp from {} to {} "
+          "(tolerance 1e-9 relative) -- the pass must only redistribute; refusing to write it.",
+          r.iteration, deck_sum_before, deck_sum_after ) );
+    }
+
     rl_attr::fight_record fr{};
     fr.kind = rl_attr::KIND_FIGHT;
     fr.iteration = r.iteration;
     fr.n_decisions = n_decisions;
     fr.zero = 0;
     fr.sum_own_real = sum_own_real;
-    fr.deck_pool_exp = 0.0;  // .attr version 2 (259-05): filled by plan 259-11's deck-draw pass
+    fr.deck_pool_exp = deck_pool;  // .attr version 2: this fight's pooled deck payout (plan 259-11)
     root->rl_translog_attr_stream->write( reinterpret_cast<const char*>( &fr ), sizeof( fr ) );
 
     for ( std::uint32_t i = 0; i < n_decisions; ++i )
@@ -826,8 +896,8 @@ void record_close( sim_t* sim )
       dr.kind = rl_attr::KIND_DECISION;
       dr.seq = static_cast<std::uint32_t>( s );  // 212-CR-FIX NT-02's own narrowing convention
       dr.own_real = idx < p->rl_own_real.size() ? p->rl_own_real[ idx ] : 0.0;
-      dr.own_exp = idx < p->rl_own_exp.size() ? p->rl_own_exp[ idx ] : 0.0;
-      dr.deck_p = 0.0;  // .attr version 2 (259-05): filled by plan 259-11's deck-draw pass
+      dr.own_exp = attr_own_exp[ i ];   // repriced by the deck-draw pool pass above (259-11)
+      dr.deck_p = attr_deck_p[ i ];     // .attr version 2: this press's expected number of deck hits
       root->rl_translog_attr_stream->write( reinterpret_cast<const char*>( &dr ), sizeof( dr ) );
     }
 
