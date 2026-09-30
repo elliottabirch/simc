@@ -11,6 +11,7 @@
 #include "util/rng.hpp"
 #include "util/timespan.hpp"
 
+#include <algorithm>
 #include <functional>
 #include <string>
 #include <utility>
@@ -210,6 +211,14 @@ public:
 
   int count_remains( int key );
   int entry_remains();
+
+  // Phase 259 (plan 259-11): read-only WHOLE-deck totals (cards of `key` / all cards, regardless of
+  // the draw position), so the deck-draw pricing can read the deck's own parameters instead of
+  // hard-coding them. Never draws, shuffles or moves the position.
+  int count_total( int key ) const
+  { return static_cast<int>( std::count( entries.begin(), entries.end(), key ) ); }
+  int entry_total() const
+  { return static_cast<int>( entries.size() ); }
 };
 
 namespace prd {

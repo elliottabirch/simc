@@ -39,6 +39,7 @@
 #include "util/string_view.hpp"
 
 #include <cassert>
+#include <optional>
 #include <string>
 #include <sstream>
 
@@ -721,6 +722,28 @@ class deck_rng_wrapper_t
       return as<unsigned>( m_rng->entry_remains() );
   }
 
+  // Phase 259 (259-11): the deck's own whole-deck card counts (success cards / all cards), read
+  // through shuffled_rng_t's read-only totals. Same null-guard discipline as entry_remains().
+  unsigned success_cards() const
+  {
+      if ( m_rng == nullptr )
+      {
+          return 0U;
+      }
+
+      return as<unsigned>( m_rng->count_total( shuffled_rng_e::SUCCESS ) );
+  }
+
+  unsigned total_cards() const
+  {
+      if ( m_rng == nullptr )
+      {
+          return 0U;
+      }
+
+      return as<unsigned>( m_rng->entry_total() );
+  }
+
   // rl_proc observer sibling (260917-pcn B): cards left in the SUCCESS pile, for
   // deck_draw_chance() below. Mirrors entry_remains()'s null-guard discipline.
   unsigned proc_remains() const
@@ -832,6 +855,32 @@ double deck_draw_chance( const deck_rng_wrapper_t<T>& d )
 {
   const unsigned n = d.entry_remains();
   return n ? static_cast<double>( d.proc_remains() ) / n : 0.0;
+}
+
+// Phase 259 (plan 259-11, owner Q15/Q16, fork research option P, E6): the expected number of deck
+// hits of ONE consume of `c` stacks, from card counts only -- nothing is drawn, shuffled or advanced.
+// `s` success cards and `n` cards are left in the current deck. While the deck holds at least `c`
+// cards the expectation is c * s / n. Otherwise the consume runs the deck out and trigger() reshuffles
+// inline: the `s` remaining successes plus (c - n) draws from a fresh deck of S successes in N cards
+// (S and N are the deck's own whole-deck counts, never hard-coded).
+template <typename T>
+double rl_deck_expected_hits( const deck_rng_wrapper_t<T>& d, unsigned c )
+{
+  if ( c == 0U )
+  {
+    return 0.0;
+  }
+
+  const double s = static_cast<double>( d.proc_remains() );
+  const double n = static_cast<double>( d.entry_remains() );
+  if ( n >= static_cast<double>( c ) )
+  {
+    return static_cast<double>( c ) * s / n;
+  }
+
+  const double S = static_cast<double>( d.success_cards() );
+  const double N = static_cast<double>( d.total_cards() );
+  return N > 0.0 ? s + ( static_cast<double>( c ) - n ) * S / N : s;
 }
 } // Namespace rng ends
 
@@ -12384,6 +12433,28 @@ void shaman_t::consume_maelstrom_weapon( const action_state_t* state, int stacks
 
   if ( talent.ascendance.ok() && !buff.ascendance->check() && stacks > 0 )
   {
+    // Phase 259 (plan 259-11, owner Q15/Q16, fork research option P, binding resolution R12): the
+    // deck-draw PRICING. This consume may fire a free Doom Winds; its damage lands over the next
+    // seconds under the causing press, which makes that press's expected-credit label a coin flip.
+    // Record, BEFORE any card is drawn, this consume's expected number of deck hits (card counts
+    // only -- no random number is drawn, no deck is advanced) against the causing press: the top of
+    // the cause stack (the spender, or Stormstrike / Crash Lightning when Thorim's Invocation fired
+    // the spender). record_close() (rl_translog.cpp) later re-prices the expected own credit of a
+    // hit as "expected hits x the average payout of this fight's hits". Play, dice, the combat log,
+    // the realised credit and the reward are untouched.
+    if ( rl_fight_first_seq_set && !rl_cause_stack.empty() )
+    {
+      const std::int64_t rl_deck_seq = rl_cause_stack.back().cause.seq;
+      if ( rl_deck_seq >= 0 && static_cast<std::uint64_t>( rl_deck_seq ) >= rl_fight_first_seq )
+      {
+        const auto rl_deck_idx =
+            static_cast<std::size_t>( static_cast<std::uint64_t>( rl_deck_seq ) - rl_fight_first_seq );
+        if ( rl_deck_p.size() <= rl_deck_idx )
+          rl_deck_p.resize( rl_deck_idx + 1, 0.0 );
+        rl_deck_p[ rl_deck_idx ] += rng::rl_deck_expected_hits( rng_obj.asc_dw, as<unsigned>( stacks ) );
+      }
+    }
+
     auto success = false;
     for ( auto draw = 0U; draw < as<unsigned>( stacks ); ++draw )
     {
@@ -12402,6 +12473,21 @@ void shaman_t::consume_maelstrom_weapon( const action_state_t* state, int stacks
 
     if ( success )
     {
+      // Phase 259 (259-11): run the hit under a cause scope that carries RL_CAUSE_DECK_MARK (same
+      // decision seq as the causing press). The mark rides every stamp the hit creates -- promote(),
+      // and every DOT_TICK rebuild through rl_credit::dot_tick_class() -- so the Doom Winds buff and
+      // all of its ticks route marked. Marking is by this scope, never by action name: an Ascendance
+      // PRESS runs the same doom_winds_asc code and is not a deck hit (it is not under this scope).
+      // Known behaviour: a later refresh of the Doom Winds buff by another applier re-stamps the
+      // buff's applier, so the remaining ticks' credit moves to that applier unmarked, as any
+      // refresh does today.
+      std::optional<rl_cause_scope_t> rl_deck_scope;
+      if ( !rl_cause_stack.empty() )
+      {
+        const rl_cause_t rl_deck_top = rl_cause_stack.back().cause;
+        rl_deck_scope.emplace( this, rl_cause_t{ rl_deck_top.seq,
+                                                 static_cast<std::uint8_t>( rl_deck_top.cls | RL_CAUSE_DECK_MARK ) } );
+      }
       action.doom_winds_asc->execute_on_target( state->target );
     }
   }
