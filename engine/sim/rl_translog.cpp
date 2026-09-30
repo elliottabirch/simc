@@ -555,7 +555,8 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float ob
                        bool exploratory, bool held,
                        const float* candidate_features, std::uint16_t candidate_mask,
                        std::uint8_t candidate_count, std::uint8_t chosen_candidate_slot,
-                       const char* apl_choice_name, bool aim_explored )
+                       const char* apl_choice_name, bool aim_explored,
+                       std::uint8_t rules_candidate_slot, std::uint8_t observed_candidate_slot )
 {
   sim_t* root = root_of( sim );
   if ( root->rl_translog_file_str.empty() )
@@ -583,10 +584,11 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float ob
     r.candidate_mask = candidate_mask;
     r.candidate_count = candidate_count;
     r.chosen_candidate_slot = chosen_candidate_slot;
-    // Version 11 (259-05): no head aims on this code path yet, so the slot the rules picked and
-    // the slot the observation described are both the block's own rule-chosen slot.
-    r.rules_candidate_slot = chosen_candidate_slot;
-    r.observed_candidate_slot = chosen_candidate_slot;
+    // Version 11 (259-05, 259-07 R5): what the rules picked, what the observation described
+    // (before any random aim) and, above, what happened -- read by the caller from the captured
+    // block, three truthful numbers that differ exactly when a head or the dial moved the aim.
+    r.rules_candidate_slot = rules_candidate_slot;
+    r.observed_candidate_slot = observed_candidate_slot;
   }
   else
   {
@@ -628,10 +630,18 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float ob
   // cleared at least one naturally-legal action at this decision -- see solver_control.cpp's
   // row_held and this file's own top-of-file FLAG_HELD comment. `r.mask` above is always the
   // NATURAL mask (D3); this bit is the only place a hold is visible in the row at all.
+  // 259-07 (R1, R5): FLAG_OBS_HEAD_AIMED (bit 7) -- the observation's target facts described the
+  // HEAD's picks: a head-bearing file in `aim_obs_source = 1` mode with the force-rules switch
+  // off. A property of the fight's mode, stamped on every decision row (casts and waits alike).
+  const bool obs_head_aimed = sim->solver_policy_weights != nullptr &&
+                              sim->solver_policy_weights->has_aim_head &&
+                              sim->solver_policy_weights->aim.obs_source == 1 &&
+                              !sim->target_scorer_force_rules;
   r.flags = static_cast<std::uint8_t>( ( wait_floored ? FLAG_WAIT_FLOORED : 0 ) |
                                         ( exploratory ? FLAG_EXPLORATORY : 0 ) |
                                         ( held ? FLAG_HELD : 0 ) |
-                                        ( aim_explored ? FLAG_AIM_EXPLORED : 0 ) );
+                                        ( aim_explored ? FLAG_AIM_EXPLORED : 0 ) |
+                                        ( obs_head_aimed ? FLAG_OBS_HEAD_AIMED : 0 ) );
   r.thread = static_cast<std::uint8_t>( sim->thread_index );
   r.kind = KIND_DECISION;
   // Version 9 (260917-pcn): the per-fight cumulative proc-roll observer totals at this

@@ -105,6 +105,11 @@ struct candidate_block_slot
   std::uint8_t         chosen_slot = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
   std::uint64_t         stamp       = 0;
   bool                   has_stamp   = false;
+  // 259-07 (R5): the rules' own pick and the slot the observation described -- see
+  // candidate_block's own doc comment in rl_target_select.hpp. Set by select() (both = the
+  // rules' pick); run_target_head moves `observed_slot` only when the observation follows the head.
+  std::uint8_t           rules_slot    = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
+  std::uint8_t           observed_slot = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
 
   // 240-05 (D1(a)): parallel per-slot actor identity, captured in LOCKSTEP with `features` above
   // by select()'s own per-candidate loop -- zero extra walk. Deliberately NOT part of the public
@@ -874,7 +879,9 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
       std::fill( slot.actors.begin(), slot.actors.end(), nullptr );
     slot.mask        = 0;
     slot.count       = 0;
-    slot.chosen_slot = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
+    slot.chosen_slot   = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
+    slot.rules_slot    = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
+    slot.observed_slot = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
     slot.stamp        = current_decision_stamp( a->player );
     slot.has_stamp    = true;
   }
@@ -1001,7 +1008,14 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
   // never captured above, so it must keep the up-front no-pick sentinel here too, or the probe
   // would read a chosen slot into a block of count 0.
   if ( capture_block && best != nullptr )
-    g_candidate_block_table[ a ].chosen_slot = static_cast<std::uint8_t>( best_slot );
+  {
+    candidate_block_slot& chosen_block = g_candidate_block_table[ a ];
+    chosen_block.chosen_slot   = static_cast<std::uint8_t>( best_slot );
+    // 259-07 (R5): the rules' own pick, kept apart from `chosen_slot` (which a head or the dial
+    // may overwrite); the observation describes it until run_target_head says otherwise.
+    chosen_block.rules_slot    = static_cast<std::uint8_t>( best_slot );
+    chosen_block.observed_slot = static_cast<std::uint8_t>( best_slot );
+  }
 
   return best;
 }
@@ -1110,6 +1124,8 @@ candidate_block lookup_candidate_block( const action_t* resolved, bool* out_foun
   block.mask         = it->second.mask;
   block.count        = it->second.count;
   block.chosen_slot  = it->second.chosen_slot;
+  block.rules_slot    = it->second.rules_slot;
+  block.observed_slot = it->second.observed_slot;
   return block;
 }
 
@@ -1195,7 +1211,7 @@ bool apply_head_pick( const action_t* resolved, player_t* replacement,
 // The block's own parallel `actors` array (candidate_block_slot, above) supplies the real
 // player_t* each slot names, both for `candidate_is_better`'s final tie-break rung and for the
 // `apply_head_pick` call below.
-void run_target_head( const action_t* resolved )
+void run_target_head( const action_t* resolved, const float* context, bool observation_follows_head )
 {
   if ( !resolved )
     return;
@@ -1241,7 +1257,9 @@ void run_target_head( const action_t* resolved )
   rl_policy::rl_weights_t& w = *resolved->player->sim->solver_policy_weights;
   rl_policy::rl_aim_t&     s = w.aim;
   float* feats = s.feature_scratch.data();
-  const std::size_t aim_width = RL_AIM_INPUT_COUNT + RL_AIM_SPELL_COUNT;
+  static_assert( RL_AIM_INPUT_COUNT == RL_TARGET_FEATURES + RL_AIM_CONTEXT_COUNT,
+                 "the aim head's per-candidate inputs are the declared facts plus the declared "
+                 "context indicators (259-07)" );
 
   player_t*    current_target = resolved->player->target;
   player_t*    best           = nullptr;
@@ -1255,12 +1273,15 @@ void run_target_head( const action_t* resolved )
     // place.
     if ( !( slot.mask & static_cast<std::uint16_t>( 1u << slot_index ) ) )
       continue;
-    // Input layout (259-05b): [facts (RL_TARGET_FEATURES) | context (zero until plan 259-07
-    // wires it) | aiming-spell one-hot (RL_AIM_SPELL_COUNT)] -- RL_AIM_INPUT_COUNT floats of
-    // facts+context, then the one-hot, the same order the loader's first-layer width check pins.
-    std::memset( feats, 0, aim_width * sizeof( float ) );
+    // Input layout (259-07, R2), the trainer's own order: [RL_TARGET_FEATURES scaled facts of
+    // this slot (the very floats the translog logs) | RL_AIM_CONTEXT_COUNT context indicators
+    // (0/1, constant across the decision's slots) | RL_AIM_SPELL_COUNT aiming-spell one-hot] --
+    // RL_AIM_INPUT_COUNT floats of facts+context, then the one-hot, the same order the loader's
+    // first-layer width check pins. One per-slot buffer, written in place; no allocation.
     std::memcpy( feats, slot.features.data() + slot_index * RL_TARGET_FEATURES,
                  RL_TARGET_FEATURES * sizeof( float ) );
+    std::memcpy( feats + RL_TARGET_FEATURES, context, RL_AIM_CONTEXT_COUNT * sizeof( float ) );
+    std::memset( feats + RL_AIM_INPUT_COUNT, 0, RL_AIM_SPELL_COUNT * sizeof( float ) );
     feats[ RL_AIM_INPUT_COUNT + aim_spell_index ] = 1.0f;
     const double score = static_cast<double>( rl_policy::forward_aim( s, feats ) );
     player_t*    c     = slot.actors[ slot_index ];
@@ -1272,8 +1293,13 @@ void run_target_head( const action_t* resolved )
     }
   }
 
-  if ( best != nullptr )
-    apply_head_pick( resolved, best, best_slot );
+  if ( best != nullptr && apply_head_pick( resolved, best, best_slot ) && observation_follows_head )
+  {
+    // 259-07 (R1, R5): in `aim_obs_source = 1` mode the observation built right after this call
+    // describes the head's pick -- record it as the block's observed slot BEFORE the random-aim
+    // dial can overwrite the chosen slot. `apply_head_pick` just proved the block is current.
+    slot.observed_slot = best_slot;
+  }
 }
 
 std::uint64_t get_target_head_no_block_count()

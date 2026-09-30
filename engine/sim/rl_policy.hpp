@@ -362,6 +362,13 @@ double apply_leaf_scale( double raw, rl_kind kind, bool has_div, double div, boo
 // fight, so the candidate table's gating costs one lookup per fact, never a detector walk.
 bool capability_effective_bit( player_t* p, std::size_t capability_index );
 
+// compute_aim_context_indicators (R6): the aim head's six context inputs for the CURRENT decision,
+// `obs[RL_AIM_CONTEXT_OBS_SLOTS[j]] > 0 ? 1 : 0`, evaluated straight from the actor's cached slot
+// table WITHOUT building the observation (mode (ii) runs the head BEFORE the observation is
+// built). Only constant (capability) and buff (stacks/remains) bindings are supported -- every
+// declared context slot is one of those; any other binding kind is refused by name.
+void compute_aim_context_indicators( const player_t* p, float out[ RL_AIM_CONTEXT_COUNT ] );
+
 // ---- Stage 2 ----
 // build_mask/build_wait remain PURE over the rl_state_t POD (unchanged --
 // 260831-mk7 does not touch this purity contract; it adds a PARAMETER to

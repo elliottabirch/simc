@@ -110,6 +110,17 @@ struct gate_bits_cache_entry
   std::uint8_t  ready     [ RL_ACTION_DIM ] = {};
 };
 std::unordered_map<const player_t*, gate_bits_cache_entry> g_gate_bits_cache;
+
+// 259-07 (R6): the aim head's pre-observation context indicators for the CURRENT boundary
+// decision, kept so build_obs (the real-decision call, `is_decision_boundary`) can assert each
+// equals `obs[RL_AIM_CONTEXT_OBS_SLOTS[j]] > 0`. Single-sim/single-thread like every cache here.
+struct aim_context_pending_t
+{
+  const player_t* p = nullptr;
+  bool            valid = false;
+  float           indicator[ RL_AIM_CONTEXT_COUNT ] = {};
+};
+aim_context_pending_t g_aim_context_pending;
 } // anonymous namespace
 
 // 260914-rbp Task 2c (ADD-2): see rl_policy.hpp's own declaration comment -- clears
@@ -989,11 +1000,28 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
   // this call, so its own aim stays exactly the rule's (D8(a)). `targeted_actions_count` is
   // naturally 0 off the decision boundary (the loop above only appends inside its own boundary
   // branch), so no separate `is_decision_boundary` check is needed here.
+  //
+  // 259-07 (R1, R6, fork C2 mode (ii)): this call site is now gated on the file's obs_source. Only
+  // `aim_obs_source = 1` (the head's picks describe the observation: the joint and alternating
+  // arms) runs the head here; `aim_obs_source = 0` (the aim-only probe) keeps the observation on
+  // the RULES' picks and runs the head later, in choose(), for the chosen spell only. The head's
+  // six context inputs are evaluated from the cached slot table BEFORE the observation exists
+  // (compute_aim_context_indicators) and remembered in g_aim_context_pending so build_obs can
+  // assert each equals the built observation's own value.
+  if ( is_decision_boundary )
+    g_aim_context_pending.valid = false;
   if ( p->sim->solver_policy_weights && p->sim->solver_policy_weights->has_aim_head &&
-       !p->sim->target_scorer_force_rules )
+       p->sim->solver_policy_weights->aim.obs_source == 1 && !p->sim->target_scorer_force_rules &&
+       targeted_actions_count > 0 )
   {
+    float context[ RL_AIM_CONTEXT_COUNT ];
+    compute_aim_context_indicators( p, context );
+    g_aim_context_pending.p     = p;
+    g_aim_context_pending.valid = true;
+    std::memcpy( g_aim_context_pending.indicator, context, sizeof( context ) );
     for ( std::size_t k = 0; k < targeted_actions_count; ++k )
-      rl_target_select::run_target_head( targeted_actions_this_decision[ k ] );
+      rl_target_select::run_target_head( targeted_actions_this_decision[ k ], context,
+                                         /*observation_follows_head=*/true );
   }
 
   if ( is_decision_boundary )
@@ -2792,6 +2820,73 @@ const slot_table& bind_slots( player_t* p )
   return inserted->second;
 }
 
+// 259-07 (R6): see rl_policy.hpp. Mirrors build_obs's own arithmetic for exactly the two binding
+// kinds the six declared context slots use (constant: the capability bits; buff stacks/remains:
+// the three player-buff leaves), so the head can run BEFORE the observation is built; the
+// assertion in build_obs (aim_context_assert_matches_obs below) proves the two agree on every
+// real decision of a head-consulted fight.
+void compute_aim_context_indicators( const player_t* p, float out[ RL_AIM_CONTEXT_COUNT ] )
+{
+  const slot_table& t = bind_slots( const_cast<player_t*>( p ) );
+  for ( std::size_t j = 0; j < RL_AIM_CONTEXT_COUNT; ++j )
+  {
+    const std::size_t   slot = RL_AIM_CONTEXT_OBS_SLOTS[ j ];
+    const slot_binding& b    = t.bindings[ slot ];
+    const rl_leaf_desc& f    = *b.leaf;
+
+    double        raw    = 0.0;
+    lookup_status status = lookup_status::absent;
+    if ( b.kind == slot_binding_kind::constant )
+    {
+      raw    = b.constant_value;
+      status = lookup_status::present;
+    }
+    else if ( b.kind == slot_binding_kind::buff &&
+              ( b.buff_leaf == buff_leaf_kind::stacks || b.buff_leaf == buff_leaf_kind::remains ) &&
+              f.kind != rl_kind::k_bucket )
+    {
+      const buff_t* buff = b.buff;
+      if ( buff == nullptr || buff->check() <= 0 )
+      {
+        status = lookup_status::absent;
+      }
+      else if ( b.buff_leaf == buff_leaf_kind::stacks )
+      {
+        raw    = static_cast<double>( buff->check() );
+        status = lookup_status::present;
+      }
+      else
+      {
+        const timespan_t remains = buff->remains();
+        if ( remains == timespan_t::min() )
+        {
+          status = lookup_status::permanent;
+        }
+        else
+        {
+          raw    = remains.total_seconds();
+          status = lookup_status::present;
+        }
+      }
+    }
+    else
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::compute_aim_context_indicators: aim context '{}' (obs slot {}) is bound "
+          "to a slot kind this pre-observation evaluation does not support (only capability "
+          "constants and player-buff stacks/remains are) -- registry/binding misconfiguration",
+          RL_AIM_CONTEXT_NAMES[ j ], slot ) );
+    }
+
+    if ( status == lookup_status::absent )
+      raw = f.missing;
+    const double encoded = ( status == lookup_status::permanent )
+                               ? RL_PERMANENT_SATURATION
+                               : apply_scale( raw, f.kind, f );
+    out[ j ] = static_cast<float>( encoded ) > 0.0f ? 1.0f : 0.0f;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // build_obs -- REAL for the families this task resolves (player_buffs,
 // scalars); every other family's slots read their bound `unresolved`
@@ -3811,6 +3906,27 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
     // Arithmetic in double throughout; assign to the float output only at
     // the very end (AP-7).
     out_obs[ slot ] = static_cast<float>( encoded );
+  }
+
+  // 259-07 (R6): the head ran BEFORE this observation existed, on six indicators evaluated
+  // straight from the slot table; prove they equal what the observation just wrote. Real-
+  // decision call only (a later diagnostic call reads post-cast state), once per decision.
+  if ( s.is_decision_boundary && g_aim_context_pending.valid && g_aim_context_pending.p == p )
+  {
+    for ( std::size_t j = 0; j < RL_AIM_CONTEXT_COUNT; ++j )
+    {
+      const float expected = out_obs[ RL_AIM_CONTEXT_OBS_SLOTS[ j ] ] > 0.0f ? 1.0f : 0.0f;
+      if ( g_aim_context_pending.indicator[ j ] != expected )
+      {
+        throw sc_runtime_error( fmt::format(
+            "rl_policy::build_obs: aim head context '{}' (obs slot {}) was {} when the head ran "
+            "before the observation but the built observation says {} -- the pre-observation "
+            "evaluation and the observation builder disagree (259-07, R6)",
+            RL_AIM_CONTEXT_NAMES[ j ], RL_AIM_CONTEXT_OBS_SLOTS[ j ],
+            g_aim_context_pending.indicator[ j ], expected ) );
+      }
+    }
+    g_aim_context_pending.valid = false;
   }
 }
 

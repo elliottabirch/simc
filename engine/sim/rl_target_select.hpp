@@ -257,6 +257,13 @@ struct candidate_block
   std::uint16_t mask        = 0;
   std::uint8_t  count       = 0;
   std::uint8_t  chosen_slot = 0xFFu;  // mirrors rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK
+  // 259-07 (R5): `rules_slot` is the slot the RULES picked (select()'s own pick -- never
+  // overwritten by a head or the random-aim dial); `observed_slot` is the slot the observation's
+  // target facts described for this action -- the rules' slot, except in `aim_obs_source = 1`
+  // mode where the head's pick (before the dial) replaces it. `chosen_slot` stays "what happened"
+  // (the dial and the head both overwrite it).
+  std::uint8_t  rules_slot    = 0xFFu;
+  std::uint8_t  observed_slot = 0xFFu;
 };
 
 // Reads the candidate block stamped for `resolved` at the CURRENT decision. `*out_found` is
@@ -321,7 +328,14 @@ bool apply_head_pick( const action_t* resolved, player_t* replacement,
 // overflowing rules-path decision, or an action `fill_pick` never reached this decision): never
 // throws, never truncates, and the skip is counted (`get_target_head_no_block_count`) so the
 // fallback is measurable, not silent.
-void run_target_head( const action_t* resolved );
+//
+// 259-07 (R1, R6): `context` points at RL_AIM_CONTEXT_COUNT 0/1 indicators (the six context
+// inputs of the head's 36-wide input, each `obs[RL_AIM_CONTEXT_OBS_SLOTS[j]] > 0`) -- evaluated by
+// the caller: from the cached slot table BEFORE the observation is built in `aim_obs_source = 1`
+// mode, off the built observation in `aim_obs_source = 0` mode. `observation_follows_head` is true
+// only in the former: the head's pick is then also recorded as the block's `observed_slot` (the
+// observation built right after describes it); false leaves `observed_slot` at the rules' slot.
+void run_target_head( const action_t* resolved, const float* context, bool observation_follows_head );
 
 // One fight's total of `run_target_head` calls that found no usable candidate block for their
 // decision (see that function's own doc comment for the three cases) -- cleared by `reset( sim )`

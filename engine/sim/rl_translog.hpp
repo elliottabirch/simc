@@ -1264,7 +1264,16 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq,
                        // 259-05b (R5): true when the random-aim dial fired at THIS decision --
                        // written as FLAG_AIM_EXPLORED (bit 6). `exploratory` above keeps meaning
                        // the BUTTON dial only.
-                       bool aim_explored = false );
+                       bool aim_explored = false,
+                       // 259-07 (R5): the slot the RULES picked for the chosen action, and the
+                       // slot the observation described for it before any random aim -- written
+                       // as `rules_candidate_slot` / `observed_candidate_slot` when a candidate
+                       // block is present (the caller reads both from the captured block, never
+                       // recomputed here). `chosen_candidate_slot` above stays "what happened".
+                       // FLAG_OBS_HEAD_AIMED (bit 7) is decided in this function from the loaded
+                       // weights (head consulted in `aim_obs_source = 1` mode, force-rules off).
+                       std::uint8_t rules_candidate_slot = CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
+                       std::uint8_t observed_candidate_slot = CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK );
 
 // Called from sim_t::combat_end(), after datacollection_end(). Builds and
 // appends the close row, then flushes the buffered rows for this fight to

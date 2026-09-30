@@ -1216,6 +1216,10 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       std::uint16_t candidate_block_mask        = 0;
       std::uint8_t  candidate_block_count       = 0;
       std::uint8_t  candidate_block_chosen_slot = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
+      // 259-07 (R5): the rules' own slot and the slot the observation described, read from the
+      // captured block (never recomputed) and written beside `chosen_slot` (what happened).
+      std::uint8_t  candidate_block_rules_slot    = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
+      std::uint8_t  candidate_block_observed_slot = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
       // 230-04 (SCOR-02, R-B) / 259-05b (R5): set true when the random-aim dial (immediately below)
       // actually fired -- written as the row's own FLAG_AIM_EXPLORED bit (bit 6), NEVER
       // FLAG_EXPLORATORY, which means the button dial only.
@@ -1232,15 +1236,41 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
             if ( found && pick != nullptr )
               chosen_target_actor_index = static_cast<std::uint16_t>( pick->actor_index );
 
+            // 259-07 (R1, fork C2 mode (i), the aim-only probe): with a head loaded and
+            // `aim_obs_source = 0` the observation above described the RULES' picks for every
+            // spell; the head now aims ONLY the spell the net chose, here, before the dial
+            // block below. The forward pass draws no random numbers, so this shifts no dice.
+            // The head's context inputs are read straight off the built observation (mode (i)
+            // has it; mode (ii) evaluated them before the observation existed and asserted the
+            // equality in build_obs). `target_scorer_force_rules=1` never reaches this: the
+            // rules aim and the observation follows them in both modes. After the head the
+            // pick and the block are re-read so the dial and accept_cast see the head's pick.
+            if ( found && pick != nullptr && sim->solver_policy_weights &&
+                 sim->solver_policy_weights->has_aim_head &&
+                 sim->solver_policy_weights->aim.obs_source == 0 && !sim->target_scorer_force_rules )
+            {
+              float context[ RL_AIM_CONTEXT_COUNT ];
+              for ( std::size_t j = 0; j < RL_AIM_CONTEXT_COUNT; ++j )
+                context[ j ] = obs[ RL_AIM_CONTEXT_OBS_SLOTS[ j ] ] > 0.0f ? 1.0f : 0.0f;
+              rl_target_select::run_target_head( resolved_for_pick, context,
+                                                 /*observation_follows_head=*/false );
+              found = false;
+              pick  = rl_target_select::lookup_pick( resolved_for_pick, &found );
+              if ( found && pick != nullptr )
+                chosen_target_actor_index = static_cast<std::uint16_t>( pick->actor_index );
+            }
+
             bool                              block_found = false;
             rl_target_select::candidate_block block =
                 rl_target_select::lookup_candidate_block( resolved_for_pick, &block_found );
             if ( block_found && block.features != nullptr )
             {
-              candidate_block_features    = block.features;
-              candidate_block_mask        = block.mask;
-              candidate_block_count       = block.count;
-              candidate_block_chosen_slot = block.chosen_slot;
+              candidate_block_features      = block.features;
+              candidate_block_mask          = block.mask;
+              candidate_block_count         = block.count;
+              candidate_block_chosen_slot   = block.chosen_slot;
+              candidate_block_rules_slot    = block.rules_slot;
+              candidate_block_observed_slot = block.observed_slot;
             }
 
             // 230-04 (SCOR-02, R-B): the SECOND exploration dial, over CANDIDATES -- drawn on the
@@ -1318,7 +1348,9 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
                                      // other "off" path's zero-cost convention.
                                      sim->solver_record_apl_choice && apl_choice ? apl_choice->name() : nullptr,
                                      // 259-05b (R5): the random-aim dial's own flag (bit 6).
-                                     candidate_aim_explored );
+                                     candidate_aim_explored,
+                                     // 259-07 (R5): the rules' slot and the observed slot.
+                                     candidate_block_rules_slot, candidate_block_observed_slot );
       // 212-CR-FIX WR-06: accept_cast() can refuse a not-ready action via
       // protocol_abort() (a throw), which unwinds past combat_end()'s
       // record_close() hook entirely for this fight -- without this catch,
