@@ -14,6 +14,7 @@
 #include "player/player.hpp"
 #include "sim/event.hpp"
 #include "sim/expressions.hpp"
+#include "sim/rl_rng_record.hpp"
 #include "sim/sim.hpp"
 #include "util/git_info.hpp"
 #include "util/io.hpp"
@@ -823,7 +824,7 @@ struct sheet_fight_event_t::impl_t
   }
 
   // ---- adds ------------------------------------------------------------------------------------
-  // The centre of a jitter key's range (plan 261-04 draws instead; until then every draw is its centre).
+  // The centre of a jitter key's range (a nominal fight, and a field not yet wired to its draw).
   double jit_centre( const std::string& key, double none ) const
   {
     if ( key.empty() )
@@ -832,6 +833,52 @@ struct sheet_fight_event_t::impl_t
       if ( j.key == key )
         return ( j.min + j.max ) / 2.0;
     return none;
+  }
+
+  // ---- jitter (261-04) ---------------------------------------------------------------------------
+  // One value per fight-level key, one per phase for a per-phase key; filled once per fight by draw_jitter().
+  std::vector<double> drawn_fight;
+  std::vector<std::vector<double>> drawn_phase;
+
+  // One draw: the range's centre with NO draw at all when jitter is off or the range has no width, else exactly one
+  // uniform draw from the shared stream inside its own tagged scope (so a recording attributes it to this controller).
+  double draw_one( const sheet_fight_spec::jitter_t& j )
+  {
+    if ( !sim->solver_sheet_jitter || !( j.max > j.min ) )
+      return ( j.min + j.max ) / 2.0;
+    rl_rng_record::rl_raid_draw_scope_t guard( sim, self );
+    return sim->rng().range( j.min, j.max );
+  }
+
+  // Draw every spec key in the spec's list order; a per-phase key once for each spec phase, in phase order (a fixed
+  // number of draws per fight whatever happens in it).
+  void draw_jitter()
+  {
+    drawn_fight.assign( spec.jitter.size(), 0.0 );
+    drawn_phase.assign( spec.jitter.size(), std::vector<double>() );
+    for ( size_t k = 0; k < spec.jitter.size(); ++k )
+    {
+      if ( spec.jitter[ k ].per == "phase" )
+        for ( size_t p = 0; p < spec.phases.size(); ++p )
+          drawn_phase[ k ].push_back( draw_one( spec.jitter[ k ] ) );
+      else
+        drawn_fight[ k ] = draw_one( spec.jitter[ k ] );
+    }
+  }
+
+  // This fight's value for a key (the phase's value for a per-phase key); `none` for an absent key.
+  double jit_value( const std::string& key, double none, int phase = -1 ) const
+  {
+    if ( key.empty() )
+      return none;
+    for ( size_t k = 0; k < spec.jitter.size() && k < drawn_fight.size(); ++k )
+      if ( spec.jitter[ k ].key == key )
+      {
+        if ( spec.jitter[ k ].per == "phase" )
+          return phase >= 0 && phase < static_cast<int>( drawn_phase[ k ].size() ) ? drawn_phase[ k ][ phase ] : jit_centre( key, none );
+        return drawn_fight[ k ];
+      }
+    return jit_centre( key, none );
   }
 
   // The engine caches each action's target list; a spawn, an arrival or a death must rebuild them
@@ -1059,8 +1106,9 @@ struct sheet_fight_event_t::impl_t
     {
       const auto& en = ph.engage[ e ];
       auto* eb       = find_boss( en.boss );
-      if ( en.delay_s > 0 )  // the walk-in gap: nothing is engageable until then (plan 261-04 draws the delay)
-        make_event<engage_event_t>( *sim, *sim, this, j, eb->idx, en.on_zero, timespan_t::from_seconds( en.delay_s ) );
+      const double delay = jit_value( en.delay_jitter, en.delay_s );  // tstl-sylvanas 261-04: this fight's drawn walk-in gap
+      if ( delay > 0 )  // the walk-in gap: nothing is engageable until then
+        make_event<engage_event_t>( *sim, *sim, this, j, eb->idx, en.on_zero, timespan_t::from_seconds( delay ) );
       else
         engage_boss( *eb, en.on_zero );
     }
@@ -1310,30 +1358,22 @@ struct sheet_fight_event_t::impl_t
     key( "spec_path" ); w.String( spec.path.c_str() );
     key( "nominal" ); w.Bool( !sim->solver_sheet_jitter );
     w.EndObject();
-    // jitter drawn: plan 261-04 draws; until then every key is its range centre (per-phase keys: one entry per phase).
+    // jitter drawn (261-04): what this fight actually used, one value per key (a per-phase key: one value per spec phase).
     key( "jitter_drawn" );
     w.StartObject();
-    for ( const auto& j : spec.jitter )
+    for ( size_t k = 0; k < spec.jitter.size(); ++k )
     {
+      const auto& j = spec.jitter[ k ];
       key( j.key.c_str() );
-      const double centre = ( j.min + j.max ) / 2.0;
       if ( j.per == "phase" )
       {
         w.StartArray();
-        for ( const auto& ph : spec.phases )
-        {
-          bool used = false;
-          for ( const auto& s : ph.raid_stream )
-            used = used || s.pace_jitter == j.key;
-          if ( used )
-            w.Double( centre );
-          else
-            w.Null();
-        }
+        for ( size_t p = 0; p < spec.phases.size(); ++p )
+          w.Double( jit_value( j.key, ( j.min + j.max ) / 2.0, static_cast<int>( p ) ) );
         w.EndArray();
       }
       else
-        w.Double( centre );
+        w.Double( jit_value( j.key, ( j.min + j.max ) / 2.0 ) );
     }
     w.EndObject();
     key( "ended_by" ); w.String( ended_by_kill ? "kill" : "wipe" );
@@ -1654,6 +1694,8 @@ void sheet_fight_event_t::combat_begin()
     im.stream->init();
     im.stream->on_assessed = [ p = impl.get() ]( action_state_t* st ) { p->on_stream_assessed( st ); };
   }
+  // tstl-sylvanas 261-04: every jittered value for this fight is drawn here, once, before the first phase starts.
+  im.draw_jitter();
   im.start_phase( 0 );
   // The phase-0 bosses already arose with the other actors; every player re-acquires onto them.
   for ( auto& b : im.bosses )
