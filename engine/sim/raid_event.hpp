@@ -28,6 +28,8 @@ struct option_t;
 struct player_t;
 struct sim_t;
 
+struct sheet_fight_event_t;  // tstl-sylvanas 261-03
+
 struct raid_event_t : private noncopyable
 {
 public:
@@ -48,6 +50,9 @@ public:
   // override subclasses that call it first). The event never gets a stream of its own; every one
   // of its draws stays on the shared stream, tagged only via rl_raid_draw_scope_t's override.
   std::uint32_t rl_roller_id = rng::RL_ROLLER_UNREGISTERED;
+  // tstl-sylvanas 261-03: non-owning; set only on a child the sheet-fight controller adopted (null for every other
+  // raid event, so every other fight is byte-identical). start() / finish() tell it, so it can record downtime windows.
+  sheet_fight_event_t* sheet_parent = nullptr;
 
   // Player filter options
   double distance_min;   // Minimal player distance

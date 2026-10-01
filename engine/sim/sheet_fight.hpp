@@ -151,6 +151,10 @@ struct sheet_fight_event_t : public raid_event_t
   // the next one starts). Throws on N out of range.
   void add_phase_child( std::unique_ptr<raid_event_t> child );
 
+  // Called by an adopted child's start() / finish() (raid_event_t::sheet_parent): records downtime windows.
+  void on_child_start( raid_event_t* child );
+  void on_child_finish( raid_event_t* child );
+
   void reset() override;
   void combat_begin() override;
   // Called from sim_t::combat_end() BEFORE target demise: writes the fight record, expires every immunity the

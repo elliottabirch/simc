@@ -2054,6 +2054,10 @@ void raid_event_t::start()
   num_starts++;
   is_up = true;
 
+  // tstl-sylvanas 261-03: a sheet-fight child reports its start (a downtime window opens).
+  if ( sheet_parent )
+    sheet_parent->on_child_start( this );
+
   affected_players.clear();
 
   for ( auto& p : sim->player_non_sleeping_list )
@@ -2097,6 +2101,10 @@ void raid_event_t::finish()
   _finish();
 
   sim->print_log( "{} finishes.", log_name() );
+
+  // tstl-sylvanas 261-03: a sheet-fight child reports its end (the downtime window closes).
+  if ( sheet_parent )
+    sheet_parent->on_child_finish( this );
 
   if ( type == "pull" )
   {

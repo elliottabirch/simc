@@ -555,6 +555,16 @@ struct sheet_raid_stream_t : public spell_t
     background  = true;
     not_a_proc  = true;
     trigger_gcd = 0_ms;
+    // tstl-sylvanas 261-03: the stream has no spell data, so no target multiplier would be snapshotted; ask for it so
+    // the phase's damage-taken multiplier (the vulnerable debuff, see composite_target_da_multiplier) reaches it.
+    snapshot_flags |= STATE_TGT_MUL_DA;
+    update_flags |= STATE_TGT_MUL_DA;
+  }
+
+  // Only the controller's multiplier (the vulnerable debuff): no other target debuff scales the raid's own damage.
+  double composite_target_da_multiplier( player_t* t ) const override
+  {
+    return ( t->debuffs.vulnerable && t->debuffs.vulnerable->check() ) ? 1.0 + t->debuffs.vulnerable->check_value() : 1.0;
   }
 
   void assess_damage( result_amount_type rt, action_state_t* s ) override
@@ -611,6 +621,8 @@ struct sheet_fight_event_t::impl_t
     const sheet_fight_spec::boss_t* spec = nullptr;
     int idx = 0;
     bool spawned = false, dead = false, benched = false, zero_bench = false;
+    bool floor_hold = false;   // intermission: the boss cannot die (the real bosses sit at 1 health until the heal)
+    bool vuln_applied = false; // the phase's damage-taken multiplier is on this boss
     double spawn_s = 0, death_s = -1, first_dmg = -1, first_pdmg = -1, first_swing = -1, stream_taken = 0;
     double life_start_s = 0, life_dmg_base = 0, max_at_spawn = 0, stream_rate = 0;
     std::vector<sample_t> samples;
@@ -658,6 +670,14 @@ struct sheet_fight_event_t::impl_t
     sheet_spawner_t* spawner = nullptr;
     std::vector<char> armed;  // per spec.waves[w].at entry: a boss_health trigger waiting for its crossing
   };
+  struct window_t
+  {
+    std::string type;
+    int phase;
+    double start_s, end_s;
+    const raid_event_t* ev;
+  };
+  std::vector<window_t> windows;
   std::vector<wave_rt_t> wave_rt;
   std::vector<std::unique_ptr<inst_t>> insts;
   std::unordered_map<const player_t*, int> mob_inst;
@@ -702,6 +722,33 @@ struct sheet_fight_event_t::impl_t
       if ( im->current_phase == phase )  // an instance whose phase has ended before it fires is dropped
         im->spawn_wave( wave );
     }
+  };
+  struct engage_event_t : event_t
+  {
+    impl_t* im;
+    int phase, boss;
+    std::string on_zero;
+    engage_event_t( sim_t& s, impl_t* i, int ph, int b, std::string oz, timespan_t t )
+      : event_t( s, t ), im( i ), phase( ph ), boss( b ), on_zero( std::move( oz ) ) {}
+    const char* name() const override { return "sheet_fight_engage"; }
+    void execute() override
+    {
+      if ( im->current_phase != phase )
+        return;
+      auto& b = im->bosses[ boss ];
+      im->engage_boss( b, on_zero );
+      im->apply_phase_effects( phase, b );
+      im->retarget_players( retarget_source::ACTOR_ARISE, b.actor );
+      im->sample( b );
+    }
+  };
+  struct heal_event_t : event_t
+  {
+    impl_t* im;
+    int phase, tick;
+    heal_event_t( sim_t& s, impl_t* i, int ph, int k, timespan_t t ) : event_t( s, t ), im( i ), phase( ph ), tick( k ) {}
+    const char* name() const override { return "sheet_fight_heal"; }
+    void execute() override { im->heal_tick( phase, tick ); }
   };
   struct arrive_event_t : event_t
   {
@@ -892,6 +939,23 @@ struct sheet_fight_event_t::impl_t
     invalidate_target_caches();
   }
 
+  // ---- downtime windows ----------------------------------------------------------------------
+  void child_start( raid_event_t* ev )
+  {
+    // The engine names its movement events movement_distance / movement_direction; the record says "movement".
+    const std::string type = ev->type.rfind( "movement", 0 ) == 0 ? std::string( "movement" ) : ev->type;
+    windows.push_back( { type, ev->pull - 1, r3( now() ), -1.0, ev } );
+  }
+  void child_finish( raid_event_t* ev )
+  {
+    for ( auto it = windows.rbegin(); it != windows.rend(); ++it )
+      if ( it->ev == ev && it->end_s < 0 )
+      {
+        it->end_s = r3( now() );
+        return;
+      }
+  }
+
   // ---- phases --------------------------------------------------------------------------------
   void engage_boss( boss_rt_t& b, const std::string& on_zero )
   {
@@ -918,17 +982,93 @@ struct sheet_fight_event_t::impl_t
     b.zero_bench = on_zero == "bench";
   }
 
+  // A boss listed by the phase gets its second life (new maximum health), its damage-taken multiplier and, in an
+  // intermission, the no-death floor. Applied once per boss per phase, when the boss is up.
+  void apply_phase_effects( int j, boss_rt_t& b )
+  {
+    const auto& ph = spec.phases[ j ];
+    player_t* a    = b.actor;
+    for ( const auto& mh : ph.max_health )
+      if ( mh.first == b.spec->actor )
+      {
+        // Only max and initial: base stays, so the next fight's arise (init_resources) restores the first life's maximum.
+        a->resources.max[ RESOURCE_HEALTH ]     = mh.second;
+        a->resources.initial[ RESOURCE_HEALTH ] = mh.second;
+        if ( a->resources.current[ RESOURCE_HEALTH ] > mh.second )
+          a->resources.current[ RESOURCE_HEALTH ] = mh.second;
+        b.life_start_s  = now();
+        b.life_dmg_base = a->iteration_dmg_taken;
+        sample( b );  // the reader splits a new life on a change of maximum
+      }
+    for ( const auto& d : ph.damage_taken )
+      if ( d.boss == b.spec->actor && !b.vuln_applied && std::fabs( d.multiplier - 1.0 ) > 1e-12 )
+      {
+        a->debuffs.vulnerable->increment( 1, d.multiplier - 1.0 );  // composite_player_vulnerability multiplies by 1 + value
+        b.vuln_applied = true;
+      }
+    if ( ph.intermission && !b.benched && !b.dead )
+    {
+      b.floor_hold = true;
+      if ( a->resources.current[ RESOURCE_HEALTH ] < 2.0 )
+        a->resources.current[ RESOURCE_HEALTH ] = 2.0;
+    }
+  }
+
+  void end_phase_effects()
+  {
+    for ( auto& b : bosses )
+    {
+      b.floor_hold = false;
+      if ( b.vuln_applied )
+      {
+        b.actor->debuffs.vulnerable->decrement();
+        b.vuln_applied = false;
+      }
+    }
+  }
+
+  void heal_tick( int phase, int tick )
+  {
+    if ( current_phase != phase )  // the phase has ended: pending ticks are dropped
+      return;
+    const auto& h = *spec.phases[ phase ].heal;
+    for ( const auto& name : h.bosses )
+    {
+      auto* b = find_boss( name );
+      if ( !b || !b->spawned || b->dead || b->actor->is_sleeping() )
+        continue;
+      b->actor->resource_gain( RESOURCE_HEALTH, h.pct_of_max_per_tick / 100.0 * b->actor->resources.max[ RESOURCE_HEALTH ] );
+    }
+    if ( tick + 1 < h.ticks )
+      make_event<heal_event_t>( *sim, *sim, this, phase, tick + 1, timespan_t::from_seconds( h.tick_interval_s ) );
+  }
+
   void start_phase( int j )
   {
     const auto& ph = spec.phases[ j ];
     sim->print_log( "sheet fight: phase {} '{}' starts", j, ph.name );
     if ( current_phase >= 0 )
+    {
       for ( auto& c : children[ current_phase ] )
         c->deactivate( "sheet phase ended" );
+      end_phase_effects();
+    }
     current_phase = j;
     phase_changes.push_back( { now(), j } );
-    for ( auto& e : ph.engage )
-      engage_boss( *find_boss( e.boss ), e.on_zero );
+    for ( size_t e = 0; e < ph.engage.size(); ++e )
+    {
+      const auto& en = ph.engage[ e ];
+      auto* eb       = find_boss( en.boss );
+      if ( en.delay_s > 0 )  // the walk-in gap: nothing is engageable until then (plan 261-04 draws the delay)
+        make_event<engage_event_t>( *sim, *sim, this, j, eb->idx, en.on_zero, timespan_t::from_seconds( en.delay_s ) );
+      else
+        engage_boss( *eb, en.on_zero );
+    }
+    for ( auto& b : bosses )
+      if ( b.spawned && !b.dead )
+        apply_phase_effects( j, b );
+    if ( ph.heal )
+      make_event<heal_event_t>( *sim, *sim, this, j, 0, timespan_t::from_seconds( ph.heal->first_tick_after_start_s ) );
     for ( auto& b : bosses )
       b.stream_rate = 0;
     for ( auto& s : ph.raid_stream )
@@ -991,6 +1131,12 @@ struct sheet_fight_event_t::impl_t
     auto& b = bosses[ i ];
     if ( increasing || !b.spawned || b.dead )
       return;
+    if ( b.floor_hold )
+    {
+      // Intermission: the boss cannot die; hold it just above the 1-health line so every later hit fires again.
+      b.actor->resources.current[ RESOURCE_HEALTH ] = 2.0;
+      return;
+    }
     if ( b.zero_bench && !b.benched )
     {
       // Inside resource_loss, before the death check: hold at 1 health (direct write: no recursion, survives
@@ -1326,7 +1472,22 @@ struct sheet_fight_event_t::impl_t
       w.EndObject();
     }
     w.EndArray();
-    key( "downtime_windows" ); w.StartArray(); w.EndArray();
+    key( "downtime_windows" );
+    w.StartArray();
+    for ( const auto& d : windows )
+    {
+      w.StartObject();
+      key( "type" ); w.String( d.type.c_str() );
+      key( "phase" ); w.Int( d.phase );
+      key( "start_s" ); w.Double( d.start_s );
+      key( "end_s" );
+      if ( d.end_s < 0 )
+        w.Null();
+      else
+        w.Double( d.end_s );
+      w.EndObject();
+    }
+    w.EndArray();
     w.EndObject();
 
     if ( sim->solver_fight_timeline_str.empty() )
@@ -1433,7 +1594,18 @@ void sheet_fight_event_t::add_phase_child( std::unique_ptr<raid_event_t> child )
   if ( k < 0 || k >= static_cast<int>( impl->children.size() ) )
     throw sc_invalid_sim_argument( fmt::format( "solver_sheet_fight='{}': raid event '{}' has pull={}, the spec has {} phases.",
                                                 impl->spec.path, child->type, child->pull, impl->children.size() ) );
+  child->sheet_parent = this;
   impl->children[ k ].push_back( std::move( child ) );
+}
+
+void sheet_fight_event_t::on_child_start( raid_event_t* child )
+{
+  impl->child_start( child );
+}
+
+void sheet_fight_event_t::on_child_finish( raid_event_t* child )
+{
+  impl->child_finish( child );
 }
 
 void sheet_fight_event_t::reset()
@@ -1451,6 +1623,7 @@ void sheet_fight_event_t::reset()
   im.casts_rec.clear();
   im.insts.clear();
   im.mob_inst.clear();
+  im.windows.clear();
   for ( auto& wr : im.wave_rt )
     std::fill( wr.armed.begin(), wr.armed.end(), 0 );
   im.trigger_ready.assign( im.spec.phases.size(), 0 );
@@ -1463,7 +1636,7 @@ void sheet_fight_event_t::reset()
       return true;
     }();
     b.actor->initial.sleeping = sleeps;
-    b.spawned = b.dead = b.benched = b.zero_bench = false;
+    b.spawned = b.dead = b.benched = b.zero_bench = b.floor_hold = b.vuln_applied = false;
     b.spawn_s = 0;
     b.death_s = b.first_dmg = b.first_pdmg = b.first_swing = -1;
     b.stream_taken = 0;
@@ -1498,6 +1671,12 @@ void sheet_fight_event_t::on_combat_end()
   // back into the target list (and active_enemies) for the next fight.
   for ( auto& b : im.bosses )
   {
+    if ( b.vuln_applied )
+    {
+      b.actor->debuffs.vulnerable->expire();
+      b.vuln_applied = false;
+    }
+    b.floor_hold = false;
     if ( b.benched )
     {
       b.benched = false;
