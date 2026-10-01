@@ -1185,7 +1185,7 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
     bool first_enemy = true;
     for ( player_t* t : p->sim->target_non_sleeping_list )
     {
-      if ( !t->is_enemy() )
+      if ( !t->is_enemy() || !rl_target_select::rl_counts_as_enemy( t ) )  // 262-04 (IN-02): the dump's twin aggregates match the observation
         continue;
       if ( !first_enemy )
         out << ",";

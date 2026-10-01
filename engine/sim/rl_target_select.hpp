@@ -35,6 +35,13 @@ struct sim_t;
 namespace rl_target_select
 {
 
+// tstl-sylvanas 262-04 (IN-02; R-6, R-7): THE one predicate every enemy-list walk asks before it counts or lists an enemy.
+// False for a sheet-fight hazard actor (a floor patch or ghost is not an enemy to hit); and, ONLY under fight_style=SheetFight,
+// also false for an invulnerable actor (a boss benched at 1 health between its lives is out of the fight). The immunity
+// half is gated on the style on purpose: the existing shapes use invulnerable raid events and must stay byte-identical.
+// Out of line (rl_target_select.cpp) so this header keeps its forward declarations only.
+bool rl_counts_as_enemy( const player_t* t );
+
 // A plain per-enemy fact record -- no engine pointer beyond the candidate itself (D-03: the same
 // shape the repo-side rig and the addon's parity harness will mirror, TGT-07). NOT sent over the
 // wire by this plan; plan 228-04's observation writer builds its own leaves from the same
@@ -52,6 +59,7 @@ struct enemy_fact
   double    time_to_die             = 0.0;    // time_to_percent(0), same call compute_enemy_slot_candidates uses -- degenerate for bosses under fixed_time=1, R-B
   double    health_pct              = 0.0;
   bool      is_boss                 = false;
+  bool      hazard{ false };                  // tstl-sylvanas 262-04 (IN-02, R-6): a sheet-fight hazard actor (floor patch, ghost) -- never a target, never counted. Read straight off the actor's own flag. Brace-initialised on purpose, NOT `= false`: target_features_derive.py parses every `name = default;` line of this struct as one of the net's per-target features, and R-6 rules out a hazard net column (a per-spell pick never sees a hazard, so it would be a constant zero).
   double    flame_shock_remaining   = 0.0;    // candidate->get_dot("flame_shock", a->player)->remains() -- works on ANY enemy, not only the current target (P-5's fix point)
   int       neighbours_within_radius = 0;     // OBS-03/R-U: live enemies within the CALLING action's own `a->radius` (+ `combat_reach`) of the candidate -- deterministic geometry, never a target-cache read. Replaces the always-equal splash/jump neighbour-count pair this struct used to carry (OBS-01/03 landed together, tstl-sylvanas 232-02).
   bool      is_current_target       = false;  // candidate == p->target

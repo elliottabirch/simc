@@ -493,11 +493,11 @@ spec_t load_spec( const std::string& path )
       }
       if ( !w[ "lifetime_s" ].IsNull() )
         L.fail( p + ".lifetime_s", "add lifetime_s must be null" );
-      // tstl-sylvanas 261-07: validated and accepted, not read here (Phase 262 reads it); a number above 0, or null.
+      // tstl-sylvanas 261-07: validated and accepted; 262-04 reads it (fight.next_wave.lifetime): a number above 0, or null.
       if ( !w.HasMember( "nominal_lifetime_s" ) )
         L.fail( p + ".nominal_lifetime_s", "missing key nominal_lifetime_s" );
       if ( !w[ "nominal_lifetime_s" ].IsNull() )
-        L.num( w[ "nominal_lifetime_s" ], p + ".nominal_lifetime_s", "add nominal_lifetime_s", false, -1e300, 0 );
+        out.nominal_lifetime_s = L.num( w[ "nominal_lifetime_s" ], p + ".nominal_lifetime_s", "add nominal_lifetime_s", false, -1e300, 0 );
     }
     else
     {
@@ -1374,6 +1374,98 @@ struct sheet_fight_event_t::impl_t
       b->first_swing = t;
   }
 
+  // ---- the fight.* view (tstl-sylvanas 262-04) -------------------------------------------------
+  // What the net is allowed to see (IN-01). A pure read: no draw, no event, no state change. Nothing here reads a value the
+  // game hides: the wave forecast is the DRAWN spawn time (the announce is visible) plus the sheet's NOMINAL travel
+  // (R-5, the centre of the jitter range); the lifetime and the bloodlust offset are the sheet's nominal centres.
+  // An event whose time is decided by a boss's health (a health-triggered phase, wave or window) is NOT known in time,
+  // so it is never forecast as "soon" (pitfall P4); only the health pair says how near a health-triggered phase is.
+  sheet_fight_forecast_t forecast() const
+  {
+    sheet_fight_forecast_t f;
+    if ( current_phase < 0 || phase_changes.empty() )
+      return f;
+    const double t           = now();
+    const double phase_start = phase_changes.back().at_s;
+
+    // The next must-die add wave: a phase-time trigger of the CURRENT phase (a later phase has not scheduled its own yet),
+    // arrival = drawn spawn + nominal travel, strictly later than now. An instance already spawned but not yet at its
+    // nominal arrival still counts: the game shows the add walking in.
+    for ( size_t w = 0; w < spec.waves.size(); ++w )
+    {
+      const auto& wv = spec.waves[ w ];
+      if ( wv.kind != "add" || !wv.must_die )
+        continue;
+      const double shift = jit_value( wv.time_shift_jitter, 0.0 );
+      for ( const auto& a : wv.at )
+      {
+        if ( a.kind != "phase_time" || a.phase != current_phase )
+          continue;
+        const double spawn   = phase_start + std::max( 0.0, a.in_phase_s + shift );
+        const double arrival = spawn + wv.travel_s.value_or( 0.0 );
+        const double in      = arrival - t;
+        if ( in > 0.0 && ( !f.wave_known || in < f.wave_arrival_in_s ) )
+        {
+          f.wave_known        = true;
+          f.wave_arrival_in_s = in;
+          f.wave_count        = static_cast<int>( wv.count );
+          f.wave_lifetime_s   = wv.nominal_lifetime_s.value_or( 0.0 );
+        }
+      }
+    }
+
+    // The next phase, only when its start is a boss's health crossing (a timer-started phase reads no event, P5).
+    const int next = current_phase + 1;
+    if ( next < static_cast<int>( spec.phases.size() ) && spec.phases[ next ].start.kind == "boss_health" )
+      for ( const auto& b : bosses )
+        if ( b.spec->actor == spec.phases[ next ].start.boss && b.spawned && !b.dead )
+        {
+          const double max_hp = b.actor->resources.max[ RESOURCE_HEALTH ];
+          if ( max_hp > 0 )
+          {
+            f.phase_known        = true;
+            f.phase_at_boss_pct  = spec.phases[ next ].start.pct;
+            f.phase_boss_pct_now = b.actor->resources.current[ RESOURCE_HEALTH ] / max_hp * 100.0;
+          }
+          break;
+        }
+
+    // Downtime: the current phase's no-damage windows (a stun, a forced movement, an immune boss). One in progress reads
+    // 0; else the earliest start already scheduled by timestamp. A health-triggered window (first_pct) is unknown until it
+    // begins (P4).
+    for ( const auto& c : children[ current_phase ] )
+    {
+      const bool downtime = c->type == "stun" || c->type == "invulnerable" || c->type.rfind( "movement", 0 ) == 0;
+      if ( !downtime )
+        continue;
+      if ( c->up() )
+      {
+        f.downtime_known  = true;
+        f.downtime_active = true;
+        f.downtime_in_s   = 0.0;
+        break;
+      }
+      if ( c->first_pct != -1 )
+        continue;
+      const double u = c->until_next().total_seconds();
+      if ( u > 0.0 && u < 1.0e6 && ( !f.downtime_known || u < f.downtime_in_s ) )
+      {
+        f.downtime_known = true;
+        f.downtime_in_s  = u;
+      }
+    }
+
+    // Bloodlust: the current phase carries it, it has not fired yet; the sheet's nominal offset after the phase start,
+    // floored at 0 (due now) once that moment has passed without it firing.
+    const auto& ph = spec.phases[ current_phase ];
+    if ( ph.bloodlust && bloodlust_at < 0 )
+    {
+      f.bloodlust_known = true;
+      f.bloodlust_in_s  = std::max( 0.0, phase_start + ph.bloodlust->offset_after_start_s - t );
+    }
+    return f;
+  }
+
   // ---- the fight record ----------------------------------------------------------------------
   void write_record()
   {
@@ -1794,4 +1886,17 @@ std::optional<timespan_t> sheet_fight_event_t::boss_time_to_percent( const playe
     if ( b.actor == boss )
       return im.ttd( b, percent );
   return std::nullopt;
+}
+
+sheet_fight_forecast_t sheet_fight_event_t::forecast() const
+{
+  return impl->forecast();
+}
+
+// tstl-sylvanas 262-04: the free-function view the observation readers call; all-unknown outside SheetFight.
+sheet_fight_forecast_t sheet_fight_forecast( const sim_t* sim )
+{
+  if ( !sim || sim->fight_style != FIGHT_STYLE_SHEET_FIGHT || !sim->sheet_fight )
+    return {};
+  return sim->sheet_fight->forecast();
 }

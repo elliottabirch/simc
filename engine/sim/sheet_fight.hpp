@@ -121,6 +121,7 @@ struct wave_t
   std::vector<wave_at_t> at;
   std::string time_shift_jitter;
   std::optional<double> max_health, travel_s, lifetime_s;
+  std::optional<double> nominal_lifetime_s;  // tstl-sylvanas 262-04: an add's nominal lifetime (the writer's R-5 centre); null for a hazard
   bool must_die = false;
   double spawn_distance_yd = 0;
   std::string travel_jitter;
@@ -142,6 +143,30 @@ struct spec_t
 spec_t load_spec( const std::string& path );
 }  // namespace sheet_fight_spec
 
+// tstl-sylvanas 262-04: the read-only view of the fight the net is allowed to see (the fight.* inputs).
+// Every field is a thing the game shows a raider (a wave of adds announced or arrived, a boss health percent, a
+// scheduled downtime, a bloodlust that is coming) or the sheet's NOMINAL value; no drawn value that the game hides
+// (the real travel time, add lifetime or bloodlust offset) is ever read. `*_known` false means "nothing to
+// forecast"; the readers then write their no-event values.
+struct sheet_fight_forecast_t
+{
+  bool wave_known = false;
+  double wave_arrival_in_s = 0;  // drawn spawn time + the sheet's NOMINAL travel, minus now
+  int wave_count = 0;
+  double wave_lifetime_s = 0;  // the sheet's nominal lifetime of that wave's adds
+  bool phase_known = false;
+  double phase_at_boss_pct = 0;   // the health percent at which the next phase starts
+  double phase_boss_pct_now = 0;  // that boss's health percent now
+  bool downtime_active = false;
+  bool downtime_known = false;
+  double downtime_in_s = 0;  // seconds to the next scheduled downtime start (0 while one is in progress)
+  bool bloodlust_known = false;
+  double bloodlust_in_s = 0;  // anchor phase start + the sheet's NOMINAL offset, minus now (floored at 0)
+};
+
+// The all-unknown view when the fight style is not SheetFight or no controller exists.
+sheet_fight_forecast_t sheet_fight_forecast( const sim_t* sim );
+
 struct sheet_fight_event_t : public raid_event_t
 {
   sheet_fight_event_t( sim_t* sim, const std::string& spec_path );
@@ -162,6 +187,8 @@ struct sheet_fight_event_t : public raid_event_t
   void on_combat_end();
   // Per-life time to a health percent for a spec boss that is up; nullopt for any other actor.
   std::optional<timespan_t> boss_time_to_percent( const player_t* boss, double percent ) const;
+  // tstl-sylvanas 262-04: the fight.* view (see sheet_fight_forecast_t); a pure read, no draw, no state change.
+  sheet_fight_forecast_t forecast() const;
 
 private:
   void _start() override {}

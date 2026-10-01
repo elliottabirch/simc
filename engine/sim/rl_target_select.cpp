@@ -283,7 +283,7 @@ int count_hits_within_radius( player_t* caster, player_t* candidate, double radi
   int count = 0;
   for ( player_t* other : caster->sim->target_non_sleeping_list )
   {
-    if ( other == candidate || !other->is_enemy() )
+    if ( other == candidate || !other->is_enemy() || !rl_counts_as_enemy( other ) )
       continue;
     if ( candidate->get_player_distance( *other ) <= radius + other->combat_reach )
       ++count;
@@ -301,7 +301,7 @@ int count_new_flame_shock_neighbours( player_t* caster, player_t* candidate, dou
   int count = 0;
   for ( player_t* other : caster->sim->target_non_sleeping_list )
   {
-    if ( other == candidate || !other->is_enemy() )
+    if ( other == candidate || !other->is_enemy() || !rl_counts_as_enemy( other ) )
       continue;
     if ( candidate->get_player_distance( *other ) > radius + other->combat_reach )
       continue;
@@ -325,6 +325,15 @@ int count_new_flame_shock_neighbours( player_t* caster, player_t* candidate, dou
       ++count;
   }
   return std::min( cap, count );
+}
+
+bool rl_counts_as_enemy( const player_t* t )
+{
+  if ( t->sheet_hazard )
+    return false;
+  if ( t->sim->fight_style == FIGHT_STYLE_SHEET_FIGHT && t->debuffs.invulnerable && t->debuffs.invulnerable->check() )
+    return false;
+  return true;
 }
 
 bool generic_filter( const action_t* a, player_t* candidate, bool harmful )
@@ -404,6 +413,7 @@ enemy_fact build_enemy_fact( const action_t* a, player_t* candidate )
   f.time_to_die = std::min( candidate->time_to_percent( 0 ).total_seconds(), 600.0 );
   f.health_pct  = candidate->health_percentage();
   f.is_boss     = obs_is_boss( candidate );  // tstl-sylvanas 260928-tb8
+  f.hazard      = candidate->sheet_hazard;  // tstl-sylvanas 262-04 (IN-02, R-6): the actor's own flag, beside is_boss
 
   // WR-04 (260902/cr4): `find_dot` -- a non-allocating scan of the candidate's existing dot_list --
   // instead of `get_dot`, which CREATES a dot_t on every candidate that has never been Flame
@@ -424,7 +434,7 @@ enemy_fact build_enemy_fact( const action_t* a, player_t* candidate )
   {
     for ( player_t* other : a->sim->target_non_sleeping_list )
     {
-      if ( other == candidate || !other->is_enemy() )
+      if ( other == candidate || !other->is_enemy() || !rl_counts_as_enemy( other ) )
         continue;
       if ( candidate->get_player_distance( *other ) <= a->radius + other->combat_reach )
         ++neighbours;
@@ -494,7 +504,7 @@ std::vector<enemy_fact> build_candidate_facts( const action_t* a, bool harmful )
 {
   std::vector<enemy_fact> out;
   for ( player_t* t : a->sim->target_non_sleeping_list )
-    if ( t->is_enemy() && generic_filter( a, t, harmful ) )
+    if ( t->is_enemy() && rl_counts_as_enemy( t ) && generic_filter( a, t, harmful ) )
       out.push_back( build_enemy_fact( a, t ) );
   return out;
 }
@@ -633,7 +643,7 @@ enemy_fact build_enemy_fact_for_scoring( const action_t* a, player_t* candidate,
     int neighbours = 0;
     for ( player_t* other : a->sim->target_non_sleeping_list )
     {
-      if ( other == candidate || !other->is_enemy() )
+      if ( other == candidate || !other->is_enemy() || !rl_counts_as_enemy( other ) )
         continue;
       if ( candidate->get_player_distance( *other ) <= geo->radius + other->combat_reach )
         ++neighbours;
@@ -648,7 +658,7 @@ enemy_fact build_enemy_fact_for_scoring( const action_t* a, player_t* candidate,
     int neighbours = 0;
     for ( player_t* other : a->sim->target_non_sleeping_list )
     {
-      if ( other == candidate || !other->is_enemy() )
+      if ( other == candidate || !other->is_enemy() || !rl_counts_as_enemy( other ) )
         continue;
       if ( candidate->get_player_distance( *other ) <= a->radius + other->combat_reach )
         ++neighbours;
@@ -834,7 +844,7 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
   candidates.clear();
   candidates.reserve( a->sim->target_non_sleeping_list.size() );
   for ( player_t* t : a->sim->target_non_sleeping_list )
-    if ( t->is_enemy() && generic_filter( a, t, harmful ) )
+    if ( t->is_enemy() && rl_counts_as_enemy( t ) && generic_filter( a, t, harmful ) )
       candidates.push_back( t );
 
   // TGT-02 edge: empty -- no pick, legality bit goes to 0, the unanchored wait stays legal.

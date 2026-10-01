@@ -34,6 +34,7 @@
 #include "sim/expressions.hpp"
 #include "sim/raid_event.hpp"
 #include "sim/rl_target_select.hpp"
+#include "sim/sheet_fight.hpp"  // tstl-sylvanas 262-04: sheet_fight_forecast
 #include "sim/sim.hpp"
 #include "sim/solver_control.hpp"
 #include "util/io.hpp"
@@ -214,7 +215,7 @@ fight_wide_aggregates_t compute_fight_wide_aggregates( player_t* p )
   fight_wide_aggregates_t agg;
   for ( player_t* t : p->sim->target_non_sleeping_list )
   {
-    if ( !t->is_enemy() )
+    if ( !t->is_enemy() || !rl_target_select::rl_counts_as_enemy( t ) )  // 262-04 (IN-02)
       continue;
     ++agg.enemies_total;
 
@@ -328,7 +329,7 @@ shape_hit_result_t compute_crash_lightning_shape( player_t* p )
   shape_hit_result_t r;
   for ( player_t* t : p->sim->target_non_sleeping_list )
   {
-    if ( !t->is_enemy() )
+    if ( !t->is_enemy() || !rl_target_select::rl_counts_as_enemy( t ) )  // 262-04 (IN-02)
       continue;
     if ( !rl_target_select::crash_lightning_cone_contains( p->x_position, p->y_position, p->facing_x,
                                                             p->facing_y, t->x_position, t->y_position,
@@ -352,7 +353,7 @@ shape_hit_result_t compute_sundering_shape( player_t* p )
   shape_hit_result_t r;
   for ( player_t* t : p->sim->target_non_sleeping_list )
   {
-    if ( !t->is_enemy() )
+    if ( !t->is_enemy() || !rl_target_select::rl_counts_as_enemy( t ) )  // 262-04 (IN-02)
       continue;
     if ( !rl_target_select::sundering_rect_contains( p->x_position, p->y_position, p->facing_x,
                                                        p->facing_y, t->x_position, t->y_position,
@@ -1178,6 +1179,10 @@ enum class buff_leaf_kind { stacks, remains, next_expiry, expiry_2, expiry_3, st
 // derived), and build_obs' derived-first dispatch short-circuits before
 // ever consulting a binding's `direct` id, exactly as the retired
 // per-field walk did for the same field.
+// tstl-sylvanas 262-04 (R-8, IN-01): the raw value of a clock-like input that has nothing to say: 600 s, which every seconds
+// column with clipDiv 60 encodes as exactly 1.0 (the standing 'no event pending' horizon). Never a countdown.
+constexpr double RL_SATURATED_SECONDS = 600.0;
+
 enum class direct_id
 {
   active_enemies, t, maelstrom,
@@ -1209,6 +1214,11 @@ enum class direct_id
   fw_immunity_in, fw_immunity_remaining,
   // 260923-lrc (PLAN.md D1-D3): the new lightning_rod_carrier_count aggregate.
   fw_lightning_rod_carrier_count,
+  // tstl-sylvanas 262-04 (IN-01): the eight fight.* inputs -- what the net may see of the fight coming. Dormant until the
+  // generated header names them (the strcmp branches in resolve_scalar_leaf bind by full dotted name).
+  fight_next_wave_in, fight_next_wave_count, fight_next_wave_lifetime,
+  fight_next_phase_at_boss_pct, fight_next_phase_boss_pct_now,
+  fight_downtime_in, fight_bloodlust_in, fight_enemies_damageable_in_range,
   // 260914-rbp Task 1 (R5/R7/R9, HIT-INPUTS-DESIGN.md §2, rulings §B): the seven per-ability
   // "how many targets will this hit" scalars -- geometry only, never SimC's own target_list()/
   // chain resolver (memo §B.3's HARD constraint). Every one reads 0 when no pick is stamped for
@@ -1658,6 +1668,56 @@ slot_binding resolve_scalar_leaf( const rl_leaf_desc& leaf )
     // create_expression, mirroring raid_event_next_in's own direct dispatch.
     b.kind = slot_binding_kind::direct;
     b.direct = direct_id::time_to_bloodlust;
+    return b;
+  }
+  // tstl-sylvanas 262-04 (IN-01): the eight fight.* scalars, bound by FULL dotted name like every opaque scalar. At a width
+  // whose header lacks these names none of them binds (an unresolved name reads its descriptor's own `missing` value).
+  if ( std::strcmp( leaf.leaf, "fight.next_wave.in" ) == 0 )
+  {
+    b.kind = slot_binding_kind::direct;
+    b.direct = direct_id::fight_next_wave_in;
+    return b;
+  }
+  if ( std::strcmp( leaf.leaf, "fight.next_wave.count" ) == 0 )
+  {
+    b.kind = slot_binding_kind::direct;
+    b.direct = direct_id::fight_next_wave_count;
+    return b;
+  }
+  if ( std::strcmp( leaf.leaf, "fight.next_wave.lifetime" ) == 0 )
+  {
+    b.kind = slot_binding_kind::direct;
+    b.direct = direct_id::fight_next_wave_lifetime;
+    return b;
+  }
+  if ( std::strcmp( leaf.leaf, "fight.next_phase.at_boss_pct" ) == 0 )
+  {
+    b.kind = slot_binding_kind::direct;
+    b.direct = direct_id::fight_next_phase_at_boss_pct;
+    return b;
+  }
+  if ( std::strcmp( leaf.leaf, "fight.next_phase.boss_pct_now" ) == 0 )
+  {
+    b.kind = slot_binding_kind::direct;
+    b.direct = direct_id::fight_next_phase_boss_pct_now;
+    return b;
+  }
+  if ( std::strcmp( leaf.leaf, "fight.downtime.in" ) == 0 )
+  {
+    b.kind = slot_binding_kind::direct;
+    b.direct = direct_id::fight_downtime_in;
+    return b;
+  }
+  if ( std::strcmp( leaf.leaf, "fight.bloodlust.in" ) == 0 )
+  {
+    b.kind = slot_binding_kind::direct;
+    b.direct = direct_id::fight_bloodlust_in;
+    return b;
+  }
+  if ( std::strcmp( leaf.leaf, "fight.enemies.damageable_in_range" ) == 0 )
+  {
+    b.kind = slot_binding_kind::direct;
+    b.direct = direct_id::fight_enemies_damageable_in_range;
     return b;
   }
   // 260914-rbp Task 1 Step 2 (R1, rulings §B): crash_lightning_stack_window's/
@@ -2933,6 +2993,20 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
     return fw_iw;
   };
 
+  // tstl-sylvanas 262-04 (IN-01): the sheet-fight forecast, read AT MOST ONCE per build_obs() call (the all-unknown view
+  // outside SheetFight, so every existing shape reads the no-event values).
+  bool fight_fc_computed = false;
+  sheet_fight_forecast_t fight_fc;
+  auto get_fight_fc = [ & ]() -> const sheet_fight_forecast_t&
+  {
+    if ( !fight_fc_computed )
+    {
+      fight_fc          = sheet_fight_forecast( p->sim );
+      fight_fc_computed = true;
+    }
+    return fight_fc;
+  };
+
   // 260914-rbp Task 2c (HI-1): crash_lightning's own shape, computed AT MOST ONCE per
   // build_obs() call -- same "read once, use twice" lazy pattern as get_fw_agg/get_fw_iw above.
   // Shared by the slot_binding_kind::shape_fact case (shapes.crash_lightning.enemies_hit) and
@@ -3038,7 +3112,7 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
         player_t* caster = explosion->player;
         for ( player_t* carrier : caster->sim->target_non_sleeping_list )
         {
-          if ( !carrier->is_enemy() )
+          if ( !carrier->is_enemy() || !rl_target_select::rl_counts_as_enemy( carrier ) )  // 262-04 (IN-02)
             continue;
           // Q6 (rulings, HIT-INPUTS-DESIGN.md §2.5): caster-filtered -- THIS actor's own Flame
           // Shock, the SAME find_dot("flame_shock", caster) idiom build_enemy_fact's own
@@ -3097,7 +3171,9 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
       const double fight_len = p->sim->max_time.total_seconds() > 0.0
                                     ? p->sim->max_time.total_seconds()
                                     : RL_EPISODE_MAX_TIME;
-      raw = std::max( fight_len - s.t, 0.0 );
+      // tstl-sylvanas 262-04 (R-8): in a sheet fight the clock-like reading is the saturating value (raw >= 60 encodes 1.0),
+      // never `max_time - t`: that is a time-since-the-pull in disguise and only drops under 60 s in slow fights.
+      raw = ( p->sim->fight_style == FIGHT_STYLE_SHEET_FIGHT ) ? RL_SATURATED_SECONDS : std::max( fight_len - s.t, 0.0 );
       status = lookup_status::present;
     }
     else
@@ -3358,7 +3434,8 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
                 const double fight_len = p->sim->max_time.total_seconds() > 0.0
                                               ? p->sim->max_time.total_seconds()
                                               : RL_EPISODE_MAX_TIME;
-                v = std::max( fight_len - s.t, 0.0 );
+                // tstl-sylvanas 262-04 (R-8): the saturating value in a sheet fight, as for fight_remains above.
+                v = ( p->sim->fight_style == FIGHT_STYLE_SHEET_FIGHT ) ? RL_SATURATED_SECONDS : std::max( fight_len - s.t, 0.0 );
               }
               raw = v;
               status = lookup_status::present;
@@ -3377,6 +3454,59 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
               raw = p->calculate_time_to_bloodlust();
               status = lookup_status::present;
               break;
+
+            // tstl-sylvanas 262-04 (IN-01): the fight.* inputs. Each reads the controller's forecast view; outside
+            // SheetFight the view is all-unknown, so every column holds its no-event value (the `.in` columns the saturating
+            // 600 s -> 1.0, the counts and the percent pair 0). `status` is always present: the controller either
+            // knows or it has nothing to say, and "nothing" is a value, not an absence.
+            case direct_id::fight_next_wave_in:
+              raw = get_fight_fc().wave_known ? get_fight_fc().wave_arrival_in_s : RL_SATURATED_SECONDS;
+              status = lookup_status::present;
+              break;
+            case direct_id::fight_next_wave_count:
+              raw = get_fight_fc().wave_known ? static_cast<double>( get_fight_fc().wave_count ) : 0.0;
+              status = lookup_status::present;
+              break;
+            case direct_id::fight_next_wave_lifetime:
+              raw = get_fight_fc().wave_known ? get_fight_fc().wave_lifetime_s : 0.0;
+              status = lookup_status::present;
+              break;
+            // The phase pair: a phase starting at 0 % is a real value, so "none" (0 / 0) is told apart from "next phase at
+            // 0 %" by the boss's own percent now being above 0 (pitfall P5); a timer-started phase reads 0 / 0 by design.
+            case direct_id::fight_next_phase_at_boss_pct:
+              raw = get_fight_fc().phase_known ? get_fight_fc().phase_at_boss_pct : 0.0;
+              status = lookup_status::present;
+              break;
+            case direct_id::fight_next_phase_boss_pct_now:
+              raw = get_fight_fc().phase_known ? get_fight_fc().phase_boss_pct_now : 0.0;
+              status = lookup_status::present;
+              break;
+            case direct_id::fight_downtime_in:
+              raw = get_fight_fc().downtime_known ? get_fight_fc().downtime_in_s : RL_SATURATED_SECONDS;
+              status = lookup_status::present;
+              break;
+            case direct_id::fight_bloodlust_in:
+              raw = get_fight_fc().bloodlust_known ? get_fight_fc().bloodlust_in_s : RL_SATURATED_SECONDS;
+              status = lookup_status::present;
+              break;
+            // Damageable enemies within 8 yd of the player: on the non-sleeping list, not a hazard, not invulnerable (a boss
+            // benched between lives), within NEAR_RANGE_YARDS (the Crash Lightning / Fire Nova radius). 0 outside SheetFight.
+            // (Live side excludes possessed players too; the simulator has none, R-7.)
+            case direct_id::fight_enemies_damageable_in_range:
+            {
+              int n = 0;
+              if ( p->sim->fight_style == FIGHT_STYLE_SHEET_FIGHT )
+                for ( player_t* t : p->sim->target_non_sleeping_list )
+                {
+                  if ( !t->is_enemy() || !rl_target_select::rl_counts_as_enemy( t ) )
+                    continue;
+                  if ( p->get_player_distance( *t ) <= rl_target_select::NEAR_RANGE_YARDS )
+                    ++n;
+                }
+              raw = static_cast<double>( n );
+              status = lookup_status::present;
+              break;
+            }
 
             // 228-11 (D-16, TGT-05): the identity-free fight-wide aggregates -- every value
             // already computed by 228-10's compute_fight_wide_aggregates(), cached once above.
