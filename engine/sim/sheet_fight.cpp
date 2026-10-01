@@ -636,6 +636,7 @@ struct sheet_fight_event_t::impl_t
   std::vector<char> trigger_ready;
   int current_phase = -1;
   bool ended_by_kill = false;
+  bool active_mismatch_reported = false;  // the once-per-fight active_enemies self-check
   size_t tick_index = 0;
   std::vector<phase_change_t> phase_changes;
   std::vector<cast_rec_t> casts_rec;
@@ -646,7 +647,7 @@ struct sheet_fight_event_t::impl_t
   {
     int wave = -1;
     sheet_mob_t* mob = nullptr;
-    bool alive = false, arrived = false;
+    bool alive = false, arrived = false, hazard = false;
     double spawn_s = 0, arrival_s = -1, death_s = -1, despawn_s = -1;
     double first_dmg = -1, first_pdmg = -1, first_swing = -1, stream_taken = 0;
     double dmg_base = 0, dmg_total = 0;
@@ -807,21 +808,28 @@ struct sheet_fight_event_t::impl_t
     auto& wr       = wave_rt[ w ];
     if ( !wr.spawner )
       return;
-    auto mobs = wr.spawner->spawn( timespan_t::min(), static_cast<unsigned>( wv.count ) );
+    const bool hazard = wv.kind == "hazard";
+    // A hazard leaves on its own schedule (spec lifetime_s); an add has no clock at all.
+    const timespan_t life = ( hazard && wv.lifetime_s ) ? timespan_t::from_seconds( *wv.lifetime_s ) : timespan_t::min();
+    auto mobs = wr.spawner->spawn( life, static_cast<unsigned>( wv.count ) );
     for ( auto* m : mobs )
     {
       m->full_name_str = m->name_str = wv.actor;
       // Behind the player, the spec's distance from the boss at the origin: no facing-gated spell reaches it early.
       m->x_position = -wv.spawn_distance_yd;
       m->y_position = 0;
-      m->resources.base[ RESOURCE_HEALTH ]              = *wv.max_health;
-      m->resources.infinite_resource[ RESOURCE_HEALTH ] = false;
-      m->init_resources( true );
+      if ( !hazard )
+      {
+        m->resources.base[ RESOURCE_HEALTH ]              = *wv.max_health;
+        m->resources.infinite_resource[ RESOURCE_HEALTH ] = false;
+        m->init_resources( true );
+      }
 
       auto in = std::make_unique<inst_t>();
       in->wave     = w;
       in->mob      = m;
       in->alive    = true;
+      in->hazard   = hazard;
       in->spawn_s  = now();
       in->dmg_base = m->iteration_dmg_taken;
       if ( wv.raid_stream )
@@ -835,8 +843,11 @@ struct sheet_fight_event_t::impl_t
       m->dmg_base   = in->dmg_base;
       mob_inst[ m ] = idx;
       insts.push_back( std::move( in ) );
-      const double travel = wv.travel_s.value_or( 0.0 );
-      make_event<arrive_event_t>( *sim, *sim, this, idx, timespan_t::from_seconds( travel ) );
+      if ( !hazard )
+      {
+        const double travel = wv.travel_s.value_or( 0.0 );
+        make_event<arrive_event_t>( *sim, *sim, this, idx, timespan_t::from_seconds( travel ) );
+      }
     }
     invalidate_target_caches();
   }
@@ -874,7 +885,10 @@ struct sheet_fight_event_t::impl_t
     in.dmg_total = m->iteration_dmg_taken - in.dmg_base;
     if ( sim->event_mgr.canceled )
       return;
-    in.death_s = now();
+    if ( in.hazard )
+      in.despawn_s = now();  // a hazard leaves on its schedule; it is never killed
+    else
+      in.death_s = now();
     invalidate_target_caches();
   }
 
@@ -925,6 +939,8 @@ struct sheet_fight_event_t::impl_t
       for ( size_t k = 0; k < spec.waves[ w ].at.size(); ++k )
       {
         const auto& a = spec.waves[ w ].at[ k ];
+        if ( a.kind == "boss_health" )
+          wave_rt[ w ].armed[ k ] = a.phase == j ? 1 : 0;  // armed from its phase's start; disarmed when another phase starts
         if ( a.phase != j )
           continue;
         if ( a.kind == "phase_time" )
@@ -986,7 +1002,23 @@ struct sheet_fight_event_t::impl_t
       retarget_players( retarget_source::ACTOR_INVULNERABLE, b.actor );
       sample( b );
     }
+    fire_health_waves( b, 0.0 );
     crossed( b, 0.0 );
+  }
+
+  // A boss crossed a health threshold downward: every armed boss_health wave trigger on it fires once.
+  void fire_health_waves( const boss_rt_t& b, double pct )
+  {
+    for ( size_t w = 0; w < spec.waves.size(); ++w )
+      for ( size_t k = 0; k < spec.waves[ w ].at.size(); ++k )
+      {
+        const auto& a = spec.waves[ w ].at[ k ];
+        if ( a.kind == "boss_health" && wave_rt[ w ].armed[ k ] && a.boss == b.spec->actor && std::fabs( a.pct - pct ) < 1e-9 )
+        {
+          wave_rt[ w ].armed[ k ] = 0;
+          spawn_wave( static_cast<int>( w ) );
+        }
+      }
   }
 
   void pct_cb( int i, double pct, bool increasing )
@@ -994,6 +1026,7 @@ struct sheet_fight_event_t::impl_t
     auto& b = bosses[ i ];
     if ( increasing || !b.spawned || b.dead )
       return;
+    fire_health_waves( b, pct );  // before crossed(): a phase change would disarm them
     crossed( b, pct );
   }
 
@@ -1037,6 +1070,18 @@ struct sheet_fight_event_t::impl_t
         stream->base_dd_min = stream->base_dd_max = in.stream_rate * interval;
         stream->target = in.mob;
         stream->execute();
+      }
+    }
+    if ( !active_mismatch_reported )
+    {
+      int expected = 0;
+      for ( const auto* t : sim->target_non_sleeping_list )
+        if ( !t->sheet_hazard )
+          ++expected;
+      if ( expected != sim->active_enemies )
+      {
+        active_mismatch_reported = true;
+        fmt::print( stderr, "[RL_SHEET_FIGHT] active_enemies={} expected={} t={:.3f}\n", sim->active_enemies, expected, now() );
       }
     }
     for ( auto& b : bosses )
@@ -1323,10 +1368,14 @@ sheet_fight_event_t::sheet_fight_event_t( sim_t* s, const std::string& spec_path
   for ( size_t w = 0; w < im.spec.waves.size(); ++w )
   {
     const auto& wv = im.spec.waves[ w ];
-    if ( wv.kind != "add" )
-      continue;
     const std::string actor = wv.actor;
-    auto* sp = new sheet_spawner_t( actor + " spawner", s->target, [ actor ]( player_t* owner ) { return new sheet_mob_t( owner, actor ); } );
+    const bool hazard       = wv.kind == "hazard";
+    // The flag is set on creation, before the pet is initialised or arises, and never changes afterwards.
+    auto* sp = new sheet_spawner_t( actor + " spawner", s->target, [ actor, hazard ]( player_t* owner ) {
+      auto* m         = new sheet_mob_t( owner, actor );
+      m->sheet_hazard = hazard;
+      return m;
+    } );
     impl_t* pi = &im;
     sp->set_event_callback( spawner::pet_event_type::DEMISE, [ pi ]( spawner::pet_event_type, sheet_mob_t* m ) { pi->on_mob_demise( m ); } );
     im.wave_rt[ w ].spawner = sp;
@@ -1396,6 +1445,7 @@ void sheet_fight_event_t::reset()
       c->reset();
   im.current_phase = -1;
   im.ended_by_kill = false;
+  im.active_mismatch_reported = false;
   im.tick_index = 0;
   im.phase_changes.clear();
   im.casts_rec.clear();

@@ -564,6 +564,9 @@ struct player_t : public actor_t
 
   // Position
   double x_position, y_position, default_x_position, default_y_position;
+  // tstl-sylvanas 261-03: a sheet-fight hazard (an enemy the game lets you see but that is never a target). False for
+  // every other actor; set once, by the sheet-fight controller, on a hazard's creation (it never flips at runtime).
+  bool sheet_hazard = false;
   // Facing (228-01, D-04): a unit vector this player faces, turned instantly (no turn rate,
   // D-05) toward the current cast target at every `player_t::acquire_target` retarget and at
   // the fork's own cast-target set site. Initialised toward the default target (measured:

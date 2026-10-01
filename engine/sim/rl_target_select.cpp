@@ -333,6 +333,10 @@ bool generic_filter( const action_t* a, player_t* candidate, bool harmful )
   if ( candidate->is_sleeping() )
     return false;
 
+  // G1b -- tstl-sylvanas 261-03: never a hazard.
+  if ( candidate->sheet_hazard )
+    return false;
+
   // G2 -- not immune while harmful.
   if ( harmful && candidate->debuffs.invulnerable && candidate->debuffs.invulnerable->check() )
     return false;

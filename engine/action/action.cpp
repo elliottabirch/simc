@@ -1848,7 +1848,8 @@ size_t action_t::available_targets( std::vector<player_t*>& tl ) const
     // target list may hold one. Actions with neither radius nor range skip the distance filter and
     // would otherwise "chain" onto the first non-target enemy in the list (the Bite of Zul'jan
     // weapon proc hit Bystander_1 on every fight).
-    if ( sim->is_rl_bystander( t ) )
+    // tstl-sylvanas 261-03: a sheet-fight hazard is untargetable the same way.
+    if ( sim->is_untargetable_enemy( t ) )
       continue;
 
     if ( t->is_enemy() && ( t != target ) && ( !cb || cb( this, t ) ) )
@@ -1880,9 +1881,10 @@ std::vector<player_t*>& action_t::target_list() const
       check_distance_targeting( target_cache.list );
     // tstl-sylvanas 260929-bystander: also catches available_targets overrides that do not chain to
     // the base implementation above.
-    if ( !sim->rl_bystanders.empty() )
+    // tstl-sylvanas 261-03: also under a sheet fight (hazards); absent both, the branch is skipped exactly as before.
+    if ( !sim->rl_bystanders.empty() || sim->sheet_fight )
     {
-      range::erase_remove( target_cache.list, [ this ]( const player_t* t ) { return t != target && sim->is_rl_bystander( t ); } );
+      range::erase_remove( target_cache.list, [ this ]( const player_t* t ) { return t != target && sim->is_untargetable_enemy( t ); } );
     }
     target_cache.is_valid = true;
   }

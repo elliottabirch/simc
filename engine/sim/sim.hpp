@@ -974,6 +974,8 @@ struct sim_t : private sc_thread_t
   std::vector<player_t*> rl_bystanders;
   // True for a player created from solver_bystander_positions (linear scan; at most 12 entries).
   bool is_rl_bystander( const player_t* p ) const;
+  // tstl-sylvanas 261-03: true for an enemy that must never be targeted: a sheet-fight hazard or a bystander.
+  bool is_untargetable_enemy( const player_t* p ) const;
   // tstl-sylvanas 261-02: fight_style=SheetFight. solver_sheet_fight=<spec.json> is the sheet-fight spec
   // the controller (sim/sheet_fight.cpp) plays; solver_sheet_jitter (default on) turns the per-fight
   // jitter draws on (plan 261-04; until then every jittered field uses its range centre);

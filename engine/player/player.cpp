@@ -7274,7 +7274,10 @@ void player_t::arise()
 
   if ( is_enemy() )
   {
-    sim->active_enemies++;
+    // tstl-sylvanas 261-03: a hazard stays in target_non_sleeping_list (so a later input can flag it) but is not an
+    // active enemy: neither the net's count nor the scripted rotation's AoE switch may see it.
+    if ( !sheet_hazard )
+      sim->active_enemies++;
     sim->target_non_sleeping_list.push_back( this );
 
     // When an enemy arises, trigger players to potentially acquire a new target
@@ -7384,7 +7387,8 @@ void player_t::demise()
 
   if ( is_enemy() )
   {
-    sim->active_enemies--;
+    if ( !sheet_hazard )
+      sim->active_enemies--;
     sim->target_non_sleeping_list.find_and_erase( this );
 
     // When an enemy dies, trigger players to acquire a new target
@@ -7397,8 +7401,8 @@ void player_t::demise()
     sim->player_non_sleeping_list.find_and_erase_unordered( this );
   }
 
-  // If an enemy mob dies, trigger on-kill callback on all active players
-  if ( is_enemy() )
+  // If an enemy mob dies, trigger on-kill callback on all active players (a hazard leaving is not a kill)
+  if ( is_enemy() && !sheet_hazard )
   {
     for ( auto p : sim->player_non_sleeping_list )
     {
@@ -14978,7 +14982,8 @@ void player_t::acquire_target( retarget_source event, player_t* context )
   {
     // tstl-sylvanas 260929-bystander (D3): never retarget onto a bystander. On trash-route the boss is
     // immune from t=0.1 with retarget=1, so without this the player would auto-attack a bystander.
-    if ( sim->is_rl_bystander( enemy ) )
+    // tstl-sylvanas 261-03: nor onto a sheet-fight hazard (is_untargetable_enemy covers both).
+    if ( sim->is_untargetable_enemy( enemy ) )
       continue;
 
     if ( enemy->debuffs.invulnerable != nullptr && enemy->debuffs.invulnerable->check() )

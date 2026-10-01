@@ -2263,6 +2263,12 @@ bool sim_t::is_rl_bystander( const player_t* p ) const
   return range::contains( rl_bystanders, p );
 }
 
+// tstl-sylvanas 261-03: the one predicate every target-list filter site asks (hazard flag or bystander).
+bool sim_t::is_untargetable_enemy( const player_t* p ) const
+{
+  return p->sheet_hazard || is_rl_bystander( p );
+}
+
 void sim_t::combat_end()
 {
   print_debug( "Combat End" );
