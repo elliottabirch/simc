@@ -840,8 +840,26 @@ struct sheet_fight_event_t::impl_t
       s.ttd = r3( t->total_seconds() );
       s.has_ttd = true;
     }
+    // tstl-sylvanas 261-08: two samples at one instant used to collapse into one, which lost the
+    // 1-health bench sample a boss takes when his life ends just before a phase gives him a new
+    // maximum health. The reader closes a life only on a sample at or below 1 health
+    // (scripts/wcl/boss-timeline.js:195), so that sample must survive. The record contract wants strictly
+    // increasing times (scripts/fights/fight-contracts.js:652), so a sample at the same instant with a
+    // DIFFERENT maximum health is stamped one millisecond (the record's resolution, r3) after the previous one.
+    // A sample at the same instant with the SAME maximum still replaces the previous one, and keeps its stamp.
     if ( !b.samples.empty() && b.samples.back().t >= s.t - 1e-9 )
-      b.samples.back() = s;
+    {
+      if ( b.samples.back().max_hp == s.max_hp )
+      {
+        s.t = b.samples.back().t;
+        b.samples.back() = s;
+      }
+      else
+      {
+        s.t = r3( b.samples.back().t + 0.001 );
+        b.samples.push_back( s );
+      }
+    }
     else
       b.samples.push_back( s );
   }
