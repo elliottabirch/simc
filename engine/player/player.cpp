@@ -15050,6 +15050,18 @@ void player_t::acquire_target( retarget_source event, player_t* context )
     trigger_ready();
   }
 
+  // tstl-sylvanas 261-09: in a sheet fight a weapon swing can be left on an enemy the player has already left
+  // (see unique_gear.cpp, Skyfury). When that enemy dies while the player's own target does not change, neither
+  // branch above revisits the swing, and auto_attack then re-executes at one instant forever (watchdog exit 51).
+  // Move a swing whose target is asleep onto the same choice; nothing else is touched.
+  if ( sim->sheet_fight )
+  {
+    player_t* choice = candidate_target ? candidate_target : first_invuln_target;
+    for ( action_t* hand : { static_cast<action_t*>( main_hand_attack ), static_cast<action_t*>( off_hand_attack ) } )
+      if ( choice && hand && hand->target && hand->target != choice && hand->target->is_sleeping() )
+        hand->acquire_target( event, context, choice );
+  }
+
   if ( candidate_target || first_invuln_target )
   {
     // Finally, re-acquire targeting for all dynamic targeting actions. This needs to be done
