@@ -528,6 +528,11 @@ namespace
 // Refuses (throws, never silently falls back to the caller's own zero geometry) when the resolved
 // source is null or its radius is <= 0.0 -- a structural invariant: a Thorim's-primed decision with
 // no Tempest/Chain-Lightning action registered on this player is a configuration error.
+// 261001 (MEASURED, decision-path fights): this refusal does NOT fire for a character that lacks the
+// Tempest talent. A Totemic character's `tempest` action is still constructed from its priority
+// list, is not a background action, and carries Tempest's own 8-yd radius, so the refusal stays
+// reserved for a genuinely missing action (a priority list that names no `tempest`/`chain_lightning`
+// while the Thorim's branch is primed) -- never loosen it for an untalented character.
 struct chain_geometry
 {
   double radius = 0.0;
@@ -563,17 +568,16 @@ chain_geometry resolve_thorims_branch_geometry( const action_t* resolved, prefer
     // any generic effect-merge in `sc_shaman.cpp` (which references Chaining Storms, id 334308,
     // in exactly two places -- neither an `apply_affecting_effects`-style call -- so the +2 must
     // be applied by some OTHER, more generic DBC-level mechanism this session did not trace).
-    // Attempts to reproduce a WITHOUT-Chaining-Storms baseline by re-asserting a stripped
-    // `spec_talents=` line LATER in the same profile (including an entirely EMPTY one) did NOT
-    // change either this cap or the unrelated, independently-observable
-    // `has_talent_thorims_invocation` dump field -- i.e. that override methodology itself does
-    // not take effect for an `input=`-included profile in this build, so this session could NOT
-    // conclusively measure the WITHOUT-talent case. Given that, this refuses on anything OTHER
-    // than the two values either side of the addon's own ternary ({3, 5}) rather than asserting
-    // a single unconfirmed number -- protects against a genuinely wrong cap (e.g. a future
-    // spell-data change moving it to some third value) without overclaiming a with/without-talent
-    // causal link this session did not establish. See the addon-parity todo for the open
-    // question and how to close it properly (a real in-game or clean-profile measurement).
+    // 261001 (MEASURED, decision-path fights, threads=1, `target_select_enabled=1`): the
+    // WITHOUT-Chaining-Storms case the paragraph above could not measure resolves to 3, exactly the
+    // addon's own untalented value, and does NOT refuse here. Receipts: the standard Stormbringer
+    // profile (Chaining Storms talented) logs aoe=5; the same profile with the by-name per-fight
+    // override `spec_talents+=/chaining_storms:0` after `input=` logs aoe=3 and its `save=` profile's
+    // encoded `talents=` string changes -- that override DOES take effect (the earlier "did not
+    // take effect" reading was wrong; 261001's own Voltaic Blaze proof relied on the same override
+    // form); the Totemic profile (neither Chaining Storms nor Tempest) also logs aoe=3, radius 10.
+    // Neither untalented build refused over 5 seeds x {1, 5} targets x 300 s. So {3, 5} stays the
+    // full legal set and the check below still catches a genuinely wrong third value.
     if ( geo.cap != 3 && geo.cap != 5 )
     {
       throw sc_runtime_error( fmt::format(
