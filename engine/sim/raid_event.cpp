@@ -1376,6 +1376,17 @@ struct stun_event_t final : public raid_event_t
     for ( auto p : affected_players )
     {
       p->buffs.stunned->decrement();
+
+      // tstl-sylvanas 262-09: stock interrupt() cancels the actor's Player-Ready event while it is stunned
+      // (player.cpp, the stunned branch of interrupt()) and the stunned buff's expire callback only calls
+      // trigger_ready(), which returns at once for a poll-ready actor -- so nothing gives the actor its turn
+      // back until an unrelated raid event interrupts it (a sheet relocation 5.6 s later; never, in a fight
+      // with none). Under the sheet-fight style, hand the turn back the moment the stun ends, using the same
+      // test the stock code applies when the player is not stunned. Every other fight style keeps the stock
+      // behaviour byte for byte.
+      if ( sim->fight_style == FIGHT_STYLE_SHEET_FIGHT && !sim->event_mgr.canceled && !p->buffs.stunned->check() &&
+           !p->readying && !p->executing && !p->channeling && !p->current.sleeping )
+        p->schedule_ready();
     }
   }
 };
