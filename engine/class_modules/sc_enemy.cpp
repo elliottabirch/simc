@@ -6,6 +6,7 @@
 #include "util/generic.hpp"
 
 #include "simulationcraft.hpp"
+#include "sim/sheet_fight.hpp"  // tstl-sylvanas 261-02
 
 // ==========================================================================
 // Enemy
@@ -1354,6 +1355,10 @@ void enemy_t::init_base_stats()
   // override in play; combining it with any of these would produce an undefined health curve.
   if ( respawns() )
   {
+    // tstl-sylvanas 261-02: first, so the message names both options (the fixed_time refusal below would otherwise
+    // fire first, because SheetFight forces fixed_time off).
+    if ( sim->fight_style == FIGHT_STYLE_SHEET_FIGHT )
+      throw sc_invalid_sim_argument( "solver_respawn_health is incompatible with fight_style=SheetFight." );
     if ( !std::isfinite( sim->solver_respawn_health ) )
       throw sc_invalid_sim_argument( "solver_respawn_health must be a finite value." );
     if ( !sim->fixed_time )
@@ -1849,6 +1854,12 @@ double enemy_t::health_percentage() const
 
 timespan_t enemy_t::time_to_percent( double percent ) const
 {
+  // tstl-sylvanas 261-02: a sheet-fight boss answers from its own life (damage since it arose over the seconds since),
+  // not from the pull; every other enemy keeps the stock path.
+  if ( sim->sheet_fight )
+    if ( auto t = sim->sheet_fight->boss_time_to_percent( this, percent ) )
+      return *t;
+
   // 260923-hp: respawn-on-death health model -- per-life time_to_die/time_to_percent, damage-driven
   // despite fixed_time=1, capped at the fight clock. See D5.
   if ( respawns() )
