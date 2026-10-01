@@ -1079,7 +1079,14 @@ static std::vector<player_t*>& __check_distance_targeting( const action_t* actio
   best_so_far.push_back( last_chain );
   current_attempt.push_back( last_chain );
 
-  size_t num_targets  = sim->target_non_sleeping_list.size();
+  // tstl-sylvanas 262-09 (261 review WR-06): a hazard (an enemy that is never meant to be hit) is neither a chain hop
+  // nor part of the count that bounds the search; the flag is false outside sheet fights, so every other shape copies
+  // the whole list exactly as before.
+  std::vector<player_t*> targets_left_to_try( sim->target_non_sleeping_list.data() );  // Members of a vector that haven't been tried yet.
+  targets_left_to_try.erase( std::remove_if( targets_left_to_try.begin(), targets_left_to_try.end(),
+                                             []( const player_t* t ) { return t->sheet_hazard; } ),
+                             targets_left_to_try.end() );
+  size_t num_targets  = targets_left_to_try.size();
   // tstl-sylvanas 261-04: with no awake enemy at all (a sheet fight between two bosses: the last one is benched and the
   // next is not engaged yet) `num_targets - 1.0` is negative, the unsigned conversion is undefined and the retry loop below
   // never ended. A chain with nothing to chain to is just its own target.
@@ -1093,8 +1100,6 @@ static std::vector<player_t*>& __check_distance_targeting( const action_t* actio
   size_t local_attempts = 0;
   size_t attempts = 0;
   size_t chain_number = 1;
-  std::vector<player_t*> targets_left_to_try(
-      sim->target_non_sleeping_list.data() );  // This list contains members of a vector that haven't been tried yet.
   auto position = std::find( targets_left_to_try.begin(), targets_left_to_try.end(), target );
   if ( position != targets_left_to_try.end() )
     targets_left_to_try.erase( position );
@@ -3682,6 +3687,12 @@ struct shaman_spell_t : public shaman_spell_base_t<spell_t>
     }
 
     range::for_each( sim->target_non_sleeping_list, [ this ]( player_t* target ) {
+      // tstl-sylvanas 262-09 (261 review WR-06): never hand a hazard the accumulated damage.
+      if ( target->sheet_hazard )
+      {
+        return;
+      }
+
       if ( !td( target )->debuff.lightning_rod->up() )
       {
         return;
@@ -7344,6 +7355,12 @@ struct flame_shock_spreader_t : public shaman_spell_t
         continue;
       }
 
+      // tstl-sylvanas 262-09 (261 review WR-06): a hazard is never a spread target
+      if ( t->sheet_hazard )
+      {
+        continue;
+      }
+
       // Skip targets that are further than 8 yards from the original target
       if ( sim->distance_targeting_enabled && t->get_player_distance( *target ) > 8 + t->combat_reach )
       {
@@ -7377,6 +7394,12 @@ struct flame_shock_spreader_t : public shaman_spell_t
     {
       // Skip source target
       if ( t == target )
+      {
+        continue;
+      }
+
+      // tstl-sylvanas 262-09 (261 review WR-06): a hazard is never a spread target
+      if ( t->sheet_hazard )
       {
         continue;
       }
@@ -7430,9 +7453,17 @@ struct flame_shock_spreader_t : public shaman_spell_t
       return;
     }
 
+    // tstl-sylvanas 262-09 (261 review WR-06): hazards never carry Flame Shock, so the "all targets have it" test
+    // compares with the number of awake enemies that are not hazards (the whole list outside sheet fights).
+    size_t spreadable_targets = 0;
+    for ( auto t : sim->target_non_sleeping_list )
+    {
+      if ( !t->sheet_hazard )
+        ++spreadable_targets;
+    }
+
     // If all targets have flame shock, pick the shortest remaining time
-    if ( player->get_active_dots( source_td->dot.flame_shock ) ==
-         sim->target_non_sleeping_list.size() )
+    if ( player->get_active_dots( source_td->dot.flame_shock ) == spreadable_targets )
     {
       copy_target = shortest_duration_target();
     }
