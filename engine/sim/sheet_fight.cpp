@@ -651,6 +651,7 @@ struct sheet_fight_event_t::impl_t
   bool ended_by_kill = false;
   bool active_mismatch_reported = false;  // the once-per-fight active_enemies self-check
   size_t tick_index = 0;
+  double bloodlust_at = -1;  // sim time bloodlust fired this fight, or -1 (261-04)
   std::vector<phase_change_t> phase_changes;
   std::vector<cast_rec_t> casts_rec;
   sheet_raid_stream_t* stream = nullptr;  // owned by the master (its action_list), like the stock raid_damage_t
@@ -750,6 +751,18 @@ struct sheet_fight_event_t::impl_t
     heal_event_t( sim_t& s, impl_t* i, int ph, int k, timespan_t t ) : event_t( s, t ), im( i ), phase( ph ), tick( k ) {}
     const char* name() const override { return "sheet_fight_heal"; }
     void execute() override { im->heal_tick( phase, tick ); }
+  };
+  struct bloodlust_event_t : event_t
+  {
+    impl_t* im;
+    int phase;
+    bloodlust_event_t( sim_t& s, impl_t* i, int ph, timespan_t t ) : event_t( s, t ), im( i ), phase( ph ) {}
+    const char* name() const override { return "sheet_fight_bloodlust"; }
+    void execute() override
+    {
+      if ( im->current_phase == phase )  // a phase that has already ended gets no bloodlust
+        im->do_bloodlust();
+    }
   };
   struct arrive_event_t : event_t
   {
@@ -1121,6 +1134,9 @@ struct sheet_fight_event_t::impl_t
       b.stream_rate = 0;
     for ( auto& s : ph.raid_stream )
       find_boss( s.boss )->stream_rate = s.damage_per_s * jit_value( s.pace_jitter, 1.0, j );  // tstl-sylvanas 261-04: this phase's raid pace
+    if ( ph.bloodlust )  // tstl-sylvanas 261-04: the sheet's anchor phase start + the drawn offset, never a fixed second
+      make_event<bloodlust_event_t>( *sim, *sim, this, j,
+                                     timespan_t::from_seconds( jit_value( ph.bloodlust->offset_jitter, ph.bloodlust->offset_after_start_s ) ) );
     for ( size_t c = 0; c < ph.casts.size(); ++c )
       make_event<cast_event_t>( *sim, *sim, this, j, static_cast<int>( c ), timespan_t::from_seconds( ph.casts[ c ].at_in_phase_s ) );
     for ( size_t w = 0; w < spec.waves.size(); ++w )
@@ -1148,6 +1164,22 @@ struct sheet_fight_event_t::impl_t
   {
     while ( current_phase + 1 < static_cast<int>( spec.phases.size() ) && trigger_ready[ current_phase + 1 ] )
       start_phase( current_phase + 1 );
+  }
+
+  // Bloodlust for every player who can take it (the pull system's loop, raid_event.cpp; the player's own bloodlust
+  // action cannot fire: the style keeps overrides.bloodlust at 0, so the engine's time/percent check is never scheduled).
+  // Indices, not iterators: triggering a buff can add actors.
+  void do_bloodlust()
+  {
+    for ( size_t i = 0; i < sim->player_non_sleeping_list.size(); i++ )
+    {
+      auto* p = sim->player_non_sleeping_list[ i ];
+      if ( p->is_pet() || p->buffs.exhaustion->check() )
+        continue;
+      p->buffs.bloodlust->trigger();
+      p->buffs.exhaustion->trigger();
+    }
+    bloodlust_at = now();
   }
 
   void do_cast( int phase, int cast )
@@ -1495,7 +1527,15 @@ struct sheet_fight_event_t::impl_t
       w.EndObject();
     }
     w.EndArray();
-    key( "bloodlust" ); w.Null();
+    key( "bloodlust" );
+    if ( bloodlust_at < 0 )
+      w.Null();
+    else
+    {
+      w.StartObject();
+      key( "at_s" ); w.Double( r3( bloodlust_at ) );
+      w.EndObject();
+    }
     key( "intermissions" );
     w.StartArray();
     for ( size_t k = 0; k < phase_changes.size(); ++k )
@@ -1660,6 +1700,7 @@ void sheet_fight_event_t::reset()
   im.ended_by_kill = false;
   im.active_mismatch_reported = false;
   im.tick_index = 0;
+  im.bloodlust_at = -1;
   im.phase_changes.clear();
   im.casts_rec.clear();
   im.insts.clear();
