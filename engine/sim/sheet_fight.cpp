@@ -1,0 +1,1205 @@
+// ==========================================================================
+// tstl-sylvanas 261-02: the sheet-fight controller. See sheet_fight.hpp.
+// ==========================================================================
+
+#include "sim/sheet_fight.hpp"
+
+#include "action/action.hpp"
+#include "action/action_state.hpp"
+#include "action/spell.hpp"
+#include "buff/buff.hpp"
+#include "player/assessor.hpp"
+#include "player/player.hpp"
+#include "sim/event.hpp"
+#include "sim/expressions.hpp"
+#include "sim/sim.hpp"
+#include "util/git_info.hpp"
+#include "util/io.hpp"
+#include "util/util.hpp"
+
+#include "rapidjson/document.h"
+#include "rapidjson/stringbuffer.h"
+#include "rapidjson/writer.h"
+
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <functional>
+#include <limits>
+#include <map>
+#include <set>
+#include <sstream>
+
+using namespace rapidjson;
+
+// ==========================================================================
+// Spec loader
+// ==========================================================================
+
+namespace sheet_fight_spec
+{
+namespace
+{
+struct loader_t
+{
+  const std::string& path;
+  struct jit_use_t
+  {
+    const jitter_t* j = nullptr;
+    std::set<std::string> uses;
+  };
+  std::map<std::string, jit_use_t> jit;
+  std::set<std::string> boss_actors, must_die_bosses, wave_actors;
+  std::string master;
+
+  explicit loader_t( const std::string& p ) : path( p ) {}
+
+  [[noreturn]] void fail( const std::string& jp, const std::string& msg ) const
+  {
+    throw sc_invalid_sim_argument( fmt::format( "solver_sheet_fight='{}': {}: {}", path, jp.empty() ? "<root>" : jp, msg ) );
+  }
+  static std::string at( const std::string& p, size_t i ) { return fmt::format( "{}[{}]", p, i ); }
+  static std::string dot( const std::string& p, const char* k ) { return p.empty() ? std::string( k ) : p + "." + k; }
+
+  void keys( const Value& o, std::initializer_list<const char*> ks, const std::string& p ) const
+  {
+    if ( !o.IsObject() )
+      fail( p, "must be a JSON object" );
+    for ( const char* k : ks )
+      if ( !o.HasMember( k ) )
+        fail( dot( p, k ), fmt::format( "missing key {}", k ) );
+    for ( auto it = o.MemberBegin(); it != o.MemberEnd(); ++it )
+    {
+      bool known = false;
+      for ( const char* k : ks )
+        known = known || std::string( k ) == it->name.GetString();
+      if ( !known )
+        fail( dot( p, it->name.GetString() ), "unknown key (not part of the contract)" );
+    }
+  }
+  const Value& get( const Value& o, const char* k ) const { return o[ k ]; }
+
+  double num( const Value& v, const std::string& p, const char* what, bool integer = false, double min = -1e300,
+              double min_excl = -1e300, double max_excl = 1e300, double max = 1e300 ) const
+  {
+    if ( !v.IsNumber() )
+      fail( p, fmt::format( "{} must be {}", what, integer ? "an integer" : "a number" ) );
+    double d = v.GetDouble();
+    if ( !std::isfinite( d ) || ( integer && d != std::floor( d ) ) )
+      fail( p, fmt::format( "{} must be {}", what, integer ? "an integer" : "a finite number" ) );
+    if ( d < min )
+      fail( p, fmt::format( "{} must be at least {}", what, min ) );
+    if ( d <= min_excl )
+      fail( p, fmt::format( "{} must be a number greater than {}", what, min_excl ) );
+    if ( d >= max_excl )
+      fail( p, fmt::format( "{} must be less than {}", what, max_excl ) );
+    if ( d > max )
+      fail( p, fmt::format( "{} must be at most {}", what, max ) );
+    return d;
+  }
+  std::string str( const Value& v, const std::string& p, const char* what ) const
+  {
+    if ( !v.IsString() || v.GetStringLength() == 0 )
+      fail( p, fmt::format( "{} must be a non-empty string", what ) );
+    return v.GetString();
+  }
+  bool boolean( const Value& v, const std::string& p, const char* what ) const
+  {
+    if ( !v.IsBool() )
+      fail( p, fmt::format( "{} must be a boolean", what ) );
+    return v.GetBool();
+  }
+  static bool actor_ok( const std::string& s )
+  {
+    return !s.empty() && std::all_of( s.begin(), s.end(), []( unsigned char c ) { return std::isalnum( c ) || c == '_'; } );
+  }
+  std::string actor( const Value& v, const std::string& p ) const
+  {
+    if ( !v.IsString() || !actor_ok( v.GetString() ) )
+      fail( p, "actor must match ^[A-Za-z0-9_]+$" );
+    return v.GetString();
+  }
+  std::string boss_ref( const Value& v, const std::string& p ) const
+  {
+    if ( !v.IsString() || !boss_actors.count( v.GetString() ) )
+      fail( p, "unknown boss " + ( v.IsString() ? std::string( v.GetString() ) : std::string( "(not a string)" ) ) );
+    return v.GetString();
+  }
+  // A *_jitter field: null or a key of the jitter table.
+  std::string jref( const Value& v, const std::string& p, const char* kind, bool min_positive = false )
+  {
+    if ( v.IsNull() )
+      return {};
+    if ( !v.IsString() || !jit.count( v.GetString() ) )
+      fail( p, "names a jitter key that is not in jitter" );
+    auto& e = jit[ v.GetString() ];
+    e.uses.insert( kind );
+    if ( min_positive && !( e.j->min > 0 ) )
+      fail( p, fmt::format( "{} jitter key {} must have min greater than 0", kind, v.GetString() ) );
+    return v.GetString();
+  }
+  void centre( const std::string& key, double value, const std::string& p ) const
+  {
+    if ( key.empty() )
+      return;
+    const jitter_t* j = jit.at( key ).j;
+    if ( std::fabs( value - ( j->min + j->max ) / 2.0 ) > 1e-9 )
+      fail( p, fmt::format( "must equal the centre of jitter key {} ({})", key, ( j->min + j->max ) / 2.0 ) );
+  }
+  const Value& list( const Value& o, const char* k, const std::string& p ) const
+  {
+    const Value& v = o[ k ];
+    if ( !v.IsArray() )
+      fail( dot( p, k ), fmt::format( "{} must be a list", k ) );
+    return v;
+  }
+};
+}  // namespace
+
+spec_t load_spec( const std::string& path )
+{
+  io::ifstream in;
+  in.open( path );
+  if ( !in.is_open() )
+    throw sc_invalid_sim_argument( fmt::format( "solver_sheet_fight='{}': cannot open the spec file.", path ) );
+  std::stringstream ss;
+  ss << in.rdbuf();
+  const std::string text = ss.str();
+  Document doc;
+  doc.Parse( text.c_str() );
+  loader_t L( path );
+  if ( doc.HasParseError() )
+    L.fail( "<root>", fmt::format( "not valid JSON (parse error at offset {})", doc.GetErrorOffset() ) );
+
+  spec_t spec;
+  spec.path = path;
+  L.keys( doc, { "format", "slug", "sheet_fingerprint", "encounter_id", "fragment_path", "master_actor", "max_time_s",
+                 "sample_interval_s", "bosses", "phases", "waves", "jitter", "timers_pending_second_kill", "defaults_used" }, "" );
+  if ( !doc[ "format" ].IsString() || std::string( doc[ "format" ].GetString() ) != "sheet-fight-spec/1" )
+    L.fail( "format", "format must be \"sheet-fight-spec/1\"" );
+  spec.slug = L.str( doc[ "slug" ], "slug", "slug" );
+  {
+    const Value& f = doc[ "sheet_fingerprint" ];
+    bool ok = f.IsString() && f.GetStringLength() == 64;
+    if ( ok )
+      for ( const char* c = f.GetString(); *c; ++c )
+        ok = ok && ( ( *c >= '0' && *c <= '9' ) || ( *c >= 'a' && *c <= 'f' ) );
+    if ( !ok )
+      L.fail( "sheet_fingerprint", "sheet_fingerprint must be 64 lowercase hex characters" );
+    spec.sheet_fingerprint = f.GetString();
+  }
+  spec.encounter_id = static_cast<long long>( L.num( doc[ "encounter_id" ], "encounter_id", "encounter_id", true ) );
+  spec.fragment_path = L.str( doc[ "fragment_path" ], "fragment_path", "fragment_path" );
+  if ( spec.fragment_path.size() < 11 || spec.fragment_path.compare( spec.fragment_path.size() - 11, 11, ".fight.simc" ) != 0 ||
+       spec.fragment_path[ 0 ] == '/' )
+    L.fail( "fragment_path", "fragment_path must be a repo-relative path ending in .fight.simc" );
+  spec.master_actor = L.actor( doc[ "master_actor" ], "master_actor" );
+  L.master = spec.master_actor;
+  spec.max_time_s = L.num( doc[ "max_time_s" ], "max_time_s", "max_time_s", false, -1e300, 0 );
+  spec.sample_interval_s = L.num( doc[ "sample_interval_s" ], "sample_interval_s", "sample_interval_s", false, -1e300, 0 );
+
+  // jitter table first (other fields reference it)
+  const Value& jl = L.list( doc, "jitter", "" );
+  spec.jitter.reserve( jl.Size() );
+  for ( SizeType i = 0; i < jl.Size(); ++i )
+  {
+    const std::string p = loader_t::at( "jitter", i );
+    L.keys( jl[ i ], { "key", "min", "max", "per" }, p );
+    jitter_t j;
+    const Value& k = jl[ i ][ "key" ];
+    bool kok = k.IsString() && k.GetStringLength() > 0;
+    if ( kok )
+      for ( const char* c = k.GetString(); *c; ++c )
+        kok = kok && ( ( *c >= 'a' && *c <= 'z' ) || ( *c >= '0' && *c <= '9' ) || *c == '_' );
+    if ( !kok )
+      L.fail( p + ".key", "key must match ^[a-z0-9_]+$" );
+    j.key = k.GetString();
+    if ( L.jit.count( j.key ) )
+      L.fail( p + ".key", "duplicate jitter key " + j.key );
+    j.min = L.num( jl[ i ][ "min" ], p + ".min", "min" );
+    j.max = L.num( jl[ i ][ "max" ], p + ".max", "max" );
+    if ( j.max < j.min )
+      L.fail( p + ".max", "max must be at least min" );
+    const Value& per = jl[ i ][ "per" ];
+    if ( !per.IsString() || ( std::string( per.GetString() ) != "fight" && std::string( per.GetString() ) != "phase" ) )
+      L.fail( p + ".per", "per must be \"fight\" or \"phase\"" );
+    j.per = per.GetString();
+    spec.jitter.push_back( j );
+  }
+  for ( const auto& j : spec.jitter )
+    L.jit[ j.key ].j = &j;
+
+  // bosses
+  const Value& bl = L.list( doc, "bosses", "" );
+  if ( bl.Size() == 0 )
+    L.fail( "bosses", "bosses must be a non-empty list" );
+  for ( SizeType i = 0; i < bl.Size(); ++i )
+  {
+    const std::string p = loader_t::at( "bosses", i );
+    L.keys( bl[ i ], { "actor", "name", "npc_game_id", "max_health", "must_die" }, p );
+    boss_t b;
+    b.actor = L.actor( bl[ i ][ "actor" ], p + ".actor" );
+    if ( b.actor == spec.master_actor )
+      L.fail( p + ".actor", "actor must not be the master actor" );
+    if ( !L.boss_actors.insert( b.actor ).second )
+      L.fail( p + ".actor", "duplicate boss actor " + b.actor );
+    b.name = L.str( bl[ i ][ "name" ], p + ".name", "name" );
+    b.npc_game_id = static_cast<long long>( L.num( bl[ i ][ "npc_game_id" ], p + ".npc_game_id", "npc_game_id", true ) );
+    b.max_health = L.num( bl[ i ][ "max_health" ], p + ".max_health", "max_health", false, -1e300, 0 );
+    b.must_die = L.boolean( bl[ i ][ "must_die" ], p + ".must_die", "must_die" );
+    if ( b.must_die )
+      L.must_die_bosses.insert( b.actor );
+    spec.bosses.push_back( b );
+  }
+
+  // phases
+  const Value& pl = L.list( doc, "phases", "" );
+  if ( pl.Size() == 0 )
+    L.fail( "phases", "phases must be a non-empty list" );
+  std::set<std::string> phase_names, earlier_casts;
+  std::vector<std::set<std::string>> engaged_by_phase;
+  int bloodlust_phases = 0;
+  for ( SizeType i = 0; i < pl.Size(); ++i )
+  {
+    const std::string p = loader_t::at( "phases", i );
+    const Value& ph = pl[ i ];
+    L.keys( ph, { "name", "intermission", "start", "engage", "max_health", "raid_stream", "damage_taken", "heal", "casts", "bloodlust" }, p );
+    phase_t out;
+    out.name = L.str( ph[ "name" ], p + ".name", "name" );
+    if ( !phase_names.insert( out.name ).second )
+      L.fail( p + ".name", "duplicate phase name " + out.name );
+    out.intermission = L.boolean( ph[ "intermission" ], p + ".intermission", "intermission" );
+    // start
+    {
+      const Value& s = ph[ "start" ];
+      const std::string sp = p + ".start";
+      if ( !s.IsObject() )
+        L.fail( sp, "start must be a JSON object" );
+      std::string kind = s.HasMember( "kind" ) && s[ "kind" ].IsString() ? s[ "kind" ].GetString() : "";
+      out.start.kind = kind;
+      if ( i == 0 )
+      {
+        if ( kind != "pull" )
+          L.fail( sp + ".kind", "phase 0 must start with kind \"pull\"" );
+        L.keys( s, { "kind" }, sp );
+      }
+      else if ( kind == "boss_health" )
+      {
+        L.keys( s, { "kind", "boss", "pct" }, sp );
+        out.start.boss = L.boss_ref( s[ "boss" ], sp + ".boss" );
+        out.start.pct = L.num( s[ "pct" ], sp + ".pct", "pct", false, 0, -1e300, 100 );
+      }
+      else if ( kind == "after_cast" )
+      {
+        L.keys( s, { "kind", "cast", "after_s", "after_s_jitter" }, sp );
+        if ( !s[ "cast" ].IsString() || !earlier_casts.count( s[ "cast" ].GetString() ) )
+          L.fail( sp + ".cast", "cast is not declared in an earlier phase" );
+        out.start.cast = s[ "cast" ].GetString();
+        out.start.after_s = L.num( s[ "after_s" ], sp + ".after_s", "after_s", false, 0 );
+        out.start.after_jitter = L.jref( s[ "after_s_jitter" ], sp + ".after_s_jitter", "after_s_jitter" );
+        L.centre( out.start.after_jitter, out.start.after_s, sp + ".after_s" );
+      }
+      else
+        L.fail( sp + ".kind", kind == "pull" ? "kind \"pull\" is for phase 0 only" : "kind must be pull, boss_health or after_cast" );
+    }
+    // engage
+    std::set<std::string> engaged;
+    std::map<std::string, std::string> engaged_zero;
+    const Value& el = L.list( ph, "engage", p );
+    for ( SizeType k = 0; k < el.Size(); ++k )
+    {
+      const std::string ep = loader_t::at( p + ".engage", k );
+      L.keys( el[ k ], { "boss", "delay_s", "delay_jitter", "on_zero" }, ep );
+      engage_t e;
+      e.boss = L.boss_ref( el[ k ][ "boss" ], ep + ".boss" );
+      e.delay_s = L.num( el[ k ][ "delay_s" ], ep + ".delay_s", "delay_s", false, 0 );
+      e.delay_jitter = L.jref( el[ k ][ "delay_jitter" ], ep + ".delay_jitter", "delay_jitter" );
+      L.centre( e.delay_jitter, e.delay_s, ep + ".delay_s" );
+      const Value& oz = el[ k ][ "on_zero" ];
+      if ( !oz.IsString() || ( std::string( oz.GetString() ) != "bench" && std::string( oz.GetString() ) != "die" ) )
+        L.fail( ep + ".on_zero", "on_zero must be bench or die" );
+      e.on_zero = oz.GetString();
+      engaged.insert( e.boss );
+      engaged_zero[ e.boss ] = e.on_zero;
+      out.engage.push_back( e );
+    }
+    engaged_by_phase.push_back( engaged );
+    if ( i + 1 == pl.Size() )
+      for ( const auto& m : L.must_die_bosses )
+        if ( engaged_zero[ m ] != "die" )
+          L.fail( p + ".engage", "the last phase must engage every must_die boss with on_zero \"die\" (missing: " + m + ")" );
+    // max_health
+    const Value& mh = ph[ "max_health" ];
+    if ( !mh.IsObject() )
+      L.fail( p + ".max_health", "max_health must be an object (boss actor -> number)" );
+    for ( auto it = mh.MemberBegin(); it != mh.MemberEnd(); ++it )
+    {
+      const std::string mp = p + ".max_health." + it->name.GetString();
+      if ( !L.boss_actors.count( it->name.GetString() ) )
+        L.fail( mp, std::string( "unknown boss " ) + it->name.GetString() );
+      out.max_health.emplace_back( it->name.GetString(), L.num( it->value, mp, "max_health", false, -1e300, 0 ) );
+    }
+    // raid_stream
+    const Value& sl = L.list( ph, "raid_stream", p );
+    for ( SizeType k = 0; k < sl.Size(); ++k )
+    {
+      const std::string sp = loader_t::at( p + ".raid_stream", k );
+      L.keys( sl[ k ], { "boss", "damage_per_s", "pace_jitter" }, sp );
+      stream_t s;
+      s.boss = L.boss_ref( sl[ k ][ "boss" ], sp + ".boss" );
+      s.damage_per_s = L.num( sl[ k ][ "damage_per_s" ], sp + ".damage_per_s", "damage_per_s", false, 0 );
+      s.pace_jitter = L.jref( sl[ k ][ "pace_jitter" ], sp + ".pace_jitter", "pace_jitter", true );
+      out.raid_stream.push_back( s );
+    }
+    // damage_taken
+    const Value& dl = L.list( ph, "damage_taken", p );
+    for ( SizeType k = 0; k < dl.Size(); ++k )
+    {
+      const std::string dp = loader_t::at( p + ".damage_taken", k );
+      L.keys( dl[ k ], { "boss", "multiplier" }, dp );
+      damage_taken_t d;
+      d.boss = L.boss_ref( dl[ k ][ "boss" ], dp + ".boss" );
+      d.multiplier = L.num( dl[ k ][ "multiplier" ], dp + ".multiplier", "multiplier", false, -1e300, 0 );
+      out.damage_taken.push_back( d );
+    }
+    // heal
+    if ( !ph[ "heal" ].IsNull() )
+    {
+      const Value& h = ph[ "heal" ];
+      const std::string hp = p + ".heal";
+      L.keys( h, { "bosses", "pct_of_max_per_tick", "tick_interval_s", "ticks", "first_tick_after_start_s" }, hp );
+      heal_t he;
+      if ( !h[ "bosses" ].IsArray() )
+        L.fail( hp + ".bosses", "bosses must be a list of boss actors" );
+      for ( SizeType k = 0; k < h[ "bosses" ].Size(); ++k )
+        he.bosses.push_back( L.boss_ref( h[ "bosses" ][ k ], loader_t::at( hp + ".bosses", k ) ) );
+      he.pct_of_max_per_tick = L.num( h[ "pct_of_max_per_tick" ], hp + ".pct_of_max_per_tick", "pct_of_max_per_tick", false, -1e300, 0 );
+      he.tick_interval_s = L.num( h[ "tick_interval_s" ], hp + ".tick_interval_s", "tick_interval_s", false, -1e300, 0 );
+      he.ticks = static_cast<long long>( L.num( h[ "ticks" ], hp + ".ticks", "ticks", true, 1 ) );
+      he.first_tick_after_start_s = L.num( h[ "first_tick_after_start_s" ], hp + ".first_tick_after_start_s", "first_tick_after_start_s", false, 0 );
+      out.heal = he;
+    }
+    // casts
+    const Value& cl = L.list( ph, "casts", p );
+    std::set<std::string> declared_here;
+    for ( SizeType k = 0; k < cl.Size(); ++k )
+    {
+      const std::string cp = loader_t::at( p + ".casts", k );
+      L.keys( cl[ k ], { "name", "ability_id", "caster", "at_in_phase_s" }, cp );
+      cast_t c;
+      c.name = L.str( cl[ k ][ "name" ], cp + ".name", "name" );
+      c.ability_id = static_cast<long long>( L.num( cl[ k ][ "ability_id" ], cp + ".ability_id", "ability_id", true ) );
+      c.caster = L.boss_ref( cl[ k ][ "caster" ], cp + ".caster" );
+      c.at_in_phase_s = L.num( cl[ k ][ "at_in_phase_s" ], cp + ".at_in_phase_s", "at_in_phase_s", false, 0 );
+      declared_here.insert( c.name );
+      out.casts.push_back( c );
+    }
+    // bloodlust
+    if ( !ph[ "bloodlust" ].IsNull() )
+    {
+      const std::string bp = p + ".bloodlust";
+      if ( ++bloodlust_phases > 1 )
+        L.fail( bp, "at most one phase may have a bloodlust" );
+      L.keys( ph[ "bloodlust" ], { "offset_after_start_s", "offset_jitter" }, bp );
+      bloodlust_t b;
+      b.offset_after_start_s = L.num( ph[ "bloodlust" ][ "offset_after_start_s" ], bp + ".offset_after_start_s", "offset_after_start_s", false, 0 );
+      b.offset_jitter = L.jref( ph[ "bloodlust" ][ "offset_jitter" ], bp + ".offset_jitter", "offset_jitter" );
+      L.centre( b.offset_jitter, b.offset_after_start_s, bp + ".offset_after_start_s" );
+      out.bloodlust = b;
+    }
+    earlier_casts.insert( declared_here.begin(), declared_here.end() );
+    spec.phases.push_back( out );
+  }
+
+  // waves
+  const Value& wl = L.list( doc, "waves", "" );
+  const int phase_count = static_cast<int>( spec.phases.size() );
+  for ( SizeType i = 0; i < wl.Size(); ++i )
+  {
+    const std::string p = loader_t::at( "waves", i );
+    const Value& w = wl[ i ];
+    L.keys( w, { "name", "actor", "npc_game_id", "kind", "count", "at", "time_shift_jitter", "max_health", "must_die",
+                 "spawn_distance_yd", "travel_s", "travel_jitter", "raid_stream", "lifetime_s" }, p );
+    wave_t out;
+    out.name = L.str( w[ "name" ], p + ".name", "name" );
+    out.actor = L.actor( w[ "actor" ], p + ".actor" );
+    if ( out.actor == spec.master_actor || L.boss_actors.count( out.actor ) )
+      L.fail( p + ".actor", "actor must not be a boss or the master" );
+    if ( !L.wave_actors.insert( out.actor ).second )
+      L.fail( p + ".actor", "duplicate wave actor " + out.actor );
+    out.npc_game_id = static_cast<long long>( L.num( w[ "npc_game_id" ], p + ".npc_game_id", "npc_game_id", true ) );
+    out.count = static_cast<long long>( L.num( w[ "count" ], p + ".count", "count", true, 1 ) );
+    const std::string kind = w[ "kind" ].IsString() ? w[ "kind" ].GetString() : "";
+    if ( kind != "add" && kind != "hazard" )
+      L.fail( p + ".kind", "kind must be add or hazard" );
+    out.kind = kind;
+    if ( !w[ "at" ].IsArray() || w[ "at" ].Size() == 0 )
+      L.fail( p + ".at", "at must be a non-empty list" );
+    for ( SizeType k = 0; k < w[ "at" ].Size(); ++k )
+    {
+      const Value& a = w[ "at" ][ k ];
+      const std::string ap = loader_t::at( p + ".at", k );
+      if ( !a.IsObject() )
+        L.fail( ap, "must be a JSON object" );
+      wave_at_t wa;
+      if ( !a.HasMember( "phase" ) )
+        L.fail( ap + ".phase", "missing key phase" );
+      wa.phase = static_cast<int>( L.num( a[ "phase" ], ap + ".phase", "phase", true, 0, -1e300, 1e300, phase_count - 1 ) );
+      const std::string ak = a.HasMember( "kind" ) && a[ "kind" ].IsString() ? a[ "kind" ].GetString() : "";
+      wa.kind = ak;
+      if ( ak == "phase_time" )
+      {
+        L.keys( a, { "kind", "phase", "in_phase_s" }, ap );
+        wa.in_phase_s = L.num( a[ "in_phase_s" ], ap + ".in_phase_s", "in_phase_s", false, 0 );
+      }
+      else if ( ak == "boss_health" )
+      {
+        L.keys( a, { "kind", "phase", "boss", "pct" }, ap );
+        wa.boss = L.boss_ref( a[ "boss" ], ap + ".boss" );
+        if ( !engaged_by_phase[ wa.phase ].count( wa.boss ) )
+          L.fail( ap + ".boss", fmt::format( "boss {} is not engaged in phase {}", wa.boss, wa.phase ) );
+        wa.pct = L.num( a[ "pct" ], ap + ".pct", "pct", false, -1e300, 0, 100 );
+      }
+      else
+        L.fail( ap + ".kind", "kind must be phase_time or boss_health" );
+      out.at.push_back( wa );
+    }
+    out.time_shift_jitter = L.jref( w[ "time_shift_jitter" ], p + ".time_shift_jitter", "time_shift_jitter" );
+    out.must_die = L.boolean( w[ "must_die" ], p + ".must_die", "must_die" );
+    out.spawn_distance_yd = L.num( w[ "spawn_distance_yd" ], p + ".spawn_distance_yd", "spawn_distance_yd", false, -1e300, 0 );
+    if ( kind == "add" )
+    {
+      if ( !w[ "max_health" ].IsNumber() )
+        L.fail( p + ".max_health", "add max_health must be a number greater than 0 (an add has real health)" );
+      out.max_health = L.num( w[ "max_health" ], p + ".max_health", "add max_health", false, -1e300, 0 );
+      out.travel_s = L.num( w[ "travel_s" ], p + ".travel_s", "travel_s", false, 0 );
+      out.travel_jitter = L.jref( w[ "travel_jitter" ], p + ".travel_jitter", "travel_jitter" );
+      L.centre( out.travel_jitter, *out.travel_s, p + ".travel_s" );
+      if ( !w[ "raid_stream" ].IsNull() )
+      {
+        const Value& r = w[ "raid_stream" ];
+        const std::string rp = p + ".raid_stream";
+        L.keys( r, { "damage_per_s", "start_after_spawn_s", "lifetime_jitter" }, rp );
+        wave_stream_t ws;
+        ws.damage_per_s = L.num( r[ "damage_per_s" ], rp + ".damage_per_s", "damage_per_s", false, 0 );
+        ws.start_after_spawn_s = L.num( r[ "start_after_spawn_s" ], rp + ".start_after_spawn_s", "start_after_spawn_s", false, 0 );
+        ws.lifetime_jitter = L.jref( r[ "lifetime_jitter" ], rp + ".lifetime_jitter", "lifetime_jitter", true );
+        out.raid_stream = ws;
+      }
+      if ( !w[ "lifetime_s" ].IsNull() )
+        L.fail( p + ".lifetime_s", "add lifetime_s must be null" );
+    }
+    else
+    {
+      if ( !w[ "max_health" ].IsNull() )
+        L.fail( p + ".max_health", "hazard max_health must be null" );
+      if ( out.must_die )
+        L.fail( p + ".must_die", "hazard must_die must be false" );
+      if ( !w[ "travel_s" ].IsNull() )
+        L.fail( p + ".travel_s", "hazard travel_s must be null" );
+      if ( !w[ "travel_jitter" ].IsNull() )
+        L.fail( p + ".travel_jitter", "hazard travel_jitter must be null" );
+      if ( !w[ "raid_stream" ].IsNull() )
+        L.fail( p + ".raid_stream", "hazard raid_stream must be null" );
+      out.lifetime_s = L.num( w[ "lifetime_s" ], p + ".lifetime_s", "hazard lifetime_s", false, -1e300, 0 );
+    }
+    spec.waves.push_back( out );
+  }
+
+  for ( const auto& kv : L.jit )
+    if ( kv.second.j->per == "phase" )
+      for ( const auto& u : kv.second.uses )
+        if ( u != "pace_jitter" )
+          L.fail( fmt::format( "jitter[{}].per", kv.second.j - spec.jitter.data() ),
+                  fmt::format( "only pace_jitter keys may be per \"phase\" ({} is also used as {})", kv.first, u ) );
+  const Value& tp = doc[ "timers_pending_second_kill" ];
+  if ( !tp.IsArray() )
+    L.fail( "timers_pending_second_kill", "must be a list of strings" );
+  for ( SizeType i = 0; i < tp.Size(); ++i )
+    if ( !tp[ i ].IsString() )
+      L.fail( "timers_pending_second_kill", "must be a list of strings" );
+  const Value& du = L.list( doc, "defaults_used", "" );
+  for ( SizeType i = 0; i < du.Size(); ++i )
+    L.keys( du[ i ], { "what", "value", "source" }, loader_t::at( "defaults_used", i ) );
+  return spec;
+}
+}  // namespace sheet_fight_spec
+
+// ==========================================================================
+// The controller
+// ==========================================================================
+
+namespace
+{
+double r3( double x )
+{
+  return std::round( x * 1000.0 ) / 1000.0;
+}
+
+// The raid-damage stream: a background spell owned by the sleeping fight master, executed on a boss once per tick.
+// Going through the action path gives absorbs, vulnerability, immunity, damage-taken accounting and the health
+// callbacks for free. A magic school, so armour never scales it.
+struct sheet_raid_stream_t : public spell_t
+{
+  std::function<void( action_state_t* )> on_assessed;
+
+  explicit sheet_raid_stream_t( player_t* master ) : spell_t( "sheet_raid_stream", master )
+  {
+    school      = SCHOOL_ARCANE;
+    may_crit    = false;
+    may_miss    = false;
+    callbacks   = false;
+    background  = true;
+    not_a_proc  = true;
+    trigger_gcd = 0_ms;
+  }
+
+  void assess_damage( result_amount_type rt, action_state_t* s ) override
+  {
+    spell_t::assess_damage( rt, s );
+    if ( on_assessed )
+      on_assessed( s );
+  }
+};
+}  // namespace
+
+struct sheet_fight_event_t::impl_t
+{
+  struct sample_t
+  {
+    double t, pct, hp, max_hp, ttd;
+    bool has_ttd;
+  };
+  struct boss_rt_t
+  {
+    player_t* actor = nullptr;
+    const sheet_fight_spec::boss_t* spec = nullptr;
+    int idx = 0;
+    bool spawned = false, dead = false, benched = false, zero_bench = false;
+    double spawn_s = 0, death_s = -1, first_dmg = -1, first_pdmg = -1, first_swing = -1, stream_taken = 0;
+    double life_start_s = 0, life_dmg_base = 0, max_at_spawn = 0, stream_rate = 0;
+    std::vector<sample_t> samples;
+    std::vector<double> pct_values;  // distinct percent thresholds (> 0) named by phase starts and wave triggers
+  };
+  struct phase_change_t
+  {
+    double at_s;
+    int phase;
+  };
+  struct cast_rec_t
+  {
+    double at_s;
+    long long ability_id;
+    std::string caster, name;
+  };
+
+  sheet_fight_event_t& self;
+  sim_t* sim;
+  sheet_fight_spec::spec_t spec;
+  std::vector<boss_rt_t> bosses;
+  std::vector<std::vector<std::unique_ptr<raid_event_t>>> children;
+  std::vector<char> trigger_ready;
+  int current_phase = -1;
+  bool ended_by_kill = false;
+  size_t tick_index = 0;
+  std::vector<phase_change_t> phase_changes;
+  std::vector<cast_rec_t> casts_rec;
+  sheet_raid_stream_t* stream = nullptr;  // owned by the master (its action_list), like the stock raid_damage_t
+
+  // ---- events ---------------------------------------------------------------------------------
+  struct tick_event_t : event_t
+  {
+    impl_t* im;
+    tick_event_t( sim_t& s, impl_t* i, timespan_t t ) : event_t( s, t ), im( i ) {}
+    const char* name() const override { return "sheet_fight_tick"; }
+    void execute() override { im->tick(); }
+  };
+  struct cast_event_t : event_t
+  {
+    impl_t* im;
+    int phase, cast;
+    cast_event_t( sim_t& s, impl_t* i, int ph, int c, timespan_t t ) : event_t( s, t ), im( i ), phase( ph ), cast( c ) {}
+    const char* name() const override { return "sheet_fight_cast"; }
+    void execute() override { im->do_cast( phase, cast ); }
+  };
+  struct start_event_t : event_t
+  {
+    impl_t* im;
+    int phase;
+    start_event_t( sim_t& s, impl_t* i, int ph, timespan_t t ) : event_t( s, t ), im( i ), phase( ph ) {}
+    const char* name() const override { return "sheet_fight_phase_start"; }
+    void execute() override
+    {
+      im->trigger_ready[ phase ] = 1;
+      im->try_advance();
+    }
+  };
+
+  impl_t( sheet_fight_event_t& s, sim_t* sm, sheet_fight_spec::spec_t sp ) : self( s ), sim( sm ), spec( std::move( sp ) )
+  {
+    children.resize( spec.phases.size() );
+    trigger_ready.assign( spec.phases.size(), 0 );
+  }
+
+  double now() const { return sim->current_time().total_seconds(); }
+  boss_rt_t* find_boss( const std::string& actor )
+  {
+    for ( auto& b : bosses )
+      if ( b.spec->actor == actor )
+        return &b;
+    return nullptr;
+  }
+  boss_rt_t* find_boss( const player_t* p )
+  {
+    for ( auto& b : bosses )
+      if ( b.actor == p )
+        return &b;
+    return nullptr;
+  }
+
+  void retarget_players( retarget_source why, player_t* boss )
+  {
+    for ( auto* p : sim->player_non_sleeping_list )
+      p->acquire_target( why, boss );
+  }
+
+  // ---- health samples ------------------------------------------------------------------------
+  std::optional<timespan_t> ttd( const boss_rt_t& b, double percent ) const
+  {
+    if ( !b.spawned || b.dead )
+      return std::nullopt;
+    const double max_hp = b.actor->resources.max[ RESOURCE_HEALTH ];
+    const double cur = b.actor->resources.current[ RESOURCE_HEALTH ];
+    if ( max_hp <= 0 || cur / max_hp * 100.0 <= percent )
+      return timespan_t::zero();
+    const double elapsed = now() - b.life_start_s;
+    const double dmg = b.actor->iteration_dmg_taken - b.life_dmg_base;
+    if ( elapsed <= 0 || dmg <= 0 )
+      return timespan_t::max();
+    return timespan_t::from_seconds( ( cur - percent * 0.01 * max_hp ) / ( dmg / elapsed ) );
+  }
+
+  void sample( boss_rt_t& b )
+  {
+    if ( !b.spawned )
+      return;
+    const double max_hp = b.actor->resources.max[ RESOURCE_HEALTH ];
+    const double cur = b.actor->resources.current[ RESOURCE_HEALTH ];
+    sample_t s{ r3( now() ), max_hp > 0 ? cur / max_hp * 100.0 : 0.0, cur, max_hp, 0.0, false };
+    auto t = b.dead ? std::optional<timespan_t>( timespan_t::zero() ) : ttd( b, 0.0 );
+    if ( t && *t != timespan_t::max() )
+    {
+      s.ttd = r3( t->total_seconds() );
+      s.has_ttd = true;
+    }
+    if ( !b.samples.empty() && b.samples.back().t >= s.t - 1e-9 )
+      b.samples.back() = s;
+    else
+      b.samples.push_back( s );
+  }
+
+  // ---- phases --------------------------------------------------------------------------------
+  void engage_boss( boss_rt_t& b, const std::string& on_zero )
+  {
+    player_t* a = b.actor;
+    if ( a->is_sleeping() )
+    {
+      a->initial.sleeping = false;
+      a->arise();
+    }
+    if ( !b.spawned )
+    {
+      b.spawned = true;
+      b.spawn_s = now();
+      b.life_start_s = b.spawn_s;
+      b.life_dmg_base = a->iteration_dmg_taken;
+      b.max_at_spawn = a->resources.max[ RESOURCE_HEALTH ];
+    }
+    else if ( b.benched )
+    {
+      b.benched = false;
+      a->debuffs.invulnerable->decrement();
+      retarget_players( retarget_source::ACTOR_INVULNERABLE, a );
+    }
+    b.zero_bench = on_zero == "bench";
+  }
+
+  void start_phase( int j )
+  {
+    const auto& ph = spec.phases[ j ];
+    sim->print_log( "sheet fight: phase {} '{}' starts", j, ph.name );
+    if ( current_phase >= 0 )
+      for ( auto& c : children[ current_phase ] )
+        c->deactivate( "sheet phase ended" );
+    current_phase = j;
+    phase_changes.push_back( { now(), j } );
+    for ( auto& e : ph.engage )
+      engage_boss( *find_boss( e.boss ), e.on_zero );
+    for ( auto& b : bosses )
+      b.stream_rate = 0;
+    for ( auto& s : ph.raid_stream )
+      find_boss( s.boss )->stream_rate = s.damage_per_s;
+    for ( size_t c = 0; c < ph.casts.size(); ++c )
+      make_event<cast_event_t>( *sim, *sim, this, j, static_cast<int>( c ), timespan_t::from_seconds( ph.casts[ c ].at_in_phase_s ) );
+    for ( auto& c : children[ j ] )
+      c->combat_begin();
+    for ( auto& b : bosses )
+      sample( b );
+  }
+
+  void try_advance()
+  {
+    while ( current_phase + 1 < static_cast<int>( spec.phases.size() ) && trigger_ready[ current_phase + 1 ] )
+      start_phase( current_phase + 1 );
+  }
+
+  void do_cast( int phase, int cast )
+  {
+    const auto& c = spec.phases[ phase ].casts[ cast ];
+    casts_rec.push_back( { r3( now() ), c.ability_id, c.caster, c.name } );
+    for ( size_t j = 0; j < spec.phases.size(); ++j )
+    {
+      const auto& st = spec.phases[ j ].start;
+      if ( st.kind == "after_cast" && st.cast == c.name )
+        make_event<start_event_t>( *sim, *sim, this, static_cast<int>( j ), timespan_t::from_seconds( st.after_s ) );
+    }
+  }
+
+  // A boss crossed a health threshold (pct 0 = the 1-health zero callback): any phase starting on it becomes ready.
+  void crossed( const boss_rt_t& b, double pct )
+  {
+    for ( size_t j = 1; j < spec.phases.size(); ++j )
+    {
+      const auto& st = spec.phases[ j ].start;
+      if ( st.kind == "boss_health" && st.boss == b.spec->actor && std::fabs( st.pct - pct ) < 1e-9 )
+        trigger_ready[ j ] = 1;
+    }
+    try_advance();
+  }
+
+  void zero_cb( int i, bool increasing )
+  {
+    auto& b = bosses[ i ];
+    if ( increasing || !b.spawned || b.dead )
+      return;
+    if ( b.zero_bench && !b.benched )
+    {
+      // Inside resource_loss, before the death check: hold at 1 health (direct write: no recursion, survives
+      // player_t::do_damage's death test) and make the boss immune so ignore_invulnerable_targets takes it out of
+      // every target list.
+      b.actor->resources.current[ RESOURCE_HEALTH ] = 1.0;
+      b.benched = true;
+      b.actor->debuffs.invulnerable->increment();
+      retarget_players( retarget_source::ACTOR_INVULNERABLE, b.actor );
+      sample( b );
+    }
+    crossed( b, 0.0 );
+  }
+
+  void pct_cb( int i, double pct, bool increasing )
+  {
+    auto& b = bosses[ i ];
+    if ( increasing || !b.spawned || b.dead )
+      return;
+    crossed( b, pct );
+  }
+
+  void death_cb( int i )
+  {
+    auto& b = bosses[ i ];
+    if ( sim->event_mgr.canceled || b.dead || !b.spawned )  // fight-end demises are not deaths
+      return;
+    b.dead = true;
+    b.death_s = now();
+    sample( b );
+    for ( auto& o : bosses )
+      if ( o.spec->must_die && !o.dead )
+        return;
+    ended_by_kill = true;
+    sim->cancel_iteration();
+  }
+
+  // ---- stream and tick -----------------------------------------------------------------------
+  void tick()
+  {
+    const double interval = spec.sample_interval_s;
+    if ( tick_index > 0 && stream )
+    {
+      for ( auto& b : bosses )
+      {
+        if ( !b.spawned || b.dead || b.benched || b.stream_rate <= 0 || b.actor->is_sleeping() )
+          continue;
+        stream->base_dd_min = stream->base_dd_max = b.stream_rate * interval;
+        stream->target = b.actor;
+        stream->execute();
+      }
+    }
+    for ( auto& b : bosses )
+      if ( !b.dead )
+        sample( b );
+    ++tick_index;
+    make_event<tick_event_t>( *sim, *sim, this, timespan_t::from_seconds( interval ) );
+  }
+
+  void on_stream_assessed( action_state_t* s )
+  {
+    if ( !s->target || s->result_amount <= 0 )
+      return;
+    if ( auto* b = find_boss( s->target ) )
+    {
+      b->stream_taken += s->result_amount;
+      if ( b->first_dmg < 0 )
+        b->first_dmg = now();
+    }
+  }
+
+  void on_player_damage( action_state_t* s )
+  {
+    if ( !s->target || s->result_amount <= 0 )
+      return;
+    auto* b = find_boss( s->target );
+    if ( !b )
+      return;
+    const double t = now();
+    if ( b->first_pdmg < 0 )
+      b->first_pdmg = t;
+    if ( b->first_dmg < 0 )
+      b->first_dmg = t;
+    if ( b->first_swing < 0 && s->action && !s->action->special )
+      b->first_swing = t;
+  }
+
+  // ---- the fight record ----------------------------------------------------------------------
+  void write_record()
+  {
+    if ( sim->solver_fight_timeline_str.empty() )
+      return;
+    StringBuffer sb;
+    Writer<StringBuffer> w( sb );
+    auto key = [ & ]( const char* k ) { w.Key( k ); };
+    auto num_or_null = [ & ]( double v ) {
+      if ( v < 0 )
+        w.Null();
+      else
+        w.Double( r3( v ) );
+    };
+    w.StartObject();
+    key( "format" ); w.String( "fork-fight/1" );
+    key( "slug" ); w.String( spec.slug.c_str() );
+    key( "encounter_id" ); w.Int64( spec.encounter_id );
+    key( "provenance" );
+    w.StartObject();
+    key( "engine_git_rev" ); w.String( git_info::available() && git_info::revision()[ 0 ] ? git_info::revision() : "unknown" );
+    key( "seed" ); w.String( std::to_string( sim->seed ).c_str() );
+    key( "iteration" ); w.Int( std::max( sim->current_iteration, 0 ) );
+    key( "sheet_fingerprint" ); w.String( spec.sheet_fingerprint.c_str() );
+    key( "spec_path" ); w.String( spec.path.c_str() );
+    key( "nominal" ); w.Bool( !sim->solver_sheet_jitter );
+    w.EndObject();
+    // jitter drawn: plan 261-04 draws; until then every key is its range centre (per-phase keys: one entry per phase).
+    key( "jitter_drawn" );
+    w.StartObject();
+    for ( const auto& j : spec.jitter )
+    {
+      key( j.key.c_str() );
+      const double centre = ( j.min + j.max ) / 2.0;
+      if ( j.per == "phase" )
+      {
+        w.StartArray();
+        for ( const auto& ph : spec.phases )
+        {
+          bool used = false;
+          for ( const auto& s : ph.raid_stream )
+            used = used || s.pace_jitter == j.key;
+          if ( used )
+            w.Double( centre );
+          else
+            w.Null();
+        }
+        w.EndArray();
+      }
+      else
+        w.Double( centre );
+    }
+    w.EndObject();
+    key( "ended_by" ); w.String( ended_by_kill ? "kill" : "wipe" );
+    key( "duration_s" ); w.Double( r3( now() ) );
+    key( "enemies" );
+    w.StartArray();
+    for ( auto& b : bosses )
+    {
+      if ( !b.spawned )
+        continue;
+      w.StartObject();
+      key( "actor" ); w.String( b.spec->actor.c_str() );
+      key( "actor_index" ); w.Int( static_cast<int>( b.actor->actor_index ) );
+      key( "npc_game_id" ); w.Int64( b.spec->npc_game_id );
+      key( "kind" ); w.String( "boss" );
+      key( "must_die" ); w.Bool( b.spec->must_die );
+      key( "hazard" ); w.Bool( false );
+      key( "spawn_s" ); w.Double( r3( b.spawn_s ) );
+      key( "melee_arrival_s" ); w.Null();
+      key( "despawn_s" ); w.Null();
+      key( "death_s" ); num_or_null( b.death_s );
+      key( "first_damage_taken_s" ); num_or_null( b.first_dmg );
+      key( "first_player_damage_s" ); num_or_null( b.first_pdmg );
+      key( "first_player_swing_s" ); num_or_null( b.first_swing );
+      key( "total_damage_taken" ); w.Double( b.actor->iteration_dmg_taken );
+      key( "raid_stream_damage_taken" ); w.Double( b.stream_taken );
+      key( "max_health" ); w.Double( b.max_at_spawn );
+      w.EndObject();
+    }
+    w.EndArray();
+    key( "boss_health" );
+    w.StartObject();
+    for ( auto& b : bosses )
+    {
+      if ( !b.spawned )
+        continue;
+      key( b.spec->actor.c_str() );
+      w.StartArray();
+      for ( const auto& s : b.samples )
+      {
+        w.StartArray();
+        w.Double( s.t );
+        w.Double( s.pct );
+        w.Double( s.hp );
+        w.Double( s.max_hp );
+        if ( s.has_ttd )
+          w.Double( s.ttd );
+        else
+          w.Null();
+        w.EndArray();
+      }
+      w.EndArray();
+    }
+    w.EndObject();
+    key( "phase_changes" );
+    w.StartArray();
+    for ( const auto& pc : phase_changes )
+    {
+      const auto& ph = spec.phases[ pc.phase ];
+      w.StartObject();
+      key( "at_s" ); w.Double( r3( pc.at_s ) );
+      key( "phase" ); w.Int( pc.phase );
+      key( "name" ); w.String( ph.name.c_str() );
+      key( "trigger" );
+      w.StartObject();
+      key( "kind" ); w.String( ph.start.kind.c_str() );
+      if ( ph.start.kind == "boss_health" )
+      {
+        key( "boss" ); w.String( ph.start.boss.c_str() );
+        key( "pct" ); w.Double( ph.start.pct );
+      }
+      else if ( ph.start.kind == "after_cast" )
+      {
+        key( "cast" ); w.String( ph.start.cast.c_str() );
+        key( "after_s" ); w.Double( ph.start.after_s );
+      }
+      w.EndObject();
+      w.EndObject();
+    }
+    w.EndArray();
+    key( "enemy_casts" );
+    w.StartArray();
+    for ( const auto& c : casts_rec )
+    {
+      w.StartObject();
+      key( "at_s" ); w.Double( c.at_s );
+      key( "type" ); w.String( "cast" );
+      key( "ability_id" ); w.Int64( c.ability_id );
+      key( "caster" ); w.String( c.caster.c_str() );
+      key( "name" ); w.String( c.name.c_str() );
+      w.EndObject();
+    }
+    w.EndArray();
+    key( "bloodlust" ); w.Null();
+    key( "intermissions" );
+    w.StartArray();
+    for ( size_t k = 0; k < phase_changes.size(); ++k )
+    {
+      if ( !spec.phases[ phase_changes[ k ].phase ].intermission )
+        continue;
+      w.StartObject();
+      key( "phase" ); w.Int( phase_changes[ k ].phase );
+      key( "start_s" ); w.Double( r3( phase_changes[ k ].at_s ) );
+      key( "end_s" );
+      if ( k + 1 < phase_changes.size() )
+        w.Double( r3( phase_changes[ k + 1 ].at_s ) );
+      else
+        w.Null();
+      w.EndObject();
+    }
+    w.EndArray();
+    key( "downtime_windows" ); w.StartArray(); w.EndArray();
+    w.EndObject();
+
+    if ( sim->solver_fight_timeline_str.empty() )
+      return;
+    io::ofstream out;
+    out.open( sim->solver_fight_timeline_str,
+              sim->current_iteration <= 0 ? ( std::ios::out | std::ios::trunc ) : ( std::ios::out | std::ios::app ) );
+    if ( !out.is_open() )
+      throw sc_runtime_error( fmt::format( "solver_fight_timeline='{}': cannot open the file for writing.", sim->solver_fight_timeline_str ) );
+    out << sb.GetString() << "\n";
+  }
+};
+
+sheet_fight_event_t::sheet_fight_event_t( sim_t* s, const std::string& spec_path ) : raid_event_t( s, "sheet_fight" )
+{
+  // The base scheduler never fires this event (it is driven by its own hooks): cooldown = max, no timestamps.
+  cooldown.mean = timespan_t::max();
+  name = "sheet_fight";
+
+  impl = std::make_unique<impl_t>( *this, s, sheet_fight_spec::load_spec( spec_path ) );
+  auto& im = *impl;
+
+  if ( !s->target || s->target->name_str != im.spec.master_actor )
+    throw sc_invalid_sim_argument( fmt::format( "solver_sheet_fight='{}': the first enemy= line is '{}', the spec's master_actor is '{}'.",
+                                                spec_path, s->target ? s->target->name_str : std::string( "<none>" ), im.spec.master_actor ) );
+  im.bosses.resize( im.spec.bosses.size() );
+  for ( size_t i = 0; i < im.spec.bosses.size(); ++i )
+  {
+    auto& b = im.bosses[ i ];
+    b.spec = &im.spec.bosses[ i ];
+    b.idx = static_cast<int>( i );
+    b.actor = s->find_player( b.spec->actor );
+    if ( !b.actor || !b.actor->is_enemy() )
+      throw sc_invalid_sim_argument( fmt::format( "solver_sheet_fight='{}': boss actor '{}' is not an enemy= line in the profile.", spec_path, b.spec->actor ) );
+  }
+
+  // Thresholds each boss needs: every pct > 0 named by a phase start or a wave trigger.
+  for ( auto& b : im.bosses )
+  {
+    std::set<double> pcts;
+    for ( const auto& ph : im.spec.phases )
+      if ( ph.start.kind == "boss_health" && ph.start.boss == b.spec->actor && ph.start.pct > 0 )
+        pcts.insert( ph.start.pct );
+    for ( const auto& w : im.spec.waves )
+      for ( const auto& a : w.at )
+        if ( a.kind == "boss_health" && a.boss == b.spec->actor )
+          pcts.insert( a.pct );
+    b.pct_values.assign( pcts.begin(), pcts.end() );
+  }
+  // Registered ONCE per boss (the callback vector only grows, so never per fight): the 1-health zero callback, one
+  // percent callback per threshold, and one on-demise callback. Upward crossings (the intermission heal) are ignored
+  // inside the callbacks.
+  impl_t* p = &im;
+  for ( size_t i = 0; i < im.bosses.size(); ++i )
+  {
+    const int idx = static_cast<int>( i );
+    player_t* a = im.bosses[ i ].actor;
+    a->register_resource_callback( RESOURCE_HEALTH, 1.0, [ p, idx ]( bool inc ) { p->zero_cb( idx, inc ); }, false, false );
+    for ( double pct : im.bosses[ i ].pct_values )
+      a->register_resource_callback( RESOURCE_HEALTH, pct, [ p, idx, pct ]( bool inc ) { p->pct_cb( idx, pct, inc ); }, true, false );
+    a->callbacks_on_demise.emplace_back( a, [ p, idx ]( player_t* ) { p->death_cb( idx ); } );
+  }
+  // First player damage / first auto-attack per boss: one assessor on every non-pet, non-enemy player.
+  s->register_actor_initializer( INIT_ACTOR_ASSESSORS + 11, [ p ]( player_t* pl ) {
+    if ( pl->is_enemy() || pl->is_pet() )
+      return;
+    pl->assessor_out_damage.add( assessor::TARGET_DAMAGE + 2, [ p ]( result_amount_type, action_state_t* st ) {
+      p->on_player_damage( st );
+      return assessor::CONTINUE;
+    } );
+  }, "assessors_sheet_fight" );
+
+  static std::atomic<bool> noticed{ false };
+  if ( !noticed.exchange( true ) )
+    fmt::print( stderr, "[RL_SHEET_FIGHT] spec={} bosses={} phases={} waves={} jitter={} timeline={}\n", spec_path, im.spec.bosses.size(),
+                im.spec.phases.size(), im.spec.waves.size(), s->solver_sheet_jitter ? 1 : 0,
+                s->solver_fight_timeline_str.empty() ? std::string( "none" ) : s->solver_fight_timeline_str );
+}
+
+sheet_fight_event_t::~sheet_fight_event_t() = default;
+
+void sheet_fight_event_t::add_phase_child( std::unique_ptr<raid_event_t> child )
+{
+  const int k = child->pull - 1;
+  if ( k < 0 || k >= static_cast<int>( impl->children.size() ) )
+    throw sc_invalid_sim_argument( fmt::format( "solver_sheet_fight='{}': raid event '{}' has pull={}, the spec has {} phases.",
+                                                impl->spec.path, child->type, child->pull, impl->children.size() ) );
+  impl->children[ k ].push_back( std::move( child ) );
+}
+
+void sheet_fight_event_t::reset()
+{
+  raid_event_t::reset();
+  auto& im = *impl;
+  for ( auto& ph : im.children )
+    for ( auto& c : ph )
+      c->reset();
+  im.current_phase = -1;
+  im.ended_by_kill = false;
+  im.tick_index = 0;
+  im.phase_changes.clear();
+  im.casts_rec.clear();
+  im.trigger_ready.assign( im.spec.phases.size(), 0 );
+  for ( auto& b : im.bosses )
+  {
+    const auto sleeps = [ & ] {
+      for ( const auto& e : im.spec.phases[ 0 ].engage )
+        if ( e.boss == b.spec->actor )
+          return false;
+      return true;
+    }();
+    b.actor->initial.sleeping = sleeps;
+    b.spawned = b.dead = b.benched = b.zero_bench = false;
+    b.spawn_s = 0;
+    b.death_s = b.first_dmg = b.first_pdmg = b.first_swing = -1;
+    b.stream_taken = 0;
+    b.life_start_s = b.life_dmg_base = b.max_at_spawn = b.stream_rate = 0;
+    b.samples.clear();
+  }
+}
+
+void sheet_fight_event_t::combat_begin()
+{
+  auto& im = *impl;
+  if ( !im.stream )
+  {
+    im.stream = new sheet_raid_stream_t( sim->target );
+    im.stream->init();
+    im.stream->on_assessed = [ p = impl.get() ]( action_state_t* st ) { p->on_stream_assessed( st ); };
+  }
+  im.start_phase( 0 );
+  // The phase-0 bosses already arose with the other actors; every player re-acquires onto them.
+  for ( auto& b : im.bosses )
+    if ( b.spawned && !b.actor->is_sleeping() )
+      im.retarget_players( retarget_source::ACTOR_ARISE, b.actor );
+  make_event<impl_t::tick_event_t>( *sim, *sim, impl.get(), timespan_t::zero() );
+  im.try_advance();
+}
+
+void sheet_fight_event_t::on_combat_end()
+{
+  auto& im = *impl;
+  im.write_record();
+  // Expire every immunity the controller applied BEFORE target demise: an immunity still up would push a dead actor
+  // back into the target list (and active_enemies) for the next fight.
+  for ( auto& b : im.bosses )
+  {
+    if ( b.benched )
+    {
+      b.benched = false;
+      b.actor->debuffs.invulnerable->decrement();
+    }
+    if ( b.spec )
+    {
+      bool engaged_first = false;
+      for ( const auto& e : im.spec.phases[ 0 ].engage )
+        engaged_first = engaged_first || e.boss == b.spec->actor;
+      if ( !engaged_first )
+        b.actor->initial.sleeping = true;
+    }
+  }
+}
+
+std::optional<timespan_t> sheet_fight_event_t::boss_time_to_percent( const player_t* boss, double percent ) const
+{
+  auto& im = *impl;
+  for ( const auto& b : im.bosses )
+    if ( b.actor == boss )
+      return im.ttd( b, percent );
+  return std::nullopt;
+}

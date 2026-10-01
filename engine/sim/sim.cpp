@@ -35,6 +35,7 @@
 #include "sim/rl_target_select.hpp"
 #include "sim/rl_translog.hpp"
 #include "sim/rl_rng_record.hpp"
+#include "sim/sheet_fight.hpp"
 
 #include <filesystem>
 #include "sim/scale_factor_control.hpp"
@@ -2281,6 +2282,12 @@ void sim_t::combat_end()
     }
   }
 
+  // tstl-sylvanas 261-02: the sheet-fight controller writes its fight record and expires every immunity it
+  // applied BEFORE the target demise below (an immunity still up would push a dead actor back into the target
+  // list for the next fight). No controller (every other fight) = no call.
+  if ( sheet_fight )
+    sheet_fight->on_combat_end();
+
   for ( auto* t : target_list )
   {
      if ( t -> is_add() ) continue;
@@ -2686,6 +2693,18 @@ void sim_t::init_fight_style()
     // observation mask and the per-enemy respawn pool spread key off this style elsewhere.
     case FIGHT_STYLE_TRASH_PACK:
       raid_events_str.clear();
+      break;
+
+    // tstl-sylvanas 261-02: SheetFight -- the controller (sim/sheet_fight.cpp) plays real-health bosses from the
+    // spec. This case runs after option parsing, so it overrides the training emitter's fixed_time=1,
+    // override.bloodlust=1 and bloodlust_time=30. It must NOT clear raid_events_str the way Patchwerk and
+    // TrashPack do: the spec's phase children (stun/movement/absorb with pull=N) live there.
+    case FIGHT_STYLE_SHEET_FIGHT:
+      desired_targets = 1;
+      fixed_time = false;
+      overrides.bloodlust = 0;               // the controller fires bloodlust itself (plan 261-04)
+      ignore_invulnerable_targets = true;    // benched bosses leave every target list
+      distance_targeting_enabled = true;     // adds arrive at melee only if distance matters (plan 261-03)
       break;
 
     case FIGHT_STYLE_CASTING_PATCHWERK:
@@ -3170,6 +3189,16 @@ void sim_t::init()
         t->initial.sleeping = t->base.sleeping = t->current.sleeping = true;
       } );
     }
+  }
+  else if ( fight_style == FIGHT_STYLE_SHEET_FIGHT )
+  {
+    // tstl-sylvanas 261-02: the first enemy= line is the sleeping "fight master": it owns everything, has no
+    // health and never dies, so no boss death ends the fight by accident (the controller ends it) and the
+    // stock end event at max_time is the wipe ceiling.
+    if ( target_list.empty() )
+      throw sc_initialization_error( "fight_style=SheetFight needs enemy= lines (the first is the spec's fight master)." );
+    target = target_list.data().front();
+    target->initial.sleeping = target->base.sleeping = target->current.sleeping = true;
   }
   else if ( !target_list.empty() )
   {
@@ -4386,6 +4415,10 @@ void sim_t::create_options()
   // solver_bystander_positions_str doc comment.
   add_option( opt_string( "solver_bystander_positions", solver_bystander_positions_str ) );
   add_option( opt_bool( "solver_bystander_trace", solver_bystander_trace ) );
+  // tstl-sylvanas 261-02: SheetFight spec path, jitter switch and per-fight record path (validated in setup()).
+  add_option( opt_string( "solver_sheet_fight", solver_sheet_fight_str ) );
+  add_option( opt_bool( "solver_sheet_jitter", solver_sheet_jitter ) );
+  add_option( opt_string( "solver_fight_timeline", solver_fight_timeline_str ) );
   // 260926-f2e (Need 1): forces the in-process transport's decision at a specific decision
   // counter to a specific action index. Parsed and validated below, in its own fail-closed
   // block immediately after solver_hold_windows_str's own -- see sim.hpp's
@@ -5274,6 +5307,25 @@ void sim_t::setup( sim_control_t* c )
           "solver_bystander_positions=: {} entries exceed the maximum of 12 in '{}'.",
           solver_bystander_positions.size(), solver_bystander_positions_str ) );
     }
+  }
+
+  // tstl-sylvanas 261-02: SheetFight option refusals. Every message names the option and its value.
+  {
+    const bool sheet_style = fight_style == FIGHT_STYLE_SHEET_FIGHT;
+    if ( sheet_style && solver_sheet_fight_str.empty() )
+      throw sc_invalid_sim_argument( "fight_style=SheetFight requires solver_sheet_fight=<spec.json>." );
+    if ( !sheet_style && !solver_sheet_fight_str.empty() )
+      throw sc_invalid_sim_argument(
+          fmt::format( "solver_sheet_fight='{}' requires fight_style=SheetFight.", solver_sheet_fight_str ) );
+    if ( !sheet_style && !solver_fight_timeline_str.empty() )
+      throw sc_invalid_sim_argument(
+          fmt::format( "solver_fight_timeline='{}' requires fight_style=SheetFight.", solver_fight_timeline_str ) );
+    if ( !solver_fight_timeline_str.empty() && threads > 1 )
+      throw sc_invalid_sim_argument( fmt::format(
+          "solver_fight_timeline='{}' requires threads=1 (one writer per file), got threads={}.",
+          solver_fight_timeline_str, threads ) );
+    if ( sheet_style && single_actor_batch )
+      throw sc_invalid_sim_argument( "fight_style=SheetFight is incompatible with single_actor_batch=1." );
   }
 
   // 260926-f2e (Need 1): solver_force_decision=<k>:<action_index>[,<k>:<action_index>,...].

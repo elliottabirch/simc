@@ -554,6 +554,7 @@ const char* util::fight_style_string( fight_style_e name )
     case FIGHT_STYLE_HELTER_SKELTER:     return "HelterSkelter";
     case FIGHT_STYLE_ULTRAXION:          return "Ultraxion";
     case FIGHT_STYLE_TRASH_PACK:         return "TrashPack";  // tstl-sylvanas 260928-tb8
+    case FIGHT_STYLE_SHEET_FIGHT:        return "SheetFight";  // tstl-sylvanas 261-02
     default:                             return "None";
   }
 }

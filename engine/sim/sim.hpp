@@ -38,6 +38,7 @@ struct iteration_data_entry_t;
 struct option_t;
 struct plot_t;
 struct raid_event_t;
+struct sheet_fight_event_t;  // tstl-sylvanas 261-02
 struct reforge_plot_t;
 struct scale_factor_control_t;
 struct sim_control_t;
@@ -973,6 +974,16 @@ struct sim_t : private sc_thread_t
   std::vector<player_t*> rl_bystanders;
   // True for a player created from solver_bystander_positions (linear scan; at most 12 entries).
   bool is_rl_bystander( const player_t* p ) const;
+  // tstl-sylvanas 261-02: fight_style=SheetFight. solver_sheet_fight=<spec.json> is the sheet-fight spec
+  // the controller (sim/sheet_fight.cpp) plays; solver_sheet_jitter (default on) turns the per-fight
+  // jitter draws on (plan 261-04; until then every jittered field uses its range centre);
+  // solver_fight_timeline=<file.jsonl> appends one fork-fight/1 record per fight. All three are empty/
+  // default when absent, which leaves every other fight byte-identical.
+  std::string solver_sheet_fight_str;
+  bool solver_sheet_jitter = true;
+  std::string solver_fight_timeline_str;
+  // Non-owning: the controller lives in raid_events (created by raid_event_t::init under SheetFight).
+  sheet_fight_event_t* sheet_fight = nullptr;
   // 260926-f2e (Need 1): forces the in-process transport's decision AT a specific decision
   // counter `k` to a specific action index, overriding both the net's greedy choice and the
   // exploration draw. solver_force_decision=<k>:<action_index>[,<k>:<action_index>,...] -- a

@@ -18,6 +18,7 @@
 #include "sim/event.hpp"
 #include "sim/expressions.hpp"
 #include "sim/rl_rng_record.hpp"
+#include "sim/sheet_fight.hpp"
 #include "sim/sim.hpp"
 #include "util/rng.hpp"
 #include <cstdlib>  // TEMPORARY (260919-scb T1) -- getenv() for rl_trace_rng_enabled()
@@ -2503,6 +2504,16 @@ std::unique_ptr<raid_event_t> raid_event_t::create( sim_t* sim, util::string_vie
 
 void raid_event_t::init( sim_t* sim )
 {
+  // tstl-sylvanas 261-02: under SheetFight the controller is created here (it loads the spec) BEFORE the profile's
+  // raid lines are split, so a pull=N child can be attached to its phase N-1; it is pushed onto sim->raid_events
+  // after the loop.
+  std::unique_ptr<sheet_fight_event_t> sheet_controller;
+  if ( sim->fight_style == FIGHT_STYLE_SHEET_FIGHT )
+  {
+    sheet_controller = std::make_unique<sheet_fight_event_t>( sim, sim->solver_sheet_fight_str );
+    sim->sheet_fight = sheet_controller.get();
+  }
+
   auto splits = util::string_split<util::string_view>( sim->raid_events_str, "/\\" );
 
   for ( const auto& split : splits )
@@ -2565,8 +2576,17 @@ void raid_event_t::init( sim_t* sim )
           raid_event->duration.max = raid_event->duration.mean * 1.5;
       }
 
+      if ( sheet_controller && raid_event->type == "invulnerable" )
+        throw std::invalid_argument(
+            "fight_style=SheetFight refuses invulnerable raid events (they would clear the controller's bench state)." );
+
+      // tstl-sylvanas 261-02: a pull=N event under SheetFight is a phase-relative child of sheet phase N-1.
+      if ( sheet_controller && raid_event->pull > 0 && raid_event->type != "pull" )
+      {
+        sheet_controller->add_phase_child( std::move( raid_event ) );
+      }
       // Collect other raid events assigned to a pull.
-      if ( raid_event->pull > 0 && raid_event->type != "pull" )
+      else if ( raid_event->pull > 0 && raid_event->type != "pull" )
       {
         pull_event_t* pull_event = nullptr;
         for ( auto& existing_event : sim->raid_events )
@@ -2598,6 +2618,9 @@ void raid_event_t::init( sim_t* sim )
       std::throw_with_nested( sc_initialization_error( fmt::format( "Error creating raid event from '{}'", split ) ) );
     }
   }
+
+  if ( sheet_controller )
+    sim->raid_events.push_back( std::move( sheet_controller ) );
 
   if ( sim->fight_style == FIGHT_STYLE_DUNGEON_ROUTE )
   {
