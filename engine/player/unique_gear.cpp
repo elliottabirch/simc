@@ -3238,7 +3238,13 @@ void generic::skyfury( special_effect_t& effect )
 
       atk->repeating = true;
       atk->may_miss = old_may_miss;
-      atk->set_target( old_target );
+      // tstl-sylvanas 261-09: in a sheet fight the controller's health callbacks run inside this repeat's
+      // damage and can retarget every action (a phase change that makes the struck enemy immune). Restoring
+      // the saved target then leaves the swing on an enemy the player has left, and later on a dead one, where
+      // auto_attack re-executes at one instant forever. Restore only if the repeat left the swing where this
+      // callback put it; every other fight style restores unconditionally, as before.
+      if ( !listener->sim->sheet_fight || atk->target == t )
+        atk->set_target( old_target );
     }
   };
 
