@@ -311,7 +311,12 @@ namespace rl_translog
 // trailing NUL is part of the magic itself.
 inline constexpr char MAGIC[ 4 ] = { 'R', 'L', 'T', 'L' };
 inline constexpr std::uint32_t ENDIAN_CANARY = 0x01020304u;
-inline constexpr std::uint32_t FORMAT_VERSION = 11u;  // 259-05: 16 slots, rules/observed slots,
+inline constexpr std::uint32_t FORMAT_VERSION = 12u;  // 262-10 (2026-10-01): width 324 on Phase 259's
+                                                        // 16 target slots -- the seven fight inputs are
+                                                        // added and two reserved scalars retired, so the
+                                                        // observation row is 5 floats wider; formats 10
+                                                        // and 11 are refused by name on the Python side.
+                                                        // 11 was 259-05: 16 slots, rules/observed slots,
                                                         // aim flags, header aim fields (see
                                                         // top-of-file version-11 comment); 10 was
                                                         // 260918-cbc's credit-by-cause block
@@ -325,7 +330,13 @@ inline constexpr std::uint32_t FORMAT_VERSION = 11u;  // 259-05: 16 slots, rules
 // compile (tstl 220-03, OBS-06; formula updated 260901-pb1 Task 3 for version 5, updated again
 // 228-09 for version 6, updated again 230-04 for version 7, updated again 260917-pcn for
 // version 9 -- see top-of-file comment).
-inline constexpr std::uint32_t RECORD_SIZE = 3056u;  // 259-05 (format 11, top-of-file version-11
+inline constexpr std::uint32_t RECORD_SIZE = 3080u;  // 262-10 (format 12): 3056 -> 3080 -- RL_OBS_DIM moves
+                                                       // 319 -> 324 (seven fight inputs added, two reserved
+                                                       // scalars retired); RL_TARGET_SLOTS stays 16.
+                                                       // roundup8(45 + 4*324 + 4*16*23 + 5) = 2824,
+                                                       // + 160 + 96 = 3080. Confirmed by the static_assert
+                                                       // immediately below, not hand-verified.
+                                                       // 259-05 (format 11, top-of-file version-11
                                                        // comment): 2320 -> 3056 -- RL_TARGET_SLOTS
                                                        // moves 8 -> 16 and one more byte is used
                                                        // before the proc block. roundup8(45 + 4*319
@@ -433,11 +444,11 @@ inline constexpr std::uint32_t PROC_BLOCK_OFFSET =
         4u * static_cast<std::uint32_t>( RL_TARGET_SLOTS ) * static_cast<std::uint32_t>( RL_TARGET_FEATURES ) +
         5u + 7u ) / 8u ) * 8u;  // 259-05: +5 (was +4) -- observed_candidate_slot takes one more byte
 inline constexpr std::uint32_t PROC_BLOCK_SIZE = 8u * rl_proc::COUNT;
-static_assert( PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE == 2960u,
-               "PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE must equal the version-11 pre-credit row size at "
-               "the 259-05 obs width (RL_OBS_DIM=319) and 16 target slots (2960; was 2224 at 8 slots "
-               "and 260928-tb9's width, version 10) -- CREDIT_BLOCK_OFFSET below is pinned to that "
-               "exact value" );
+static_assert( PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE == 2984u,
+               "PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE must equal the version-12 pre-credit row size at "
+               "the 262-10 obs width (RL_OBS_DIM=324) and 16 target slots (2984; was 2960 at width 319, "
+               "version 11, and 2224 at 8 slots and 260928-tb9's width, version 10) -- "
+               "CREDIT_BLOCK_OFFSET below is pinned to that exact value" );
 // 260918-cbc: the version-9 row size (unchanged formula) is where the new credit-by-cause
 // block starts; CREDIT_BLOCK_SIZE is the block's own byte count (two double[STREAM_COUNT]
 // arrays -- see rl_credit.hpp's rl_credit_streams_t). Declared after PROC_BLOCK_SIZE so the

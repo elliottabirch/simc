@@ -175,7 +175,8 @@ sim_t* root_of( sim_t* sim )
   return root;
 }
 
-// Appends one RECORD_SIZE-byte row (RECORD_SIZE bytes; 2312 as of version 10) onto the
+// Appends one RECORD_SIZE-byte row (RECORD_SIZE bytes; 3080 as of version 12, width 324:
+// roundup8(45 + 4*324 + 4*16*23 + 5) + 160 + 96) onto the
 // root's in-memory buffer. Does not
 // flush -- callers decide the flush cadence (D-13: once per fight end, not
 // once per row).

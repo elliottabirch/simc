@@ -1214,11 +1214,11 @@ enum class direct_id
   fw_immunity_in, fw_immunity_remaining,
   // 260923-lrc (PLAN.md D1-D3): the new lightning_rod_carrier_count aggregate.
   fw_lightning_rod_carrier_count,
-  // tstl-sylvanas 262-04 (IN-01): the eight fight.* inputs -- what the net may see of the fight coming. Dormant until the
+  // tstl-sylvanas 262-04 (IN-01): the seven fight.* inputs -- what the net may see of the fight coming. Dormant until the
   // generated header names them (the strcmp branches in resolve_scalar_leaf bind by full dotted name).
   fight_next_wave_in, fight_next_wave_count, fight_next_wave_lifetime,
   fight_next_phase_at_boss_pct, fight_next_phase_boss_pct_now,
-  fight_downtime_in, fight_bloodlust_in, fight_enemies_damageable_in_range,
+  fight_downtime_in, fight_bloodlust_in,
   // 260914-rbp Task 1 (R5/R7/R9, HIT-INPUTS-DESIGN.md §2, rulings §B): the seven per-ability
   // "how many targets will this hit" scalars -- geometry only, never SimC's own target_list()/
   // chain resolver (memo §B.3's HARD constraint). Every one reads 0 when no pick is stamped for
@@ -1670,7 +1670,7 @@ slot_binding resolve_scalar_leaf( const rl_leaf_desc& leaf )
     b.direct = direct_id::time_to_bloodlust;
     return b;
   }
-  // tstl-sylvanas 262-04 (IN-01): the eight fight.* scalars, bound by FULL dotted name like every opaque scalar. At a width
+  // tstl-sylvanas 262-04 (IN-01): the seven fight.* scalars, bound by FULL dotted name like every opaque scalar. At a width
   // whose header lacks these names none of them binds (an unresolved name reads its descriptor's own `missing` value).
   if ( std::strcmp( leaf.leaf, "fight.next_wave.in" ) == 0 )
   {
@@ -1712,12 +1712,6 @@ slot_binding resolve_scalar_leaf( const rl_leaf_desc& leaf )
   {
     b.kind = slot_binding_kind::direct;
     b.direct = direct_id::fight_bloodlust_in;
-    return b;
-  }
-  if ( std::strcmp( leaf.leaf, "fight.enemies.damageable_in_range" ) == 0 )
-  {
-    b.kind = slot_binding_kind::direct;
-    b.direct = direct_id::fight_enemies_damageable_in_range;
     return b;
   }
   // 260914-rbp Task 1 Step 2 (R1, rulings §B): crash_lightning_stack_window's/
@@ -3489,24 +3483,6 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
               raw = get_fight_fc().bloodlust_known ? get_fight_fc().bloodlust_in_s : RL_SATURATED_SECONDS;
               status = lookup_status::present;
               break;
-            // Damageable enemies within 8 yd of the player: on the non-sleeping list, not a hazard, not invulnerable (a boss
-            // benched between lives), within NEAR_RANGE_YARDS (the Crash Lightning / Fire Nova radius). 0 outside SheetFight.
-            // (Live side excludes possessed players too; the simulator has none, R-7.)
-            case direct_id::fight_enemies_damageable_in_range:
-            {
-              int n = 0;
-              if ( p->sim->fight_style == FIGHT_STYLE_SHEET_FIGHT )
-                for ( player_t* t : p->sim->target_non_sleeping_list )
-                {
-                  if ( !t->is_enemy() || !rl_target_select::rl_counts_as_enemy( t ) )
-                    continue;
-                  if ( p->get_player_distance( *t ) <= rl_target_select::NEAR_RANGE_YARDS )
-                    ++n;
-                }
-              raw = static_cast<double>( n );
-              status = lookup_status::present;
-              break;
-            }
 
             // 228-11 (D-16, TGT-05): the identity-free fight-wide aggregates -- every value
             // already computed by 228-10's compute_fight_wide_aggregates(), cached once above.
