@@ -708,7 +708,14 @@ struct sheet_fight_event_t::impl_t
     int phase, cast;
     cast_event_t( sim_t& s, impl_t* i, int ph, int c, timespan_t t ) : event_t( s, t ), im( i ), phase( ph ), cast( c ) {}
     const char* name() const override { return "sheet_fight_cast"; }
-    void execute() override { im->do_cast( phase, cast ); }
+    void execute() override
+    {
+      // tstl-sylvanas 262-09 (261 review WR-10): like the wave, engage and bloodlust events, an instance whose phase has
+      // already ended before it fires is dropped: it must not be recorded as a cast nor start a phase that waits on it.
+      if ( im->current_phase != phase )
+        return;
+      im->do_cast( phase, cast );
+    }
   };
   struct start_event_t : event_t
   {
@@ -1125,7 +1132,9 @@ struct sheet_fight_event_t::impl_t
     for ( const auto& name : h.bosses )
     {
       auto* b = find_boss( name );
-      if ( !b || !b->spawned || b->dead || b->actor->is_sleeping() )
+      // tstl-sylvanas 262-09 (261 review WR-08): a benched boss (held at 1 health and immune) is skipped too, so a
+      // late tick cannot lift it off the 1-health line the reader needs.
+      if ( !b || !b->spawned || b->dead || b->benched || b->actor->is_sleeping() )
         continue;
       b->actor->resource_gain( RESOURCE_HEALTH, h.pct_of_max_per_tick / 100.0 * b->actor->resources.max[ RESOURCE_HEALTH ] );
     }
@@ -1259,8 +1268,29 @@ struct sheet_fight_event_t::impl_t
       retarget_players( retarget_source::ACTOR_INVULNERABLE, b.actor );
       sample( b );
     }
+    // tstl-sylvanas 262-09 (261 review WR-09): this hit took the boss to zero, so every percent trigger above zero
+    // that is still armed was crossed by this same hit (a trigger passed earlier already fired and disarmed itself in
+    // pct_cb). The engine calls the zero callback before the percent callbacks (registration order), and the phase
+    // change below disarms the old phase's triggers, so fire them here, before the phase change. The callback order
+    // itself is unchanged.
+    fire_armed_health_waves_above_zero( b );
     fire_health_waves( b, 0.0 );
     crossed( b, 0.0 );
+  }
+
+  // Every still-armed boss_health wave trigger of this boss that sits above zero percent fires once (see zero_cb).
+  void fire_armed_health_waves_above_zero( const boss_rt_t& b )
+  {
+    for ( size_t w = 0; w < spec.waves.size(); ++w )
+      for ( size_t k = 0; k < spec.waves[ w ].at.size(); ++k )
+      {
+        const auto& a = spec.waves[ w ].at[ k ];
+        if ( a.kind == "boss_health" && wave_rt[ w ].armed[ k ] && a.boss == b.spec->actor && a.pct > 0.0 )
+        {
+          wave_rt[ w ].armed[ k ] = 0;
+          spawn_wave( static_cast<int>( w ) );
+        }
+      }
   }
 
   // A boss crossed a health threshold downward: every armed boss_health wave trigger on it fires once.

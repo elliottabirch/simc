@@ -2634,6 +2634,12 @@ void raid_event_t::init( sim_t* sim )
     }
     catch ( const std::exception& )
     {
+      // tstl-sylvanas 262-09 (261 review WR-11): the controller registered callbacks that capture its own state and
+      // sim->sheet_fight points at it. On the throw path hand it to the sim before the exception leaves, so a refused
+      // raid-event line cannot leave them dangling. The normal path's push after the loop is unchanged, so the order
+      // of an existing sheet's raid events does not move.
+      if ( sheet_controller )
+        sim->raid_events.push_back( std::move( sheet_controller ) );
       std::throw_with_nested( sc_initialization_error( fmt::format( "Error creating raid event from '{}'", split ) ) );
     }
   }
