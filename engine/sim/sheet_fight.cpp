@@ -1485,6 +1485,9 @@ struct sheet_fight_event_t::impl_t
     // begins (P4).
     for ( const auto& c : children[ current_phase ] )
     {
+      // tstl-sylvanas 262-09 (review IN-02): the "invulnerable" test below is unreachable under SheetFight, because
+      // raid_event_t::init refuses an invulnerable raid event in this fight style (it would clear the controller's bench
+      // state); kept so the forecast reads the same list of downtime kinds the stock events define.
       const bool downtime = c->type == "stun" || c->type == "invulnerable" || c->type.rfind( "movement", 0 ) == 0;
       if ( !downtime )
         continue;
