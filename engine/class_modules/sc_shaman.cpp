@@ -1080,6 +1080,14 @@ static std::vector<player_t*>& __check_distance_targeting( const action_t* actio
   current_attempt.push_back( last_chain );
 
   size_t num_targets  = sim->target_non_sleeping_list.size();
+  // tstl-sylvanas 261-04: with no awake enemy at all (a sheet fight between two bosses: the last one is benched and the
+  // next is not engaged yet) `num_targets - 1.0` is negative, the unsigned conversion is undefined and the retry loop below
+  // never ended. A chain with nothing to chain to is just its own target.
+  if ( num_targets == 0 )
+  {
+    tl.assign( 1, target );
+    return tl;
+  }
   size_t max_attempts = static_cast<size_t>(
       std::min( ( num_targets - 1.0 ) * 2.0, 30.0 ) );  // With a lot of targets this can get pretty high. Cap it at 30.
   size_t local_attempts = 0;
