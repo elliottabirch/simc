@@ -423,7 +423,8 @@ spec_t load_spec( const std::string& path )
     const std::string p = loader_t::at( "waves", i );
     const Value& w = wl[ i ];
     L.keys( w, { "name", "actor", "npc_game_id", "kind", "count", "at", "time_shift_jitter", "max_health", "must_die",
-                 "spawn_distance_yd", "travel_s", "travel_jitter", "raid_stream", "lifetime_s" }, p );
+                 "spawn_distance_yd", "travel_s", "travel_jitter", "raid_stream", "lifetime_s",
+                 "nominal_lifetime_s" }, p );  // tstl-sylvanas 261-07: the writer carries the add's nominal lifetime for Phase 262
     wave_t out;
     out.name = L.str( w[ "name" ], p + ".name", "name" );
     out.actor = L.actor( w[ "actor" ], p + ".actor" );
@@ -492,6 +493,11 @@ spec_t load_spec( const std::string& path )
       }
       if ( !w[ "lifetime_s" ].IsNull() )
         L.fail( p + ".lifetime_s", "add lifetime_s must be null" );
+      // tstl-sylvanas 261-07: validated and accepted, not read here (Phase 262 reads it); a number above 0, or null.
+      if ( !w.HasMember( "nominal_lifetime_s" ) )
+        L.fail( p + ".nominal_lifetime_s", "missing key nominal_lifetime_s" );
+      if ( !w[ "nominal_lifetime_s" ].IsNull() )
+        L.num( w[ "nominal_lifetime_s" ], p + ".nominal_lifetime_s", "add nominal_lifetime_s", false, -1e300, 0 );
     }
     else
     {
@@ -506,6 +512,10 @@ spec_t load_spec( const std::string& path )
       if ( !w[ "raid_stream" ].IsNull() )
         L.fail( p + ".raid_stream", "hazard raid_stream must be null" );
       out.lifetime_s = L.num( w[ "lifetime_s" ], p + ".lifetime_s", "hazard lifetime_s", false, -1e300, 0 );
+      if ( !w.HasMember( "nominal_lifetime_s" ) )
+        L.fail( p + ".nominal_lifetime_s", "missing key nominal_lifetime_s" );
+      if ( !w[ "nominal_lifetime_s" ].IsNull() )
+        L.fail( p + ".nominal_lifetime_s", "hazard nominal_lifetime_s must be null" );  // tstl-sylvanas 261-07
     }
     spec.waves.push_back( out );
   }
