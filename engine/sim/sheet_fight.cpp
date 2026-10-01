@@ -9,6 +9,8 @@
 #include "action/spell.hpp"
 #include "buff/buff.hpp"
 #include "player/assessor.hpp"
+#include "player/pet.hpp"
+#include "player/pet_spawner.hpp"
 #include "player/player.hpp"
 #include "sim/event.hpp"
 #include "sim/expressions.hpp"
@@ -29,6 +31,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <unordered_map>
 
 using namespace rapidjson;
 
@@ -561,6 +564,38 @@ struct sheet_raid_stream_t : public spell_t
       on_assessed( s );
   }
 };
+
+// tstl-sylvanas 261-03: one add or hazard. A runtime pet of the fight master (the engine's own dynamic-pet
+// mechanism, the same class of object the pull system spawns) with health as its primary resource. The
+// controller keeps one instance record per spawn; a pet object can be reused by a later spawn, so the
+// per-instance numbers are differences against the snapshots taken here.
+struct sheet_mob_t : public pet_t
+{
+  int inst = -1;            // index of the controller's current instance record for this pet object
+  double spawn_s = 0;       // sim time of the current spawn
+  double dmg_base = 0;      // iteration_dmg_taken at the current spawn
+
+  sheet_mob_t( player_t* o, util::string_view n ) : pet_t( o->sim, o, n, PET_ENEMY ) {}
+
+  // Skip pet_t's override: it sets a pet's health from the owner's (here a sleeping master); an add has its own.
+  void init_resources( bool force ) override { player_t::init_resources( force ); }
+  resource_e primary_resource() const override { return RESOURCE_HEALTH; }
+
+  // Time to a health percent from the damage THIS add has taken since it spawned.
+  timespan_t time_to_percent( double percent ) const override
+  {
+    const double target_hp = resources.max[ RESOURCE_HEALTH ] * ( percent / 100.0 );
+    const double cur       = resources.current[ RESOURCE_HEALTH ];
+    if ( target_hp >= cur )
+      return timespan_t::zero();
+    const double elapsed = ( sim->current_time() ).total_seconds() - spawn_s;
+    const double dmg     = iteration_dmg_taken - dmg_base;
+    if ( elapsed > 0 && dmg > 0 )
+      return timespan_t::from_seconds( ( cur - target_hp ) / ( dmg / elapsed ) );
+    return pet_t::time_to_percent( percent );
+  }
+};
+using sheet_spawner_t = spawner::pet_spawner_t<sheet_mob_t, player_t>;
 }  // namespace
 
 struct sheet_fight_event_t::impl_t
@@ -606,6 +641,26 @@ struct sheet_fight_event_t::impl_t
   std::vector<cast_rec_t> casts_rec;
   sheet_raid_stream_t* stream = nullptr;  // owned by the master (its action_list), like the stock raid_damage_t
 
+  // ---- adds (261-03) ---------------------------------------------------------------------------
+  struct inst_t
+  {
+    int wave = -1;
+    sheet_mob_t* mob = nullptr;
+    bool alive = false, arrived = false;
+    double spawn_s = 0, arrival_s = -1, death_s = -1, despawn_s = -1;
+    double first_dmg = -1, first_pdmg = -1, first_swing = -1, stream_taken = 0;
+    double dmg_base = 0, dmg_total = 0;
+    double stream_from_s = 0, stream_rate = 0;
+  };
+  struct wave_rt_t
+  {
+    sheet_spawner_t* spawner = nullptr;
+    std::vector<char> armed;  // per spec.waves[w].at entry: a boss_health trigger waiting for its crossing
+  };
+  std::vector<wave_rt_t> wave_rt;
+  std::vector<std::unique_ptr<inst_t>> insts;
+  std::unordered_map<const player_t*, int> mob_inst;
+
   // ---- events ---------------------------------------------------------------------------------
   struct tick_event_t : event_t
   {
@@ -633,6 +688,27 @@ struct sheet_fight_event_t::impl_t
       im->trigger_ready[ phase ] = 1;
       im->try_advance();
     }
+  };
+
+  struct wave_event_t : event_t
+  {
+    impl_t* im;
+    int wave, phase;
+    wave_event_t( sim_t& s, impl_t* i, int w, int ph, timespan_t t ) : event_t( s, t ), im( i ), wave( w ), phase( ph ) {}
+    const char* name() const override { return "sheet_fight_wave"; }
+    void execute() override
+    {
+      if ( im->current_phase == phase )  // an instance whose phase has ended before it fires is dropped
+        im->spawn_wave( wave );
+    }
+  };
+  struct arrive_event_t : event_t
+  {
+    impl_t* im;
+    int inst;
+    arrive_event_t( sim_t& s, impl_t* i, int n, timespan_t t ) : event_t( s, t ), im( i ), inst( n ) {}
+    const char* name() const override { return "sheet_fight_arrive"; }
+    void execute() override { im->on_arrive( inst ); }
   };
 
   impl_t( sheet_fight_event_t& s, sim_t* sm, sheet_fight_spec::spec_t sp ) : self( s ), sim( sm ), spec( std::move( sp ) )
@@ -698,6 +774,110 @@ struct sheet_fight_event_t::impl_t
       b.samples.push_back( s );
   }
 
+  // ---- adds ------------------------------------------------------------------------------------
+  // The centre of a jitter key's range (plan 261-04 draws instead; until then every draw is its centre).
+  double jit_centre( const std::string& key, double none ) const
+  {
+    if ( key.empty() )
+      return none;
+    for ( const auto& j : spec.jitter )
+      if ( j.key == key )
+        return ( j.min + j.max ) / 2.0;
+    return none;
+  }
+
+  // The engine caches each action's target list; a spawn, an arrival or a death must rebuild them
+  // (the pull system's regenerate_cache).
+  void invalidate_target_caches()
+  {
+    for ( auto* p : sim->player_non_sleeping_list )
+      for ( auto* a : p->action_list )
+        a->target_cache.is_valid = false;
+  }
+
+  inst_t* find_inst( const player_t* p )
+  {
+    auto it = mob_inst.find( p );
+    return it == mob_inst.end() ? nullptr : insts[ it->second ].get();
+  }
+
+  void spawn_wave( int w )
+  {
+    const auto& wv = spec.waves[ w ];
+    auto& wr       = wave_rt[ w ];
+    if ( !wr.spawner )
+      return;
+    auto mobs = wr.spawner->spawn( timespan_t::min(), static_cast<unsigned>( wv.count ) );
+    for ( auto* m : mobs )
+    {
+      m->full_name_str = m->name_str = wv.actor;
+      // Behind the player, the spec's distance from the boss at the origin: no facing-gated spell reaches it early.
+      m->x_position = -wv.spawn_distance_yd;
+      m->y_position = 0;
+      m->resources.base[ RESOURCE_HEALTH ]              = *wv.max_health;
+      m->resources.infinite_resource[ RESOURCE_HEALTH ] = false;
+      m->init_resources( true );
+
+      auto in = std::make_unique<inst_t>();
+      in->wave     = w;
+      in->mob      = m;
+      in->alive    = true;
+      in->spawn_s  = now();
+      in->dmg_base = m->iteration_dmg_taken;
+      if ( wv.raid_stream )
+      {
+        in->stream_rate   = wv.raid_stream->damage_per_s / jit_centre( wv.raid_stream->lifetime_jitter, 1.0 );
+        in->stream_from_s = in->spawn_s + wv.raid_stream->start_after_spawn_s;
+      }
+      const int idx = static_cast<int>( insts.size() );
+      m->inst       = idx;
+      m->spawn_s    = in->spawn_s;
+      m->dmg_base   = in->dmg_base;
+      mob_inst[ m ] = idx;
+      insts.push_back( std::move( in ) );
+      const double travel = wv.travel_s.value_or( 0.0 );
+      make_event<arrive_event_t>( *sim, *sim, this, idx, timespan_t::from_seconds( travel ) );
+    }
+    invalidate_target_caches();
+  }
+
+  // The add reaches melee: it is put next to the first engaged boss, 2 yards to the side (walking in is SIM-11).
+  void on_arrive( int idx )
+  {
+    auto& in = *insts[ idx ];
+    if ( !in.alive || in.arrived )
+      return;
+    in.arrived   = true;
+    in.arrival_s = now();
+    double bx = 0, by = 0;
+    for ( auto& b : bosses )
+      if ( b.spawned && !b.dead && !b.benched && !b.actor->is_sleeping() )
+      {
+        bx = b.actor->x_position;
+        by = b.actor->y_position;
+        break;
+      }
+    in.mob->x_position = bx;
+    in.mob->y_position = by + 2.0;
+    invalidate_target_caches();
+  }
+
+  // The spawner's demise callback: an add dies only by damage; fight-end demises are not deaths.
+  void on_mob_demise( sheet_mob_t* m )
+  {
+    if ( m->inst < 0 )
+      return;
+    auto& in = *insts[ m->inst ];
+    if ( !in.alive )
+      return;
+    in.alive     = false;
+    in.dmg_total = m->iteration_dmg_taken - in.dmg_base;
+    if ( sim->event_mgr.canceled )
+      return;
+    in.death_s = now();
+    invalidate_target_caches();
+  }
+
   // ---- phases --------------------------------------------------------------------------------
   void engage_boss( boss_rt_t& b, const std::string& on_zero )
   {
@@ -741,6 +921,19 @@ struct sheet_fight_event_t::impl_t
       find_boss( s.boss )->stream_rate = s.damage_per_s;
     for ( size_t c = 0; c < ph.casts.size(); ++c )
       make_event<cast_event_t>( *sim, *sim, this, j, static_cast<int>( c ), timespan_t::from_seconds( ph.casts[ c ].at_in_phase_s ) );
+    for ( size_t w = 0; w < spec.waves.size(); ++w )
+      for ( size_t k = 0; k < spec.waves[ w ].at.size(); ++k )
+      {
+        const auto& a = spec.waves[ w ].at[ k ];
+        if ( a.phase != j )
+          continue;
+        if ( a.kind == "phase_time" )
+        {
+          const double shift = jit_centre( spec.waves[ w ].time_shift_jitter, 0.0 );
+          make_event<wave_event_t>( *sim, *sim, this, static_cast<int>( w ), j,
+                                    timespan_t::from_seconds( std::max( 0.0, a.in_phase_s + shift ) ) );
+        }
+      }
     for ( auto& c : children[ j ] )
       c->combat_begin();
     for ( auto& b : bosses )
@@ -834,6 +1027,18 @@ struct sheet_fight_event_t::impl_t
         stream->execute();
       }
     }
+    if ( tick_index > 0 && stream )
+    {
+      for ( auto& up : insts )
+      {
+        auto& in = *up;
+        if ( !in.alive || in.stream_rate <= 0 || now() + 1e-9 < in.stream_from_s )
+          continue;
+        stream->base_dd_min = stream->base_dd_max = in.stream_rate * interval;
+        stream->target = in.mob;
+        stream->execute();
+      }
+    }
     for ( auto& b : bosses )
       if ( !b.dead )
         sample( b );
@@ -851,6 +1056,12 @@ struct sheet_fight_event_t::impl_t
       if ( b->first_dmg < 0 )
         b->first_dmg = now();
     }
+    else if ( auto* in = find_inst( s->target ) )
+    {
+      in->stream_taken += s->result_amount;
+      if ( in->first_dmg < 0 )
+        in->first_dmg = now();
+    }
   }
 
   void on_player_damage( action_state_t* s )
@@ -859,7 +1070,19 @@ struct sheet_fight_event_t::impl_t
       return;
     auto* b = find_boss( s->target );
     if ( !b )
+    {
+      if ( auto* in = find_inst( s->target ) )
+      {
+        const double t = now();
+        if ( in->first_pdmg < 0 )
+          in->first_pdmg = t;
+        if ( in->first_dmg < 0 )
+          in->first_dmg = t;
+        if ( in->first_swing < 0 && s->action && !s->action->special )
+          in->first_swing = t;
+      }
       return;
+    }
     const double t = now();
     if ( b->first_pdmg < 0 )
       b->first_pdmg = t;
@@ -947,6 +1170,33 @@ struct sheet_fight_event_t::impl_t
       key( "total_damage_taken" ); w.Double( b.actor->iteration_dmg_taken );
       key( "raid_stream_damage_taken" ); w.Double( b.stream_taken );
       key( "max_health" ); w.Double( b.max_at_spawn );
+      w.EndObject();
+    }
+    for ( auto& up : insts )
+    {
+      const auto& in = *up;
+      const auto& wv = spec.waves[ in.wave ];
+      w.StartObject();
+      key( "actor" ); w.String( wv.actor.c_str() );
+      key( "actor_index" ); w.Int( static_cast<int>( in.mob->actor_index ) );
+      key( "npc_game_id" ); w.Int64( wv.npc_game_id );
+      key( "kind" ); w.String( wv.kind.c_str() );
+      key( "must_die" ); w.Bool( wv.must_die );
+      key( "hazard" ); w.Bool( wv.kind == "hazard" );
+      key( "spawn_s" ); w.Double( r3( in.spawn_s ) );
+      key( "melee_arrival_s" ); num_or_null( in.arrival_s );
+      key( "despawn_s" ); num_or_null( in.despawn_s );
+      key( "death_s" ); num_or_null( in.death_s );
+      key( "first_damage_taken_s" ); num_or_null( in.first_dmg );
+      key( "first_player_damage_s" ); num_or_null( in.first_pdmg );
+      key( "first_player_swing_s" ); num_or_null( in.first_swing );
+      key( "total_damage_taken" ); w.Double( in.alive ? in.mob->iteration_dmg_taken - in.dmg_base : in.dmg_total );
+      key( "raid_stream_damage_taken" ); w.Double( in.stream_taken );
+      key( "max_health" );
+      if ( wv.max_health )
+        w.Double( *wv.max_health );
+      else
+        w.Null();
       w.EndObject();
     }
     w.EndArray();
@@ -1068,6 +1318,21 @@ sheet_fight_event_t::sheet_fight_event_t( sim_t* s, const std::string& spec_path
       throw sc_invalid_sim_argument( fmt::format( "solver_sheet_fight='{}': boss actor '{}' is not an enemy= line in the profile.", spec_path, b.spec->actor ) );
   }
 
+  // One spawner per wave, owned by the fight master, named "<wave actor> spawner" (the pull system's convention).
+  im.wave_rt.resize( im.spec.waves.size() );
+  for ( size_t w = 0; w < im.spec.waves.size(); ++w )
+  {
+    const auto& wv = im.spec.waves[ w ];
+    if ( wv.kind != "add" )
+      continue;
+    const std::string actor = wv.actor;
+    auto* sp = new sheet_spawner_t( actor + " spawner", s->target, [ actor ]( player_t* owner ) { return new sheet_mob_t( owner, actor ); } );
+    impl_t* pi = &im;
+    sp->set_event_callback( spawner::pet_event_type::DEMISE, [ pi ]( spawner::pet_event_type, sheet_mob_t* m ) { pi->on_mob_demise( m ); } );
+    im.wave_rt[ w ].spawner = sp;
+    im.wave_rt[ w ].armed.assign( wv.at.size(), 0 );
+  }
+
   // Thresholds each boss needs: every pct > 0 named by a phase start or a wave trigger.
   for ( auto& b : im.bosses )
   {
@@ -1134,6 +1399,10 @@ void sheet_fight_event_t::reset()
   im.tick_index = 0;
   im.phase_changes.clear();
   im.casts_rec.clear();
+  im.insts.clear();
+  im.mob_inst.clear();
+  for ( auto& wr : im.wave_rt )
+    std::fill( wr.armed.begin(), wr.armed.end(), 0 );
   im.trigger_ready.assign( im.spec.phases.size(), 0 );
   for ( auto& b : im.bosses )
   {
