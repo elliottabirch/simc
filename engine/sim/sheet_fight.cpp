@@ -1117,8 +1117,10 @@ struct sheet_fight_event_t::impl_t
 
   void heal_tick( int phase, int tick )
   {
-    if ( current_phase != phase )  // the phase has ended: pending ticks are dropped
-      return;
+    // tstl-sylvanas 261-08: a heal delivers all its declared ticks. It used to drop a tick that came due
+    // after its own phase had ended; the 35th tick of the Coiled Altar intermission is due 0.05 s after the
+    // last phase starts on its timer (in the real kill it landed 0.03 s into that phase). The per-boss guard
+    // below (not spawned, dead, or asleep) still skips a boss, and the chain still ends after h.ticks ticks.
     const auto& h = *spec.phases[ phase ].heal;
     for ( const auto& name : h.bosses )
     {
