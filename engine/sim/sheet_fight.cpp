@@ -928,7 +928,7 @@ struct sheet_fight_event_t::impl_t
       in->dmg_base = m->iteration_dmg_taken;
       if ( wv.raid_stream )
       {
-        in->stream_rate   = wv.raid_stream->damage_per_s / jit_centre( wv.raid_stream->lifetime_jitter, 1.0 );
+        in->stream_rate   = wv.raid_stream->damage_per_s / jit_value( wv.raid_stream->lifetime_jitter, 1.0 );  // tstl-sylvanas 261-04: a longer lifetime = a slower stream
         in->stream_from_s = in->spawn_s + wv.raid_stream->start_after_spawn_s;
       }
       const int idx = static_cast<int>( insts.size() );
@@ -939,7 +939,7 @@ struct sheet_fight_event_t::impl_t
       insts.push_back( std::move( in ) );
       if ( !hazard )
       {
-        const double travel = wv.travel_s.value_or( 0.0 );
+        const double travel = jit_value( wv.travel_jitter, wv.travel_s.value_or( 0.0 ) );  // tstl-sylvanas 261-04
         make_event<arrive_event_t>( *sim, *sim, this, idx, timespan_t::from_seconds( travel ) );
       }
     }
@@ -1120,7 +1120,7 @@ struct sheet_fight_event_t::impl_t
     for ( auto& b : bosses )
       b.stream_rate = 0;
     for ( auto& s : ph.raid_stream )
-      find_boss( s.boss )->stream_rate = s.damage_per_s;
+      find_boss( s.boss )->stream_rate = s.damage_per_s * jit_value( s.pace_jitter, 1.0, j );  // tstl-sylvanas 261-04: this phase's raid pace
     for ( size_t c = 0; c < ph.casts.size(); ++c )
       make_event<cast_event_t>( *sim, *sim, this, j, static_cast<int>( c ), timespan_t::from_seconds( ph.casts[ c ].at_in_phase_s ) );
     for ( size_t w = 0; w < spec.waves.size(); ++w )
@@ -1133,7 +1133,7 @@ struct sheet_fight_event_t::impl_t
           continue;
         if ( a.kind == "phase_time" )
         {
-          const double shift = jit_centre( spec.waves[ w ].time_shift_jitter, 0.0 );
+          const double shift = jit_value( spec.waves[ w ].time_shift_jitter, 0.0 );  // tstl-sylvanas 261-04: one value per fight; clamped to the phase start below
           make_event<wave_event_t>( *sim, *sim, this, static_cast<int>( w ), j,
                                     timespan_t::from_seconds( std::max( 0.0, a.in_phase_s + shift ) ) );
         }
@@ -1158,7 +1158,8 @@ struct sheet_fight_event_t::impl_t
     {
       const auto& st = spec.phases[ j ].start;
       if ( st.kind == "after_cast" && st.cast == c.name )
-        make_event<start_event_t>( *sim, *sim, this, static_cast<int>( j ), timespan_t::from_seconds( st.after_s ) );
+        make_event<start_event_t>( *sim, *sim, this, static_cast<int>( j ),
+                                   timespan_t::from_seconds( jit_value( st.after_jitter, st.after_s ) ) );  // tstl-sylvanas 261-04: the drawn break length
     }
   }
 
