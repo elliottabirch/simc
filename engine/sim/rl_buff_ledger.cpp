@@ -312,11 +312,13 @@ struct state_t
   bool ext_probe_single_done = false;
   bool ext_probe_multi_done = false;
   // Plan 13 group 2c (MJ-12-02 c): per fight, a late extension of a synchronous multi-stack buff (stage 0 -> 1), then, once its window has
-  // passed, a second late extension (1 -> 2) followed by a refresh of that buff at the next press frame while the second window is
-  // still ahead (2 -> 3, record `exr`): the refresh moves the shared end inside the window (review MJ-12-01).
+  // passed, a second extension of a buff whose refresh moves the end (1 -> 2) followed by a refresh of that buff (2 -> 3, record `exr`): in
+  // fights of even iteration number at the first press frame INSIDE the second window, in fights of odd number at the next press frame
+  // (before the window begins), so the refresh clips a window that has begun in one and drops one that has not in the other (review MJ-12-01).
   int ext_probe_sync_stage = 0;
   buff_t* ext_probe_sync_buff = nullptr;
-  timespan_t ext_probe_sync_end = timespan_t::zero();
+  timespan_t ext_probe_sync_from = timespan_t::zero();  // the second extension's window: old end
+  timespan_t ext_probe_sync_end = timespan_t::zero();   // the window's new end (of the last late extension)
   // Plan 12, group 2 (MJ-04): a pass entry point reached while a pass is running is refused and counted (footer
   // nested_pass_refused, by entry point); the guard probe's nested scope and nested pass (probe_nesting_ok / _failed); the
   // probe's one dot cancel per fight (first tick pass set); the event blocks handed out inside a pass (never the pool's).
@@ -1877,7 +1879,8 @@ void run_ext_probe( state_t* s, player_t* p, const rl_cause_t& cause )
   // Plan 13 (MJ-12-02 c): the refresh that follows the second late extension of a synchronous multi-stack buff, at the next press frame while
   // the extension's window is still ahead. It is an application by this press that moves the shared end (the engine clips the window);
   // the probe writes `exr` as the independent evidence the checker clips the window by.
-  if ( s->ext_probe_sync_stage == 2 )
+  const bool refresh_inside = ( p->sim->current_iteration & 1 ) == 0;
+  if ( s->ext_probe_sync_stage == 2 && !( refresh_inside && now < s->ext_probe_sync_from ) )
   {
     buff_t* sb              = s->ext_probe_sync_buff;
     s->ext_probe_sync_stage = 3;
@@ -1908,7 +1911,7 @@ void run_ext_probe( state_t* s, player_t* p, const rl_cause_t& cause )
     return;
   buff_t* single = nullptr;
   buff_t* multi  = nullptr;
-  buff_t* ending = nullptr;  // a synchronous multi-stack buff within 1.5 s of its end
+  buff_t* ending = nullptr;  // a synchronous multi-stack buff within 1.5 s of its end (stage 0), or within 6 s with a refresh that moves the end (stage 1)
   auto better    = [ & ]( const buff_t* a, const buff_t* c ) {
     if ( c == nullptr )
       return true;
@@ -1939,12 +1942,14 @@ void run_ext_probe( state_t* s, player_t* p, const rl_cause_t& cause )
       if ( !s->ext_probe_multi_done && ( b->stack_behavior == buff_stack_behavior::ASYNCHRONOUS || b->expiration.size() == 1 ) &&
            better( b, multi ) )
         multi = b;
-      // Only a buff whose refresh moves the end (refresh behaviour not disabled) can show a window clipped by a refresh.
-      if ( want_late && b->stack_behavior != buff_stack_behavior::ASYNCHRONOUS && b->expiration.size() == 1 &&
-           b->refresh_behavior != buff_refresh_behavior::DISABLED )
+      // Stage 0: any synchronous multi-stack buff within 1.5 s of its end. Stage 1: only a buff whose refresh moves the end (refresh behaviour
+      // not disabled) can show a window clipped by a refresh, within 6 s of its end.
+      if ( want_late && b->stack_behavior != buff_stack_behavior::ASYNCHRONOUS && b->expiration.size() == 1 )
       {
+        const bool second    = s->ext_probe_sync_stage == 1;
         const timespan_t rem = b->expiration.front()->remains();
-        if ( rem > timespan_t::zero() && rem <= late && better( b, ending ) )
+        if ( ( !second || b->refresh_behavior != buff_refresh_behavior::DISABLED ) && rem > timespan_t::zero() &&
+             rem <= ( second ? timespan_t::from_seconds( 6.0 ) : late ) && better( b, ending ) )
           ending = b;
       }
     }
@@ -1970,9 +1975,11 @@ void run_ext_probe( state_t* s, player_t* p, const rl_cause_t& cause )
     // Shortly before its end, so the window (old end to new end) is reached while moved stacks are still up. The first one is left alone
     // (stage 1); once its window has passed the second is followed by a refresh (stage 2, executed at the next press frame).
     const bool refreshed_next = s->ext_probe_sync_stage == 1;
+    const timespan_t old_end  = ending->expiration.front()->occurs();
     ending->extend_duration( two );
     ++s->ext_probe_sync_late;
-    s->ext_probe_sync_end = ending->expiration.empty() ? now : ending->expiration.front()->occurs();
+    s->ext_probe_sync_from = old_end;
+    s->ext_probe_sync_end  = ending->expiration.empty() ? now : ending->expiration.front()->occurs();
     if ( refreshed_next )
     {
       s->ext_probe_sync_stage = 2;
