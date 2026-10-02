@@ -181,7 +181,14 @@ spec_t load_spec( const std::string& path )
   // A /1 spec takes today's key list and today's code path, byte for byte; under /1 either new key is an unknown key.
   const bool is2 = doc.IsObject() && doc.HasMember( "format" ) && doc[ "format" ].IsString() &&
                    std::string( doc[ "format" ].GetString() ) == "sheet-fight-spec/2";
-  if ( is2 )
+  // tstl-sylvanas 264-05 (O4): a /2 spec may also carry the OPTIONAL top-level do_not_hit list; named in the key list only when
+  // present (keys() demands every listed key), so a /2 spec without it is read exactly as before. Under /1 it stays an unknown key.
+  const bool has_dnh = is2 && doc.HasMember( "do_not_hit" );
+  if ( is2 && has_dnh )
+    L.keys( doc, { "format", "slug", "sheet_fingerprint", "encounter_id", "fragment_path", "master_actor", "max_time_s",
+                   "sample_interval_s", "bosses", "phases", "waves", "jitter", "timers_pending_second_kill", "defaults_used",
+                   "random_mechanics", "priority_marks", "do_not_hit" }, "" );
+  else if ( is2 )
     L.keys( doc, { "format", "slug", "sheet_fingerprint", "encounter_id", "fragment_path", "master_actor", "max_time_s",
                    "sample_interval_s", "bosses", "phases", "waves", "jitter", "timers_pending_second_kill", "defaults_used",
                    "random_mechanics", "priority_marks" }, "" );
@@ -665,6 +672,65 @@ spec_t load_spec( const std::string& path )
       out.funnel_all_damage = L.boolean( m[ "funnel_all_damage" ], p + ".funnel_all_damage", "funnel_all_damage" );
       spec.priority_marks.push_back( out );
     }
+
+    // tstl-sylvanas 264-05 (O4): the optional do_not_hit list. Same rules and wording as scripts/fights/fight-contracts.js
+    // checkDoNotHit (a boss actor only, phase or window, unique names, buff_ability_id a positive integer or null).
+    if ( has_dnh )
+    {
+      const Value& dl = L.list( doc, "do_not_hit", "" );
+      std::set<std::string> dnh_names;
+      for ( SizeType i = 0; i < dl.Size(); ++i )
+      {
+        const std::string p = loader_t::at( "do_not_hit", i );
+        const Value& e      = dl[ i ];
+        L.keys( e, { "name", "enemy", "while", "buff_ability_id" }, p );
+        do_not_hit_t out;
+        out.name = L.str( e[ "name" ], p + ".name", "name" );
+        if ( !dnh_names.insert( out.name ).second )
+          L.fail( p + ".name", "duplicate do_not_hit name " + out.name );
+        const Value& en = e[ "enemy" ];
+        if ( !en.IsString() || !L.boss_actors.count( en.GetString() ) )
+          L.fail( p + ".enemy", fmt::format( "enemy must name a boss actor (a wave cannot be do-not-hit; got {})",
+                                              en.IsString() ? std::string( en.GetString() ) : std::string( "(not a string)" ) ) );
+        out.enemy          = en.GetString();
+        const std::string wp = p + ".while";
+        const Value& wv      = e[ "while" ];
+        if ( !wv.IsObject() )
+          L.fail( wp, "while must be a JSON object" );
+        const std::string wkind = wv.HasMember( "kind" ) && wv[ "kind" ].IsString() ? wv[ "kind" ].GetString() : "";
+        if ( wkind == "phase" )
+        {
+          L.keys( wv, { "kind", "phase" }, wp );
+          const double ph = L.num( wv[ "phase" ], wp + ".phase", "phase", true, 0 );
+          if ( ph >= static_cast<double>( spec.phases.size() ) )
+            L.fail( wp + ".phase", fmt::format( "phase must be an index into phases (0 to {})", spec.phases.size() - 1 ) );
+          out.phase = static_cast<int>( ph );
+        }
+        else if ( wkind == "window" )
+        {
+          L.keys( wv, { "kind", "from_s", "to_s" }, wp );
+          out.from_s = L.num( wv[ "from_s" ], wp + ".from_s", "from_s", false, 0 );
+          out.to_s   = L.num( wv[ "to_s" ], wp + ".to_s", "to_s" );
+          if ( !( out.to_s > out.from_s ) )
+            L.fail( wp + ".to_s", "to_s must be above from_s" );
+          if ( out.to_s > spec.max_time_s )
+            L.fail( wp + ".to_s", fmt::format( "to_s must be at most max_time_s ({})", spec.max_time_s ) );
+        }
+        else
+          L.fail( wp + ".kind", "kind must be one of phase, window" );
+        out.while_kind = wkind;
+        const Value& bv = e[ "buff_ability_id" ];
+        if ( !bv.IsNull() )
+        {
+          const bool ok = bv.IsNumber() && std::isfinite( bv.GetDouble() ) && bv.GetDouble() == std::floor( bv.GetDouble() ) &&
+                          bv.GetDouble() > 0;
+          if ( !ok )
+            L.fail( p + ".buff_ability_id", "buff_ability_id must be a positive integer or null" );
+          out.buff_ability_id = static_cast<long long>( bv.GetDouble() );
+        }
+        spec.do_not_hit.push_back( out );
+      }
+    }
   }
   return spec;
 }
@@ -850,6 +916,24 @@ struct sheet_fight_event_t::impl_t
     double start_s, end_s;
   };
   std::vector<pw_t> pwindows;
+
+  // ---- do-not-hit entries (tstl-sylvanas 264-05, O4) --------------------------------------------------
+  // Controller-owned and read-only toward the fight: an entry is active while its boss is spawned and alive and (phase kind) the
+  // current phase is its phase or (window kind) the fight clock lies in [from_s, to_s). Nothing is scheduled and nothing is drawn,
+  // so the event order and every draw of a fight without an entry are untouched. A window is opened and closed by the one-second
+  // tick (like the priority windows); the filter itself reads the entry's exact state at the moment of the decision.
+  struct dnh_count_t
+  {
+    long long dropped = 0, sole_kept = 0;
+  };
+  struct dnh_window_t
+  {
+    int entry;
+    double start_s, end_s;
+  };
+  std::vector<dnh_count_t> dnh_counts;
+  std::vector<dnh_window_t> dnh_windows;
+  bool dnh_on() const { return spec.format == 2 && !spec.do_not_hit.empty() && sim->solver_sheet_do_not_hit != 0; }
 
   // ---- stun claims (tstl-sylvanas 265-03): per actor index, how many stuns currently hold that player (a /2 spec only).
   std::vector<int> stun_depth;
@@ -1620,6 +1704,8 @@ struct sheet_fight_event_t::impl_t
     // scheduled and nothing is drawn, so a /1 spec's event queue and draws are untouched.
     if ( spec.format == 2 && !spec.priority_marks.empty() )
       update_priority_windows();
+    if ( dnh_on() )  // tstl-sylvanas 264-05 (O4): the do-not-hit windows, same once-a-tick reading
+      update_dnh_windows();
     ++tick_index;
     make_event<tick_event_t>( *sim, *sim, this, timespan_t::from_seconds( interval ) );
   }
@@ -1903,6 +1989,69 @@ struct sheet_fight_event_t::impl_t
     }
   }
 
+  // ---- do-not-hit entries (tstl-sylvanas 264-05, O4) --------------------------------------------
+  bool dnh_entry_active( size_t k ) const
+  {
+    const auto& e = spec.do_not_hit[ k ];
+    const boss_rt_t* boss = nullptr;
+    for ( const auto& b : bosses )
+      if ( b.spec->actor == e.enemy )
+        boss = &b;
+    if ( boss == nullptr || !boss->spawned || boss->dead )
+      return false;
+    if ( e.while_kind == "phase" )
+      return current_phase == e.phase;
+    const double t = now();
+    return t >= e.from_s && t < e.to_s;
+  }
+
+  bool do_not_hit_now( const player_t* enemy ) const
+  {
+    if ( !dnh_on() )
+      return false;
+    for ( size_t k = 0; k < spec.do_not_hit.size(); ++k )
+      if ( dnh_entry_active( k ) )
+        for ( const auto& b : bosses )
+          if ( b.actor == enemy && b.spec->actor == spec.do_not_hit[ k ].enemy )
+            return true;
+    return false;
+  }
+
+  void do_not_hit_note( const player_t* enemy, bool sole_kept )
+  {
+    if ( !dnh_on() )
+      return;
+    if ( dnh_counts.size() != spec.do_not_hit.size() )
+      dnh_counts.assign( spec.do_not_hit.size(), dnh_count_t() );
+    for ( size_t k = 0; k < spec.do_not_hit.size(); ++k )
+      if ( dnh_entry_active( k ) )
+        for ( const auto& b : bosses )
+          if ( b.actor == enemy && b.spec->actor == spec.do_not_hit[ k ].enemy )
+          {
+            if ( sole_kept )
+              ++dnh_counts[ k ].sole_kept;
+            else
+              ++dnh_counts[ k ].dropped;
+          }
+  }
+
+  void update_dnh_windows()
+  {
+    const double t = r3( now() );
+    for ( size_t k = 0; k < spec.do_not_hit.size(); ++k )
+    {
+      dnh_window_t* open = nullptr;
+      for ( auto& w : dnh_windows )
+        if ( w.entry == static_cast<int>( k ) && w.end_s < 0 )
+          open = &w;
+      const bool active = dnh_entry_active( k );
+      if ( active && !open )
+        dnh_windows.push_back( { static_cast<int>( k ), t, -1.0 } );
+      else if ( !active && open )
+        open->end_s = t;
+    }
+  }
+
   // ---- the fight record ----------------------------------------------------------------------
   void write_record()
   {
@@ -2153,6 +2302,36 @@ struct sheet_fight_event_t::impl_t
         w.EndObject();
       }
       w.EndArray();
+      // tstl-sylvanas 264-05 (O4): the do-not-hit windows and the per-entry counts, written together and only for a /2 spec with an
+      // entry while the option is on; every other fight's record is unchanged byte for byte.
+      if ( dnh_on() )
+      {
+        key( "do_not_hit_windows" );
+        w.StartArray();
+        for ( const auto& dw : dnh_windows )
+        {
+          const auto& e = spec.do_not_hit[ dw.entry ];
+          w.StartObject();
+          key( "entry" ); w.String( e.name.c_str() );
+          key( "actor" ); w.String( e.enemy.c_str() );
+          key( "start_s" ); w.Double( dw.start_s );
+          key( "end_s" ); num_or_null( dw.end_s );
+          w.EndObject();
+        }
+        w.EndArray();
+        key( "do_not_hit_drops" );
+        w.StartArray();
+        for ( size_t k = 0; k < spec.do_not_hit.size(); ++k )
+        {
+          const dnh_count_t c = k < dnh_counts.size() ? dnh_counts[ k ] : dnh_count_t();
+          w.StartObject();
+          key( "entry" ); w.String( spec.do_not_hit[ k ].name.c_str() );
+          key( "dropped" ); w.Int64( c.dropped );
+          key( "sole_kept" ); w.Int64( c.sole_kept );
+          w.EndObject();
+        }
+        w.EndArray();
+      }
     }
     w.EndObject();
 
@@ -2316,6 +2495,8 @@ void sheet_fight_event_t::reset()
     for ( auto& rt : mech )
       rt = impl_t::rm_rt_t();
   im.pwindows.clear();
+  im.dnh_windows.clear();  // tstl-sylvanas 264-05 (O4)
+  im.dnh_counts.assign( im.spec.do_not_hit.size(), impl_t::dnh_count_t() );
   im.stun_depth.clear();
   for ( auto& wr : im.wave_rt )
     std::fill( wr.armed.begin(), wr.armed.end(), 0 );
@@ -2437,6 +2618,31 @@ bool sheet_fight_event_t::stun_claim_release( const player_t* p )
 std::vector<sheet_fight_mark_state_t> sheet_fight_event_t::priority_marks_now() const
 {
   return impl->priority_marks_now();
+}
+
+// tstl-sylvanas 264-05 (O4): the do-not-hit view (a pure read) and its counter bookkeeping.
+bool sheet_fight_event_t::do_not_hit_now( const player_t* enemy ) const
+{
+  return impl->do_not_hit_now( enemy );
+}
+
+void sheet_fight_event_t::do_not_hit_note( const player_t* enemy, bool sole_kept )
+{
+  impl->do_not_hit_note( enemy, sole_kept );
+}
+
+bool sheet_fight_do_not_hit( const sim_t* sim, const player_t* enemy )
+{
+  if ( !sim || sim->fight_style != FIGHT_STYLE_SHEET_FIGHT || !sim->sheet_fight )
+    return false;
+  return sim->sheet_fight->do_not_hit_now( enemy );
+}
+
+void sheet_fight_note_do_not_hit( const sim_t* sim, const player_t* enemy, bool sole_kept )
+{
+  if ( !sim || sim->fight_style != FIGHT_STYLE_SHEET_FIGHT || !sim->sheet_fight )
+    return;
+  sim->sheet_fight->do_not_hit_note( enemy, sole_kept );
 }
 
 std::vector<sheet_fight_mark_state_t> sheet_fight_priority_marks( const sim_t* sim )

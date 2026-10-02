@@ -159,6 +159,17 @@ struct priority_mark_t
   std::string name, enemy, while_kind, rank;  // while_kind: alive | absorb_on_target; rank: top | high | normal | ignore
   bool funnel_all_damage = false;
 };
+// tstl-sylvanas 264-05 (O4): a do-not-hit entry names a BOSS and the time it is left out of single-target aimed candidate sets
+// (while another candidate remains): for a whole phase (while_kind "phase", index in `phase`) or a window of fight time
+// (while_kind "window", seconds after the pull in from_s/to_s). buff_ability_id (0 = none) is recorded only: the writer has
+// already turned a buff into the phase or window the simulator plays it as. Format 2 only; the key is optional.
+struct do_not_hit_t
+{
+  std::string name, enemy, while_kind;  // while_kind: phase | window
+  int phase = 0;
+  double from_s = 0, to_s = 0;
+  long long buff_ability_id = 0;  // 0 when the spec says null
+};
 struct spec_t
 {
   int format = 1;  // tstl-sylvanas 265-03: 1 = sheet-fight-spec/1 (today's code path), 2 = sheet-fight-spec/2
@@ -171,6 +182,7 @@ struct spec_t
   std::vector<jitter_t> jitter;
   std::vector<random_mechanic_t> random_mechanics;  // format 2 only
   std::vector<priority_mark_t> priority_marks;      // format 2 only
+  std::vector<do_not_hit_t> do_not_hit;             // format 2 only, optional (264-05)
 };
 
 // Reads and validates the spec; throws sc_invalid_sim_argument "solver_sheet_fight='<path>': <json path>: <message>"
@@ -226,6 +238,14 @@ struct sheet_fight_mark_state_t
 // Empty when the fight style is not SheetFight or no controller exists.
 std::vector<sheet_fight_mark_state_t> sheet_fight_priority_marks( const sim_t* sim );
 
+// tstl-sylvanas 264-05 (O4): true when `enemy` is a boss named by a do-not-hit entry that is ACTIVE right now (its boss is spawned
+// and alive, and its phase is the current one or its window holds the current time). A PURE READ: no draw, no event, no state
+// change. False outside SheetFight, for a /1 spec, for a /2 spec with no entry, and when the option solver_sheet_do_not_hit is 0.
+bool sheet_fight_do_not_hit( const sim_t* sim, const player_t* enemy );
+// Counter bookkeeping for the aimed-target pass: one call per candidate the pass removed (sole_kept false) or kept because it was
+// the only candidate (sole_kept true), for every active entry that names `enemy`. Never draws, never schedules.
+void sheet_fight_note_do_not_hit( const sim_t* sim, const player_t* enemy, bool sole_kept );
+
 struct sheet_fight_event_t : public raid_event_t
 {
   sheet_fight_event_t( sim_t* sim, const std::string& spec_path );
@@ -250,6 +270,9 @@ struct sheet_fight_event_t : public raid_event_t
   sheet_fight_forecast_t forecast() const;
   // tstl-sylvanas 265-03: see sheet_fight_mark_state_t; a pure read, no consumer in Phase 265.
   std::vector<sheet_fight_mark_state_t> priority_marks_now() const;
+  // tstl-sylvanas 264-05 (O4): see sheet_fight_do_not_hit / sheet_fight_note_do_not_hit above.
+  bool do_not_hit_now( const player_t* enemy ) const;
+  void do_not_hit_note( const player_t* enemy, bool sole_kept );
 
   // tstl-sylvanas 265-03: stun bookkeeping for a sheet-fight-spec/2 fight (see sheet_fight_stun_start in raid_event.cpp). Every stun,
   // the engine's own and the controller's, goes through the shared start and end helpers; the controller counts how many hold

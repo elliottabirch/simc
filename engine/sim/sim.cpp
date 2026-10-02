@@ -4459,6 +4459,7 @@ void sim_t::create_options()
   // tstl-sylvanas 261-02: SheetFight spec path, jitter switch and per-fight record path (validated in setup()).
   add_option( opt_string( "solver_sheet_fight", solver_sheet_fight_str ) );
   add_option( opt_bool( "solver_sheet_jitter", solver_sheet_jitter ) );
+  add_option( opt_int( "solver_sheet_do_not_hit", solver_sheet_do_not_hit ) );  // tstl-sylvanas 264-05 (O4)
   add_option( opt_string( "solver_fight_timeline", solver_fight_timeline_str ) );
   // 260926-f2e (Need 1): forces the in-process transport's decision at a specific decision
   // counter to a specific action index. Parsed and validated below, in its own fail-closed
@@ -5360,6 +5361,10 @@ void sim_t::setup( sim_control_t* c )
     if ( !sheet_style && !solver_sheet_fight_str.empty() )
       throw sc_invalid_sim_argument(
           fmt::format( "solver_sheet_fight='{}' requires fight_style=SheetFight.", solver_sheet_fight_str ) );
+    // tstl-sylvanas 264-05 (O4): the do-not-hit switch is 0 or 1; anything else is refused by name.
+    if ( solver_sheet_do_not_hit != 0 && solver_sheet_do_not_hit != 1 )
+      throw sc_invalid_sim_argument(
+          fmt::format( "solver_sheet_do_not_hit={}: must be 0 or 1.", solver_sheet_do_not_hit ) );
     if ( !sheet_style && !solver_fight_timeline_str.empty() )
       throw sc_invalid_sim_argument(
           fmt::format( "solver_fight_timeline='{}' requires fight_style=SheetFight.", solver_fight_timeline_str ) );

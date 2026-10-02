@@ -983,6 +983,10 @@ struct sim_t : private sc_thread_t
   // default when absent, which leaves every other fight byte-identical.
   std::string solver_sheet_fight_str;
   bool solver_sheet_jitter = true;
+  // tstl-sylvanas 264-05 (O4): solver_sheet_do_not_hit (default 1; 0 or 1 only). With 1 a sheet-fight-spec/2 do_not_hit list is
+  // consulted by the aimed-target pass (rl_target_select.cpp) and its record keys are written; with 0 the list is parsed and
+  // validated but never consulted and the keys are not written (a fight then plays exactly as it does with no list).
+  int solver_sheet_do_not_hit = 1;
   std::string solver_fight_timeline_str;
   // Non-owning: the controller lives in raid_events (created by raid_event_t::init under SheetFight).
   sheet_fight_event_t* sheet_fight = nullptr;

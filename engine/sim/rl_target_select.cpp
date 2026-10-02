@@ -14,6 +14,7 @@
 #include "player/player.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_translog.hpp"
+#include "sim/sheet_fight.hpp"  // tstl-sylvanas 264-05 (O4): sheet_fight_do_not_hit
 #include "sim/sim.hpp"
 #include "util/util.hpp"
 
@@ -180,6 +181,8 @@ std::uint64_t g_target_head_no_block_count = 0;
 // states (a second concurrent select() on this buffer would race). Avoids a fresh heap allocation
 // on every targeted action's every decision.
 std::vector<player_t*> g_candidate_buffer;
+// tstl-sylvanas 264-05 (O4): the candidate set before the do-not-hit pass, kept only on a decision where the pass removed someone.
+std::vector<player_t*> g_unpruned_candidate_buffer;
 
 // 233.1-03 (R6-13, OV-5): the rules path's own candidate-feature scratch, beside g_candidate_buffer
 // above -- `w.scorer.feature_scratch` does NOT exist when `has_scorer == false` (no weights blob
@@ -379,6 +382,66 @@ bool generic_filter( const action_t* a, player_t* candidate, bool harmful )
   return true;
 }
 
+// ---- tstl-sylvanas 264-05 (O4): the sheet-declared do-not-hit rule -------------------------------------------------------
+// A boss the sheet declares do-not-hit (for a phase or a window; see sheet_fight_do_not_hit) is removed from the single-target
+// AIMED candidate sets while at least one other candidate remains. Keyed on the declaration only, so it covers every aimed token
+// whatever TARGETED_TOKENS holds (the eight at width 325, the ninth after the talent build). The rule never empties a set, never
+// changes a legality bit (generic_filter, rl_counts_as_enemy and every enemy count are untouched), never touches an area spell
+// and never looks at a shield. It reads the controller's state and draws nothing. With no entry (every non-sheet fight, a /1 spec,
+// a /2 spec without an entry, or solver_sheet_do_not_hit=0) none of the functions below changes anything.
+
+// Fills `kept` with the members of `set` that are not do-not-hit (same order) and returns true, only when the rule fires: at
+// least one member is do-not-hit and at least one is not. Counts nothing.
+static bool dnh_split( const sim_t* sim, const std::vector<player_t*>& set, std::vector<player_t*>& kept )
+{
+  if ( sim->fight_style != FIGHT_STYLE_SHEET_FIGHT || sim->sheet_fight == nullptr )
+    return false;
+  std::size_t n = 0;
+  for ( const player_t* t : set )
+    if ( sheet_fight_do_not_hit( sim, t ) )
+      ++n;
+  if ( n == 0 || n == set.size() )
+    return false;
+  kept.clear();
+  for ( player_t* t : set )
+    if ( !sheet_fight_do_not_hit( sim, t ) )
+      kept.push_back( t );
+  return true;
+}
+
+// select()'s own pass (counts for the record): two or more candidates with at least one not do-not-hit -> every do-not-hit
+// candidate removed (one drop counted per removed candidate per active entry); exactly one candidate that is do-not-hit -> kept and
+// counted as sole_kept; every candidate do-not-hit -> unchanged. When it prunes, the unpruned set is left in `unpruned` (the
+// Chain Lightning hop walk keeps reading every candidate, because a chain still reaches a do-not-hit boss).
+static bool dnh_prune_candidates( const sim_t* sim, std::vector<player_t*>& set, std::vector<player_t*>& unpruned )
+{
+  if ( sim->fight_style != FIGHT_STYLE_SHEET_FIGHT || sim->sheet_fight == nullptr )
+    return false;
+  std::size_t n = 0;
+  for ( const player_t* t : set )
+    if ( sheet_fight_do_not_hit( sim, t ) )
+      ++n;
+  if ( n == 0 )
+    return false;
+  if ( set.size() == 1 )
+  {
+    sheet_fight_note_do_not_hit( sim, set.front(), true );
+    return false;
+  }
+  if ( n == set.size() )
+    return false;
+  unpruned = set;
+  set.clear();
+  for ( player_t* t : unpruned )
+  {
+    if ( sheet_fight_do_not_hit( sim, t ) )
+      sheet_fight_note_do_not_hit( sim, t, false );
+    else
+      set.push_back( t );
+  }
+  return true;
+}
+
 // ---- Phase 266 (plan 266-01, funnel mode, owner F9): the chosen enemy (the tag) and its chooser ----
 
 player_t* rl_chosen_enemy_of( const player_t* p )
@@ -456,7 +519,20 @@ void refresh_chosen( player_t* p )
   }
 
   // Keep the tag while it can still be hit.
-  if ( p->rl_chosen_enemy != nullptr && rl_can_be_hit( p, p->rl_chosen_enemy ) )
+  // tstl-sylvanas 264-05 (O4): ... unless the sheet declares it do-not-hit right now and another enemy that can be hit is not
+  // do-not-hit; then the tag is dropped here and re-picked below.
+  bool dnh_tag_must_move = false;
+  if ( p->rl_chosen_enemy != nullptr && sheet_fight_do_not_hit( p->sim, p->rl_chosen_enemy ) &&
+       rl_can_be_hit( p, p->rl_chosen_enemy ) )
+  {
+    for ( player_t* t : p->sim->target_non_sleeping_list )
+      if ( t->is_enemy() && t != p->rl_chosen_enemy && !sheet_fight_do_not_hit( p->sim, t ) && rl_can_be_hit( p, t ) )
+      {
+        dnh_tag_must_move = true;
+        break;
+      }
+  }
+  if ( !dnh_tag_must_move && p->rl_chosen_enemy != nullptr && rl_can_be_hit( p, p->rl_chosen_enemy ) )
   {
     pin_to_tag( p );  // 266-09 (R5): flag on only; keeps target and swings on a tag that can still be hit
     return;
@@ -478,7 +554,10 @@ void refresh_chosen( player_t* p )
     if ( stormstrike != nullptr && generic_filter( stormstrike, t, /*harmful=*/true ) )
       melee_legal.push_back( t );
   }
-  const std::vector<player_t*>& eligible = melee_legal.empty() ? hittable : melee_legal;
+  // tstl-sylvanas 264-05 (O4): do-not-hit enemies leave the eligible list while at least one other eligible enemy remains.
+  std::vector<player_t*>        dnh_kept;
+  const std::vector<player_t*>& eligible_all = melee_legal.empty() ? hittable : melee_legal;
+  const std::vector<player_t*>& eligible     = dnh_split( p->sim, eligible_all, dnh_kept ) ? dnh_kept : eligible_all;
   player_t*                     pick     = eligible.empty() ? nullptr : eligible.front();
   if ( p->sim->solver_random_chosen_enemy && eligible.size() >= 2 )
   {
@@ -621,9 +700,15 @@ enemy_fact build_enemy_fact( const action_t* a, player_t* candidate )
 std::vector<enemy_fact> build_candidate_facts( const action_t* a, bool harmful )
 {
   std::vector<enemy_fact> out;
+  // tstl-sylvanas 264-05 (O4): the set the aim exploration draws from and the dump lists is the SAME set select() blocks (same
+  // do-not-hit pass, no counting here), so its order and size match the stamped block's slots.
+  std::vector<player_t*> gathered, kept;
   for ( player_t* t : a->sim->target_non_sleeping_list )
     if ( t->is_enemy() && rl_counts_as_enemy( t ) && generic_filter( a, t, harmful ) )
-      out.push_back( build_enemy_fact( a, t ) );
+      gathered.push_back( t );
+  const std::vector<player_t*>& legal = dnh_split( a->sim, gathered, kept ) ? kept : gathered;
+  for ( player_t* t : legal )
+    out.push_back( build_enemy_fact( a, t ) );
   return out;
 }
 
@@ -973,6 +1058,12 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
   if ( candidates.empty() )
     return nullptr;
 
+  // tstl-sylvanas 264-05 (O4): the sheet-declared do-not-hit pass. Right after the gather and BEFORE the candidate block is
+  // captured or any score is read: a do-not-hit boss leaves the set while another candidate remains (never empties it, never
+  // changes whether this action is legal -- the set is non-empty before and after).
+  std::vector<player_t*>& unpruned_candidates = g_unpruned_candidate_buffer;
+  const bool              dnh_pruned = dnh_prune_candidates( a->sim, candidates, unpruned_candidates );
+
   // 240-05 Task 2 (D1(a)/D8(a)): BOTH of this function's former overflow refusals (the
   // scorer-declared-slots refusal, and the `!capture_block && pref == preference_scorer` refusal
   // immediately below this comment used to guard) are REMOVED here -- they can never fire any
@@ -1062,7 +1153,10 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
     hop_slot.hop_counts.clear();
     // ME-4 (232-15b): reuses `precomputed_geo` (resolved once, just above) rather than calling
     // resolve_thorims_branch_geometry() a SECOND time for the same decision.
-    compute_chain_hop_counts( precomputed_geo.radius, precomputed_geo.cap, candidates, hop_slot.hop_counts );
+    // tstl-sylvanas 264-05 (O4): the hop walk reads EVERY gathered candidate, do-not-hit ones included: a chain still reaches
+    // them, so area geometry is untouched by the rule.
+    compute_chain_hop_counts( precomputed_geo.radius, precomputed_geo.cap,
+                              dnh_pruned ? unpruned_candidates : candidates, hop_slot.hop_counts );
     hop_slot.stamp         = current_decision_stamp( a->player );
     hop_slot.has_stamp     = true;
     hop_slot.used_fallback = false;
