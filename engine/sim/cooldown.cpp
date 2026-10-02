@@ -8,6 +8,7 @@
 #include "player/player.hpp"
 #include "sim/event.hpp"
 #include "sim/expressions.hpp"
+#include "sim/rl_buff_ledger.hpp"
 #include "sim/sim.hpp"
 
 namespace { // UNNAMED NAMESPACE
@@ -142,6 +143,9 @@ cooldown_t::cooldown_t( util::string_view n, sim_t& s ) :
  */
 void cooldown_t::adjust_recharge_multiplier()
 {
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "cooldown.adjust_recharge_multiplier" );
+
   if ( !ongoing() || charges == 0 )
   {
     return;
@@ -182,6 +186,9 @@ void cooldown_t::adjust_recharge_multiplier()
  */
 void cooldown_t::adjust_base_duration()
 {
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "cooldown.adjust_base_duration" );
+
   if ( !ongoing() )
   {
     return;
@@ -208,6 +215,9 @@ void cooldown_t::adjust_base_duration()
 
 void cooldown_t::adjust_remaining_duration( double delta )
 {
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "cooldown.adjust_remaining_duration" );
+
   assert( ongoing() && delta > 0.0 );
   assert( charges > 0 && "Cooldown charges must be positive");
 
@@ -253,6 +263,9 @@ void cooldown_t::adjust_remaining_duration( double delta )
 
 void cooldown_t::adjust( timespan_t amount, bool requires_reaction, bool apply_recharge_rate )
 {
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "cooldown.adjust" );
+
   if ( amount == 0_ms )
     return;
 
@@ -369,6 +382,9 @@ void cooldown_t::reset_init()
 
 void cooldown_t::reset( bool require_reaction, int charges_ )
 {
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "cooldown.reset" );
+
   if ( charges_ == 0 )
     return;
   if ( charges_ < 0 )
@@ -427,6 +443,9 @@ timespan_t cooldown_t::queue_delay() const
 
 void cooldown_t::start( action_t* a, timespan_t _override, timespan_t delay )
 {
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "cooldown.start" );
+
   // Zero duration cooldowns are nonsense
   if ( _override == 0_ms || ( _override < 0_ms && duration <= 0_ms ) )
   {
@@ -549,6 +568,9 @@ void cooldown_t::start( action_t* a, timespan_t _override, timespan_t delay )
 
 void cooldown_t::start( timespan_t _override, timespan_t delay )
 {
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "cooldown.start" );
+
   start( nullptr, _override, delay );
 }
 
@@ -742,6 +764,9 @@ bool cooldown_t::is_ready() const
 
 void cooldown_t::set_max_charges( int new_max_charges )
 {
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "cooldown.set_max_charges" );
+
   assert( new_max_charges > 0 && "Cooldown charges must be greater than 0" );
 
   int charges_max = charges;
@@ -823,6 +848,9 @@ void cooldown_t::set_max_charges( int new_max_charges )
 
 void cooldown_t::adjust_max_charges( int charge_change )
 {
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "cooldown.adjust_max_charges" );
+
   auto new_charges = charges + charge_change;
   assert( new_charges > 0 && "Adjusting cooldown charges results in 0 new charges." );
   set_max_charges( new_charges );

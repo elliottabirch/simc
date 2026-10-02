@@ -62,6 +62,7 @@
 #include "sim/proc_rng.hpp"
 #include "sim/scale_factor_control.hpp"
 #include "sim/sim.hpp"
+#include "sim/rl_buff_ledger.hpp"
 #include "sim/rl_rng_record.hpp"
 #include "util/io.hpp"
 #include "util/plot_data.hpp"
@@ -7712,6 +7713,9 @@ void player_t::collect_resource_timeline_information()
 
 double player_t::resource_loss( resource_e resource_type, double amount, gain_t* source, action_t* )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "player.resource_loss", 0.0 );
+
   if ( amount == 0 )
     return 0.0;
 
@@ -7771,6 +7775,9 @@ double player_t::resource_loss( resource_e resource_type, double amount, gain_t*
 
 double player_t::resource_gain( resource_e resource_type, double amount, gain_t* source, action_t* action )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "player.resource_gain", 0.0 );
+
   if ( current.sleeping || amount == 0.0 )
     return 0.0;
 
@@ -8002,6 +8009,9 @@ timespan_t player_t::total_reaction_time()
 
 void player_t::stat_gain( stat_e stat, double amount, gain_t* gain, action_t* action, bool temporary_stat )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "player.stat_gain" );
+
   if ( amount <= 0 )
     return;
 
@@ -8146,6 +8156,9 @@ void player_t::stat_gain( stat_e stat, double amount, gain_t* gain, action_t* ac
 
 void player_t::stat_loss( stat_e stat, double amount, gain_t* gain, action_t* action, bool temporary_buff )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "player.stat_loss" );
+
   if ( amount <= 0 )
     return;
 

@@ -19,6 +19,7 @@
 #include "sim/proc_rng.hpp"
 #include "sim/sim.hpp"
 #include "sim/rl_rng_record.hpp"
+#include "sim/rl_buff_ledger.hpp"
 #include "util/rng.hpp"
 
 #include <optional>
@@ -2149,16 +2150,25 @@ int buff_t::_resolve_stacks( int stacks )
 
 bool buff_t::trigger( timespan_t duration )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.trigger", false );
+
   return trigger( -1, duration );
 }
 
 bool buff_t::trigger( int stacks, timespan_t duration )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.trigger", false );
+
   return trigger( stacks, DEFAULT_VALUE(), -1, duration );
 }
 
 bool buff_t::trigger( int stacks, double value, double chance, timespan_t duration )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.trigger", false );
+
   if ( _max_stack == 0 || chance == 0 )
     return false;
 
@@ -2257,6 +2267,9 @@ bool buff_t::trigger( int stacks, double value, double chance, timespan_t durati
 
 void buff_t::execute( int stacks, double value, timespan_t duration )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.execute" );
+
   if ( value == DEFAULT_VALUE() && default_value != DEFAULT_VALUE() )
     value = default_value;
 
@@ -2298,6 +2311,9 @@ void buff_t::execute( int stacks, double value, timespan_t duration )
 
 void buff_t::increment( int stacks, double value, timespan_t duration )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.increment" );
+
   if ( overridden )
     return;
 
@@ -2323,6 +2339,9 @@ void buff_t::increment( int stacks, double value, timespan_t duration )
 
 void buff_t::decrement( int stacks, double value )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.decrement" );
+
   if ( overridden )
     return;
 
@@ -2369,6 +2388,9 @@ void buff_t::decrement( int stacks, double value )
 
 void buff_t::extend_duration( timespan_t extra_seconds )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.extend_duration" );
+
   if ( !check() )
   {
     return;
@@ -2419,6 +2441,9 @@ void buff_t::extend_duration( timespan_t extra_seconds )
 
 void buff_t::extend_async_duration( timespan_t extra_seconds )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.extend_async_duration" );
+
   if ( !check() )
   {
     return;
@@ -2458,6 +2483,9 @@ void buff_t::extend_async_duration( timespan_t extra_seconds )
 // Cannot be used for negative adjustments like buff_t::extend_duration() can
 void buff_t::extend_duration_or_trigger( timespan_t duration )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.extend_duration_or_trigger" );
+
   timespan_t d = ( duration >= timespan_t::zero() ) ? duration : buff_duration();
 
   if ( check() )
@@ -2474,6 +2502,9 @@ void buff_t::extend_duration_or_trigger( timespan_t duration )
 // instead.
 void buff_t::reschedule_tick( timespan_t delta )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.reschedule_tick" );
+
   if ( delta == 0_s )
     return;
 
@@ -2505,6 +2536,9 @@ void buff_t::reschedule_tick( timespan_t delta )
 
 void buff_t::start( int stacks, double value, timespan_t duration )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.start" );
+
   if ( _max_stack == 0 )
     return;
 
@@ -2621,6 +2655,9 @@ void buff_t::start( int stacks, double value, timespan_t duration )
 
 void buff_t::refresh( int stacks, double value, timespan_t duration )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.refresh" );
+
   if ( _max_stack == 0 )
     return;
 
@@ -2722,6 +2759,9 @@ void buff_t::refresh( int stacks, double value, timespan_t duration )
 
 void buff_t::bump( int stacks, double value )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.bump" );
+
   if ( _max_stack == 0 )
     return;
 
@@ -2881,6 +2921,9 @@ void buff_t::bump( int stacks, double value )
 
 void buff_t::override_buff( int stacks, double value )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.override_buff" );
+
   if ( _max_stack == 0 )
     return;
 
@@ -2920,6 +2963,9 @@ bool buff_t::can_trigger( action_t* action ) const
 
 bool buff_t::trigger( action_t* action, int stacks, double value, double chance, timespan_t duration )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.trigger", false );
+
   if ( can_trigger( action ) )
   {
     if ( sim->debug )
@@ -2950,6 +2996,9 @@ bool buff_t::can_consume( action_t* action ) const
 
 int buff_t::consume( action_t* action, int stacks )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.consume", 0 );
+
   if ( !stacks || !check() )
     return 0;
 
@@ -2985,6 +3034,9 @@ int buff_t::consume( action_t* action, int stacks )
 
 void buff_t::expire( timespan_t d )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.expire" );
+
   if ( current_stack <= 0 )
   {
     assert( tick_event == nullptr );
@@ -3117,6 +3169,9 @@ void buff_t::expire( timespan_t d )
 
 void buff_t::cancel()
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.cancel" );
+
   expire();
   event_t::cancel( expiration_delay );
   for ( auto e : delay )
@@ -3823,6 +3878,9 @@ void stat_buff_t::update_player_buff_stat( buff_stat_t& buff_stat, int stacks )
 
 void stat_buff_t::bump( int stacks, double value )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.bump" );
+
   buff_t::bump( stacks, value );
 
   for ( auto& buff_stat : stats )
@@ -3836,6 +3894,9 @@ void stat_buff_t::bump( int stacks, double value )
 
 void stat_buff_t::decrement( int stacks, double /* value */ )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.decrement" );
+
   if ( stacks == 0 || current_stack <= stacks )
   {
     expire();
@@ -3933,6 +3994,9 @@ cost_reduction_buff_t::cost_reduction_buff_t( actor_pair_t q, util::string_view 
 
 void cost_reduction_buff_t::bump( int stacks, double value )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.bump" );
+
   if ( value > 0 )
   {
     amount = value;
@@ -3950,6 +4014,9 @@ void cost_reduction_buff_t::bump( int stacks, double value )
 
 void cost_reduction_buff_t::decrement( int stacks, double /* value */ )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.decrement" );
+
   if ( stacks == 0 || current_stack <= stacks )
   {
     expire();
@@ -4006,6 +4073,9 @@ absorb_buff_t::absorb_buff_t( actor_pair_t q, util::string_view name, const spel
 
 void absorb_buff_t::start( int stacks, double value, timespan_t duration )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.start" );
+
   if ( max_stack() == 0 )
     return;
 
@@ -4019,6 +4089,9 @@ void absorb_buff_t::start( int stacks, double value, timespan_t duration )
 
 void absorb_buff_t::refresh( int stacks, double value, timespan_t duration )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.refresh" );
+
   if ( cumulative )
     value += current_value;
 
@@ -4147,6 +4220,9 @@ absorb_buff_t* absorb_buff_t::set_cumulative( bool c )
 
 bool movement_buff_t::trigger( int stacks, double value, double chance, timespan_t duration )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.trigger", false );
+
 
   for ( const auto& cb : player->callbacks_on_movement )
   {

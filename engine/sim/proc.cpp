@@ -5,6 +5,7 @@
 #include "proc.hpp"
 
 #include "sim/sim.hpp"
+#include "sim/rl_buff_ledger.hpp"
 
 proc_t::proc_t( sim_t& s, util::string_view n, unsigned flags )
   : sim( s ),
@@ -19,6 +20,9 @@ proc_t::proc_t( sim_t& s, util::string_view n, unsigned flags )
 
 void proc_t::occur()
 {
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "proc.occur" );
+
   iteration_count++;
   if ( last_proc >= timespan_t::zero() && last_proc < sim.current_time() )
   {
