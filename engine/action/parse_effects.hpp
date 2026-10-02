@@ -954,9 +954,14 @@ struct parse_action_effects_t : public BASE, public parse_action_base_t
     // post_snapshot callbacks every snapshot.
     callback_idx &= ~callback_mask[ PARSE_CALLBACK_POST_SNAPSHOT ];
     BASE::snapshot_internal( s, fl, rt );
-    if ( rt != result_amount_type::NONE )
+    // 261001-bac plan 03: the ledger's extra passes never fire the real post-snapshot callbacks.
+    if ( rt != result_amount_type::NONE && !BASE::sim->rl_bl_shadow )
       trigger_callbacks( PARSE_CALLBACK_POST_SNAPSHOT, s );
   }
+
+  // 261001-bac plan 03: the ledger saves and restores the callback mask around its extra passes.
+  std::uint32_t rl_bl_callback_state() const override { return callback_idx; }
+  void rl_bl_set_callback_state( std::uint32_t v ) override { callback_idx = v; }
 
   void impact( action_state_t* s ) override
   {

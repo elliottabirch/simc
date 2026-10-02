@@ -2126,6 +2126,11 @@ void action_t::execute()
         if ( sim->debug )
           s->debug();
 
+        // 261001-bac plan 03: as in the single-target branch below. The scratch copies carry this
+        // state's n_targets and chain_target; target_list() is never called by the ledger.
+        if ( sim->rl_bl_on && !pre_execute_state )
+          rl_buff_ledger::run_passes( this, s );
+
         schedule_travel( s );
       }
     }

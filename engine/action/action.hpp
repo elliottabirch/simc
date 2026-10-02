@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include "config.hpp"
 
 #include "action/action_callback.hpp"
@@ -1177,6 +1178,12 @@ public:
 
   virtual void snapshot_state( action_state_t* s, result_amount_type rt )
   { snapshot_state( s, snapshot_flags, rt ); }
+
+  // 261001-bac plan 03 (research clone only): the per-hit ledger's hidden passes must leave the
+  // parse-effects callback mask (parse_effects_t::callback_idx) as the real pass left it. No effect
+  // here; the parse-effects action template overrides both.
+  virtual std::uint32_t rl_bl_callback_state() const { return 0; }
+  virtual void rl_bl_set_callback_state( std::uint32_t ) {}
 
   virtual void update_state( action_state_t* s, unsigned flags, result_amount_type rt )
   { snapshot_internal( s, flags, rt ); }

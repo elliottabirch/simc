@@ -458,6 +458,35 @@ void xp_record( player_t* p, const rl_cause_t& cause, double amount, const char*
 // ==========================================================================
 // Plan 03: hide-and-recompute passes
 // ==========================================================================
+
+// The read tap (buff.hpp declares both). g_tap_open is true only while the REFERENCE pass of a hit
+// runs; note_read records each buff once with a non-zero stack or value, in first-read order.
+bool g_tap_open = false;
+
+namespace
+{
+struct tap_read_t
+{
+  const buff_t* b;
+  int stack;
+  double value;
+};
+std::vector<tap_read_t> g_tap_reads;
+}  // namespace
+
+void note_read( const buff_t* b, int stack, double value )
+{
+  if ( !g_tap_open )
+    return;
+  // A buff read as zero cannot be a candidate (only a read that returned something is a dependency).
+  if ( stack == 0 && value == 0.0 )
+    return;
+  for ( const tap_read_t& r : g_tap_reads )
+    if ( r.b == b )
+      return;
+  g_tap_reads.push_back( { b, stack, value } );
+}
+
 namespace
 {
 // The snapshot fields compared bit for bit between a scratch pass and the real state. A mismatch is
@@ -533,6 +562,8 @@ public:
     sim_->debug  = false;
     sim_->log    = 0;
     sim_->rl_bl_shadow = true;
+    action_ = a;
+    saved_callback_state_ = a->rl_bl_callback_state();
     if ( dealer_->is_pet() )
       owner_ = static_cast<pet_t*>( dealer_ )->owner;
     saved_dealer_.emplace( dealer_->cache );
@@ -562,6 +593,7 @@ public:
       owner_->cache = *saved_owner_;
     if ( saved_target_ )
       target_->cache = *saved_target_;
+    action_->rl_bl_set_callback_state( saved_callback_state_ );
     sim_->rl_bl_shadow = false;
     sim_->debug        = saved_debug_;
     sim_->log          = saved_log_;
@@ -572,6 +604,8 @@ private:
   player_t* dealer_;
   player_t* owner_;
   player_t* target_;
+  action_t* action_ = nullptr;
+  std::uint32_t saved_callback_state_ = 0;
   bool saved_debug_ = false;
   int saved_log_    = 0;
   std::optional<player_stat_cache_t> saved_dealer_;
@@ -637,9 +671,28 @@ struct pass_env_t
 // first made to look like the real state did at its snapshot (fresh result fields, then the real
 // result and block result put back for the amount, as in the real order: snapshot, crit roll,
 // amount). Caches are invalidated first. Leaves the pass's snapshot in env.scratch.
-amount_t amount_pass( pass_env_t& env )
+struct tap_scope_t
+{
+  explicit tap_scope_t( bool on ) : on_( on )
+  {
+    if ( on_ )
+    {
+      g_tap_reads.clear();
+      g_tap_open = true;
+    }
+  }
+  ~tap_scope_t()
+  {
+    if ( on_ )
+      g_tap_open = false;
+  }
+  bool on_;
+};
+
+amount_t amount_pass( pass_env_t& env, bool log_reads = false )
 {
   env.scope->invalidate_caches();
+  tap_scope_t tap( log_reads );
   action_state_t* sc = env.scratch;
   sc->copy_state( env.real );
   sc->action = env.action;
@@ -664,23 +717,21 @@ bool press_applied( const buff_t* b )
   return ( c.cls == RL_CAUSE_PROC_OF_CAST || c.cls == RL_CAUSE_PROC_OF_DOT ) && c.press >= 0;
 }
 
-// Task 1's simple candidate rule (replaced by the read-log rule): every buff of the dealer (and of
-// its owner), and every buff on the target whose source is the dealer (or its owner), that is up and
-// was applied by a press.
-void collect_candidates_simple( player_t* dealer, player_t* owner, player_t* target, std::vector<buff_t*>& out )
+// Candidates: the buffs the REFERENCE pass read (non-zero stack or value) that were applied by a
+// press: the dealer's own buffs, its owner's when the dealer is a pet, and debuffs on the hit's own
+// target whose source is the dealer or its owner. First-read order, which is deterministic.
+void collect_candidates( player_t* dealer, player_t* owner, player_t* target, std::vector<buff_t*>& out )
 {
-  auto take = [ & ]( buff_t* b ) {
-    if ( b->check() > 0 && press_applied( b ) )
+  for ( const tap_read_t& r : g_tap_reads )
+  {
+    buff_t* b = const_cast<buff_t*>( r.b );
+    if ( b->player == nullptr || !press_applied( b ) )
+      continue;
+    const bool own    = b->player == dealer || ( owner != nullptr && b->player == owner );
+    const bool debuff = b->player == target && ( b->source == dealer || ( owner != nullptr && b->source == owner ) );
+    if ( own || debuff )
       out.push_back( b );
-  };
-  for ( buff_t* b : dealer->buff_list )
-    take( b );
-  if ( owner != nullptr && owner != dealer )
-    for ( buff_t* b : owner->buff_list )
-      take( b );
-  for ( buff_t* b : target->buff_list )
-    if ( b->source == dealer || ( owner != nullptr && b->source == owner ) )
-      take( b );
+  }
 }
 
 void put_pass( std::string& b, const pass_rec_t& p )
@@ -742,7 +793,7 @@ void run_passes( action_t* a, action_state_t* s )
     pass_env_t env{ a, s, scratch_slot.get(), &scope };
 
     // Reference pass: nothing hidden. Must reproduce the real snapshot and pre-crit amount.
-    const amount_t ref = amount_pass( env );
+    const amount_t ref = amount_pass( env, /*log_reads=*/true );
     std::uint64_t viol = snapshot_diff( env.scratch, s );
     if ( !same_bits( ref.pre, s->result_amount ) )
       viol |= VIOL_PRE_CRIT;
@@ -754,7 +805,7 @@ void run_passes( action_t* a, action_state_t* s )
     }
     else if ( ref.pre != 0.0 )
     {
-      collect_candidates_simple( dealer, owner, s->target, cands );
+      collect_candidates( dealer, owner, s->target, cands );
       if ( cands.size() > 40 )
       {
         throw sc_runtime_error( fmt::format( "rl_buff_ledger=: {} candidate buffs on one hit of '{}'; the hidden-set "
@@ -763,12 +814,44 @@ void run_passes( action_t* a, action_state_t* s )
       }
       if ( !cands.empty() )
       {
+        auto hidden_pass = [ & ]( std::uint64_t mask ) {
+          hidden_buffs_t hidden;
+          for ( std::size_t i = 0; i < cands.size(); ++i )
+            if ( mask & ( std::uint64_t( 1 ) << i ) )
+              hidden.hide( cands[ i ] );
+          passes.push_back( { "hide", mask, amount_pass( env ), 0 } );
+        };
+
+        // One pass per candidate hidden alone.
+        for ( std::size_t i = 0; i < cands.size(); ++i )
+          hidden_pass( std::uint64_t( 1 ) << i );
+
+        // A candidate is EFFECTIVE when hiding it alone changes the pre-crit amount. For 2 or 3
+        // effective candidates every remaining hidden subset (all 2^m - 1 minus the singles) is run;
+        // above 3 only the all-effective-hidden pass (the split rule needs each single removal plus
+        // the joint removal). One effective candidate needs nothing more.
+        std::uint64_t effective_mask = 0;
+        int n_effective              = 0;
         for ( std::size_t i = 0; i < cands.size(); ++i )
         {
-          hidden_buffs_t hidden;
-          hidden.hide( cands[ i ] );
-          passes.push_back( { "hide", std::uint64_t( 1 ) << i, amount_pass( env ), 0 } );
+          if ( passes[ 1 + i ].amount.pre != ref.pre )
+          {
+            effective_mask |= std::uint64_t( 1 ) << i;
+            ++n_effective;
+          }
         }
+        if ( n_effective >= 2 && n_effective <= 3 )
+        {
+          std::vector<std::uint64_t> subsets;
+          for ( std::uint64_t sub = effective_mask; sub != 0; sub = ( sub - 1 ) & effective_mask )
+            if ( ( sub & ( sub - 1 ) ) != 0 )  // two or more members; the singles are done
+              subsets.push_back( sub );
+          std::sort( subsets.begin(), subsets.end() );
+          for ( std::uint64_t sub : subsets )
+            hidden_pass( sub );
+        }
+        else if ( n_effective > 3 )
+          hidden_pass( effective_mask );
 
         // Restoring pass: nothing hidden again, a fresh snapshot, so class members written by the
         // hidden passes (shaman's mw_affected_stacks / mw_consumed_stacks) return to their real values.

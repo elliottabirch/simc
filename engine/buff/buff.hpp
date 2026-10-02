@@ -28,6 +28,18 @@
 #include <vector>
 
 struct buff_t;
+
+// 261001-bac plan 03 (research clone only): the read tap. A buff read function reports itself here
+// only while the per-hit ledger's REFERENCE pass has an amount scope open (`g_tap_open`, a plain
+// global that is false at all other times and in every run with rl_buff_ledger= unset, so a read
+// costs one load and a branch). buff.hpp does not see sim_t, which is why this is a global and not
+// `sim->rl_bl_on`; the ledger refuses threads > 1, so there is exactly one writer. Reads made by
+// the APL, by expressions or by the observation code are never logged (the flag is false then).
+namespace rl_buff_ledger
+{
+extern bool g_tap_open;
+void note_read( const buff_t* b, int stack, double value );
+}  // namespace rl_buff_ledger
 struct cooldown_t;
 struct event_t;
 struct expr_t;
@@ -202,6 +214,8 @@ public:
    */
   int check() const
   {
+    if ( rl_buff_ledger::g_tap_open )
+      rl_buff_ledger::note_read( this, current_stack, current_value );
     return current_stack;
   }
 
@@ -237,6 +251,8 @@ public:
    */
   double stack_value()
   {
+    if ( rl_buff_ledger::g_tap_open )
+      rl_buff_ledger::note_read( this, current_stack, current_value );
     return current_stack * value();
   }
 
@@ -245,6 +261,8 @@ public:
    */
   virtual double check_value() const
   {
+    if ( rl_buff_ledger::g_tap_open )
+      rl_buff_ledger::note_read( this, current_stack, current_value );
     return current_value;
   }
 
@@ -253,6 +271,8 @@ public:
    */
   double check_stack_value() const
   {
+    if ( rl_buff_ledger::g_tap_open )
+      rl_buff_ledger::note_read( this, current_stack, current_value );
     return current_stack * check_value();
   }
 
@@ -270,7 +290,12 @@ public:
   bool remains_gt( timespan_t time ) const;
   bool remains_lt( timespan_t time ) const;
   bool has_common_school( school_e ) const;
-  bool at_max_stacks( int mod = 0 ) const { return check() + mod >= max_stack(); }
+  bool at_max_stacks( int mod = 0 ) const
+  {
+    if ( rl_buff_ledger::g_tap_open )
+      rl_buff_ledger::note_read( this, current_stack, current_value );
+    return check() + mod >= max_stack();
+  }
   // For trigger()/execute(), default value of stacks is -1, since we want to allow for explicit calls of stacks=1 to
   // override using buff_t::_initial_stack
   int _resolve_stacks( int stacks );
@@ -628,7 +653,11 @@ struct damage_buff_t : public buff_t
 
   // Get current direct damage buff multiplier value + NO benefit tracking.
   double check_value_direct() const
-  { return current_stack ? get_mod_multiplier( direct_mod ) : 1.0; }
+  {
+    if ( rl_buff_ledger::g_tap_open )
+      rl_buff_ledger::note_read( this, current_stack, current_value );
+    return current_stack ? get_mod_multiplier( direct_mod ) : 1.0;
+  }
 
   // Get current direct damage buff multiplier value multiplied by current stacks + NO benefit tracking.
   double check_stack_value_direct() const
@@ -647,7 +676,11 @@ struct damage_buff_t : public buff_t
 
   // Get current periodic damage buff multiplier value + NO benefit tracking.
   double check_value_periodic() const
-  { return current_stack ? get_mod_multiplier( periodic_mod ) : 1.0; }
+  {
+    if ( rl_buff_ledger::g_tap_open )
+      rl_buff_ledger::note_read( this, current_stack, current_value );
+    return current_stack ? get_mod_multiplier( periodic_mod ) : 1.0;
+  }
 
   // Get current periodic damage buff multiplier value multiplied by current stacks + NO benefit tracking.
   double check_stack_value_periodic() const
@@ -666,7 +699,11 @@ struct damage_buff_t : public buff_t
 
   // Get current AA damage buff multiplier value + NO benefit tracking.
   double check_value_auto_attack() const
-  { return current_stack ? get_mod_multiplier( auto_attack_mod ) : 1.0; }
+  {
+    if ( rl_buff_ledger::g_tap_open )
+      rl_buff_ledger::note_read( this, current_stack, current_value );
+    return current_stack ? get_mod_multiplier( auto_attack_mod ) : 1.0;
+  }
 
   // Get current AA damage buff multiplier value multiplied by current stacks + NO benefit tracking.
   double check_stack_value_auto_attack() const
@@ -685,7 +722,11 @@ struct damage_buff_t : public buff_t
 
   // Get current additive crit chance buff value + NO benefit tracking.
   double check_value_crit_chance() const
-  { return current_stack ? get_mod_multiplier( crit_chance_mod ) - 1.0 : 0.0; }
+  {
+    if ( rl_buff_ledger::g_tap_open )
+      rl_buff_ledger::note_read( this, current_stack, current_value );
+    return current_stack ? get_mod_multiplier( crit_chance_mod ) - 1.0 : 0.0;
+  }
 
   // Get current additive crit chance buff value multiplied by current stacks + NO benefit tracking.
   double check_stack_value_crit_chance() const

@@ -2016,7 +2016,11 @@ timespan_t buff_t::tick_time() const
 int buff_t::stack()
 {
   int cs = current_stack;
-  if ( last_benefite_update != sim->current_time() )
+  if ( rl_buff_ledger::g_tap_open )
+    rl_buff_ledger::note_read( this, cs, current_value );
+  // 261001-bac plan 03: the ledger's hidden / reference / restoring passes must leave the report's
+  // benefit counters as the real pass left them (sim->rl_bl_shadow is false in every other case).
+  if ( !sim->rl_bl_shadow && last_benefite_update != sim->current_time() )
   {
     // make sure we only record a benfit once per sim event
     last_benefite_update = sim->current_time();
@@ -2031,6 +2035,8 @@ int buff_t::stack()
 int buff_t::total_stack()
 {
   int s = current_stack;
+  if ( rl_buff_ledger::g_tap_open )
+    rl_buff_ledger::note_read( this, s, current_value );
 
   for ( const auto e : delay )
   {
@@ -2042,6 +2048,8 @@ int buff_t::total_stack()
 
 bool buff_t::may_react( int stack )
 {
+  if ( rl_buff_ledger::g_tap_open )
+    rl_buff_ledger::note_read( this, current_stack, current_value );
   if ( current_stack == 0 )
     return false;
   if ( stack > current_stack )
@@ -2060,6 +2068,8 @@ bool buff_t::may_react( int stack )
 int buff_t::stack_react()
 {
   int stack = current_stack;
+  if ( rl_buff_ledger::g_tap_open )
+    rl_buff_ledger::note_read( this, stack, current_value );
 
   for ( int i = current_stack; i >= 1; i-- )
   {
@@ -2073,6 +2083,8 @@ int buff_t::stack_react()
 
 timespan_t buff_t::remains() const
 {
+  if ( rl_buff_ledger::g_tap_open )
+    rl_buff_ledger::note_read( this, current_stack, current_value );
   if ( current_stack <= 0 )
   {
     return timespan_t::zero();
