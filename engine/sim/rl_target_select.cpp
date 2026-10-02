@@ -421,6 +421,25 @@ bool rl_can_be_hit( const player_t* p, const player_t* t )
   return generic_filter( bolt, const_cast<player_t*>( t ), /*harmful=*/true );
 }
 
+// 2026-10-02, 266-09 (research R5, owner F9): in a funnel-mode fight the RL actor's own target and both weapon
+// swings sit on the tag. Writes exactly what retarget() writes (the player's target and the two swings, never
+// any other action), so the 261-09 dead-swing guard's invariant (swings stay on the player's target) holds.
+// With the flag off this does nothing at all (R8).
+static void pin_to_tag( player_t* p )
+{
+  if ( !p->sim->solver_funnel_mode )
+    return;
+  player_t* tag = p->rl_chosen_enemy;
+  if ( tag == nullptr )
+    return;
+  if ( p->target != tag )
+    p->target = tag;
+  if ( p->main_hand_attack && p->main_hand_attack->target != tag )
+    p->main_hand_attack->set_target( tag );
+  if ( p->off_hand_attack && p->off_hand_attack->target != tag )
+    p->off_hand_attack->set_target( tag );
+}
+
 void refresh_chosen( player_t* p )
 {
   // The chooser is entered only by the RL actor. Refuse by name any other player, in
@@ -438,7 +457,10 @@ void refresh_chosen( player_t* p )
 
   // Keep the tag while it can still be hit.
   if ( p->rl_chosen_enemy != nullptr && rl_can_be_hit( p, p->rl_chosen_enemy ) )
+  {
+    pin_to_tag( p );  // 266-09 (R5): flag on only; keeps target and swings on a tag that can still be hit
     return;
+  }
 
   // Otherwise pick the first enemy, in the list order, that can be hit AND is legal for this player's
   // Stormstrike; failing that, the first that can be hit at all (R3). This plan builds only the
@@ -463,7 +485,10 @@ void refresh_chosen( player_t* p )
 
   // With nothing hittable the old tag is kept (R2).
   if ( pick != nullptr )
+  {
     p->rl_chosen_enemy = pick;
+    pin_to_tag( p );  // 266-09 (R5): after a re-pick the target and swings follow the tag (flag on only)
+  }
 }
 
 // tstl-sylvanas 260928-tb8: observation-only non-boss mask for trash pulls. Engine mechanics keep
@@ -1766,11 +1791,18 @@ void retarget( action_t* a, player_t* p, player_t* pick )
   // WR-07 (260902/cr4): action_t::set_target -- NEVER a raw `a->target = pick` write (it skips the
   // AoE target-cache invalidation, leaving a stale cache and a silently wrong hit set).
   a->set_target( pick );
-  p->target = pick;
-  if ( p->main_hand_attack )
-    p->main_hand_attack->set_target( pick );
-  if ( p->off_hand_attack )
-    p->off_hand_attack->set_target( pick );
+  // 2026-10-02, 266-09 (research R5, owner F9): in a funnel-mode fight an aimed cast goes where it was aimed
+  // (the action's own target above) but does NOT move the player's own target or either weapon swing: they stay
+  // on the chosen enemy (the tag), the way the live game keeps them. Flag off: today's writes, unchanged (R8).
+  // The mid-cast fallback in action.cpp calls this with the player's own target, so it needs no gate of its own.
+  if ( !p->sim->solver_funnel_mode )
+  {
+    p->target = pick;
+    if ( p->main_hand_attack )
+      p->main_hand_attack->set_target( pick );
+    if ( p->off_hand_attack )
+      p->off_hand_attack->set_target( pick );
+  }
   // The turn (T2) formerly here -- both callers (accept_cast, the mid-cast re-resolution
   // ladder's fallback arm) turning the player toward `pick` -- is DELETED (R6-8, owner,
   // 2026-09-07). `pick` never reaches this function unless it already passed

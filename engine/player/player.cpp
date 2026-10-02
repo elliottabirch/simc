@@ -15041,6 +15041,14 @@ void player_t::acquire_target( retarget_source event, player_t* context )
     break;
   }
 
+  // 2026-10-02, 266-09 (research R5, owner F9): in a funnel-mode fight the RL actor keeps the tag as its target
+  // for as long as the tag can be hit, whatever enemy comes first in the list. Only the RL actor ever holds a
+  // tag (player_t::rl_chosen_enemy is written by the chooser alone), so every other player, pets included,
+  // skips this. The tag not being hittable falls through to the stock choice above; the chooser re-picks at the
+  // next decision boundary and the target follows. Flag off: not one line of this runs (R8).
+  if ( sim->solver_funnel_mode && rl_chosen_enemy != nullptr && rl_target_select::rl_can_be_hit( this, rl_chosen_enemy ) )
+    candidate_target = rl_chosen_enemy;
+
   // Invulnerable targets are currently not in the target_non_sleeping_list, so fall back to
   // checking if the first target has the invulnerability buff up, and use that as the fallback
   auto first_target = sim->target_list.data().front();

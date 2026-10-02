@@ -471,9 +471,9 @@ void open_and_write_header( sim_t* sim )
   }
   if ( root->target_scorer_force_rules )
     h.aim_state |= AIM_STATE_FORCE_RULES;
-  // Version 13 (266-01): the funnel mode and chooser state words are written 0 until plan 266-09 adds
-  // the options that set them. (h is value-initialised above; stated here so the zero is on purpose.)
-  h.funnel_mode = 0;
+  // Version 13 (266-01, 266-09): the funnel mode word is the option's value (0 or 1, R10); the chooser state
+  // word stays 0 until the random-tag option exists (its bit 0, plan 266-09 task 2).
+  h.funnel_mode = root->solver_funnel_mode ? 1u : 0u;
   h.chooser_state = 0;
   // tstl-sylvanas phase 218, plan 218-02 (RIG-01): source the header's
   // fight-shape word from the sim option instead of hardcoding zero. 0

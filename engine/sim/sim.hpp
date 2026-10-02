@@ -1361,6 +1361,13 @@ struct sim_t : private sc_thread_t
   // and is still validated, but `select()` never dispatches to it. Registering a new option moves
   // the simulator-options fingerprint the rig computes -- recorded in that same receipt.
   bool target_scorer_force_rules;
+  // Phase 266 (plan 266-09, owner F9, research R5/R11): funnel mode. With it on, the RL actor's own target and
+  // both weapon swings stay on the chosen enemy (the tag, player_t::rl_chosen_enemy): an aimed cast no longer
+  // moves them (rl_target_select::retarget skips the writes), player_t::acquire_target keeps the tag while it
+  // can be hit, and after the chooser re-picks the target and swings follow it. Default off; off changes no line
+  // of play (R8). There is NO funnel aiming rule: select(), preference_for, the legality filter and
+  // target_scorer_force_rules are the same code with the flag on and off (R6).
+  bool solver_funnel_mode;
   bool ignore_invulnerable_targets;
   bool enable_dps_healing;
   bool count_overheal_as_heal;
