@@ -26,6 +26,8 @@
 
 #include "sim/rl_credit.hpp"
 
+#include "util/rng.hpp"
+
 #include <cstdint>
 
 struct sim_t;
@@ -101,4 +103,38 @@ void xp_record( player_t* p, const rl_cause_t& cause, double amount, const char*
 // for bit). The result is parked in a side table under a fresh id written to state->rl_bl_hit and
 // attached to the hit record by hit_sink.
 void run_passes( action_t* a, action_state_t* s );
+
+// 261001-bac plan 04: the same hide-and-recompute passes for one DIRECT tick of a damage-over-time
+// effect (an action with no tick_action), called from action_t::tick after calculate_tick_amount and
+// before assess_damage. `tick_multiplier` is the factor the engine passed to calculate_tick_amount
+// (dot tick factor times stacks). Each pass re-runs update_state (the tick-time update flags only)
+// on a scratch copy of the DoT's state; the reference pass must reproduce the real tick bit for bit.
+// The result is parked under a fresh id written to d->state->rl_bl_hit, attached by hit_sink, and the
+// tick's hit record names the application (`parent`, the `app` record the DoT's state carries).
+void run_tick_passes( action_t* a, action_state_t* dot_state, double tick_multiplier );
+
+// 261001-bac plan 04 shadow guards. Inside the ledger's own passes (sim->rl_bl_shadow) every function
+// that changes a buff, a cooldown, a resource, a stat or a proc counter returns at once through one of
+// these (the neutral return value is the argument): the call is counted under `guard` in the footer's
+// `shadow_violation` and the pass set that is running is marked unsafe. Outside a pass nothing calls
+// them.
+void note_blocked( sim_t* sim, const char* guard );
+template <typename T>
+inline T blocked( sim_t* sim, const char* guard, T neutral )
+{
+  note_blocked( sim, guard );
+  return neutral;
+}
+inline void blocked( sim_t* sim, const char* guard )
+{
+  note_blocked( sim, guard );
+}
+
+// 261001-bac plan 04: the one hook behind all six accessors that hand out a random generator
+// (action_t, player_t, sim_t, buff_t, dbc_proc_callback_t, proc_rng_t). While the ledger's passes run
+// (sim->rl_bl_shadow) it counts one violation `rng.draw.<family>` and returns the ledger's scratch
+// generator, which the roll recorder never sees; otherwise it returns null and the accessor's own
+// stream is used unchanged. `family` is one of "action", "player", "sim", "buff", "callback",
+// "proc_rng".
+rng::rng_t* rng_access( sim_t* sim, const char* family );
 }  // namespace rl_buff_ledger

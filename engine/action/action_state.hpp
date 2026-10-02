@@ -42,6 +42,11 @@ struct action_state_t : private noncopyable
   std::int16_t    rl_cause_press = -1;    // widths match rl_cause_t's (see its comment)
   std::int32_t    rl_cause_launch = -1;
   std::uint64_t   rl_bl_hit = 0;
+  // 261001-bac plan 04: the id (`h`) of the `app` record written for the application this state was
+  // snapshotted in (a hit that applies a damage-over-time effect). Unlike rl_bl_hit it IS copied by
+  // copy_state, so the DoT's own state (a copy of the applying hit's state) carries it to every
+  // later tick, which names it as its parent. 0 = none.
+  std::uint64_t   rl_bl_app = 0;
   // tstl-sylvanas phase 250, plan 250-03 (REC-04): the press active when this state was stamped
   // (rl_rng_record::stamp_state(), called beside the rl_cause_seq stamp above at every site that
   // sets it) -- outer is the outermost active press (the button that was pressed), inner is the

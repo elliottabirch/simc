@@ -84,9 +84,13 @@ class recorder_t;
 // 261001-bac stage 0: per-hit buff ledger (research clone only). Forward declaration only --
 // sim.hpp must NOT include rl_buff_ledger.hpp; the state type is defined in rl_buff_ledger.cpp.
 // Held in a std::shared_ptr (type-erased deleter), exactly like rl_rng_recorder below.
+struct sim_t;
 namespace rl_buff_ledger
 {
 struct state_t;
+// Plan 04: the one hook behind every accessor that hands out a random generator (see
+// rl_buff_ledger.hpp); declared here so the inline sim_t::rng() can call it.
+rng::rng_t* rng_access( sim_t* sim, const char* family );
 }
 
 struct sim_progress_t
@@ -801,6 +805,11 @@ struct sim_t : private sc_thread_t
   // (rl_buff_ledger.cpp, shadow_scope_t). Consulted by buff_t::stack() (no benefit-counter update)
   // and by the parse-effects snapshot_internal (no post-snapshot callbacks). Never set otherwise.
   bool rl_bl_shadow = false;
+  // 261001-bac plan 04 (stage-0 only): rl_buff_ledger_guard_probe=1 makes the ledger plant one
+  // deliberate violation of every shadow guard inside a pass per fight (a buff expire, a resource
+  // gain, a cooldown adjust, a stat gain, one draw through the dealing action and one through the
+  // candidate buff). Default 0. Its only purpose is to prove the guards block and count.
+  bool rl_buff_ledger_guard_probe = false;
   std::shared_ptr<rl_buff_ledger::state_t> rl_bl_state;
   // The replay option (tstl-sylvanas phase 253, plan 253-02, REP-01/D-01/D-16). rl_rng_replay=
   // <path>, off by default (empty string), byte-identical to today's behaviour when unset. A
@@ -1575,10 +1584,22 @@ struct sim_t : private sc_thread_t
   { return event_mgr.current_time; }
   static double distribution_mean_error( const sim_t& s, const extended_sample_data_t& sd )
   { return s.confidence_estimator * sd.mean_std_dev; }
+  // 261001-bac plan 04: while the buff ledger's extra passes run, every accessor serves the ledger's
+  // scratch generator (rl_buff_ledger::rng_access); otherwise `_rng` exactly as before.
   const rng::rng_t& rng() const
-  { return _rng; }
+  {
+    if ( rl_bl_on )
+      if ( auto* r = rl_buff_ledger::rng_access( const_cast<sim_t*>( this ), "sim" ) )
+        return *r;
+    return _rng;
+  }
   rng::rng_t& rng()
-  { return _rng; }
+  {
+    if ( rl_bl_on )
+      if ( auto* r = rl_buff_ledger::rng_access( this, "sim" ) )
+        return *r;
+    return _rng;
+  }
   double averaged_range( double min, double max );
 
   // Thread id of this sim_t object

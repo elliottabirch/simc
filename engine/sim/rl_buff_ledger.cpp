@@ -14,6 +14,7 @@
 #include "buff/buff.hpp"
 #include "player/pet.hpp"
 #include "player/player.hpp"
+#include "sim/cooldown.hpp"
 #include "sim/decision_dump.hpp"
 #include "sim/sim.hpp"
 #include "util/io.hpp"
@@ -25,7 +26,9 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -41,7 +44,7 @@ constexpr std::size_t PASS_HIST_SIZE = 64;
 
 // The record kinds this build writes (the `hdr` record's `emits` list). stage0_checks.py reads
 // it to decide which identities it can assert.
-constexpr const char* EMITS_JSON = "[\"hdr\",\"fb\",\"fe\",\"ftr\",\"pr\",\"hit\",\"xp\"]";
+constexpr const char* EMITS_JSON = "[\"hdr\",\"fb\",\"fe\",\"ftr\",\"pr\",\"hit\",\"xp\",\"app\"]";
 }  // namespace
 
 // The ledger's state, defined here so sim.hpp never sees it (sim.hpp forward-declares it).
@@ -68,6 +71,7 @@ struct state_t
     int status = 0;
     std::string cand_json;  // the entries of hit.cand, comma separated, no brackets
     std::string pass_json;  // the entries of hit.pass, comma separated, no brackets
+    std::string guards_json;  // plan 04: names of the shadow guards that fired (status 2), quoted, comma separated
     std::uint32_t n_passes = 0;
   };
   std::unordered_map<std::uint64_t, hit_entry_t> hit_table;
@@ -76,6 +80,23 @@ struct state_t
   // free list (get_state / action_state_t::release): that would reorder the list and could change
   // which recycled object later code receives.
   std::unordered_map<const action_t*, std::unique_ptr<action_state_t>> scratch;
+
+  // Plan 04: application records kept alive until the fight ends. A tick looks its parent up here to
+  // count candidate buffs the tick shares with its application (footer both_group_candidates).
+  struct app_info_t
+  {
+    const action_t* action = nullptr;
+    const player_t* target = nullptr;
+    std::vector<const buff_t*> cands;
+  };
+  std::unordered_map<std::uint64_t, app_info_t> apps;
+
+  // Plan 04: the guards that fired inside the pass set that is running now (names are string
+  // literals; the set is cleared when a shadow scope opens), the scratch generator every accessor
+  // serves inside a pass, and the once-per-fight latch of the guard probe.
+  std::vector<const char*> cur_guards;
+  rng::rng_t scratch_rng;
+  bool probe_done = false;
 
   // Per-fight
   std::int32_t next_press = 0;
@@ -109,6 +130,12 @@ struct state_t
   std::uint64_t cache_check = 0;
   std::uint64_t cache_check_fail = 0;
   std::uint64_t no_stats_hits = 0;
+  // Plan 04: guard counts by name (an object in the footer), ticks that share a candidate buff with
+  // their application, and the periodic-application records and their passes.
+  std::map<std::string, std::uint64_t> shadow_violation;
+  std::uint64_t both_group_candidates = 0;
+  std::uint64_t app_records = 0;
+  std::uint64_t app_passes = 0;
 };
 
 namespace
@@ -221,6 +248,11 @@ void fight_begin( sim_t* sim )
   s->in_fight = true;
   s->in_hit_sink = false;
   s->hit_table.clear();
+  s->apps.clear();
+  s->cur_guards.clear();
+  s->probe_done = false;
+  // A fixed seed at every fight begin: the scratch stream is never a function of the fight's own streams.
+  s->scratch_rng.seed( 0x5CA1AB1E0DDBA11FULL );
   s->next_press = 0;
   s->last_press = -1;
   s->next_hit = 1;
@@ -243,6 +275,7 @@ void fight_end( sim_t* sim )
     return;
   s->in_fight = false;
   s->hit_table.clear();
+  s->apps.clear();
 
   // Same predicate rl_translog::record_close() writes as FLAG_COLLECTED (and sim_t's
   // datacollection_end() guard): iteration 0 is the warm-up fight unless there is only one.
@@ -293,7 +326,19 @@ void write_footer( sim_t* sim )
                   s->stale_hit_id, s->reference_mismatch );
   fmt::format_to( out_it( b ), ",\"restoring_mismatch\":{},\"premade_drift\":{},\"unsafe_hits\":{}",
                   s->restoring_mismatch, s->premade_drift, s->unsafe_hits );
-  b += ",\"shadow_violation\":{}";
+  b += ",\"shadow_violation\":{";
+  {
+    bool first = true;
+    for ( const auto& kv : s->shadow_violation )
+    {
+      if ( !first )
+        b += ',';
+      first = false;
+      put_string( b, kv.first );
+      fmt::format_to( out_it( b ), ":{}", kv.second );
+    }
+  }
+  b += '}';
   fmt::format_to( out_it( b ), ",\"passes_total\":{},\"pass_hist\":[", s->passes_total );
   for ( std::size_t i = 0; i < PASS_HIST_SIZE; ++i )
   {
@@ -301,11 +346,14 @@ void write_footer( sim_t* sim )
       b += ',';
     fmt::format_to( out_it( b ), "{}", s->pass_hist[ i ] );
   }
+  // The last three counters were declared by plan 04 (LEDGER-FORMAT.md amendment); they are not part
+  // of the version-1 required set.
   fmt::format_to( out_it( b ),
                   "],\"swing_rescaled\":{},\"foreign_press\":{},\"cache_hits\":{},\"cache_misses\":{},"
-                  "\"cache_check\":{},\"cache_check_fail\":{},\"no_stats_hits\":{}}}\n",
+                  "\"cache_check\":{},\"cache_check_fail\":{},\"no_stats_hits\":{},"
+                  "\"both_group_candidates\":{},\"app_records\":{},\"app_passes\":{}}}\n",
                   s->swing_rescaled, s->foreign_press, s->cache_hits, s->cache_misses, s->cache_check,
-                  s->cache_check_fail, s->no_stats_hits );
+                  s->cache_check_fail, s->no_stats_hits, s->both_group_candidates, s->app_records, s->app_passes );
 
   s->out << b;
   s->out.flush();
@@ -385,6 +433,7 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
   int status = 0;
   std::string cand_json;
   std::string pass_json;
+  std::string guards_json;
   if ( state->rl_bl_hit != 0 )
   {
     auto it = s->hit_table.find( state->rl_bl_hit );
@@ -400,6 +449,7 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
         status = it->second.status;
         cand_json = std::move( it->second.cand_json );
         pass_json = std::move( it->second.pass_json );
+        guards_json = std::move( it->second.guards_json );
         const std::uint32_t n = it->second.n_passes;
         s->passes_total += n;
         ++s->pass_hist[ std::min<std::size_t>( n, PASS_HIST_SIZE - 1 ) ];
@@ -431,7 +481,24 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
   b += cand_json;
   b += "],\"pass\":[";
   b += pass_json;
-  b += "],\"par\":[]}\n";
+  // Plan 04: a tick of a damage-over-time effect names the `app` record its state carries (null when
+  // the effect came from a state that had none); `par` repeats it as the format's parent list.
+  if ( tick )
+  {
+    if ( state->rl_bl_app != 0 )
+      fmt::format_to( out_it( b ), "],\"par\":[{0}],\"parent\":{0}", state->rl_bl_app );
+    else
+      b += "],\"par\":[],\"parent\":null";
+  }
+  else
+    b += "],\"par\":[]";
+  if ( !guards_json.empty() )
+  {
+    b += ",\"guards\":[";
+    b += guards_json;
+    b += ']';
+  }
+  b += "}\n";
 }
 
 void xp_record( player_t* p, const rl_cause_t& cause, double amount, const char* action_name )
@@ -550,13 +617,20 @@ std::uint64_t snapshot_diff( const action_state_t* x, const action_state_t* y )
 //     are saved by copy, invalidated before EVERY pass (with asserts compiled in, a read of a valid
 //     entry re-computes and asserts equality, so a hidden pass that found an entry the previous pass
 //     left valid would abort the program), and restored by assignment on exit. The recursive,
-//     side-effecting player_t::invalidate_cache() is never called.
+//     side-effecting player_t::invalidate_cache() is never called;
+//   * plan 04: the roll recorder's hook pointer (rng::rl_draw_sink) is cleared for the whole scope and
+//     restored, so no draw made inside a pass can ever be written to a roll recording (every accessor
+//     serves the ledger's scratch generator in there anyway, rl_buff_ledger::rng_access), and the
+//     list of shadow guards that fired (state_t::cur_guards) starts empty.
 class shadow_scope_t
 {
 public:
-  shadow_scope_t( action_t* a, player_t* target )
+  shadow_scope_t( state_t* st, action_t* a, player_t* target )
     : sim_( a->sim ), dealer_( a->player ), owner_( nullptr ), target_( target )
   {
+    st->cur_guards.clear();
+    saved_sink_  = rng::rl_draw_sink;
+    rng::rl_draw_sink = nullptr;
     saved_debug_ = sim_->debug;
     saved_log_   = sim_->log;
     sim_->debug  = false;
@@ -594,6 +668,7 @@ public:
     if ( saved_target_ )
       target_->cache = *saved_target_;
     action_->rl_bl_set_callback_state( saved_callback_state_ );
+    rng::rl_draw_sink  = saved_sink_;
     sim_->rl_bl_shadow = false;
     sim_->debug        = saved_debug_;
     sim_->log          = saved_log_;
@@ -606,6 +681,7 @@ private:
   player_t* target_;
   action_t* action_ = nullptr;
   std::uint32_t saved_callback_state_ = 0;
+  rng::rl_draw_sink_t* saved_sink_ = nullptr;
   bool saved_debug_ = false;
   int saved_log_    = 0;
   std::optional<player_stat_cache_t> saved_dealer_;
@@ -711,6 +787,67 @@ amount_t amount_pass( pass_env_t& env, bool log_reads = false )
   return out;
 }
 
+// Plan 04, application pass: the engine's own snapshot of the applying state (as amount_pass), then the
+// PERIODIC amount that snapshot would give: calculate_tick_amount( copy, 1.0 ) on a copy whose result is
+// a plain hit (calculate_tick_amount applies the crit bonus itself, so the pre-crit amount needs a
+// non-crit result). `pre` of the returned amount is that periodic amount. Direct damage is not
+// computed here (the hit's own passes carry it). `viol_out`, when given, receives the snapshot
+// mismatch against the real state (the same fields as the direct passes; there is no real periodic
+// amount to compare against at application time).
+amount_t app_pass( pass_env_t& env, bool log_reads, std::uint64_t* viol_out )
+{
+  env.scope->invalidate_caches();
+  tap_scope_t tap( log_reads );
+  action_state_t* sc = env.scratch;
+  sc->copy_state( env.real );
+  sc->action = env.action;
+  sc->result       = RESULT_NONE;
+  sc->block_result = BLOCK_RESULT_UNBLOCKED;
+  sc->result_raw = sc->result_total = sc->result_mitigated = sc->result_absorbed = sc->result_amount =
+      sc->self_absorb_amount = 0.0;
+  env.action->snapshot_state( sc, env.real->result_type );
+  if ( viol_out != nullptr )
+    *viol_out = snapshot_diff( sc, env.real );
+  sc->result = RESULT_HIT;
+
+  amount_t out;
+  out.pre = env.action->calculate_tick_amount( sc, 1.0 );
+  out.cc  = sc->composite_crit_chance();
+  out.cb  = env.action->total_crit_bonus( sc );
+  return out;
+}
+
+// Plan 04, tick pass: a scratch copy of the DoT's state, re-run through update_state (the tick-time
+// update flags only, exactly the call action_t::tick makes first), then the pre-crit tick amount
+// calculate_tick_amount( copy, tick_multiplier ) on a plain-hit copy. The real tick reproduces as
+// pre x ( 1 + crit bonus ) for a crit tick and as pre for any other. `viol_out`, when given, receives
+// the bits of the snapshot mismatch against the real state and VIOL_PRE_CRIT when that reproduction
+// is not bit for bit.
+amount_t tick_pass( pass_env_t& env, double tick_multiplier, bool log_reads, std::uint64_t* viol_out )
+{
+  env.scope->invalidate_caches();
+  tap_scope_t tap( log_reads );
+  action_state_t* sc = env.scratch;
+  sc->copy_state( env.real );
+  sc->action = env.action;
+  env.action->update_state( sc, env.action->amount_type( sc, true ) );
+  if ( viol_out != nullptr )
+    *viol_out = snapshot_diff( sc, env.real );
+  sc->result = RESULT_HIT;
+
+  amount_t out;
+  out.pre = env.action->calculate_tick_amount( sc, tick_multiplier );
+  out.cc  = sc->composite_crit_chance();
+  out.cb  = env.action->total_crit_bonus( sc );
+  if ( viol_out != nullptr )
+  {
+    const double want = env.real->result == RESULT_CRIT ? out.pre * ( 1.0 + out.cb ) : out.pre;
+    if ( !same_bits( want, env.real->result_amount ) )
+      *viol_out |= VIOL_PRE_CRIT;
+  }
+  return out;
+}
+
 bool press_applied( const buff_t* b )
 {
   const rl_cause_t& c = b->rl_applied_cause;
@@ -734,7 +871,9 @@ void collect_candidates( player_t* dealer, player_t* owner, player_t* target, st
   }
 }
 
-void put_pass( std::string& b, const pass_rec_t& p )
+// `app_ref` non-null = an application pass: `pre` is the periodic amount and `per` its ratio to the
+// reference pass's periodic amount (1 for the reference itself). Otherwise `per` is null.
+void put_pass( std::string& b, const pass_rec_t& p, const double* app_ref = nullptr )
 {
   if ( !b.empty() )
     b += ',';
@@ -744,7 +883,12 @@ void put_pass( std::string& b, const pass_rec_t& p )
   put_double( b, p.amount.cc );
   b += ",\"cb\":";
   put_double( b, p.amount.cb );
-  fmt::format_to( out_it( b ), ",\"per\":null,\"viol\":{}}}", p.viol );
+  b += ",\"per\":";
+  if ( app_ref != nullptr && *app_ref != 0.0 )
+    put_double( b, p.amount.pre / *app_ref );
+  else
+    b += "null";
+  fmt::format_to( out_it( b ), ",\"viol\":{}}}", p.viol );
 }
 
 void put_candidate( std::string& b, std::size_t i, const buff_t* c, bool debuff )
@@ -761,7 +905,263 @@ void put_candidate( std::string& b, std::size_t i, const buff_t* c, bool debuff 
   fmt::format_to( out_it( b ), ",\"app\":[[{},{},{}]],\"cov\":false}}", ap.press, static_cast<int>( ap.cls ),
                   c->check() );
 }
+
+// What one pass set produced: the passes in record order, the candidates (bit i of a pass's hidden
+// mask = cands[ i ]) and the status code (0 no candidates, 1 split recorded, 3 reference mismatch,
+// 4 restoring mismatch; 2 is set by the caller from the guards that fired).
+struct split_t
+{
+  std::vector<pass_rec_t> passes;
+  std::vector<buff_t*> cands;
+  int status = 0;
+};
+
+// One pass of whatever kind the caller runs: nothing hidden unless the caller hid something first.
+// The first argument asks for the read tap (reference pass only); the second, when non-null, receives
+// the pass's violation bits (reference and restoring passes).
+using pass_fn_t = std::function<amount_t( bool, std::uint64_t* )>;
+
+// The guard probe (stage-0 only, rl_buff_ledger_guard_probe=1): inside a pass set, once per fight, the
+// first time a pass set has a candidate, plant one deliberate violation of every guard. Each call must be
+// blocked (the fight must not change) and counted under its own guard name.
+void fire_guard_probe( action_t* a, player_t* dealer, buff_t* cand )
+{
+  cand->expire();
+  dealer->resource_gain( dealer->primary_resource(), 1.0 );
+  a->cooldown->adjust( timespan_t::from_seconds( -1.0 ) );
+  dealer->stat_gain( dealer->convert_hybrid_stat( STAT_STR_AGI_INT ), 1.0 );
+  (void) a->rng().real();
+  (void) cand->rng().real();
+}
+
+// The pass sequence shared by direct hits, application passes and ticks: a reference pass (nothing
+// hidden), one pass per candidate hidden alone, every hidden subset for 2 or 3 effective candidates
+// (the all-effective pass above 3), and a restoring pass. A candidate is EFFECTIVE when hiding it alone
+// changes `pre`. A reference pass whose violation bits are non-zero ends the sequence (status 3); a
+// reference amount of exactly 0 or no candidate leaves the reference pass alone (status 0).
+split_t run_split( state_t* st, action_t* a, player_t* dealer, player_t* owner, player_t* target,
+                   const pass_fn_t& pass, bool allow_probe )
+{
+  split_t out;
+  std::uint64_t viol = 0;
+  const amount_t ref = pass( /*log_reads=*/true, &viol );
+  out.passes.push_back( { "ref", 0, ref, viol } );
+  if ( viol != 0 )
+  {
+    ++st->reference_mismatch;
+    out.status = 3;
+    return out;
+  }
+  if ( ref.pre == 0.0 )
+    return out;
+
+  std::vector<buff_t*>& cands = out.cands;
+  collect_candidates( dealer, owner, target, cands );
+  if ( cands.size() > 40 )
+  {
+    throw sc_runtime_error( fmt::format( "rl_buff_ledger=: {} candidate buffs on one hit of '{}'; the hidden-set "
+                                         "bitmask supports at most 40.",
+                                         cands.size(), a->name() ) );
+  }
+  if ( cands.empty() )
+    return out;
+
+  if ( allow_probe && a->sim->rl_buff_ledger_guard_probe && !st->probe_done )
+  {
+    st->probe_done = true;
+    fire_guard_probe( a, dealer, cands[ 0 ] );
+  }
+
+  auto hidden_pass = [ & ]( std::uint64_t mask ) {
+    hidden_buffs_t hidden;
+    for ( std::size_t i = 0; i < cands.size(); ++i )
+      if ( mask & ( std::uint64_t( 1 ) << i ) )
+        hidden.hide( cands[ i ] );
+    out.passes.push_back( { "hide", mask, pass( false, nullptr ), 0 } );
+  };
+
+  // One pass per candidate hidden alone.
+  for ( std::size_t i = 0; i < cands.size(); ++i )
+    hidden_pass( std::uint64_t( 1 ) << i );
+
+  // For 2 or 3 effective candidates every remaining hidden subset (all 2^m - 1 minus the singles) is
+  // run; above 3 only the all-effective-hidden pass (the split rule needs each single removal plus the
+  // joint removal). One effective candidate needs nothing more.
+  std::uint64_t effective_mask = 0;
+  int n_effective              = 0;
+  for ( std::size_t i = 0; i < cands.size(); ++i )
+  {
+    if ( out.passes[ 1 + i ].amount.pre != ref.pre )
+    {
+      effective_mask |= std::uint64_t( 1 ) << i;
+      ++n_effective;
+    }
+  }
+  if ( n_effective >= 2 && n_effective <= 3 )
+  {
+    std::vector<std::uint64_t> subsets;
+    for ( std::uint64_t sub = effective_mask; sub != 0; sub = ( sub - 1 ) & effective_mask )
+      if ( ( sub & ( sub - 1 ) ) != 0 )  // two or more members; the singles are done
+        subsets.push_back( sub );
+    std::sort( subsets.begin(), subsets.end() );
+    for ( std::uint64_t sub : subsets )
+      hidden_pass( sub );
+  }
+  else if ( n_effective > 3 )
+    hidden_pass( effective_mask );
+
+  // Restoring pass: nothing hidden again, a fresh snapshot, so class members written by the hidden
+  // passes (shaman's mw_affected_stacks / mw_consumed_stacks) return to their real values.
+  std::uint64_t rviol = 0;
+  const amount_t rest = pass( false, &rviol );
+  out.passes.push_back( { "restore", 0, rest, rviol } );
+  if ( rviol != 0 )
+  {
+    ++st->restoring_mismatch;
+    out.status = 4;
+  }
+  else
+    out.status = 1;
+  return out;
+}
+
+// After a pass set: a guard that fired makes the set unsafe (status 2, counted once per set) unless a
+// mismatch already gave it status 3 or 4. Returns the guard names as a quoted, comma separated list.
+std::string finish_unsafe( state_t* st, split_t& sp )
+{
+  std::string names;
+  if ( st->cur_guards.empty() )
+    return names;
+  ++st->unsafe_hits;
+  if ( sp.status == 0 || sp.status == 1 )
+    sp.status = 2;
+  for ( const char* g : st->cur_guards )
+  {
+    if ( !names.empty() )
+      names += ',';
+    put_string( names, g );
+  }
+  return names;
+}
+
+// Candidate entries are written for any status with candidates (1 split, 2 unsafe, 4 restoring mismatch).
+void write_candidates( std::string& out, const split_t& sp, const player_t* target )
+{
+  if ( sp.status != 1 && sp.status != 2 && sp.status != 4 )
+    return;
+  for ( std::size_t i = 0; i < sp.cands.size(); ++i )
+    put_candidate( out, i, sp.cands[ i ], sp.cands[ i ]->player == target );
+}
+
+action_state_t* scratch_for( state_t* st, action_t* a )
+{
+  auto& slot = st->scratch[ a ];
+  if ( !slot )
+    slot.reset( a->new_state() );
+  return slot.get();
+}
+
+// Plan 04: the application's periodic passes, written as an `app` record at once (an application with
+// no direct damage has no hit record to ride). Only for a hit that applies a damage-over-time effect
+// with no tick_action (those are plan 05's). The record's id is drawn from the same per-fight serial as
+// `hit.h` and is stamped on the state, so the DoT's state (a copy) and every later tick can name it.
+// An application whose reference periodic amount is exactly 0 writes nothing.
+void run_app_passes( state_t* st, action_t* a, action_state_t* s, action_state_t* scratch, player_t* dealer,
+                     player_t* owner )
+{
+  split_t sp;
+  std::string guards;
+  {
+    shadow_scope_t scope( st, a, s->target );
+    pass_env_t env{ a, s, scratch, &scope };
+    pass_fn_t fn = [ & ]( bool log_reads, std::uint64_t* viol ) { return app_pass( env, log_reads, viol ); };
+    sp     = run_split( st, a, dealer, owner, s->target, fn, /*allow_probe=*/false );
+    guards = finish_unsafe( st, sp );
+  }
+  const double ref_periodic = sp.passes[ 0 ].amount.pre;
+  if ( sp.status == 0 && ref_periodic == 0.0 )
+    return;
+
+  const std::uint64_t h = st->next_hit++;
+  s->rl_bl_app          = h;
+  ++st->app_records;
+  st->app_passes += sp.passes.size();
+  state_t::app_info_t info;
+  info.action = a;
+  info.target = s->target;
+  for ( const buff_t* c : sp.cands )
+    info.cands.push_back( c );
+  st->apps.emplace( h, std::move( info ) );
+
+  sim_t* sim     = a->sim;
+  std::string& b = st->fight_buf;
+  fmt::format_to( out_it( b ), "{{\"k\":\"app\",\"it\":{},\"t\":", sim->current_iteration );
+  put_double( b, sim->current_time().total_seconds() );
+  fmt::format_to( out_it( b ), ",\"h\":{},\"actor\":", h );
+  put_string( b, a->player->name() );
+  b += ",\"action\":";
+  put_string( b, a->name() );
+  b += ",\"target\":";
+  put_string( b, s->target->name() );
+  fmt::format_to( out_it( b ), ",\"seq\":{},\"cls\":{},\"press\":{},\"launch\":{},\"n_targets\":{},\"status\":{},\"cand\":[",
+                  s->rl_cause_seq, static_cast<int>( s->rl_cause_class ), s->rl_cause_press, s->rl_cause_launch,
+                  s->n_targets, sp.status );
+  std::string cand_json;
+  write_candidates( cand_json, sp, s->target );
+  b += cand_json;
+  b += "],\"pass\":[";
+  std::string pass_json;
+  for ( const pass_rec_t& p : sp.passes )
+    put_pass( pass_json, p, &ref_periodic );
+  b += pass_json;
+  b += ']';
+  if ( !guards.empty() )
+  {
+    b += ",\"guards\":[";
+    b += guards;
+    b += ']';
+  }
+  b += "}\n";
+}
+
+// The two guard-name tables of rng_access.
+struct family_name_t
+{
+  const char* family;
+  const char* guard;
+};
+constexpr family_name_t RNG_FAMILIES[] = {
+    { "action", "rng.draw.action" },     { "player", "rng.draw.player" },     { "sim", "rng.draw.sim" },
+    { "buff", "rng.draw.buff" },         { "callback", "rng.draw.callback" }, { "proc_rng", "rng.draw.proc_rng" },
+};
 }  // namespace
+
+void note_blocked( sim_t* sim, const char* guard )
+{
+  state_t* st = state_of( sim );
+  if ( st == nullptr )
+    return;
+  ++st->shadow_violation[ guard ];
+  for ( const char* g : st->cur_guards )
+    if ( std::strcmp( g, guard ) == 0 )
+      return;
+  st->cur_guards.push_back( guard );
+}
+
+rng::rng_t* rng_access( sim_t* sim, const char* family )
+{
+  if ( !sim->rl_bl_shadow )
+    return nullptr;
+  state_t* st = state_of( sim );
+  if ( st == nullptr )
+    return nullptr;
+  const char* guard = "rng.draw.other";
+  for ( const family_name_t& f : RNG_FAMILIES )
+    if ( std::strcmp( f.family, family ) == 0 )
+      guard = f.guard;
+  note_blocked( sim, guard );
+  return &st->scratch_rng;
+}
 
 void run_passes( action_t* a, action_state_t* s )
 {
@@ -775,118 +1175,114 @@ void run_passes( action_t* a, action_state_t* s )
   // an action without stats routes nothing) gets its snapshot checked but nothing parked.
   const bool will_sink = a->stats != nullptr && ( s->result_raw > 0 || action_t::result_is_miss( s->result ) );
 
-  auto& scratch_slot = st->scratch[ a ];
-  if ( !scratch_slot )
-    scratch_slot.reset( a->new_state() );
-
-  player_t* dealer = a->player;
-  player_t* owner  = dealer->is_pet() ? static_cast<pet_t*>( dealer )->owner : nullptr;
+  action_state_t* scratch = scratch_for( st, a );
+  player_t* dealer        = a->player;
+  player_t* owner         = dealer->is_pet() ? static_cast<pet_t*>( dealer )->owner : nullptr;
 
   state_t::hit_entry_t entry;
   entry.action = a;
   entry.target = s->target;
-  std::vector<pass_rec_t> passes;
-  std::vector<buff_t*> cands;
-
+  split_t sp;
   {
-    shadow_scope_t scope( a, s->target );
-    pass_env_t env{ a, s, scratch_slot.get(), &scope };
-
-    // Reference pass: nothing hidden. Must reproduce the real snapshot and pre-crit amount.
-    const amount_t ref = amount_pass( env, /*log_reads=*/true );
-    std::uint64_t viol = snapshot_diff( env.scratch, s );
-    if ( !same_bits( ref.pre, s->result_amount ) )
-      viol |= VIOL_PRE_CRIT;
-    passes.push_back( { "ref", 0, ref, viol } );
-    if ( viol != 0 )
-    {
-      ++st->reference_mismatch;
-      entry.status = 3;
-    }
-    else if ( ref.pre != 0.0 )
-    {
-      collect_candidates( dealer, owner, s->target, cands );
-      if ( cands.size() > 40 )
+    shadow_scope_t scope( st, a, s->target );
+    pass_env_t env{ a, s, scratch, &scope };
+    // Reference and restoring passes must reproduce the real snapshot and pre-crit amount bit for bit.
+    pass_fn_t fn = [ & ]( bool log_reads, std::uint64_t* viol ) {
+      const amount_t am = amount_pass( env, log_reads );
+      if ( viol != nullptr )
       {
-        throw sc_runtime_error( fmt::format( "rl_buff_ledger=: {} candidate buffs on one hit of '{}'; the hidden-set "
-                                             "bitmask supports at most 40.",
-                                             cands.size(), a->name() ) );
+        *viol = snapshot_diff( env.scratch, s );
+        if ( !same_bits( am.pre, s->result_amount ) )
+          *viol |= VIOL_PRE_CRIT;
       }
-      if ( !cands.empty() )
+      return am;
+    };
+    sp                 = run_split( st, a, dealer, owner, s->target, fn, /*allow_probe=*/true );
+    entry.guards_json  = finish_unsafe( st, sp );
+  }  // scope ends: caches, debug, log, shadow flag, recorder hook restored; hidden buffs were restored per pass
+
+  if ( will_sink )
+  {
+    entry.status = sp.status;
+    write_candidates( entry.cand_json, sp, s->target );
+    for ( const pass_rec_t& p : sp.passes )
+      put_pass( entry.pass_json, p );
+    entry.n_passes = static_cast<std::uint32_t>( sp.passes.size() );
+
+    const std::uint64_t id = st->next_hit_id++;
+    st->hit_table.emplace( id, std::move( entry ) );
+    s->rl_bl_hit = id;
+  }
+
+  // Plan 04: a hit that applies a damage-over-time effect (no tick_action) also records what the effect's
+  // periodic amount will be under every hidden set. A miss applies nothing.
+  if ( a->tick_action == nullptr && a->dot_duration > timespan_t::zero() && action_t::result_is_hit( s->result ) )
+    run_app_passes( st, a, s, scratch, dealer, owner );
+}
+
+void run_tick_passes( action_t* a, action_state_t* d_state, double tick_multiplier )
+{
+  state_t* st = state_of( a->sim );
+  if ( st == nullptr || !st->in_fight || !belongs_to_actor( *st, a->player ) )
+    return;
+
+  const bool will_sink =
+      a->stats != nullptr && ( d_state->result_raw > 0 || action_t::result_is_miss( d_state->result ) );
+
+  action_state_t* scratch = scratch_for( st, a );
+  player_t* dealer        = a->player;
+  player_t* owner         = dealer->is_pet() ? static_cast<pet_t*>( dealer )->owner : nullptr;
+
+  state_t::hit_entry_t entry;
+  entry.action = a;
+  entry.target = d_state->target;
+  split_t sp;
+  {
+    shadow_scope_t scope( st, a, d_state->target );
+    pass_env_t env{ a, d_state, scratch, &scope };
+    pass_fn_t fn = [ & ]( bool log_reads, std::uint64_t* viol ) {
+      return tick_pass( env, tick_multiplier, log_reads, viol );
+    };
+    sp                = run_split( st, a, dealer, owner, d_state->target, fn, /*allow_probe=*/false );
+    entry.guards_json = finish_unsafe( st, sp );
+  }
+
+  // A tick that shares a candidate buff with its application: the product rule in LEDGER-FORMAT.md is
+  // then only approximate for that buff.
+  if ( d_state->rl_bl_app != 0 && !sp.cands.empty() )
+  {
+    auto app = st->apps.find( d_state->rl_bl_app );
+    if ( app != st->apps.end() )
+    {
+      for ( const buff_t* c : sp.cands )
       {
-        auto hidden_pass = [ & ]( std::uint64_t mask ) {
-          hidden_buffs_t hidden;
-          for ( std::size_t i = 0; i < cands.size(); ++i )
-            if ( mask & ( std::uint64_t( 1 ) << i ) )
-              hidden.hide( cands[ i ] );
-          passes.push_back( { "hide", mask, amount_pass( env ), 0 } );
-        };
-
-        // One pass per candidate hidden alone.
-        for ( std::size_t i = 0; i < cands.size(); ++i )
-          hidden_pass( std::uint64_t( 1 ) << i );
-
-        // A candidate is EFFECTIVE when hiding it alone changes the pre-crit amount. For 2 or 3
-        // effective candidates every remaining hidden subset (all 2^m - 1 minus the singles) is run;
-        // above 3 only the all-effective-hidden pass (the split rule needs each single removal plus
-        // the joint removal). One effective candidate needs nothing more.
-        std::uint64_t effective_mask = 0;
-        int n_effective              = 0;
-        for ( std::size_t i = 0; i < cands.size(); ++i )
+        if ( std::find( app->second.cands.begin(), app->second.cands.end(), c ) != app->second.cands.end() )
         {
-          if ( passes[ 1 + i ].amount.pre != ref.pre )
-          {
-            effective_mask |= std::uint64_t( 1 ) << i;
-            ++n_effective;
-          }
+          ++st->both_group_candidates;
+          break;
         }
-        if ( n_effective >= 2 && n_effective <= 3 )
-        {
-          std::vector<std::uint64_t> subsets;
-          for ( std::uint64_t sub = effective_mask; sub != 0; sub = ( sub - 1 ) & effective_mask )
-            if ( ( sub & ( sub - 1 ) ) != 0 )  // two or more members; the singles are done
-              subsets.push_back( sub );
-          std::sort( subsets.begin(), subsets.end() );
-          for ( std::uint64_t sub : subsets )
-            hidden_pass( sub );
-        }
-        else if ( n_effective > 3 )
-          hidden_pass( effective_mask );
-
-        // Restoring pass: nothing hidden again, a fresh snapshot, so class members written by the
-        // hidden passes (shaman's mw_affected_stacks / mw_consumed_stacks) return to their real values.
-        const amount_t rest = amount_pass( env );
-        std::uint64_t rviol = snapshot_diff( env.scratch, s );
-        if ( !same_bits( rest.pre, s->result_amount ) )
-          rviol |= VIOL_PRE_CRIT;
-        passes.push_back( { "restore", 0, rest, rviol } );
-        if ( rviol != 0 )
-        {
-          ++st->restoring_mismatch;
-          entry.status = 4;
-        }
-        else
-          entry.status = 1;
       }
     }
-  }  // scope ends: caches, debug, log, shadow flag restored; hidden buffs were restored per pass
+  }
 
+  // A previous tick's parked entry that never reached the sink (zero raw amount) is dropped.
+  if ( d_state->rl_bl_hit != 0 )
+  {
+    st->hit_table.erase( d_state->rl_bl_hit );
+    d_state->rl_bl_hit = 0;
+  }
   if ( !will_sink )
     return;
 
-  if ( entry.status == 1 || entry.status == 4 )
-  {
-    for ( std::size_t i = 0; i < cands.size(); ++i )
-      put_candidate( entry.cand_json, i, cands[ i ], cands[ i ]->player == s->target );
-  }
-  for ( const pass_rec_t& p : passes )
+  entry.status = sp.status;
+  write_candidates( entry.cand_json, sp, d_state->target );
+  for ( const pass_rec_t& p : sp.passes )
     put_pass( entry.pass_json, p );
-  entry.n_passes = static_cast<std::uint32_t>( passes.size() );
+  entry.n_passes = static_cast<std::uint32_t>( sp.passes.size() );
 
   const std::uint64_t id = st->next_hit_id++;
   st->hit_table.emplace( id, std::move( entry ) );
-  s->rl_bl_hit = id;
+  d_state->rl_bl_hit = id;
 }
-
 
 }  // namespace rl_buff_ledger

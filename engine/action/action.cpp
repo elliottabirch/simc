@@ -2385,6 +2385,11 @@ void action_t::tick( dot_t* d )
 
     d->state->result_amount = calculate_tick_amount( d->state, d->get_tick_factor() * stack );
 
+    // 261001-bac plan 04: hide-and-recompute passes for this direct tick (no tick_action), between the
+    // amount and assess_damage. One bool test when the ledger is off.
+    if ( sim->rl_bl_on )
+      rl_buff_ledger::run_tick_passes( this, d->state, d->get_tick_factor() * stack );
+
     // tstl-sylvanas quick task 260918-cbc (Stage A1): a DoT tick assessed directly here (no
     // tick_action) is always a DOT_TICK event, whichever class the applying/refreshing
     // decision's own state carried in via copy_state() (CAST, AUTO, ...) -- only the class is
