@@ -35,6 +35,16 @@ struct action_state_t;
 
 namespace rl_buff_ledger
 {
+// Press values below zero. A press >= 0 is a foreground cast of the RL actor (see open_press).
+// -1 means "no press": the switch is off, or a stamp that was never given one -- on an own-class
+// hit that is a LOST press (footer `lost_press`, must be 0). Chains that legitimately start
+// outside a cast carry a sentinel instead, so the lost-press check stays exact: a DoT applied by
+// an auto-attack swing's proc keeps ticking as class DOT_TICK (the class forced at tick time loses
+// the origin class); measured at 2bcc19760d, about 390 own-class hits per stock fight are such ticks.
+inline constexpr std::int16_t PRESS_NONE   = -1;
+inline constexpr std::int16_t PRESS_AUTO   = -2;  // the chain began at an AUTO swing (rl_resolve_cause)
+inline constexpr std::int16_t PRESS_ORPHAN = -3;  // the chain began with no cause context at all
+
 // Opens the output file (root sim only; refusals were already made by the caller, sim_t::setup)
 // and writes the `hdr` record. Sets up the ledger state on the root sim.
 void open_and_write_header( sim_t* sim );

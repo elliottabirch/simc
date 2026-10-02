@@ -337,7 +337,7 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
   const std::uint64_t h = s->next_hit++;
   ++s->fight_hits;
 
-  if ( is_own_class( state->rl_cause_class ) && state->rl_cause_press < 0 )
+  if ( is_own_class( state->rl_cause_class ) && state->rl_cause_press == PRESS_NONE )
     ++s->lost_press;
 
   const result_amount_type rt = a->report_amount_type( state );

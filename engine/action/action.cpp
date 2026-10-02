@@ -1969,11 +1969,19 @@ rl_cause_t action_t::rl_resolve_cause()
   {
     return rl_cause_t{ static_cast<std::int64_t>( sim->solver_control_seq ), RL_CAUSE_CAST };
   }
+  // 261001-bac stage 0: with the ledger on, a chain that starts here carries a press sentinel
+  // naming its origin (rl_buff_ledger.hpp), so "lost press" stays an exact check -- see there.
   if ( repeating && !special )
   {
-    return rl_cause_t{ static_cast<std::int64_t>( sim->solver_control_seq ), RL_CAUSE_AUTO };
+    rl_cause_t out{ static_cast<std::int64_t>( sim->solver_control_seq ), RL_CAUSE_AUTO };
+    if ( sim->rl_bl_on )
+      out.press = rl_buff_ledger::PRESS_AUTO;
+    return out;
   }
-  return rl_cause_t{ static_cast<std::int64_t>( sim->solver_control_seq ), RL_CAUSE_ORPHAN };
+  rl_cause_t out{ static_cast<std::int64_t>( sim->solver_control_seq ), RL_CAUSE_ORPHAN };
+  if ( sim->rl_bl_on )
+    out.press = rl_buff_ledger::PRESS_ORPHAN;
+  return out;
 }
 
 // action_t::execute ========================================================
