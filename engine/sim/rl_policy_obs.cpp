@@ -866,6 +866,18 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
     // later lookup_pick() call (solver_control.cpp) distinguish "the pick belongs to this
     // decision" from "stale, refuse by name" without ever recomputing.
     rl_target_select::begin_decision( p );
+
+    // Phase 266 (266-21, owner F9, R2): the boundary call of the chooser -- the tag is kept up to date at
+    // every decision boundary (it is re-picked only when it can no longer be hit while some enemy can).
+    // This branch is NOT restricted to the RL actor (it takes any player, no actor test of its own; the
+    // per-action loop's is_rl_actor test below sits inside the loop, and the caller's in-process filter
+    // is name-only and in-process only), so the call carries the gate itself: the fork's one RL-actor
+    // test, verbatim from solver_control.cpp:144 (exact name match, never a prefix, never a pet; CR-05).
+    // The chooser refuses any other player by name, so a missing or wrong gate aborts instead of tagging.
+    // It runs here, before the per-action loop and its pick-filling, so the dump and the wire see the
+    // tag this decision is made against.
+    if ( std::strcmp( p->name(), RL_ACTOR_NAME ) == 0 && !p->is_pet() )
+      rl_target_select::refresh_chosen( const_cast<player_t*>( p ) );
   }
 
   auto cached = g_action_handle_cache.find( p );

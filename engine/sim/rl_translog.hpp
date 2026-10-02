@@ -316,7 +316,11 @@ inline constexpr std::uint32_t FORMAT_VERSION = 13u;  // 266-01 (2026-10-01, fun
                                                         // block (damage_chosen, damage_expected_chosen and the
                                                         // two six-stream copies) and a header grown 264 -> 272
                                                         // (funnel_mode, chooser_state, both 0 until plan
-                                                        // 266-09); format 12 and earlier are refused by name
+                                                        // 266-09); 266-21 (fork commit C1b) adds the u16
+                                                        // chosen_enemy_actor_index in the padding before the
+                                                        // proc block (2818 at width 324) and moves the .attr
+                                                        // sidecar to its version 3 (48-byte records);
+                                                        // format 12 and earlier are refused by name
                                                         // on the Python side (plan 266-12).
                                                         // 12 was 262-10 (2026-10-01): width 324 on Phase 259's
                                                         // 16 target slots -- the seven fight inputs are
@@ -332,7 +336,7 @@ inline constexpr std::uint32_t FORMAT_VERSION = 13u;  // 266-01 (2026-10-01, fun
 // source text for an `ast.Constant`-shaped literal on both sides of the
 // language boundary, and a computed expression here would break that
 // parse. The static_assert immediately below is what keeps the literal
-// honest: RECORD_SIZE(W) = roundup8(45 + 4*W + 4*RL_TARGET_SLOTS*RL_TARGET_FEATURES + 5) +
+// honest: RECORD_SIZE(W) = roundup8(45 + 4*W + 4*RL_TARGET_SLOTS*RL_TARGET_FEATURES + 7) +
 // 8*rl_proc::COUNT, so a mistyped literal cannot silently drift from the formula and still
 // compile (tstl 220-03, OBS-06; formula updated 260901-pb1 Task 3 for version 5, updated again
 // 228-09 for version 6, updated again 230-04 for version 7, updated again 260917-pcn for
@@ -457,7 +461,8 @@ inline constexpr std::uint32_t RECORD_SIZE = 3192u;  // 266-01 (format 13, 2026-
 inline constexpr std::uint32_t PROC_BLOCK_OFFSET =
     ( ( 45u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) +
         4u * static_cast<std::uint32_t>( RL_TARGET_SLOTS ) * static_cast<std::uint32_t>( RL_TARGET_FEATURES ) +
-        5u + 7u ) / 8u ) * 8u;  // 259-05: +5 (was +4) -- observed_candidate_slot takes one more byte
+        7u + 7u ) / 8u ) * 8u;  // 266-21: +7 (was +5) -- chosen_enemy_actor_index takes two more bytes
+                                // (259-05: +5 was +4 -- observed_candidate_slot took one more byte)
 inline constexpr std::uint32_t PROC_BLOCK_SIZE = 8u * rl_proc::COUNT;
 static_assert( PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE == 2984u,
                "PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE must equal the version-12 pre-credit row size at "
@@ -478,7 +483,7 @@ inline constexpr std::uint32_t CREDIT_BLOCK_SIZE = 8u * 2u * rl_credit::STREAM_C
 inline constexpr std::uint32_t CHOSEN_BLOCK_OFFSET = CREDIT_BLOCK_OFFSET + CREDIT_BLOCK_SIZE;
 inline constexpr std::uint32_t CHOSEN_BLOCK_SIZE = 16u + 8u * 2u * rl_credit::STREAM_COUNT;
 static_assert( RECORD_SIZE == CHOSEN_BLOCK_OFFSET + CHOSEN_BLOCK_SIZE,
-               "RECORD_SIZE must be roundup8(45 + 4*RL_OBS_DIM + 4*RL_TARGET_SLOTS*RL_TARGET_FEATURES + 5) + "
+               "RECORD_SIZE must be roundup8(45 + 4*RL_OBS_DIM + 4*RL_TARGET_SLOTS*RL_TARGET_FEATURES + 7) + "
                "8*rl_proc::COUNT + 16*rl_credit::STREAM_COUNT + 16 + 16*rl_credit::STREAM_COUNT" );
 static_assert( RECORD_SIZE == 3192u && CHOSEN_BLOCK_OFFSET == 3080u && CHOSEN_BLOCK_SIZE == 112u,
                "version 13 at the 262-10 width (324) and 16 target slots: RECORD_SIZE 3192 = 3080 + a "
@@ -640,6 +645,11 @@ struct decision_record
   std::uint8_t observed_candidate_slot;   // @49+4W+4SF -- version 11 (259-05; was padding): the slot the
                                //         observation described for the chosen action before any
                                //         random aim, or 0xFF with no block
+  std::uint16_t chosen_enemy_actor_index; // @50+4W+4SF -- version 13 (266-21, funnel mode; was padding):
+                               //         the actor index of the chosen enemy (the tag,
+                               //         player_t::rl_chosen_enemy) at this boundary, or
+                               //         CHOSEN_TARGET_SENTINEL_NO_PICK (0xFFFF) when no tag is set.
+                               //         Costs no bytes: it sits in the padding before the 8-aligned proc block.
   // Version 9 (260917-pcn): the per-fight CUMULATIVE proc-roll observer block, struct-of-arrays,
   // alignas(8) so it starts exactly at PROC_BLOCK_OFFSET (= the version-7 row size) at any width W.
   // A window's counts are consecutive-row differences, exactly like `damage`. Sits AFTER `reserved`
@@ -707,6 +717,7 @@ struct close_record
   std::uint8_t kind;                         // @47+4W+4SF -- KIND_CLOSE
   std::uint8_t reserved;                      // @48+4W+4SF -- written zero (decision_record's rules_candidate_slot)
   std::uint8_t reserved2;                     // @49+4W+4SF -- version 11: written zero (decision_record's observed_candidate_slot)
+  std::uint16_t zero_chosen_enemy;            // @50+4W+4SF -- version 13 (266-21): written zero (decision_record's chosen_enemy_actor_index)
   // Version 9 (260917-pcn): the per-fight FINAL proc-roll observer totals -- named the same as
   // decision_record's own fields (not a zero-twin) so a reader gets the fight's closing counts.
   alignas( 8 ) std::uint16_t proc_attempts[ rl_proc::COUNT ];   // @PROC_BLOCK_OFFSET
@@ -778,6 +789,7 @@ struct footer_record
   std::uint8_t kind;                     // @47+4W+4SF -- KIND_FOOTER
   std::uint8_t reserved;                 // @48+4W+4SF -- written zero (decision_record's rules_candidate_slot)
   std::uint8_t reserved2;                // @49+4W+4SF -- version 11: written zero (decision_record's observed_candidate_slot)
+  std::uint16_t zero_chosen_enemy;       // @50+4W+4SF -- version 13 (266-21): written zero (decision_record's chosen_enemy_actor_index)
   // Version 9 (260917-pcn): written zero -- no fight owns the footer.
   alignas( 8 ) std::uint8_t zero_proc_block[ PROC_BLOCK_SIZE ];  // @PROC_BLOCK_OFFSET
   // Version 10 (260918-cbc): written zero -- no fight owns the footer, matching the proc
@@ -895,6 +907,11 @@ static_assert( offsetof( decision_record, chosen_candidate_slot ) == 46u + 4u * 
 static_assert( offsetof( decision_record, kind ) == 47u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 static_assert( offsetof( decision_record, rules_candidate_slot ) == 48u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 static_assert( offsetof( decision_record, observed_candidate_slot ) == 49u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+// 266-21 (version 13): the chosen enemy's actor index sits in the two padding bytes before the proc block
+// (2818 at width 324, 2822 at 325); the proc block starts where it always did.
+static_assert( offsetof( decision_record, chosen_enemy_actor_index ) == 50u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( decision_record, chosen_enemy_actor_index ) + sizeof( std::uint16_t ) <= PROC_BLOCK_OFFSET,
+               "chosen_enemy_actor_index must end at or before the proc block" );
 
 // close_record field offsets -- version 7, same W/SF-parametrised form.
 static_assert( offsetof( close_record, final_damage_total ) == 0 );
@@ -915,6 +932,7 @@ static_assert( offsetof( close_record, zero_chosen_candidate_slot ) == 46u + 4u 
 static_assert( offsetof( close_record, kind ) == 47u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 static_assert( offsetof( close_record, reserved ) == 48u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 static_assert( offsetof( close_record, reserved2 ) == 49u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( close_record, zero_chosen_enemy ) == 50u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 
 // footer_record field offsets -- version 7, same W/SF-parametrised form.
 static_assert( offsetof( footer_record, engine_run_aggregate ) == 0 );
@@ -937,6 +955,7 @@ static_assert( offsetof( footer_record, zero_chosen_candidate_slot ) == 46u + 4u
 static_assert( offsetof( footer_record, kind ) == 47u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 static_assert( offsetof( footer_record, reserved ) == 48u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 static_assert( offsetof( footer_record, reserved2 ) == 49u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( footer_record, zero_chosen_enemy ) == 50u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 
 // file_header field offsets
 static_assert( offsetof( file_header, magic ) == 0 );
@@ -965,6 +984,8 @@ static_assert( offsetof( decision_record, rules_candidate_slot ) == offsetof( cl
 static_assert( offsetof( decision_record, observed_candidate_slot ) == offsetof( close_record, reserved2 ) );
 static_assert( offsetof( close_record, reserved ) == offsetof( footer_record, reserved ) );
 static_assert( offsetof( close_record, reserved2 ) == offsetof( footer_record, reserved2 ) );
+static_assert( offsetof( decision_record, chosen_enemy_actor_index ) == offsetof( close_record, zero_chosen_enemy ) );
+static_assert( offsetof( close_record, zero_chosen_enemy ) == offsetof( footer_record, zero_chosen_enemy ) );
 static_assert( offsetof( decision_record, rules_candidate_slot ) == 48u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 // 228-09 (version 6): the new chosen-target field also lands at the same offset across all
 // three row shapes -- decision_record's own NAMED field, close/footer's zero-written twins.
@@ -1077,8 +1098,11 @@ namespace rl_attr
 {
 
 inline constexpr char MAGIC[ 4 ] = { 'R', 'L', 'A', 'T' };
-inline constexpr std::uint32_t FORMAT_VERSION = 2u;  // 259-05: records 24 -> 32 bytes, each gains a double @24
-inline constexpr std::uint32_t RECORD_SIZE = 32u;
+inline constexpr std::uint32_t FORMAT_VERSION = 3u;  // 266-21 (funnel mode): records 32 -> 48 bytes, each gains two
+                                                       // doubles @32 and @40 (the chosen-enemy copies);
+                                                       // 2 was 259-05: records 24 -> 32 bytes, each gained a
+                                                       // double @24
+inline constexpr std::uint32_t RECORD_SIZE = 48u;
 inline constexpr std::uint32_t HEADER_SIZE = 32u;
 
 inline constexpr std::uint32_t KIND_FIGHT = 1u;
@@ -1106,7 +1130,9 @@ static_assert( offsetof( file_header, zero16 ) == 16 );
 // `iteration` mirrors the translog row's own `iteration` field for this fight (widened to
 // uint32 here purely so the three record kinds below share one struct shape -- no 16-bit
 // row-count-style ceiling is being asserted). `sum_own_real` is the identity-checked total --
-// see this namespace's own top-of-section doc comment.
+// see this namespace's own top-of-section doc comment. Version 3 (266-21, funnel mode): the two
+// `_chosen` doubles are the chosen-enemy copies -- the same quantities counting only hits whose
+// target was the chosen enemy (the tag) at the moment of the hit.
 struct fight_record
 {
   std::uint32_t kind;          // @0  -- KIND_FIGHT
@@ -1115,7 +1141,10 @@ struct fight_record
   std::uint32_t zero;          // @12
   alignas( 8 ) double sum_own_real;  // @16 -- sum(own_real) over this fight's DECISION records
   double deck_pool_exp;              // @24 -- version 2 (259-05): this fight's marked expected own credit
-                                      //         redistributed by the deck-draw pass; 0.0 until plan 259-11
+                                      //         redistributed by the deck-draw pass (live since plan 259-11)
+  double sum_own_real_chosen;        // @32 -- version 3 (266-21): sum(own_real_chosen) over this fight's DECISION records
+  double deck_pool_exp_chosen;       // @40 -- version 3: the chosen copy of deck_pool_exp (the pool pass run a second
+                                      //         time on the chosen copy, with the same deck_p)
 };
 static_assert( sizeof( fight_record ) == RECORD_SIZE, "rl_attr::fight_record must be exactly RECORD_SIZE bytes" );
 static_assert( alignof( fight_record ) == 8, "rl_attr::fight_record must be 8-aligned" );
@@ -1125,6 +1154,8 @@ static_assert( offsetof( fight_record, n_decisions ) == 8 );
 static_assert( offsetof( fight_record, zero ) == 12 );
 static_assert( offsetof( fight_record, sum_own_real ) == 16 );
 static_assert( offsetof( fight_record, deck_pool_exp ) == 24 );
+static_assert( offsetof( fight_record, sum_own_real_chosen ) == 32 );
+static_assert( offsetof( fight_record, deck_pool_exp_chosen ) == 40 );
 
 // One per decision of the fight it follows, seq ascending (write order == decision order --
 // rl_translog_pending_seqs, sim.hpp, is captured in write order by record_decision()).
@@ -1137,8 +1168,11 @@ struct decision_record
   std::uint32_t seq;    // @4  -- the decision row's own seq (sim->solver_control_seq at that boundary)
   alignas( 8 ) double own_real;  // @8
   double own_exp;                // @16
-  double deck_p;                 // @24 -- version 2 (259-05): this press's expected number of deck hits;
-                                  //         0.0 until plan 259-11
+  double deck_p;                 // @24 -- version 2 (259-05): this press's expected number of deck hits
+                                  //         (live since plan 259-11)
+  double own_real_chosen;        // @32 -- version 3 (266-21): own_real counting only hits on the chosen enemy
+  double own_exp_chosen;         // @40 -- version 3: own_exp counting only hits on the chosen enemy, after the
+                                  //         deck-draw pool pass run a second time on the chosen copy
 };
 static_assert( sizeof( decision_record ) == RECORD_SIZE, "rl_attr::decision_record must be exactly RECORD_SIZE bytes" );
 static_assert( alignof( decision_record ) == 8, "rl_attr::decision_record must be 8-aligned" );
@@ -1147,6 +1181,8 @@ static_assert( offsetof( decision_record, seq ) == 4 );
 static_assert( offsetof( decision_record, own_real ) == 8 );
 static_assert( offsetof( decision_record, own_exp ) == 16 );
 static_assert( offsetof( decision_record, deck_p ) == 24 );
+static_assert( offsetof( decision_record, own_real_chosen ) == 32 );
+static_assert( offsetof( decision_record, own_exp_chosen ) == 40 );
 
 // Once, at translog close (write_footer()). No fight owns the footer -- both fields besides
 // n_fights are written zero, mirroring rl_translog::footer_record's own zero-fill convention.
@@ -1158,6 +1194,8 @@ struct footer_record
   std::uint32_t zero2;     // @12
   alignas( 8 ) double zero_f;  // @16
   double zero_f2;              // @24 -- version 2 (259-05): written zero
+  double zero_f3;              // @32 -- version 3 (266-21): written zero
+  double zero_f4;              // @40 -- version 3 (266-21): written zero
 };
 static_assert( sizeof( footer_record ) == RECORD_SIZE, "rl_attr::footer_record must be exactly RECORD_SIZE bytes" );
 static_assert( alignof( footer_record ) == 8, "rl_attr::footer_record must be 8-aligned" );
@@ -1167,6 +1205,8 @@ static_assert( offsetof( footer_record, zero1 ) == 8 );
 static_assert( offsetof( footer_record, zero2 ) == 12 );
 static_assert( offsetof( footer_record, zero_f ) == 16 );
 static_assert( offsetof( footer_record, zero_f2 ) == 24 );
+static_assert( offsetof( footer_record, zero_f3 ) == 32 );
+static_assert( offsetof( footer_record, zero_f4 ) == 40 );
 
 } // namespace rl_attr
 
@@ -1347,7 +1387,12 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq,
                        // FLAG_OBS_HEAD_AIMED (bit 7) is decided in this function from the loaded
                        // weights (head consulted in `aim_obs_source = 1` mode, force-rules off).
                        std::uint8_t rules_candidate_slot = CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
-                       std::uint8_t observed_candidate_slot = CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK );
+                       std::uint8_t observed_candidate_slot = CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
+                       // 266-21 (funnel mode, version 13): the actor index of the chosen enemy (the
+                       // tag, `p->rl_chosen_enemy`) at this boundary, caller-resolved (this file is a
+                       // writer, not a decision-maker), or CHOSEN_TARGET_SENTINEL_NO_PICK when no tag is
+                       // set. Both solver_control.cpp call sites pass it explicitly.
+                       std::uint16_t chosen_enemy_actor_index = CHOSEN_TARGET_SENTINEL_NO_PICK );
 
 // Called from sim_t::combat_end(), after datacollection_end(). Builds and
 // appends the close row, then flushes the buffered rows for this fight to

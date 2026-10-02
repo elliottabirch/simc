@@ -1466,6 +1466,22 @@ void record( player_t* p, action_t* chosen, execute_type et )
   write_state_fields( line, p, chosen, !sim->solver_control_str.empty() || !sim->solver_policy_str.empty(),
                        et == execute_type::FOREGROUND, /*is_decision_boundary=*/false );
 
+  // Phase 266 (266-21, funnel mode): the "funnel" object -- the chosen enemy (the tag) and where the player's
+  // own target and both weapon swings point at this row, as actor indices (-1 for none). It is the observable
+  // the funnel proofs read (plans 266-06 and 266-09). Appended here, in record(), not in write_state_fields:
+  // that function is shared with the solver_control wire request, which must not grow. A named, expected
+  // difference between a net-driven dump from this fork and one from production (plan 266-02).
+  {
+    auto actor_index_or_none = []( const player_t* t ) -> long {
+      return t != nullptr ? static_cast<long>( t->actor_index ) : -1L;
+    };
+    line << ",\"funnel\":{\"tag\":" << actor_index_or_none( p->rl_chosen_enemy )
+         << ",\"player_target\":" << actor_index_or_none( p->target )
+         << ",\"mh_target\":" << actor_index_or_none( p->main_hand_attack ? p->main_hand_attack->target : nullptr )
+         << ",\"oh_target\":" << actor_index_or_none( p->off_hand_attack ? p->off_hand_attack->target : nullptr )
+         << "}";
+  }
+
   line << "}\n";
 
   {

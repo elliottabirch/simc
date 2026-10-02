@@ -2340,15 +2340,32 @@ void sim_t::combat_end()
   // the identical quantity. Truncated on iteration 0 (the first fight this process runs),
   // appended thereafter -- safe because rl_iteration_seeds refuses threads > 1 above, so this
   // sim_t is the sole writer to this path.
+  // 266-21 (funnel mode): each line is now FOUR columns, `iteration,seed,dps,chosen_dps` -- the fourth is the
+  // damage per second counting only hits on the chosen enemy (see the computation below). Every reader of
+  // this file must accept four columns; the three-column form no longer exists.
   if ( !rl_iteration_out.empty() )
   {
     double dps = current_time() != timespan_t::zero() ? iteration_dmg / current_time().total_seconds() : 0.0;
+    // Phase 266 (266-21, owner F7, R12): the fourth column, `chosen_dps` -- damage per second on the
+    // chosen enemy (the tag, player_t::rl_chosen_enemy), from the owner-routed running total each
+    // player keeps (pets and guardians credit their owner), summed over the non-pet players with the
+    // same zero-time guard as dps. Always written, in scripted fights too (no opt-in). A player that is
+    // not the RL actor never gets a tag, so its total stays 0 and the column reads exactly 0. It is NOT
+    // priority_iteration_dmg (that counts hits on sim->target, not on the tag).
+    double chosen_dps = 0.0;
+    if ( current_time() != timespan_t::zero() )
+    {
+      double chosen_total = 0.0;
+      for ( const player_t* chosen_player : player_no_pet_list )
+        chosen_total += chosen_player->solver_chosen_damage_so_far;
+      chosen_dps = chosen_total / current_time().total_seconds();
+    }
     io::ofstream out;
     out.open( rl_iteration_out, current_iteration == 0 ? ( std::ios::out | std::ios::trunc )
                                                          : ( std::ios::out | std::ios::app ) );
     if ( out.is_open() )
     {
-      out.printf( "%d,%llu,%.17g\n", current_iteration, static_cast<unsigned long long>( seed ), dps );
+      out.printf( "%d,%llu,%.17g,%.17g\n", current_iteration, static_cast<unsigned long long>( seed ), dps, chosen_dps );
     }
   }
 

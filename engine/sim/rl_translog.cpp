@@ -613,7 +613,8 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float ob
                        const float* candidate_features, std::uint16_t candidate_mask,
                        std::uint8_t candidate_count, std::uint8_t chosen_candidate_slot,
                        const char* apl_choice_name, bool aim_explored,
-                       std::uint8_t rules_candidate_slot, std::uint8_t observed_candidate_slot )
+                       std::uint8_t rules_candidate_slot, std::uint8_t observed_candidate_slot,
+                       std::uint16_t chosen_enemy_actor_index )
 {
   sim_t* root = root_of( sim );
   if ( root->rl_translog_file_str.empty() )
@@ -667,6 +668,9 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float ob
   // Version 6 (228-09, D-23/TGT-08): the CHOSEN action's own stamped pick, caller-resolved
   // (lookup_pick(), never recomputed here -- this file is a writer, not a decision-maker).
   r.chosen_target_actor_index = chosen_target_actor_index;
+  // Version 13 (266-21, funnel mode): the chosen enemy (the tag) at this boundary, caller-resolved --
+  // 0xFFFF (CHOSEN_TARGET_SENTINEL_NO_PICK) when no tag is set.
+  r.chosen_enemy_actor_index = chosen_enemy_actor_index;
 
   // Pack the legality mask one bit per action, in declaration order.
   // Version 4: widened uint8 -> uint32 (up to 32 actions instead of 8) to
@@ -854,12 +858,15 @@ void record_close( sim_t* sim )
     assert( root->rl_translog_pending_seqs.size() == n_decisions );
 
     double sum_own_real = 0.0;
+    double sum_own_real_chosen = 0.0;  // 266-21 (.attr version 3): the chosen-enemy twin, same order
     for ( std::uint32_t i = 0; i < n_decisions; ++i )
     {
       const std::uint64_t s = root->rl_translog_pending_seqs[ i ];
       const std::size_t idx = static_cast<std::size_t>( s - p->rl_fight_first_seq );
       if ( idx < p->rl_own_real.size() )
         sum_own_real += p->rl_own_real[ idx ];
+      if ( idx < p->rl_own_real_chosen.size() )
+        sum_own_real_chosen += p->rl_own_real_chosen[ idx ];
     }
 
     // Phase 259 (plan 259-11, owner Q15/Q16, binding resolution R12, fork research option P): the
@@ -929,6 +936,50 @@ void record_close( sim_t* sim )
           r.iteration, deck_sum_before, deck_sum_after ) );
     }
 
+    // Phase 266 (plan 266-21, owner F9, R9): the SAME deck-draw pool pass, run a second time on the
+    // CHOSEN copy -- the marked expected credit that landed on the chosen enemy, pooled and shared out by
+    // the SAME per-press expected deck hits (`attr_deck_p`, `deck_sum_p`: the draw chances do not depend
+    // on which enemy a hit struck), in exactly the all-enemy pass's order of operations, so that with
+    // one enemy every number here is bit-for-bit its all-enemy twin:
+    //   own_exp_chosen[k] <- own_exp_chosen[k] - marked_chosen[k] + p[k] * pool_chosen / sum(p).
+    std::vector<double> attr_own_exp_chosen( n_decisions, 0.0 );
+    std::vector<double> attr_marked_chosen( n_decisions, 0.0 );
+    double chosen_sum_before = 0.0, chosen_sum_marked = 0.0;
+    for ( std::uint32_t i = 0; i < n_decisions; ++i )
+    {
+      const std::uint64_t s = root->rl_translog_pending_seqs[ i ];
+      const std::size_t idx = static_cast<std::size_t>( s - p->rl_fight_first_seq );
+      attr_own_exp_chosen[ i ] = idx < p->rl_own_exp_chosen.size() ? p->rl_own_exp_chosen[ idx ] : 0.0;
+      attr_marked_chosen[ i ] = idx < p->rl_own_exp_marked_chosen.size() ? p->rl_own_exp_marked_chosen[ idx ] : 0.0;
+      chosen_sum_before += attr_own_exp_chosen[ i ];
+      chosen_sum_marked += attr_marked_chosen[ i ];
+    }
+    const double deck_pool_chosen = chosen_sum_marked;
+    if ( deck_sum_p > 0.0 )
+    {
+      for ( std::uint32_t i = 0; i < n_decisions; ++i )
+        attr_own_exp_chosen[ i ] =
+            attr_own_exp_chosen[ i ] - attr_marked_chosen[ i ] + attr_deck_p[ i ] * deck_pool_chosen / deck_sum_p;
+    }
+    else if ( deck_pool_chosen != 0.0 )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_translog=: fight {} has a chosen-enemy deck pool of {} marked expected credit but no decision "
+          "with a deck draw chance (sum deck_p == 0) -- the deck-draw pricing accounting is broken; refusing "
+          "to write a label that would silently drop that credit.",
+          r.iteration, deck_pool_chosen ) );
+    }
+    double chosen_sum_after = 0.0;
+    for ( std::uint32_t i = 0; i < n_decisions; ++i )
+      chosen_sum_after += attr_own_exp_chosen[ i ];
+    if ( std::fabs( chosen_sum_after - chosen_sum_before ) > 1e-9 * std::max( 1.0, std::fabs( chosen_sum_before ) ) )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_translog=: fight {} deck-draw pool pass moved the fight's sum of own_exp_chosen from {} to {} "
+          "(tolerance 1e-9 relative) -- the pass must only redistribute; refusing to write it.",
+          r.iteration, chosen_sum_before, chosen_sum_after ) );
+    }
+
     rl_attr::fight_record fr{};
     fr.kind = rl_attr::KIND_FIGHT;
     fr.iteration = r.iteration;
@@ -936,6 +987,8 @@ void record_close( sim_t* sim )
     fr.zero = 0;
     fr.sum_own_real = sum_own_real;
     fr.deck_pool_exp = deck_pool;  // .attr version 2: this fight's pooled deck payout (plan 259-11)
+    fr.sum_own_real_chosen = sum_own_real_chosen;  // .attr version 3 (266-21): the chosen-enemy twins
+    fr.deck_pool_exp_chosen = deck_pool_chosen;
     root->rl_translog_attr_stream->write( reinterpret_cast<const char*>( &fr ), sizeof( fr ) );
 
     for ( std::uint32_t i = 0; i < n_decisions; ++i )
@@ -949,6 +1002,8 @@ void record_close( sim_t* sim )
       dr.own_real = idx < p->rl_own_real.size() ? p->rl_own_real[ idx ] : 0.0;
       dr.own_exp = attr_own_exp[ i ];   // repriced by the deck-draw pool pass above (259-11)
       dr.deck_p = attr_deck_p[ i ];     // .attr version 2: this press's expected number of deck hits
+      dr.own_real_chosen = idx < p->rl_own_real_chosen.size() ? p->rl_own_real_chosen[ idx ] : 0.0;  // .attr version 3 (266-21)
+      dr.own_exp_chosen = attr_own_exp_chosen[ i ];  // repriced by the chosen-copy pool pass above
       root->rl_translog_attr_stream->write( reinterpret_cast<const char*>( &dr ), sizeof( dr ) );
     }
 

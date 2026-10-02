@@ -7635,6 +7635,24 @@ action_t* player_t::execute_action()
   // moment; it only changes WHICH action identity gets reported.
   action = solver_control::choose( this, action );
 
+  // Phase 266 (266-21, owner F9, R13): the SCRIPTED-FIGHT hook of the chooser. A scripted fight (no
+  // solver_control= and no solver_policy=) has no decision boundaries, so the boundary call in
+  // rl_policy_obs.cpp never runs; the chosen-enemy bars are cut with the scripted rotation, so the tag
+  // must be kept up to date here, once per foreground action pass. player_t::execute_action() is the
+  // narrowest hook that runs exactly once per foreground action: it is the foreground Player-Ready path
+  // (an enemy's arise never reaches it), and in a net-driven fight solver_control::choose() has already
+  // reached the boundary call through read_action_gate_bits, so this hook is skipped there and the
+  // chooser is never entered twice at one boundary. It runs for pets too (the Feral Spirit wolves take
+  // their foreground passes here), so it carries the fork's one RL-actor test itself, the member-function
+  // spelling of solver_control.cpp:144; the chooser refuses any other player by name. Placed after the
+  // choose() reply and before decision_dump::record() so a scripted dump row sees the tag it was made
+  // against.
+  if ( sim->solver_control_str.empty() && sim->solver_policy_str.empty() )
+  {
+    if ( std::strcmp( name(), RL_ACTOR_NAME ) == 0 && !is_pet() )
+      rl_target_select::refresh_chosen( this );
+  }
+
   // P2 spike hook (simc-solver-spike-2026-07-29) - dump full decision-boundary
   // state HERE: `action` is chosen (by the APL, or -- now -- already resolved
   // by solver_control above) but nothing has executed yet (no cost paid, no
