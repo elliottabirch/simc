@@ -127,8 +127,41 @@ struct wave_t
   std::string travel_jitter;
   std::optional<wave_stream_t> raid_stream;
 };
+// tstl-sylvanas 265-03: sheet-fight-spec/2 (Phase 265 D-08..D-11). A random mechanic is something a boss may do to the raid
+// that lands on the player only some of the time; the controller plays it itself (never as a phase child), so the
+// fight inputs the net reads do not change. A "declared cast" is one entry of a mechanic's casts list.
+struct rm_cast_t
+{
+  int phase = 0;
+  std::string at_kind;  // phase_time | boss_health | after_cast
+  double in_phase_s = 0;
+  std::string boss;
+  double pct = 0;
+  std::string cast;
+  double after_s = 0;
+  std::optional<std::pair<double, double>> time_jitter;  // a shift in seconds added to the time (min, max)
+};
+struct random_mechanic_t
+{
+  std::string name;
+  long long ability_id = 0;
+  std::string caster;
+  double chance = 0;
+  std::string category;  // forced_movement | stun | other_realm
+  double duration_s = 0;
+  std::optional<double> distance_yd;  // forced_movement only; recorded, the effect is timed by duration_s
+  std::vector<rm_cast_t> casts;
+};
+// A priority mark names an enemy (a boss or a wave actor) and when it is "the one to hit". The controller only REPORTS
+// the windows (record key priority_windows); nothing acts on them in Phase 265.
+struct priority_mark_t
+{
+  std::string name, enemy, while_kind, rank;  // while_kind: alive | absorb_on_target; rank: top | high | normal | ignore
+  bool funnel_all_damage = false;
+};
 struct spec_t
 {
+  int format = 1;  // tstl-sylvanas 265-03: 1 = sheet-fight-spec/1 (today's code path), 2 = sheet-fight-spec/2
   std::string slug, sheet_fingerprint, fragment_path, master_actor, path;
   long long encounter_id = 0;
   double max_time_s = 0, sample_interval_s = 1;
@@ -136,6 +169,8 @@ struct spec_t
   std::vector<phase_t> phases;
   std::vector<wave_t> waves;
   std::vector<jitter_t> jitter;
+  std::vector<random_mechanic_t> random_mechanics;  // format 2 only
+  std::vector<priority_mark_t> priority_marks;      // format 2 only
 };
 
 // Reads and validates the spec; throws sc_invalid_sim_argument "solver_sheet_fight='<path>': <json path>: <message>"

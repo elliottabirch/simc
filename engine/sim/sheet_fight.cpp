@@ -177,10 +177,21 @@ spec_t load_spec( const std::string& path )
 
   spec_t spec;
   spec.path = path;
-  L.keys( doc, { "format", "slug", "sheet_fingerprint", "encounter_id", "fragment_path", "master_actor", "max_time_s",
-                 "sample_interval_s", "bosses", "phases", "waves", "jitter", "timers_pending_second_kill", "defaults_used" }, "" );
-  if ( !doc[ "format" ].IsString() || std::string( doc[ "format" ].GetString() ) != "sheet-fight-spec/1" )
-    L.fail( "format", "format must be \"sheet-fight-spec/1\"" );
+  // tstl-sylvanas 265-03: "sheet-fight-spec/2" is the same object plus two required lists (random_mechanics, priority_marks).
+  // A /1 spec takes today's key list and today's code path, byte for byte; under /1 either new key is an unknown key.
+  const bool is2 = doc.IsObject() && doc.HasMember( "format" ) && doc[ "format" ].IsString() &&
+                   std::string( doc[ "format" ].GetString() ) == "sheet-fight-spec/2";
+  if ( is2 )
+    L.keys( doc, { "format", "slug", "sheet_fingerprint", "encounter_id", "fragment_path", "master_actor", "max_time_s",
+                   "sample_interval_s", "bosses", "phases", "waves", "jitter", "timers_pending_second_kill", "defaults_used",
+                   "random_mechanics", "priority_marks" }, "" );
+  else
+    L.keys( doc, { "format", "slug", "sheet_fingerprint", "encounter_id", "fragment_path", "master_actor", "max_time_s",
+                   "sample_interval_s", "bosses", "phases", "waves", "jitter", "timers_pending_second_kill", "defaults_used" }, "" );
+  if ( !doc[ "format" ].IsString() ||
+       ( std::string( doc[ "format" ].GetString() ) != "sheet-fight-spec/1" && std::string( doc[ "format" ].GetString() ) != "sheet-fight-spec/2" ) )
+    L.fail( "format", "format must be \"sheet-fight-spec/1\" or \"sheet-fight-spec/2\"" );
+  spec.format = is2 ? 2 : 1;
   spec.slug = L.str( doc[ "slug" ], "slug", "slug" );
   {
     const Value& f = doc[ "sheet_fingerprint" ];
@@ -535,6 +546,130 @@ spec_t load_spec( const std::string& path )
   const Value& du = L.list( doc, "defaults_used", "" );
   for ( SizeType i = 0; i < du.Size(); ++i )
     L.keys( du[ i ], { "what", "value", "source" }, loader_t::at( "defaults_used", i ) );
+
+  if ( is2 )
+  {
+    // tstl-sylvanas 265-03: the two format-2 lists. Same accept and refuse rules as validateSheetFightSpec in
+    // scripts/fights/fight-contracts.js (that file's header is the contract).
+    const int rm_phase_count = static_cast<int>( spec.phases.size() );
+    const Value& rl          = L.list( doc, "random_mechanics", "" );
+    std::set<std::string> rm_names;
+    for ( SizeType i = 0; i < rl.Size(); ++i )
+    {
+      const std::string p = loader_t::at( "random_mechanics", i );
+      const Value& m      = rl[ i ];
+      L.keys( m, { "name", "ability_id", "caster", "chance", "effect", "casts" }, p );
+      random_mechanic_t out;
+      out.name = L.str( m[ "name" ], p + ".name", "name" );
+      if ( !rm_names.insert( out.name ).second )
+        L.fail( p + ".name", "duplicate random mechanic name " + out.name );
+      out.ability_id = static_cast<long long>( L.num( m[ "ability_id" ], p + ".ability_id", "ability_id", true ) );
+      out.caster     = L.boss_ref( m[ "caster" ], p + ".caster" );
+      out.chance     = L.num( m[ "chance" ], p + ".chance", "chance", false, 0, -1e300, 1e300, 1 );
+      const std::string ep = p + ".effect";
+      const Value& ef      = m[ "effect" ];
+      L.keys( ef, { "category", "duration_s", "distance_yd" }, ep );
+      const Value& cat = ef[ "category" ];
+      if ( !cat.IsString() || ( std::string( cat.GetString() ) != "forced_movement" && std::string( cat.GetString() ) != "stun" &&
+                                std::string( cat.GetString() ) != "other_realm" ) )
+        L.fail( ep + ".category", "category must be one of forced_movement, stun, other_realm" );
+      out.category   = cat.GetString();
+      out.duration_s = L.num( ef[ "duration_s" ], ep + ".duration_s", "duration_s", false, -1e300, 0 );
+      if ( out.category == "forced_movement" )
+        out.distance_yd = L.num( ef[ "distance_yd" ], ep + ".distance_yd", "distance_yd", false, -1e300, 0 );
+      else if ( !ef[ "distance_yd" ].IsNull() )
+        L.fail( ep + ".distance_yd", "distance_yd must be null for category " + out.category );
+      if ( out.category == "forced_movement" )  // 265-03 task-1 limit: removed in task 2
+        L.fail( ep + ".category", "this build does not play forced_movement yet (plan 265-03 task 2)" );
+      const Value& cl = L.list( m, "casts", p );
+      if ( cl.Size() == 0 )
+        L.fail( p + ".casts", "casts must be a non-empty list" );
+      for ( SizeType k = 0; k < cl.Size(); ++k )
+      {
+        const std::string cp = loader_t::at( p + ".casts", k );
+        const Value& cv      = cl[ k ];
+        L.keys( cv, { "phase", "at", "time_jitter" }, cp );
+        rm_cast_t c;
+        c.phase = static_cast<int>( L.num( cv[ "phase" ], cp + ".phase", "phase", true, 0, -1e300, 1e300, rm_phase_count - 1 ) );
+        const std::string ap = cp + ".at";
+        const Value& av      = cv[ "at" ];
+        if ( !av.IsObject() )
+          L.fail( ap, "at must be a JSON object" );
+        const std::string kind = av.HasMember( "kind" ) && av[ "kind" ].IsString() ? av[ "kind" ].GetString() : "";
+        c.at_kind              = kind;
+        if ( kind == "phase_time" )
+        {
+          L.keys( av, { "kind", "in_phase_s" }, ap );
+          c.in_phase_s = L.num( av[ "in_phase_s" ], ap + ".in_phase_s", "in_phase_s", false, 0 );
+        }
+        else if ( kind == "boss_health" )
+        {
+          L.keys( av, { "kind", "boss", "pct" }, ap );
+          c.boss = L.boss_ref( av[ "boss" ], ap + ".boss" );
+          c.pct  = L.num( av[ "pct" ], ap + ".pct", "pct", false, 0, -1e300, 100 );
+        }
+        else if ( kind == "after_cast" )
+        {
+          L.keys( av, { "kind", "cast", "after_s" }, ap );
+          bool declared = false;
+          if ( av[ "cast" ].IsString() )
+            for ( const auto& sc : spec.phases[ c.phase ].casts )
+              declared = declared || sc.name == av[ "cast" ].GetString();
+          if ( !declared )
+            L.fail( ap + ".cast", fmt::format( "cast is not declared in that phase's casts list (phase {})", c.phase ) );
+          c.cast    = av[ "cast" ].GetString();
+          c.after_s = L.num( av[ "after_s" ], ap + ".after_s", "after_s", false, 0 );
+        }
+        else
+          L.fail( ap + ".kind", "kind must be one of phase_time, boss_health, after_cast" );
+        if ( kind != "phase_time" )  // 265-03 task-1 limit: removed in task 2
+          L.fail( ap + ".kind", "this build plays only phase_time casts so far (plan 265-03 task 2)" );
+        const Value& tj = cv[ "time_jitter" ];
+        if ( !tj.IsNull() )
+        {
+          const std::string jp = cp + ".time_jitter";
+          L.keys( tj, { "min", "max" }, jp );
+          const double lo = L.num( tj[ "min" ], jp + ".min", "min" );
+          const double hi = L.num( tj[ "max" ], jp + ".max", "max" );
+          if ( hi < lo )
+            L.fail( jp + ".max", "max must be at least min" );
+          c.time_jitter = std::make_pair( lo, hi );
+        }
+        out.casts.push_back( c );
+      }
+      spec.random_mechanics.push_back( out );
+    }
+
+    const Value& ml = L.list( doc, "priority_marks", "" );
+    std::set<std::string> mark_names;
+    for ( SizeType i = 0; i < ml.Size(); ++i )
+    {
+      const std::string p = loader_t::at( "priority_marks", i );
+      const Value& m      = ml[ i ];
+      L.keys( m, { "name", "enemy", "while", "rank", "funnel_all_damage" }, p );
+      priority_mark_t out;
+      out.name = L.str( m[ "name" ], p + ".name", "name" );
+      if ( !mark_names.insert( out.name ).second )
+        L.fail( p + ".name", "duplicate priority mark name " + out.name );
+      const Value& en = m[ "enemy" ];
+      if ( !en.IsString() || !( L.boss_actors.count( en.GetString() ) || L.wave_actors.count( en.GetString() ) ) )
+        L.fail( p + ".enemy", "enemy must name a boss or wave actor" );
+      out.enemy = en.GetString();
+      const std::string wp = p + ".while";
+      L.keys( m[ "while" ], { "kind" }, wp );
+      const Value& wk = m[ "while" ][ "kind" ];
+      if ( !wk.IsString() || ( std::string( wk.GetString() ) != "alive" && std::string( wk.GetString() ) != "absorb_on_target" ) )
+        L.fail( wp + ".kind", "kind must be one of alive, absorb_on_target" );
+      out.while_kind = wk.GetString();
+      const Value& rk = m[ "rank" ];
+      if ( !rk.IsString() || ( std::string( rk.GetString() ) != "top" && std::string( rk.GetString() ) != "high" &&
+                               std::string( rk.GetString() ) != "normal" && std::string( rk.GetString() ) != "ignore" ) )
+        L.fail( p + ".rank", "rank must be one of top, high, normal, ignore" );
+      out.rank              = rk.GetString();
+      out.funnel_all_damage = L.boolean( m[ "funnel_all_damage" ], p + ".funnel_all_damage", "funnel_all_damage" );
+      spec.priority_marks.push_back( out );
+    }
+  }
   return spec;
 }
 }  // namespace sheet_fight_spec
@@ -694,6 +829,22 @@ struct sheet_fight_event_t::impl_t
   std::vector<std::unique_ptr<inst_t>> insts;
   std::unordered_map<const player_t*, int> mob_inst;
 
+  // ---- random mechanics (tstl-sylvanas 265-03) ---------------------------------------------------
+  // One record per declared cast of a /2 spec, in spec order. The outcome (the time shift and the hit) is decided when the
+  // fight begins, by draw_jitter(); the cast event only plays it out. Controller-owned: none of this is a phase child, so
+  // forecast() and the downtime windows never see it.
+  struct rm_rt_t
+  {
+    double offset = 0;  // seconds added to the cast's trigger time: the drawn shift, or the centre of its range
+    double roll   = -1; // the hit draw in [0, 1); below 0 means none (a nominal fight draws nothing)
+    bool hit      = false;  // the outcome decided at the start: roll < chance, or chance >= 0.5 with no draw
+    bool fired    = false;  // the cast happened this fight
+    bool armed    = false;  // a boss_health cast waiting for its crossing
+    double cast_s = -1, start_s = -1, end_s = -1;
+    std::vector<player_t*> affected;  // the players the effect landed on (the end event gives them their turn back)
+  };
+  std::vector<std::vector<rm_rt_t>> rm_rt;
+
   // ---- events ---------------------------------------------------------------------------------
   struct tick_event_t : event_t
   {
@@ -789,11 +940,40 @@ struct sheet_fight_event_t::impl_t
     const char* name() const override { return "sheet_fight_arrive"; }
     void execute() override { im->on_arrive( inst ); }
   };
+  // tstl-sylvanas 265-03: a random mechanic's cast moment and the end of its effect. check_phase: the cast is dropped when
+  // its phase has already ended (like a spec cast); a cast triggered by a crossing or another cast with no extra delay is
+  // not dropped by a phase change in the same instant.
+  struct rm_cast_event_t : event_t
+  {
+    impl_t* im;
+    int m, c, phase;
+    bool check_phase;
+    rm_cast_event_t( sim_t& s, impl_t* i, int mm, int cc, int ph, bool chk, timespan_t t )
+      : event_t( s, t ), im( i ), m( mm ), c( cc ), phase( ph ), check_phase( chk ) {}
+    const char* name() const override { return "sheet_fight_random_cast"; }
+    void execute() override
+    {
+      if ( check_phase && im->current_phase != phase )
+        return;
+      im->rm_fire( m, c );
+    }
+  };
+  struct rm_end_event_t : event_t
+  {
+    impl_t* im;
+    int m, c;
+    rm_end_event_t( sim_t& s, impl_t* i, int mm, int cc, timespan_t t ) : event_t( s, t ), im( i ), m( mm ), c( cc ) {}
+    const char* name() const override { return "sheet_fight_random_end"; }
+    void execute() override { im->rm_end( m, c ); }
+  };
 
   impl_t( sheet_fight_event_t& s, sim_t* sm, sheet_fight_spec::spec_t sp ) : self( s ), sim( sm ), spec( std::move( sp ) )
   {
     children.resize( spec.phases.size() );
     trigger_ready.assign( spec.phases.size(), 0 );
+    rm_rt.resize( spec.random_mechanics.size() );  // tstl-sylvanas 265-03: never resized again (a movement ticker keeps a reference into it)
+    for ( size_t m = 0; m < rm_rt.size(); ++m )
+      rm_rt[ m ].resize( spec.random_mechanics[ m ].casts.size() );
   }
 
   double now() const { return sim->current_time().total_seconds(); }
@@ -912,6 +1092,31 @@ struct sheet_fight_event_t::impl_t
       else
         drawn_fight[ k ] = draw_one( spec.jitter[ k ] );
     }
+    // tstl-sylvanas 265-03: the random mechanics' draws come AFTER every existing key's draw, and only for a /2 spec, so a
+    // /1 spec draws exactly as before. With jitter on: for each mechanic in list order and each declared cast in order, one
+    // time-shift draw when the cast has a range of non-zero width, then ALWAYS exactly one hit draw (range, never roll(): roll()
+    // takes no draw at a chance of 0 or 1, which would make the number of draws per fight depend on the spec's numbers).
+    // With jitter off nothing is drawn: the shift is the centre of the range and the cast hits when its chance is at least 0.5.
+    if ( spec.format == 2 )
+      for ( size_t m = 0; m < spec.random_mechanics.size(); ++m )
+        for ( size_t c = 0; c < spec.random_mechanics[ m ].casts.size(); ++c )
+        {
+          const auto& mech   = spec.random_mechanics[ m ];
+          const auto& tj     = mech.casts[ c ].time_jitter;
+          auto& rt           = rm_rt[ m ][ c ];
+          const double centre = tj ? ( tj->first + tj->second ) / 2.0 : 0.0;
+          if ( !sim->solver_sheet_jitter )
+          {
+            rt.offset = centre;
+            rt.roll   = -1;
+            rt.hit    = mech.chance >= 0.5;
+            continue;
+          }
+          rl_rng_record::rl_raid_draw_scope_t guard( sim, self );
+          rt.offset = ( tj && tj->second > tj->first ) ? sim->rng().range( tj->first, tj->second ) : centre;
+          rt.roll   = sim->rng().range( 0.0, 1.0 );
+          rt.hit    = rt.roll < mech.chance;
+        }
   }
 
   // This fight's value for a key (the phase's value for a per-phase key); `none` for an absent key.
@@ -1178,6 +1383,16 @@ struct sheet_fight_event_t::impl_t
                                      timespan_t::from_seconds( jit_value( ph.bloodlust->offset_jitter, ph.bloodlust->offset_after_start_s ) ) );
     for ( size_t c = 0; c < ph.casts.size(); ++c )
       make_event<cast_event_t>( *sim, *sim, this, j, static_cast<int>( c ), timespan_t::from_seconds( ph.casts[ c ].at_in_phase_s ) );
+    // tstl-sylvanas 265-03: a random mechanic's phase_time casts are tied to their phase (dropped when it ends first).
+    for ( size_t m = 0; m < spec.random_mechanics.size(); ++m )
+      for ( size_t c = 0; c < spec.random_mechanics[ m ].casts.size(); ++c )
+      {
+        const auto& rc = spec.random_mechanics[ m ].casts[ c ];
+        if ( rc.phase != j || rc.at_kind != "phase_time" )
+          continue;
+        make_event<rm_cast_event_t>( *sim, *sim, this, static_cast<int>( m ), static_cast<int>( c ), j, true,
+                                     timespan_t::from_seconds( std::max( 0.0, rc.in_phase_s + rm_rt[ m ][ c ].offset ) ) );
+      }
     for ( size_t w = 0; w < spec.waves.size(); ++w )
       for ( size_t k = 0; k < spec.waves[ w ].at.size(); ++k )
       {
@@ -1519,6 +1734,48 @@ struct sheet_fight_event_t::impl_t
     return f;
   }
 
+  // ---- random mechanics (tstl-sylvanas 265-03) ----------------------------------------------------
+  // A random cast's moment has come. The outcome was decided when the fight began, so nothing is drawn here. A hit applies
+  // its effect to every non-pet, non-sleeping player and schedules the end of the effect.
+  void rm_fire( int m, int c )
+  {
+    auto& rt = rm_rt[ m ][ c ];
+    if ( rt.fired )
+      return;
+    rt.fired  = true;
+    rt.cast_s = r3( now() );
+    if ( !rt.hit )
+      return;
+    const auto& mech = spec.random_mechanics[ m ];
+    rt.start_s       = rt.cast_s;
+    rt.affected.clear();
+    // Indices, not iterators: starting an effect can change the lists.
+    for ( size_t i = 0; i < sim->player_non_sleeping_list.size(); ++i )
+    {
+      auto* p = sim->player_non_sleeping_list[ i ];
+      if ( !p->is_pet() )
+        rt.affected.push_back( p );
+    }
+    if ( mech.category == "stun" )
+      for ( auto* p : rt.affected )
+        sheet_fight_stun_start( p );
+    make_event<rm_end_event_t>( *sim, *sim, this, m, c, timespan_t::from_seconds( mech.duration_s ) );
+  }
+
+  // The effect's duration is over: end it (a stun hands the turn back through the shared helper) and record the end.
+  void rm_end( int m, int c )
+  {
+    auto& rt         = rm_rt[ m ][ c ];
+    const auto& mech = spec.random_mechanics[ m ];
+    // As the stock raid event's finish does: a player who fell asleep meanwhile is dropped first.
+    rt.affected.erase( std::remove_if( rt.affected.begin(), rt.affected.end(), []( const player_t* p ) { return p->is_sleeping(); } ),
+                       rt.affected.end() );
+    if ( mech.category == "stun" )
+      for ( auto* p : rt.affected )
+        sheet_fight_stun_end( sim, p );
+    rt.end_s = r3( rt.start_s + mech.duration_s );
+  }
+
   // ---- the fight record ----------------------------------------------------------------------
   void write_record()
   {
@@ -1724,6 +1981,39 @@ struct sheet_fight_event_t::impl_t
       w.EndObject();
     }
     w.EndArray();
+    // tstl-sylvanas 265-03: a /2 fight records its random mechanics (one entry per declared cast, spec order) and the
+    // priority windows; a /1 fight's record carries neither key, so its bytes do not change.
+    if ( spec.format == 2 )
+    {
+      key( "random_mechanics" );
+      w.StartArray();
+      for ( size_t m = 0; m < spec.random_mechanics.size(); ++m )
+        for ( size_t c = 0; c < spec.random_mechanics[ m ].casts.size(); ++c )
+        {
+          const auto& mech = spec.random_mechanics[ m ];
+          const auto& rt   = rm_rt[ m ][ c ];
+          w.StartObject();
+          key( "name" ); w.String( mech.name.c_str() );
+          key( "cast_index" ); w.Int( static_cast<int>( c ) );
+          key( "phase" ); w.Int( mech.casts[ c ].phase );
+          key( "cast_s" ); num_or_null( rt.cast_s );
+          key( "chance" ); w.Double( mech.chance );
+          key( "roll" );
+          if ( rt.roll < 0 )
+            w.Null();
+          else
+            w.Double( rt.roll );
+          key( "hit" ); w.Bool( rt.fired && rt.hit );
+          key( "category" ); w.String( mech.category.c_str() );
+          key( "start_s" ); num_or_null( rt.start_s );
+          key( "end_s" ); num_or_null( rt.end_s );
+          w.EndObject();
+        }
+      w.EndArray();
+      key( "priority_windows" );
+      w.StartArray();
+      w.EndArray();
+    }
     w.EndObject();
 
     if ( sim->solver_fight_timeline_str.empty() )
@@ -1861,6 +2151,9 @@ void sheet_fight_event_t::reset()
   im.insts.clear();
   im.mob_inst.clear();
   im.windows.clear();
+  for ( auto& mech : im.rm_rt )  // tstl-sylvanas 265-03
+    for ( auto& rt : mech )
+      rt = impl_t::rm_rt_t();
   for ( auto& wr : im.wave_rt )
     std::fill( wr.armed.begin(), wr.armed.end(), 0 );
   im.trigger_ready.assign( im.spec.phases.size(), 0 );
