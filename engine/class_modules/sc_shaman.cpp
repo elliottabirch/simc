@@ -28,6 +28,7 @@
 #include "report/highchart.hpp"
 #include "player/player_scaling.hpp"
 #include "player/set_bonus.hpp"
+#include "sim/rl_buff_ledger.hpp"
 #include "report/decorators.hpp"
 #include "sc_enums.hpp"
 #include "sim/cooldown.hpp"
@@ -10539,9 +10540,14 @@ struct voltaic_blaze_t : public shaman_spell_t
     {
       shaman_spell_t::impact( state );
 
-      make_event( sim, rng().gauss( 500_ms, 25_ms ), [ this, t = state->target ]() {
-        p()->trigger_secondary_flame_shock( t, spell_variant::VOLTAIC_BLAZE );
-      } );
+      // 261001-bac plan 13 (ruling R1): the timer keeps no cause, so the Flame Shock it applies reaches rl_resolve_cause()'s
+      // last branch (no cause). The ledger's own press is captured here and handed back around the application: only the
+      // ledger's press value of that application and its ticks changes, never the reward's stamps (see rl_buff_ledger.hpp).
+      make_event( sim, rng().gauss( 500_ms, 25_ms ),
+                  [ this, t = state->target, rl_carried = rl_buff_ledger::carry_capture( p() ) ]() {
+                    rl_buff_ledger::carry_scope_t rl_carry( sim, rl_carried );
+                    p()->trigger_secondary_flame_shock( t, spell_variant::VOLTAIC_BLAZE );
+                  } );
     }
   };
 

@@ -163,6 +163,12 @@ struct state_t
   std::uint64_t frame_pop_mismatch = 0;
   std::map<std::string, std::uint64_t> launches_by_kind;
 
+  // Plan 13 (ruling R1): the carried press handed back by a live carry_scope_t (PRESS_NONE: none), and the run totals `hit`
+  // records with a carried press (press_carried) and carries refused because the press number is too large (overflow).
+  std::int16_t carried_press = PRESS_NONE;
+  std::uint64_t press_carried = 0;
+  std::uint64_t press_carry_overflow = 0;
+
   // Per-fight
   std::int32_t next_press = 0;
   std::int16_t last_press = -1;
@@ -505,6 +511,7 @@ void fight_begin( sim_t* sim )
   s->charge_probe_done = false;
   // A fixed seed at every fight begin: the scratch stream is never a function of the fight's own streams.
   s->scratch_rng.seed( 0x5CA1AB1E0DDBA11FULL );
+  s->carried_press = PRESS_NONE;
   s->next_press = 0;
   s->last_press = -1;
   s->next_hit = 1;
@@ -828,11 +835,59 @@ void write_footer( sim_t* sim )
                   s->zero_structural_skipped );
   put_count_object( b, "refresh_no_cover_by_buff", s->refresh_no_cover_by_buff );
   put_count_object( b, "delay_merge_mixed_cause_by_buff", s->delay_merge_mixed_cause_by_buff );
+  // Plan 13 counters (ruling R1: the carried press).
+  fmt::format_to( out_it( b ), ",\"press_carried\":{},\"press_carry_overflow\":{}", s->press_carried, s->press_carry_overflow );
   b += "}\n";
 
   s->out << b;
   s->out.flush();
   s->out.close();
+}
+
+std::int16_t carry_capture( const player_t* p )
+{
+  sim_t* sim = p->sim;
+  if ( !sim->rl_bl_on || p->rl_cause_stack.empty() )
+    return PRESS_NONE;
+  state_t* s = state_of( sim );
+  if ( s == nullptr || !s->in_fight )
+    return PRESS_NONE;
+  const std::int16_t press = p->rl_cause_stack.back().cause.press;
+  if ( press < 0 )
+    return PRESS_NONE;  // a sentinel, or a value that is already carried: nothing to carry
+  if ( press > PRESS_CARRY_MAX )
+  {
+    ++s->press_carry_overflow;
+    return PRESS_NONE;
+  }
+  return press_carry_encode( press );
+}
+
+carry_scope_t::carry_scope_t( sim_t* sim_, std::int16_t carried ) : sim( sim_ ), prev( PRESS_NONE ), active( false )
+{
+  if ( !sim->rl_bl_on || carried == PRESS_NONE )
+    return;
+  state_t* s = state_of( sim );
+  if ( s == nullptr )
+    return;
+  prev            = s->carried_press;
+  s->carried_press = carried;
+  active          = true;
+}
+
+carry_scope_t::~carry_scope_t()
+{
+  if ( !active )
+    return;
+  state_t* s = state_of( sim );
+  if ( s != nullptr )
+    s->carried_press = prev;
+}
+
+std::int16_t orphan_press( sim_t* sim )
+{
+  state_t* s = state_of( sim );
+  return s != nullptr && s->carried_press != PRESS_NONE ? s->carried_press : PRESS_ORPHAN;
 }
 
 std::int16_t open_press( player_t* p, const rl_cause_t& cause )
@@ -903,6 +958,8 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
 
   if ( is_own_class( state->rl_cause_class ) && state->rl_cause_press == PRESS_NONE )
     ++s->lost_press;
+  if ( press_is_carried( state->rl_cause_press ) )
+    ++s->press_carried;
 
   const result_amount_type rt = a->report_amount_type( state );
   const bool tick = rt == result_amount_type::DMG_OVER_TIME || rt == result_amount_type::HEAL_OVER_TIME;
@@ -1228,7 +1285,7 @@ bool write_appliers( std::string& b, state_t* st, buff_t* c )
       const rl_cause_t& who = effective_cause( e, now );
       bool found            = false;
       for ( std::array<int, 3>& m : merged )
-        if ( m[ 0 ] == who.press && m[ 1 ] == static_cast<int>( who.cls ) )
+        if ( press_key( static_cast<std::int16_t>( m[ 0 ] ) ) == press_key( who.press ) && m[ 1 ] == static_cast<int>( who.cls ) )
         {
           m[ 2 ] += e.stacks;
           found = true;
@@ -1340,7 +1397,8 @@ void note_own_read( const buff_t* b )
 // (the merged stacks are attributed to it). Counted when the merging trigger's cause is another one (no replay: see the deferred items).
 void note_delay_merge( buff_t* b, const rl_cause_t& first, const rl_cause_t& merging )
 {
-  if ( first.seq == merging.seq && first.cls == merging.cls && first.press == merging.press && first.launch == merging.launch )
+  if ( first.seq == merging.seq && first.cls == merging.cls && press_key( first.press ) == press_key( merging.press ) &&
+       first.launch == merging.launch )
     return;
   state_t* s = state_of( b->sim );
   if ( !buff_of_actor( s, b ) )
@@ -1438,7 +1496,7 @@ static void add_covering( buff_t* b, const rl_cause_t& cause, timespan_t expiry 
            v.end() );
   for ( buff_t::rl_bl_applier_t& e : v )
   {
-    if ( e.cause.seq == cause.seq && e.cause.cls == cause.cls && e.cause.press == cause.press &&
+    if ( e.cause.seq == cause.seq && e.cause.cls == cause.cls && press_key( e.cause.press ) == press_key( cause.press ) &&
          e.cause.launch == cause.launch )
     {
       if ( expiry > e.expiry )

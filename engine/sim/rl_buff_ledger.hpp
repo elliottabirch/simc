@@ -52,6 +52,56 @@ inline constexpr std::int16_t PRESS_NONE   = -1;
 inline constexpr std::int16_t PRESS_AUTO   = -2;  // the chain began at an AUTO swing (rl_resolve_cause)
 inline constexpr std::int16_t PRESS_ORPHAN = -3;  // the chain began with no cause context at all
 
+// Plan 13 (ruling R1): a CARRIED press. A class module that creates a delayed event inside a scope that has a press can capture
+// that press (carry_capture) and hand it back around the code the event runs (carry_scope_t); while it is handed back, the LAST
+// branch of action_t::rl_resolve_cause() (the one that stamps "no cause") writes the ENCODED NEGATIVE value -1000 - p instead of
+// PRESS_ORPHAN, for a real press number p (0 .. PRESS_CARRY_MAX; a larger press is not carried and press_carry_overflow counts it).
+// The value is negative on purpose: the engine reads it as "no press" everywhere (every `press >= 0` test keeps meaning a real
+// press), so procs, buff applications and cooldown changes caused under it are treated exactly as under "no cause"; nothing the
+// reward reads (decision number, cause class) changes, and rl_cause_t and action_state_t gain no field. Only the offline reference
+// decodes it, and only for damage records (LEDGER-FORMAT.md amendment "plan 13: carried press").
+inline constexpr std::int32_t PRESS_CARRY_BASE = 1000;
+inline constexpr std::int32_t PRESS_CARRY_MAX  = 31767;
+inline constexpr bool press_is_carried( std::int16_t v )
+{
+  return v <= -PRESS_CARRY_BASE && v >= -PRESS_CARRY_BASE - PRESS_CARRY_MAX;
+}
+inline constexpr std::int16_t press_carry_encode( std::int32_t press )  // 0 <= press <= PRESS_CARRY_MAX
+{
+  return static_cast<std::int16_t>( -PRESS_CARRY_BASE - press );
+}
+inline constexpr std::int32_t press_carry_decode( std::int16_t v )  // press_is_carried( v )
+{
+  return -PRESS_CARRY_BASE - v;
+}
+// The press value to compare when two causes are tested for sameness: a carried value stands for the "no cause" chain it came
+// from (PRESS_ORPHAN), so applier lists and merged triggers group exactly as they did before the carry existed.
+inline constexpr std::int16_t press_key( std::int16_t v )
+{
+  return press_is_carried( v ) ? PRESS_ORPHAN : v;
+}
+
+// Captures the press at the top of `p`'s cause stack for carry_scope_t: the encoded value, or PRESS_NONE (-1: nothing to carry)
+// when the ledger is off, outside a fight, the stack is empty, or its top holds no real press (a sentinel or an already carried
+// value). Call it in the code that creates the delayed event; with the ledger off it is one flag test and stores nothing.
+std::int16_t carry_capture( const player_t* p );
+
+// Hands a captured value back while it lives (nesting restores the outer value). A PRESS_NONE value, or the ledger off, is a no-op.
+struct carry_scope_t
+{
+  sim_t* sim;
+  std::int16_t prev;
+  bool active;
+  carry_scope_t( sim_t* sim_, std::int16_t carried );
+  ~carry_scope_t();
+  carry_scope_t( const carry_scope_t& )            = delete;
+  carry_scope_t& operator=( const carry_scope_t& ) = delete;
+};
+
+// The press for a chain that begins with no cause context (the last branch of action_t::rl_resolve_cause()): PRESS_ORPHAN, or
+// the handed-back carried value while a carry_scope_t lives. Only called with the ledger on.
+std::int16_t orphan_press( sim_t* sim );
+
 // Plan 12 (MJ-03): an action state's application id (`rl_bl_app`) is either 0 (none stamped), the `h` of an `app` record, or one of
 // these two reserved values (no record id can take them), which say why no application record exists for that state. Every
 // reader of the id treats a reserved value as "no parent".

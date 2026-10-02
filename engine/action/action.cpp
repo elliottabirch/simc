@@ -1995,7 +1995,9 @@ rl_cause_t action_t::rl_resolve_cause()
   }
   rl_cause_t out{ static_cast<std::int64_t>( sim->solver_control_seq ), RL_CAUSE_ORPHAN };
   if ( sim->rl_bl_on )
-    out.press = rl_buff_ledger::PRESS_ORPHAN;
+    // Plan 13 (ruling R1): PRESS_ORPHAN, or the press a class module handed back around a delayed event (an encoded negative
+    // value the engine reads as "no press"; the decision number and the cause class stay exactly as they were).
+    out.press = rl_buff_ledger::orphan_press( sim );
   return out;
 }
 
