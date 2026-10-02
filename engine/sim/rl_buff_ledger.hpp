@@ -30,6 +30,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
+#include <string>
 
 struct sim_t;
 struct player_t;
@@ -339,6 +341,25 @@ void cd_start_ignored( cooldown_t* cd, const action_t* a );
 
 // recharge_event_t::execute(), after the engine's own logic: a charge came back on its own.
 void cd_recharged( cooldown_t* cd );
+
+// Plan 13 (owner ruling 6, PREREG Amendment 4 item 5): the refund probe, option rl_buff_ledger_refund_probe=<action name> (the caller tests
+// `sim.rl_bl_probe` first; with the option absent nothing here is entered). Called at the ENTRY of the three cooldown functions that
+// shorten a running recharge (cooldown_t::adjust with a negative amount, adjust_remaining_duration when it shortens, reset), before any
+// state change, with the seconds the call would take off the running recharge (`would_save_ms`). Returns true when the call must return
+// at once: the cooldown is tracked, no other scope of it is open (the outermost call owns the change), the seconds are above 0 and the
+// cause on top of the cooldown owner's stack is a press of the named action. A skip writes one `rps` record, counts it in the footer
+// (refund_probe_skipped, _seconds, _by_cooldown) and changes nothing else.
+bool cd_probe_skip( cooldown_t* cd, const char* src, std::int64_t would_save_ms );
+
+// The JSON report's `rl_buff_ledger_refund_probe` object (sim.statistics): false when the option is absent or the ledger is off.
+struct refund_probe_report_t
+{
+  std::string action;
+  std::uint64_t count   = 0;
+  double seconds        = 0.0;
+  std::map<std::string, std::pair<std::uint64_t, double>> by_cooldown;
+};
+bool refund_probe_report( const sim_t& sim, refund_probe_report_t& out );
 
 // RAII around adjust / reset / adjust_remaining_duration / adjust_base_duration (placed after the shadow guard). The
 // constructor takes the snapshot, the destructor writes the net change as `ref` entries. A scope opened inside

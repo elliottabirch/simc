@@ -14,6 +14,7 @@
 #include "report/reports.hpp"
 #include "sim/iteration_data_entry.hpp"
 #include "sim/plot.hpp"
+#include "sim/rl_buff_ledger.hpp"
 #include "sim/profileset.hpp"
 #include "sim/reforge_plot.hpp"
 #include "sim/scale_factor_control.hpp"
@@ -1296,6 +1297,25 @@ void to_json( const ::report::json::report_configuration_t& report_configuration
   stats_root[ "analyze_time_seconds" ] = chrono::to_fp_seconds( sim.analyze_time );
   stats_root[ "simulation_length" ] = sim.simulation_length;
   stats_root[ "total_events_processed" ] = sim.event_mgr.total_events_processed;
+  // 261001-bac plan 13 (refund probe, research only): present only when rl_buff_ledger_refund_probe is set, so every other report is
+  // byte-identical. The key name starts with rl_buff_ledger (the proof harness drops exactly such keys when it normalises).
+  {
+    rl_buff_ledger::refund_probe_report_t rl_probe;
+    if ( rl_buff_ledger::refund_probe_report( sim, rl_probe ) )
+    {
+      auto rl_probe_root         = stats_root[ "rl_buff_ledger_refund_probe" ];
+      rl_probe_root[ "action" ]  = rl_probe.action;
+      rl_probe_root[ "skipped" ] = rl_probe.count;
+      rl_probe_root[ "seconds" ] = rl_probe.seconds;
+      auto rl_probe_by           = rl_probe_root[ "by_cooldown" ];
+      for ( const auto& kv : rl_probe.by_cooldown )
+      {
+        auto rl_probe_cd     = rl_probe_by[ kv.first ];
+        rl_probe_cd[ "count" ]   = kv.second.first;
+        rl_probe_cd[ "seconds" ] = kv.second.second;
+      }
+    }
+  }
   add_non_zero( stats_root, "raid_dps", sim.raid_dps );
   add_non_zero( stats_root, "raid_hps", sim.raid_hps );
   add_non_zero( stats_root, "raid_aps", sim.raid_aps );

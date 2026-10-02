@@ -11,6 +11,8 @@
 #include "sim/rl_buff_ledger.hpp"
 #include "sim/sim.hpp"
 
+#include <limits>
+
 namespace { // UNNAMED NAMESPACE
 
 struct recharge_event_t : event_t
@@ -222,6 +224,14 @@ void cooldown_t::adjust_remaining_duration( double delta )
 {
   if ( sim.rl_bl_shadow )
     return rl_buff_ledger::blocked( &sim, "cooldown.adjust_remaining_duration" );
+  // 261001-bac plan 13 (refund probe, research only): a shortening caused by a press of the named action is skipped at ENTRY, before
+  // any state change. One bool test with the option absent.
+  if ( sim.rl_bl_probe && delta < 1.0 && ongoing() && ( charges == 1 || recharge_event != nullptr ) )
+  {
+    const timespan_t rl_remains = charges == 1 ? ready - sim.current_time() : recharge_event->remains();
+    if ( rl_buff_ledger::cd_probe_skip( this, "adjust_remaining_duration", ( rl_remains - rl_remains * delta ).total_millis() ) )
+      return;
+  }
   rl_buff_ledger::cd_scope_t rl_scope( this, "adjust_remaining_duration", sim.rl_bl_on );
 
   assert( ongoing() && delta > 0.0 );
@@ -271,6 +281,14 @@ void cooldown_t::adjust( timespan_t amount, bool requires_reaction, bool apply_r
 {
   if ( sim.rl_bl_shadow )
     return rl_buff_ledger::blocked( &sim, "cooldown.adjust" );
+  // 261001-bac plan 13 (refund probe, research only): a shortening caused by a press of the named action is skipped at ENTRY, before
+  // any state change; the amount is the one the body below computes (it only multiplies the local copy).
+  if ( sim.rl_bl_probe && amount < 0_ms )
+  {
+    const timespan_t rl_amount = ( action && apply_recharge_rate ) ? amount * action->recharge_rate_multiplier( *this ) : amount;
+    if ( rl_amount < 0_ms && rl_buff_ledger::cd_probe_skip( this, "adjust", ( -rl_amount ).total_millis() ) )
+      return;
+  }
   rl_buff_ledger::cd_scope_t rl_scope( this, "adjust", sim.rl_bl_on );
 
   if ( amount == 0_ms )
@@ -391,6 +409,10 @@ void cooldown_t::reset( bool require_reaction, int charges_ )
 {
   if ( sim.rl_bl_shadow )
     return rl_buff_ledger::blocked( &sim, "cooldown.reset" );
+  // 261001-bac plan 13 (refund probe, research only): a reset caused by a press of the named action, while a recharge runs, is skipped
+  // at ENTRY (the seconds it would take off are the whole remaining time of the running recharge).
+  if ( sim.rl_bl_probe && charges_ != 0 && rl_buff_ledger::cd_probe_skip( this, "reset", std::numeric_limits<std::int64_t>::max() ) )
+    return;
   rl_buff_ledger::cd_scope_t rl_scope( this, "reset", sim.rl_bl_on );
 
   if ( charges_ == 0 )

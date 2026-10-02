@@ -822,6 +822,12 @@ struct sim_t : private sc_thread_t
   // inert here. Both act only with the ledger on.
   bool rl_buff_ledger_ext_probe = false;
   bool rl_buff_ledger_charge_probe = false;
+  // 261001-bac plan 13 (stage-0 only, never set in an identity proof or the census): rl_buff_ledger_refund_probe=<action name> makes the
+  // ledger skip every shortening of a running cooldown recharge whose cause is a press of the named action (the research tool of owner
+  // ruling 6: it CHANGES the fight). Empty by default, acts only with the ledger on, refused at start-up with the ledger off.
+  // `rl_bl_probe` is set once, in sim_t::init, from a non-empty value (with the ledger on); the cooldown functions test it and nothing else.
+  std::string rl_buff_ledger_refund_probe_str;
+  bool rl_bl_probe = false;
   std::shared_ptr<rl_buff_ledger::state_t> rl_bl_state;
   // The replay option (tstl-sylvanas phase 253, plan 253-02, REP-01/D-01/D-16). rl_rng_replay=
   // <path>, off by default (empty string), byte-identical to today's behaviour when unset. A

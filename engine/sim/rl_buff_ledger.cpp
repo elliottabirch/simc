@@ -50,7 +50,7 @@ constexpr std::size_t PASS_HIST_SIZE = 64;
 // The record kinds this build writes (the `hdr` record's `emits` list). stage0_checks.py reads
 // it to decide which identities it can assert.
 constexpr const char* EMITS_JSON =
-    "[\"hdr\",\"fb\",\"fe\",\"ftr\",\"pr\",\"hit\",\"xp\",\"app\",\"ln\",\"frm\",\"rd\",\"dr\",\"cs\",\"dotr\",\"zr\",\"cyc\",\"ref\",\"use\",\"cdn\",\"ext\"]";
+    "[\"hdr\",\"fb\",\"fe\",\"ftr\",\"pr\",\"hit\",\"xp\",\"app\",\"ln\",\"frm\",\"rd\",\"dr\",\"cs\",\"dotr\",\"zr\",\"cyc\",\"ref\",\"use\",\"cdn\",\"ext\",\"rps\"]";
 }  // namespace
 
 // The ledger's state, defined here so sim.hpp never sees it (sim.hpp forward-declares it).
@@ -162,6 +162,14 @@ struct state_t
   std::map<std::string, std::uint64_t> reconciled_by_buff;
   std::uint64_t frame_pop_mismatch = 0;
   std::map<std::string, std::uint64_t> launches_by_kind;
+
+  // Plan 13 (refund probe, option rl_buff_ledger_refund_probe): the named action, whether each press of this fight (index = press
+  // number) was a press of it, and the run totals of the skipped shortenings (records `rps`; footer refund_probe_*). Empty name: off.
+  std::string probe_action;
+  std::vector<char> press_is_probe;
+  std::uint64_t probe_skipped = 0;
+  double probe_skipped_seconds = 0.0;
+  std::map<std::string, std::pair<std::uint64_t, double>> probe_by_cooldown;
 
   // Plan 13 (ruling R1): the carried press handed back by a live carry_scope_t (PRESS_NONE: none), and the run totals `hit`
   // records with a carried press (press_carried) and carries refused because the press number is too large (overflow).
@@ -445,6 +453,7 @@ void open_and_write_header( sim_t* sim )
   }
   auto st = std::make_shared<state_t>();
   st->path = root->rl_buff_ledger_str;
+  st->probe_action = root->rl_buff_ledger_refund_probe_str;
   st->out.open( st->path );
   if ( !st->out.is_open() )
   {
@@ -461,6 +470,8 @@ void open_and_write_header( sim_t* sim )
   fmt::format_to( out_it( b ), ",\"rl_buff_ledger_cache\":{}", root->rl_buff_ledger_cache ? 1 : 0 );
   fmt::format_to( out_it( b ), ",\"rl_buff_ledger_ext_probe\":{},\"rl_buff_ledger_charge_probe\":{}",
                   root->rl_buff_ledger_ext_probe ? 1 : 0, root->rl_buff_ledger_charge_probe ? 1 : 0 );
+  b += ",\"rl_buff_ledger_refund_probe\":";
+  put_string( b, root->rl_buff_ledger_refund_probe_str );
   b += "},\"emits\":";
   b += EMITS_JSON;
   b += "}\n";
@@ -512,6 +523,7 @@ void fight_begin( sim_t* sim )
   // A fixed seed at every fight begin: the scratch stream is never a function of the fight's own streams.
   s->scratch_rng.seed( 0x5CA1AB1E0DDBA11FULL );
   s->carried_press = PRESS_NONE;
+  s->press_is_probe.clear();
   s->next_press = 0;
   s->last_press = -1;
   s->next_hit = 1;
@@ -837,6 +849,26 @@ void write_footer( sim_t* sim )
   put_count_object( b, "delay_merge_mixed_cause_by_buff", s->delay_merge_mixed_cause_by_buff );
   // Plan 13 counters (ruling R1: the carried press).
   fmt::format_to( out_it( b ), ",\"press_carried\":{},\"press_carry_overflow\":{}", s->press_carried, s->press_carry_overflow );
+  // Plan 13 (refund probe): always written, 0 / empty with the option absent.
+  b += ",\"refund_probe_action\":";
+  put_string( b, s->probe_action );
+  fmt::format_to( out_it( b ), ",\"refund_probe_skipped\":{},\"refund_probe_skipped_seconds\":", s->probe_skipped );
+  put_double( b, s->probe_skipped_seconds );
+  b += ",\"refund_probe_skipped_by_cooldown\":{";
+  {
+    bool first = true;
+    for ( const auto& kv : s->probe_by_cooldown )
+    {
+      if ( !first )
+        b += ',';
+      first = false;
+      put_string( b, kv.first );
+      fmt::format_to( out_it( b ), ":[{},", kv.second.first );
+      put_double( b, kv.second.second );
+      b += ']';
+    }
+  }
+  b += '}';
   b += "}\n";
 
   s->out << b;
@@ -913,6 +945,9 @@ std::int16_t open_press( player_t* p, const rl_cause_t& cause )
   const std::int16_t press = static_cast<std::int16_t>( s->next_press++ );
   s->last_press = press;
   ++s->fight_presses;
+  // Plan 13 (refund probe): whether this press is a press of the named action (matched by the name the `pr` record below carries).
+  if ( !s->probe_action.empty() )
+    s->press_is_probe.push_back( p->last_foreground_action != nullptr && s->probe_action == p->last_foreground_action->name() ? 1 : 0 );
 
   std::string& b = s->fight_buf;
   fmt::format_to( out_it( b ), "{{\"k\":\"pr\",\"it\":{},\"t\":", p->sim->current_iteration );
@@ -3761,6 +3796,61 @@ void cd_recharged( cooldown_t* cd )
   }
   if ( cd->recharge_event != nullptr )
     cs.cur = cd_open_cycle( st, cd, cd_remaining_ms( cd ), nullptr, false );
+}
+
+bool cd_probe_skip( cooldown_t* cd, const char* src, std::int64_t would_save_ms )
+{
+  if ( would_save_ms <= 0 )
+    return false;
+  state_t* st = state_of( &cd->sim );
+  if ( st == nullptr || st->probe_action.empty() || !cd_tracked( st, cd ) )
+    return false;
+  // The seconds the call would take off the running recharge: never more than the recharge has left (0: nothing to shorten, not skipped).
+  would_save_ms = std::min( would_save_ms, cd_remaining_ms( cd ) );
+  if ( would_save_ms <= 0 )
+    return false;
+  // The outermost call owns the change (the ledger's own rule for its scopes): a shortening made from inside another call on the same
+  // cooldown (adjust -> reset, adjust_base_duration -> adjust_remaining_duration) is part of that call and is decided by it.
+  if ( std::find( g_cd_active.begin(), g_cd_active.end(), cd ) != g_cd_active.end() )
+    return false;
+  const rl_cause_t cause = cd_top_cause( st, cd );
+  // Only a REAL press (>= 0) of the named action; a carried value (below -1000), the sentinels and "none" are not presses.
+  if ( cause.press < 0 || static_cast<std::size_t>( cause.press ) >= st->press_is_probe.size() || st->press_is_probe[ cause.press ] == 0 )
+    return false;
+
+  busy_scope_t busy;
+  ++st->probe_skipped;
+  const double sec = ms_to_seconds( would_save_ms );
+  st->probe_skipped_seconds += sec;
+  auto& e = st->probe_by_cooldown[ cd->name_str ];
+  ++e.first;
+  e.second += sec;
+  const auto it = st->cds.find( cd );
+  std::string& o = st->fight_buf;
+  cd_begin_record( o, "rps", cd );
+  fmt::format_to( out_it( o ), ",\"c\":{},\"cd\":", it != st->cds.end() ? it->second.cur : -1 );
+  put_string( o, cd->name_str );
+  o += ",\"actor\":";
+  put_string( o, cd->player->name() );
+  o += ",\"sec\":";
+  put_double( o, sec );
+  fmt::format_to( out_it( o ), ",\"press\":{},\"cls\":{},\"src\":\"{}\"}}\n", cause.press, static_cast<int>( cause.cls ), src );
+  return true;
+}
+
+bool refund_probe_report( const sim_t& sim, refund_probe_report_t& out )
+{
+  const sim_t* root = &sim;
+  while ( root->parent )
+    root = root->parent;
+  const state_t* st = root->rl_bl_state.get();
+  if ( st == nullptr || st->probe_action.empty() )
+    return false;
+  out.action       = st->probe_action;
+  out.count        = st->probe_skipped;
+  out.seconds      = st->probe_skipped_seconds;
+  out.by_cooldown  = st->probe_by_cooldown;
+  return true;
 }
 
 void cd_scope_t::begin( cooldown_t* cd, const char* src )

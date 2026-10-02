@@ -4500,6 +4500,7 @@ void sim_t::create_options()
   add_option( opt_bool( "rl_buff_ledger_cache", rl_buff_ledger_cache ) );
   add_option( opt_bool( "rl_buff_ledger_ext_probe", rl_buff_ledger_ext_probe ) );
   add_option( opt_bool( "rl_buff_ledger_charge_probe", rl_buff_ledger_charge_probe ) );
+  add_option( opt_string( "rl_buff_ledger_refund_probe", rl_buff_ledger_refund_probe_str ) );
   // The replay option (tstl-sylvanas phase 253, plan 253-02, REP-01/D-01/D-16). See sim.hpp's
   // rl_rng_replay_file_str doc comment. Default empty, byte-identical to today's behavior when
   // unset. The address choice was removed in phase 254 (Gate 2 verdict); replay always reads
@@ -5913,6 +5914,16 @@ void sim_t::setup( sim_control_t* c )
     }
     rl_bl_on = true;
     rl_buff_ledger::open_and_write_header( this );
+    rl_bl_probe = !rl_buff_ledger_refund_probe_str.empty();
+  }
+  else if ( !rl_buff_ledger_refund_probe_str.empty() )
+  {
+    // 261001-bac plan 13: the refund probe needs the ledger (it names presses by the ledger's own press records), so it is refused,
+    // never ignored: a run that asked for a changed fight must not silently run the unchanged one.
+    throw sc_invalid_sim_argument(
+        fmt::format( "rl_buff_ledger_refund_probe='{}' requires rl_buff_ledger=<path> (the probe skips cooldown shortenings caused by "
+                     "presses of the named action, and the ledger is what records presses) -- refusing rather than ignoring it.",
+                     rl_buff_ledger_refund_probe_str ) );
   }
 
   if ( iterations <= 0 )
