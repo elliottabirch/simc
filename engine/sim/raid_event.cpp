@@ -2031,6 +2031,7 @@ raid_event_t::raid_event_t( sim_t* s, util::string_view type )
   add_option( opt_bool( "force_stop", force_stop ) );
   add_option( opt_int( "pull", pull ) );
   add_option( opt_string( "pull_target", pull_target_str ) );
+  add_option( opt_string( "sheet_duration_jitter", sheet_duration_jitter_str ) );  // tstl-sylvanas 265-16
   add_option( opt_func( "timestamps", std::bind( &raid_event_t::parse_timestamps, this, std::placeholders::_3 ) ) );
 }
 
@@ -2643,6 +2644,18 @@ void raid_event_t::init( sim_t* sim )
       if ( sheet_controller && raid_event->type == "invulnerable" )
         throw std::invalid_argument(
             "fight_style=SheetFight refuses invulnerable raid events (they would clear the controller's bench state)." );
+
+      // tstl-sylvanas 265-16: sheet_duration_jitter= is only meaningful on an absorb that is a sheet phase child; refuse it anywhere
+      // else by name, before the first fight (the controller refuses a /1 spec and a bad key in add_phase_child).
+      if ( !raid_event->sheet_duration_jitter_str.empty() )
+      {
+        if ( !sheet_controller )
+          throw std::invalid_argument( "sheet_duration_jitter requires fight_style=SheetFight." );
+        if ( raid_event->type != "absorb" )
+          throw std::invalid_argument( fmt::format( "sheet_duration_jitter is only valid on an absorb raid event, not '{}'.", raid_event->type ) );
+        if ( raid_event->pull <= 0 )
+          throw std::invalid_argument( "sheet_duration_jitter requires pull=N (a sheet phase child)." );
+      }
 
       // tstl-sylvanas 261-02: a pull=N event under SheetFight is a phase-relative child of sheet phase N-1.
       if ( sheet_controller && raid_event->pull > 0 && raid_event->type != "pull" )

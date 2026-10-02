@@ -53,6 +53,9 @@ public:
   // tstl-sylvanas 261-03: non-owning; set only on a child the sheet-fight controller adopted (null for every other
   // raid event, so every other fight is byte-identical). start() / finish() tell it, so it can record downtime windows.
   sheet_fight_event_t* sheet_parent = nullptr;
+  // tstl-sylvanas 265-16: sheet_duration_jitter=<spec jitter key> on an absorb sheet-phase child: the child lasts the value the
+  // controller drew for that key in this fight (empty for every other raid event, so every other fight is byte-identical).
+  std::string sheet_duration_jitter_str;
 
   // Player filter options
   double distance_min;   // Minimal player distance

@@ -1253,6 +1253,11 @@ struct sheet_fight_event_t::impl_t
   {
     // The engine names its movement events movement_distance / movement_direction; the record says "movement".
     const std::string type = ev->type.rfind( "movement", 0 ) == 0 ? std::string( "movement" ) : ev->type;
+    // tstl-sylvanas 265-16: a child that names a spec jitter key lasts this fight's drawn value of that key (the existing draw: no new
+    // draw; the centre when jitter is off). The stock start event schedules the duration end from saved_duration AFTER start() calls
+    // this hook, so the override takes effect.
+    if ( !ev->sheet_duration_jitter_str.empty() )
+      ev->saved_duration = timespan_t::from_seconds( jit_value( ev->sheet_duration_jitter_str, 0.0 ) );
     windows.push_back( { type, ev->pull - 1, r3( now() ), -1.0, ev } );
   }
   void child_finish( raid_event_t* ev )
@@ -2261,6 +2266,21 @@ void sheet_fight_event_t::add_phase_child( std::unique_ptr<raid_event_t> child )
   if ( k < 0 || k >= static_cast<int>( impl->children.size() ) )
     throw sc_invalid_sim_argument( fmt::format( "solver_sheet_fight='{}': raid event '{}' has pull={}, the spec has {} phases.",
                                                 impl->spec.path, child->type, child->pull, impl->children.size() ) );
+  // tstl-sylvanas 265-16: sheet_duration_jitter=<key>: a /2 spec only, and a key of the spec's own fight-level jitter table.
+  if ( !child->sheet_duration_jitter_str.empty() )
+  {
+    const auto& key = child->sheet_duration_jitter_str;
+    if ( impl->spec.format != 2 )
+      throw sc_invalid_sim_argument( fmt::format( "solver_sheet_fight='{}': sheet_duration_jitter='{}' needs a sheet-fight-spec/2 spec.", impl->spec.path, key ) );
+    const sheet_fight_spec::jitter_t* found = nullptr;
+    for ( const auto& j : impl->spec.jitter )
+      if ( j.key == key )
+        found = &j;
+    if ( !found )
+      throw sc_invalid_sim_argument( fmt::format( "solver_sheet_fight='{}': sheet_duration_jitter='{}' is not a key of the spec's jitter table.", impl->spec.path, key ) );
+    if ( found->per == "phase" )
+      throw sc_invalid_sim_argument( fmt::format( "solver_sheet_fight='{}': sheet_duration_jitter='{}' is a per-phase key; a duration needs a fight-level key.", impl->spec.path, key ) );
+  }
   child->sheet_parent = this;
   impl->children[ k ].push_back( std::move( child ) );
 }
