@@ -151,6 +151,8 @@ struct state_t
   std::uint64_t zero_records = 0;
   std::uint64_t dotr_rows = 0;
   std::uint64_t applier_reconciled = 0;
+  // Diagnostic (footer `applier_reconciled_by_buff`): which buffs held more stacks than their applier list explained.
+  std::map<std::string, std::uint64_t> reconciled_by_buff;
   std::uint64_t frame_pop_mismatch = 0;
   std::map<std::string, std::uint64_t> launches_by_kind;
 
@@ -562,6 +564,18 @@ void write_footer( sim_t* sim )
       fmt::format_to( out_it( b ), ":{}", kv.second );
     }
   }
+  b += "},\"applier_reconciled_by_buff\":{";
+  {
+    bool first = true;
+    for ( const auto& kv : s->reconciled_by_buff )
+    {
+      if ( !first )
+        b += ',';
+      first = false;
+      put_string( b, kv.first );
+      fmt::format_to( out_it( b ), ":{}", kv.second );
+    }
+  }
   b += "}}\n";
 
   s->out << b;
@@ -810,7 +824,10 @@ void reconcile_appliers( state_t* st, buff_t* b )
     {
       v.push_back( { rl_cause_t{}, 1, timespan_t::max() } );
       if ( st != nullptr )
+      {
         ++st->applier_reconciled;
+        ++st->reconciled_by_buff[ b->name_str + "|covering" ];
+      }
       return;
     }
     // The covering appliers are the entries whose own expiry is still ahead. If none is (the buff is up through
@@ -848,7 +865,10 @@ void reconcile_appliers( state_t* st, buff_t* b )
   {
     v.push_back( { rl_cause_t{}, stack - total, timespan_t::min() } );
     if ( st != nullptr )
+    {
       ++st->applier_reconciled;
+      ++st->reconciled_by_buff[ b->name_str + "|stacks" ];
+    }
   }
 }
 
@@ -917,13 +937,17 @@ bool write_appliers( std::string& b, state_t* st, buff_t* c )
 // One `rd` record for a buff read inside the innermost frame (a non-zero read carries the buff's appliers).
 void frame_read( const buff_t* cb, int stack, double value )
 {
-  if ( cb->sim == nullptr )
-    return;
+  if ( cb->sim == nullptr || cb->is_fallback )
+    return;  // a fallback buff stands in for a buff that does not exist: it can never be a gate
   state_t* s = state_of( cb->sim );
   if ( s == nullptr || !s->in_fight || s->frames.empty() || cb->sim->rl_bl_shadow || g_busy > 0 )
     return;
   state_t::frame_t& f = s->frames.back();
-  const bool nz       = !( stack == 0 && value == 0.0 );
+  // A read is non-zero when the buff is up (stacks != 0). A stale value on a buff that is not up (measured: read
+  // during its own expiry) is a zero read, whatever the value member holds. A read through total_stack() can
+  // include stacks still waiting in the aura delay while the buff itself is not up: non-zero, flagged `pend`.
+  (void) value;
+  const bool nz = stack != 0;
   for ( const auto& e : f.seen )
     if ( e.first == cb && e.second == nz )
       return;
@@ -941,11 +965,15 @@ void frame_read( const buff_t* cb, int stack, double value )
   put_string( o, b->player != nullptr ? std::string( b->player->name() ) : std::string() );
   fmt::format_to( out_it( o ), ",\"nz\":{},\"stacks\":{},\"app\":", nz ? "true" : "false", stack );
   bool covering = false;
-  if ( nz )
+  const bool pend = nz && b->current_stack <= 0;
+  if ( nz && !pend )
     covering = write_appliers( o, s, b );
   else
     o += "[]";
-  fmt::format_to( out_it( o ), ",\"cov\":{}}}\n", covering ? "true" : "false" );
+  fmt::format_to( out_it( o ), ",\"cov\":{}", covering ? "true" : "false" );
+  if ( pend )
+    o += ",\"pend\":true";
+  o += "}\n";
 }
 }  // namespace
 
