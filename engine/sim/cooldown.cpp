@@ -796,6 +796,10 @@ void cooldown_t::set_max_charges( int new_max_charges )
   if ( charges_max == new_max_charges )
     return;
 
+  // 261001-bac plan 12 (MJ-05): the ledger writes nothing for the restarts and adjustments below; the scope brings its bookkeeping of
+  // this cooldown to the new state when the function ends.
+  rl_buff_ledger::cd_scope_t rl_scope( this, "set_max_charges", sim.rl_bl_on );
+
   sim.print_debug( "{} adjusts {} max charges from {} to {}", *player, *this, charges_max,
                              new_max_charges );
   /**

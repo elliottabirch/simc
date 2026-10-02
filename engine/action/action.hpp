@@ -843,6 +843,10 @@ public:
   virtual block_result_e calculate_block_result( action_state_t* s ) const;
 
   virtual double calculate_direct_amount( action_state_t* state ) const;
+  // 261001-bac plan 12 (MN-10; research clone only, read only by the ledger): true when the base calculate_direct_amount's own
+  // early return applies, i.e. the direct amount is structurally zero (no base damage after rounding, no weapon multiplier, no
+  // direct power coefficients). Keep in step with that early return.
+  bool rl_bl_direct_structurally_zero( action_state_t* state ) const;
 
   virtual double calculate_tick_amount( action_state_t* state, double multiplier ) const;
 

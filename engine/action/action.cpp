@@ -1595,6 +1595,17 @@ double action_t::calculate_tick_amount( action_state_t* state, double dot_multip
   return amount;
 }
 
+bool action_t::rl_bl_direct_structurally_zero( action_state_t* state ) const
+{
+  double amount = sim->averaged_range( base_da_min( state ), base_da_max( state ) );
+
+  if ( round_base_dmg )
+    amount = floor( amount + 0.5 );
+
+  return amount == 0 && weapon_multiplier == 0 && attack_direct_power_coefficient( state ) == 0 &&
+         spell_direct_power_coefficient( state ) == 0;
+}
+
 double action_t::calculate_direct_amount( action_state_t* state ) const
 {
   double amount = sim->averaged_range( base_da_min( state ), base_da_max( state ) );

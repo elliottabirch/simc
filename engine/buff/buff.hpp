@@ -59,6 +59,11 @@ void applier_extend( buff_t* b, const rl_cause_t& cause, player_t* source, times
                      const timespan_t* new_ends, std::size_t n_exp, const char* fn );
 void applier_clear( buff_t* b );
 void note_consume( buff_t* b, const char* op, int removed );
+// Plan 12 (MN-04): an engine-internal bookkeeping read (start, the extend functions, refresh_duration, bump's maximum-stack test) that is no
+// longer written as a frame read: counted in the footer (own_reads_skipped) when a frame read would have been written.
+void note_own_read( const buff_t* b );
+// Plan 12 (MN-02): a trigger was merged into a pending aura-delay event of the same duration; counted when the two causes differ.
+void note_delay_merge( buff_t* b, const rl_cause_t& first, const rl_cause_t& merging );
 }  // namespace rl_buff_ledger
 struct cooldown_t;
 struct event_t;
@@ -277,7 +282,17 @@ public:
   {
     if ( rl_buff_ledger::g_reads_on )
       rl_buff_ledger::note_read( this, current_stack, current_value );
-    return current_stack;
+    return check_unnoted();
+  }
+
+  // 261001-bac plan 12 (MN-04): the same values for the engine's own bookkeeping (buff.cpp start, extend_*, bump): not a read of the
+  // fight, so not written as a frame read; check_own() counts it (footer own_reads_skipped) when a frame read would have been written.
+  int check_unnoted() const { return current_stack; }
+  int check_own() const
+  {
+    if ( rl_buff_ledger::g_reads_on )
+      rl_buff_ledger::note_own_read( this );
+    return check_unnoted();
   }
 
   /**
@@ -344,6 +359,14 @@ public:
   }
 
   timespan_t remains() const;
+  // Plan 12 (MN-04): remains() for the engine's own bookkeeping (refresh_duration); see check_unnoted().
+  timespan_t remains_unnoted() const;
+  timespan_t remains_own() const
+  {
+    if ( rl_buff_ledger::g_reads_on )
+      rl_buff_ledger::note_own_read( this );
+    return remains_unnoted();
+  }
   timespan_t tick_time_remains() const;
   timespan_t elapsed( timespan_t t ) const { return last_start == timespan_t::min() ? 0_ms : t - last_start; }
   timespan_t last_trigger_time() const { return last_trigger; }
@@ -355,7 +378,15 @@ public:
   {
     if ( rl_buff_ledger::g_reads_on )
       rl_buff_ledger::note_read( this, current_stack, current_value );
-    return check() + mod >= max_stack();
+    return at_max_stacks_unnoted( mod );
+  }
+  // Plan 12 (MN-04): bump's own maximum-stack test (expire_at_max_stack); see check_unnoted().
+  bool at_max_stacks_unnoted( int mod = 0 ) const { return check_unnoted() + mod >= max_stack(); }
+  bool at_max_stacks_own( int mod = 0 ) const
+  {
+    if ( rl_buff_ledger::g_reads_on )
+      rl_buff_ledger::note_own_read( this );
+    return at_max_stacks_unnoted( mod );
   }
   // For trigger()/execute(), default value of stacks is -1, since we want to allow for explicit calls of stacks=1 to
   // override using buff_t::_initial_stack

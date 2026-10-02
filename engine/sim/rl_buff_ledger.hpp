@@ -58,6 +58,11 @@ inline constexpr std::int16_t PRESS_ORPHAN = -3;  // the chain began with no cau
 inline constexpr std::uint64_t APP_ZERO_REF = ~std::uint64_t( 0 );      // the application's reference periodic amount was 0
 inline constexpr std::uint64_t APP_PREMADE  = ~std::uint64_t( 0 ) - 1;  // a dot-applying hit executed from a pre-made state
 
+// Plan 12 (NT-02): true from the moment a ledger file is open (one process-wide flag: the ledger refuses threads > 1, profilesets and
+// non-root sims). The action state's four ledger-only fields are reset and copied only behind it; with the ledger off nothing writes them, so
+// they keep their default member initialisers.
+extern bool g_ledger_open;
+
 // Opens the output file (root sim only; refusals were already made by the caller, sim_t::setup)
 // and writes the `hdr` record. Sets up the ledger state on the root sim.
 void open_and_write_header( sim_t* sim );
@@ -264,12 +269,13 @@ void note_dot_read( const dot_t* d, bool non_zero );
 // test at the call site; nothing here changes a cooldown, an event or a random number.
 
 // What the ledger needs to see of a cooldown before a mutator runs (milliseconds, integers as the engine keeps them).
+// Plan 12 (NT-02): trivially default-constructible (a default-constructed one is never read: cd_capture sets every field).
 struct cd_snap_t
 {
-  std::int64_t rem_ms = 0;  // time left in the cycle in progress (0: none); the recharge event's remains for charges > 1
-  int cc              = 0;  // current_charge
-  bool up             = true;
-  bool ev             = false;  // a recharge event was running
+  std::int64_t rem_ms;  // time left in the cycle in progress (0: none); the recharge event's remains for charges > 1
+  int cc;               // current_charge
+  bool up;
+  bool ev;  // a recharge event was running
 };
 cd_snap_t cd_capture( const cooldown_t* cd );
 
@@ -306,11 +312,13 @@ public:
 private:
   void begin( cooldown_t* cd, const char* src );
   void end();
-  cooldown_t* cd_  = nullptr;
-  const char* src_ = nullptr;
-  bool begun_      = false;
-  bool nested_     = false;  // another scope of the same cooldown is open: this one writes nothing
-  bool track_      = false;  // the cooldown belongs to the RL actor or its pets and a fight is running
+  // Plan 12 (NT-02): only begun_ is set by the constructor; every other member is set in begin(), read only after it.
+  bool begun_ = false;
+  bool nested_;  // another scope of the same cooldown is open: this one writes nothing
+  bool track_;   // the cooldown belongs to the RL actor or its pets and a fight is running
+  int before_max_;  // plan 12 (MJ-05): the cooldown's maximum charges when the scope opened
+  cooldown_t* cd_;
+  const char* src_;
   cd_snap_t before_;
 };
 }  // namespace rl_buff_ledger

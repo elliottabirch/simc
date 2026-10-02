@@ -302,6 +302,18 @@ struct state_t
   // of the actor with two or more charges has its maximum raised by one and put back (the engine's own set_max_charges).
   std::uint64_t charge_probe_fired = 0;
   bool charge_probe_done = false;
+  // Plan 12, group 2, task 4: counters of the fixes whose defects no single record shows (footer; LEDGER-FORMAT.md amendment).
+  std::uint64_t cd_max_charge_changes = 0;      // MJ-05: set_max_charges changes of a tracked cooldown (no record is written for them)
+  std::uint64_t cd_overlong_recharge = 0;       // MN-05: a recharge that continued with more time left than its length (after a delay)
+  std::uint64_t refresh_no_cover = 0;           // MJ-06: refreshes of a single-stack buff that moved nothing (refresh behaviour disabled)
+  std::map<std::string, std::uint64_t> refresh_no_cover_by_buff;
+  std::uint64_t async_trim_order_differs = 0;   // MN-03: overflow trims where "earliest expiry" and "oldest inserted" picked different entries
+  std::uint64_t delay_merge_mixed_cause = 0;    // MN-02: a trigger merged into a pending aura-delay event whose captured cause differs
+  std::map<std::string, std::uint64_t> delay_merge_mixed_cause_by_buff;
+  std::uint64_t switch_buff_down = 0;           // MN-06: a switched callback ran with none of its registered switch buffs up (no switch launch)
+  std::uint64_t own_reads_skipped = 0;          // MN-04: engine bookkeeping reads that are not written as frame reads
+  std::uint64_t null_target_skipped = 0;        // MN-08: pass sets not run because the hit's or swing's target was null
+  std::uint64_t zero_structural_skipped = 0;    // MN-10: zero-amount direct-hit pass sets with a structurally zero direct amount (no `zr` record)
 };
 
 namespace
@@ -449,6 +461,7 @@ void open_and_write_header( sim_t* sim )
   st->out << b;
   st->out.flush();
   root->rl_bl_state = std::move( st );
+  g_ledger_open     = true;
 }
 
 void fight_begin( sim_t* sim )
@@ -805,6 +818,16 @@ void write_footer( sim_t* sim )
                   s->nested_pass_refused, s->probe_nesting_ok, s->probe_nesting_failed );
   put_count_object( b, "nested_pass_refused_by_entry", s->nested_pass_refused_by_entry );
   fmt::format_to( out_it( b ), ",\"charge_probe_fired\":{}", s->charge_probe_fired );
+  // Plan 12 counters, group 2, task 4 (MJ-05, MJ-06, MN-02..MN-06, MN-08, MN-10).
+  fmt::format_to( out_it( b ),
+                  ",\"cd_max_charge_changes\":{},\"cd_overlong_recharge\":{},\"refresh_no_cover\":{},"
+                  "\"async_trim_order_differs\":{},\"delay_merge_mixed_cause\":{},\"switch_buff_down\":{},"
+                  "\"own_reads_skipped\":{},\"null_target_skipped\":{},\"zero_structural_skipped\":{}",
+                  s->cd_max_charge_changes, s->cd_overlong_recharge, s->refresh_no_cover, s->async_trim_order_differs,
+                  s->delay_merge_mixed_cause, s->switch_buff_down, s->own_reads_skipped, s->null_target_skipped,
+                  s->zero_structural_skipped );
+  put_count_object( b, "refresh_no_cover_by_buff", s->refresh_no_cover_by_buff );
+  put_count_object( b, "delay_merge_mixed_cause_by_buff", s->delay_merge_mixed_cause_by_buff );
   b += "}\n";
 
   s->out << b;
@@ -1054,6 +1077,8 @@ void xp_record( player_t* p, const rl_cause_t& cause, double amount, const char*
 // runs; note_read records each buff once with a non-zero stack or value, in first-read order.
 bool g_tap_open = false;
 bool g_reads_on = false;
+// Plan 12 (NT-02): see rl_buff_ledger.hpp.
+bool g_ledger_open = false;
 
 namespace
 {
@@ -1285,6 +1310,45 @@ void note_read( const buff_t* b, int stack, double value )
   g_tap_reads.push_back( { b, stack, value } );
 }
 
+// Plan 12: a buff whose source player (the engine's rl_buff_source_player rule) is the RL actor or one of its pets: the buffs the
+// counters of the fixes below are about.
+static bool buff_of_actor( const state_t* st, const buff_t* b )
+{
+  const player_t* src = ( b->source != nullptr && !b->source->is_enemy() ) ? b->source : b->player;
+  return st != nullptr && st->in_fight && belongs_to_actor( *st, src );
+}
+
+// Plan 12 (MN-04): the engine's own bookkeeping reads (buff_t::check_own / remains_own / at_max_stacks_own) are not reads of the fight. Inside a
+// reference pass (the tap is open) nothing changes: it is a read like any other. Otherwise it is not written as a frame read; it
+// is counted (own_reads_skipped) when a frame read would have been written (a frame is open, outside the ledger's own code).
+void note_own_read( const buff_t* b )
+{
+  if ( g_tap_open )
+  {
+    note_read( b, b->current_stack, b->current_value );
+    return;
+  }
+  if ( b->sim == nullptr || b->is_fallback )
+    return;
+  state_t* s = state_of( b->sim );
+  if ( s == nullptr || !s->in_fight || s->frames.empty() || b->sim->rl_bl_shadow || g_busy > 0 )
+    return;
+  ++s->own_reads_skipped;
+}
+
+// Plan 12 (MN-02): a trigger was merged into a pending aura-delay event of the same duration, which keeps the FIRST trigger's cause
+// (the merged stacks are attributed to it). Counted when the merging trigger's cause is another one (no replay: see the deferred items).
+void note_delay_merge( buff_t* b, const rl_cause_t& first, const rl_cause_t& merging )
+{
+  if ( first.seq == merging.seq && first.cls == merging.cls && first.press == merging.press && first.launch == merging.launch )
+    return;
+  state_t* s = state_of( b->sim );
+  if ( !buff_of_actor( s, b ) )
+    return;
+  ++s->delay_merge_mixed_cause;
+  ++s->delay_merge_mixed_cause_by_buff[ b->name_str ];
+}
+
 namespace
 {
 // Plan 12: true while the extension probe's own extend call runs (the `ext` record then says probe:true).
@@ -1385,12 +1449,51 @@ static void add_covering( buff_t* b, const rl_cause_t& cause, timespan_t expiry 
   v.push_back( { cause, 1, expiry } );
 }
 
+// Plan 12 (MN-03): the stacks an overflow removes from an asynchronous buff are the ones with the earliest own expiry (the engine
+// cancels the earliest-expiring expiration events, the key applier_expire_own already uses), not the oldest inserted. Entries of
+// equal expiry go oldest first. Counts a trim where the two rules would have picked different entries (async_trim_order_differs).
+static void trim_by_expiry( state_t* st, buff_t* b, int excess )
+{
+  auto& v = b->rl_bl_appliers;
+  auto key = [ & ]( const buff_t::rl_bl_applier_t& e ) {
+    return e.expiry == timespan_t::min() ? timespan_t::max() : e.expiry;
+  };
+  bool first = true;
+  while ( excess > 0 && !v.empty() )
+  {
+    std::size_t best = 0;
+    for ( std::size_t i = 1; i < v.size(); ++i )
+      if ( key( v[ i ] ) < key( v[ best ] ) )
+        best = i;
+    if ( first && best != 0 && buff_of_actor( st, b ) )
+      ++st->async_trim_order_differs;
+    first = false;
+    const int take = std::min( excess, v[ best ].stacks );
+    v[ best ].stacks -= take;
+    excess -= take;
+    if ( v[ best ].stacks <= 0 )
+      v.erase( v.begin() + static_cast<std::ptrdiff_t>( best ) );
+  }
+}
+
 void applier_post_bump( buff_t* b, int requested, int old_stack, const rl_cause_t& cause )
 {
   if ( covering_mode( b ) )
   {
     if ( b->rl_bl_applying && b->current_stack > 0 )
+    {
+      // Plan 12 (MJ-06): a refresh that moved nothing (refresh behaviour disabled) is handed "no new coverage" by buff.cpp.
+      if ( b->rl_bl_next_expiry == timespan_t::min() )
+      {
+        if ( state_t* st = state_of( b->sim ); buff_of_actor( st, b ) )
+        {
+          ++st->refresh_no_cover;
+          ++st->refresh_no_cover_by_buff[ b->name_str ];
+        }
+        return;
+      }
       add_covering( b, cause, b->rl_bl_next_expiry );
+    }
     return;
   }
   state_t* st = state_of( b->sim );
@@ -1402,7 +1505,17 @@ void applier_post_bump( buff_t* b, int requested, int old_stack, const rl_cause_
   else
     added = b->current_stack - old_stack;
   if ( added > 0 )
+  {
+    // Plan 12 (MN-03): an overflow of an asynchronous buff cancelled the earliest-expiring stacks before this application's own
+    // expiration event exists: remove those entries (never the one added now) by earliest expiry, then add the new one.
+    if ( b->max_stack() > 0 && b->stack_behavior == buff_stack_behavior::ASYNCHRONOUS )
+    {
+      const int excess = applier_total( b ) + added - ( b->current_stack < 0 ? 0 : b->current_stack );
+      if ( excess > 0 )
+        trim_by_expiry( st, b, excess );
+    }
     b->rl_bl_appliers.push_back( { cause, added, b->rl_bl_next_expiry } );
+  }
   reconcile_appliers( st, b );
 }
 
@@ -1694,13 +1807,16 @@ void switch_enter( const dbc_proc_callback_t* cb )
       auto it = s->switches.find( cb );
       if ( it != s->switches.end() && !it->second.empty() )
       {
-        sw = it->second.front();
+        // Plan 12 (MN-06 part 1): only a registered switch buff that is up can be the switch; with none up there is no switch launch
+        // (it used to name the first registered buff, which was down), counted in switch_buff_down.
         for ( buff_t* c : it->second )
           if ( c->current_stack > 0 )
           {
             sw = c;
             break;
           }
+        if ( sw == nullptr )
+          ++s->switch_buff_down;
       }
     }
   }
@@ -2383,7 +2499,7 @@ void fire_guard_probe( state_t* st, action_t* a, player_t* dealer, player_t* tar
 // changes `pre`. A reference pass whose violation bits are non-zero ends the sequence (status 3); a
 // reference amount of exactly 0 or no candidate leaves the reference pass alone (status 0).
 split_t run_split( state_t* st, action_t* a, player_t* dealer, player_t* owner, player_t* target,
-                   const pass_fn_t& pass, bool allow_probe )
+                   const pass_fn_t& pass, bool allow_probe, bool direct_hit = false )
 {
   split_t out;
   std::uint64_t viol = 0;
@@ -2397,6 +2513,13 @@ split_t run_split( state_t* st, action_t* a, player_t* dealer, player_t* owner, 
   }
   if ( ref.pre == 0.0 )
   {
+    // Plan 12 (MN-10): a direct hit whose direct amount is structurally zero (a pure damage-over-time or no-damage action) is not a
+    // "amount kept in class-private storage" suspect: no `zr` record, counted. The reference pass entry stays.
+    if ( direct_hit && a->rl_bl_direct_structurally_zero( scratch_for( st, a ) ) )
+    {
+      ++st->zero_structural_skipped;
+      return out;
+    }
     write_zero_record( st, a, target );
     return out;
   }
@@ -2937,6 +3060,16 @@ static bool refuse_nested( state_t* st, const sim_t* sim, const char* entry )
   return true;
 }
 
+// Plan 12 (MN-08): a pass set whose target is null is not run at all (no scope is opened, no pass executes): the scope and the
+// passes dereference the target. Counted in the footer (null_target_skipped).
+static bool skip_null_target( state_t* st, const player_t* target )
+{
+  if ( target != nullptr )
+    return false;
+  ++st->null_target_skipped;
+  return true;
+}
+
 // Plan 12 (MJ-03): a dot-applying hit executed from a pre-made state writes no `app` record (its DoT state would rest on a
 // snapshot this execute did not make): the state says so, and the count tells the ticks' null parents apart from a zero reference.
 void note_app_missing_premade( state_t* st, action_t* a, action_state_t* s )
@@ -2981,6 +3114,8 @@ void run_passes( action_t* a, action_state_t* s, const action_state_t* pre )
   if ( st == nullptr || !st->in_fight || !belongs_to_actor( *st, a->player ) )
     return;
   if ( refuse_nested( st, a->sim, "run_passes" ) )
+    return;
+  if ( skip_null_target( st, s->target ) )
     return;
   // Plan 05: a pre-made state re-snapshotted per target (AoE execute). The entry written when it was handed
   // to schedule_execute rides this hit as its parent. Plan 12 (MJ-01): taken BEFORE the result-type return (an AoE execute
@@ -3054,7 +3189,7 @@ void run_passes( action_t* a, action_state_t* s, const action_state_t* pre )
         }
         return am;
       };
-      sp                 = run_split( st, a, dealer, owner, s->target, fn, /*allow_probe=*/true );
+      sp                 = run_split( st, a, dealer, owner, s->target, fn, /*allow_probe=*/true, /*direct_hit=*/true );
       entry.guards_json  = finish_unsafe( st, sp );
     }  // scope ends: caches, debug, log, shadow flag, recorder hook restored; hidden buffs were restored per pass
     cache_store( st, cx, dealer, owner, sp, entry.guards_json );
@@ -3093,6 +3228,8 @@ void premade_snapshot( action_t* a, action_state_t* s )
     return;
   if ( refuse_nested( st, a->sim, "premade_snapshot" ) )
     return;
+  if ( skip_null_target( st, s->target ) )
+    return;
   if ( s->result_type != result_amount_type::DMG_DIRECT && s->result_type != result_amount_type::DMG_OVER_TIME )
     return;
   run_premade( st, a, s, "premade" );
@@ -3104,6 +3241,8 @@ void tick_action_snapshot( action_t* tick_action, action_state_t* s, const rl_ca
   if ( st == nullptr || !st->in_fight || !belongs_to_actor( *st, tick_action->player ) )
     return;
   if ( refuse_nested( st, tick_action->sim, "tick_action_snapshot" ) )
+    return;
+  if ( skip_null_target( st, s->target ) )
     return;
   if ( s->result_type != result_amount_type::DMG_DIRECT && s->result_type != result_amount_type::DMG_OVER_TIME )
     return;
@@ -3155,6 +3294,8 @@ void run_tick_passes( action_t* a, action_state_t* d_state, double tick_multipli
   if ( st == nullptr || !st->in_fight || !belongs_to_actor( *st, a->player ) )
     return;
   if ( refuse_nested( st, a->sim, "run_tick_passes" ) )
+    return;
+  if ( skip_null_target( st, d_state->target ) )
     return;
 
   const bool will_sink =
@@ -3229,6 +3370,8 @@ void run_swing_passes( action_t* a )
   if ( st == nullptr || !st->in_fight || !belongs_to_actor( *st, a->player ) )
     return;
   if ( refuse_nested( st, a->sim, "run_swing_passes" ) )
+    return;
+  if ( skip_null_target( st, a->target ) )
     return;
 
   player_t* dealer = a->player;
@@ -3368,6 +3511,14 @@ namespace
 // The cooldowns whose scope is open right now (outermost first): a scope opened for a cooldown that already has one
 // (adjust -> reset) writes nothing, the outermost scope owns the change and names itself as its source.
 std::vector<const cooldown_t*> g_cd_active;
+// Plan 12 (MJ-05): the cooldowns whose set_max_charges scope is open: cooldown_t::set_max_charges restarts the cooldown `charges`
+// times and moves its time by hand; none of that is a press, a use or a refund, so cd_started writes nothing for them.
+std::vector<const cooldown_t*> g_cd_mc_active;
+
+bool cd_in_mc_scope( const cooldown_t* cd )
+{
+  return !g_cd_mc_active.empty() && std::find( g_cd_mc_active.begin(), g_cd_mc_active.end(), cd ) != g_cd_mc_active.end();
+}
 
 bool cd_tracked( const state_t* st, const cooldown_t* cd )
 {
@@ -3406,7 +3557,8 @@ double ms_to_seconds( std::int64_t ms )
   return static_cast<double>( ms ) / 1000.0;
 }
 
-std::int32_t cd_open_cycle( state_t* st, const cooldown_t* cd, std::int64_t len_ms, const action_t* a, bool recovered )
+std::int32_t cd_open_cycle( state_t* st, const cooldown_t* cd, std::int64_t len_ms, const action_t* a, bool recovered,
+                            bool max_charge_change = false )
 {
   const std::int32_t id = st->next_cycle++;
   ++st->cycles_written;
@@ -3425,13 +3577,17 @@ std::int32_t cd_open_cycle( state_t* st, const cooldown_t* cd, std::int64_t len_
   fmt::format_to( out_it( o ), ",\"ch\":{}", cd->charges > 1 ? cd->current_charge : 0 );
   if ( recovered )
     o += ",\"rec\":true";
+  // Plan 12 (MJ-05): a recharge that runs only after a maximum-charges change opens a cycle of the remaining length.
+  if ( max_charge_change )
+    o += ",\"mc\":true";
   o += "}\n";
   return id;
 }
 
-void cd_write_ref( state_t* st, const cooldown_t* cd, std::int32_t c, std::int64_t ms, const char* src )
+void cd_write_ref( state_t* st, const cooldown_t* cd, std::int32_t c, std::int64_t ms, const char* src, bool nobody = false )
 {
-  const rl_cause_t cause = cd_top_cause( st, cd );
+  // Plan 12 (MJ-05): a maximum-charges change refunds nobody (press -1, class 6).
+  const rl_cause_t cause = nobody ? rl_cause_t{} : cd_top_cause( st, cd );
   ++st->refunds_written;
   std::string& o = st->fight_buf;
   cd_begin_record( o, "ref", cd );
@@ -3484,6 +3640,8 @@ void cd_started( cooldown_t* cd, const cd_snap_t& before, const action_t* a )
   state_t* st = state_of( &cd->sim );
   if ( !cd_tracked( st, cd ) )
     return;
+  if ( cd_in_mc_scope( cd ) )
+    return;
   busy_scope_t busy;
   state_t::cd_state_t& cs = st->cds[ cd ];
   cd_write_cdn( st, cd, a );
@@ -3525,6 +3683,8 @@ void cd_start_ignored( cooldown_t* cd, const action_t* a )
   state_t* st = state_of( &cd->sim );
   if ( !cd_tracked( st, cd ) )
     return;
+  if ( cd_in_mc_scope( cd ) )
+    return;
   busy_scope_t busy;
   cd_write_cdn( st, cd, a, /*ignored=*/true );
 }
@@ -3547,19 +3707,25 @@ void cd_recharged( cooldown_t* cd )
 
 void cd_scope_t::begin( cooldown_t* cd, const char* src )
 {
-  begun_ = true;
-  cd_    = cd;
+  // Plan 12 (NT-02): the members other than begun_ are set here, and only here.
+  begun_      = true;
+  cd_         = cd;
+  nested_     = false;
+  track_      = false;
+  src_        = src;
+  before_max_ = cd->charges;
   if ( std::find( g_cd_active.begin(), g_cd_active.end(), cd ) != g_cd_active.end() )
   {
     nested_ = true;
     return;
   }
   g_cd_active.push_back( cd );
+  if ( std::strcmp( src, "set_max_charges" ) == 0 )
+    g_cd_mc_active.push_back( cd );
   state_t* st = state_of( &cd->sim );
   if ( !cd_tracked( st, cd ) )
     return;
   track_  = true;
-  src_    = src;
   before_ = cd_capture( cd );
 }
 
@@ -3569,6 +3735,8 @@ void cd_scope_t::end()
     return;
   if ( !g_cd_active.empty() )
     g_cd_active.pop_back();
+  if ( std::strcmp( src_, "set_max_charges" ) == 0 && !g_cd_mc_active.empty() )
+    g_cd_mc_active.pop_back();
   if ( !track_ )
     return;
   state_t* st = state_of( &cd_->sim );
@@ -3578,6 +3746,55 @@ void cd_scope_t::end()
   state_t::cd_state_t& cs = st->cds[ cd_ ];
   const cd_snap_t after   = cd_capture( cd_ );
   const char* src         = src_;
+
+  if ( std::strcmp( src, "set_max_charges" ) == 0 )
+  {
+    // Plan 12 (MJ-05): a maximum-charges change writes no press, use, cycle or refund of its own (cooldown_t::set_max_charges restarts
+    // the cooldown once per charge and moves its time by hand). The ledger's bookkeeping of this cooldown is brought to the engine's
+    // new state instead, without inventing records.
+    ++st->cd_max_charge_changes;
+    const bool multi_before = before_max_ > 1;
+    const bool multi_after  = cd_->charges > 1;
+    // Whether a recharge was running (single charge: the time left of the one cycle; several: the recharge event).
+    const bool open_before = multi_before ? before_.ev : before_.rem_ms > 0;
+    const bool open_after  = multi_after ? after.ev : after.rem_ms > 0;
+    if ( !multi_before && multi_after )
+    {
+      // One charge -> several: a finished cycle that produced the held charge is now a held completed cycle.
+      if ( cs.cur >= 0 && !open_before )
+      {
+        cs.done.assign( 1, cs.cur );
+        cs.cur = -1;
+      }
+    }
+    else if ( multi_before && !multi_after )
+    {
+      // Several -> one charge: the cooldown names only its last cycle; with a charge held that is the newest completed one.
+      const std::int32_t newest = cs.done.empty() ? -1 : cs.done.back();
+      cs.done.clear();
+      if ( !open_after )
+        cs.cur = open_before ? -1 : newest;
+    }
+    if ( multi_after )
+    {
+      while ( static_cast<int>( cs.done.size() ) > after.cc )
+        cs.done.pop_back();
+    }
+    if ( open_before && open_after )
+    {
+      // A recharge that runs before and after keeps its cycle; a net change of its time is ONE refund that refunds nobody.
+      if ( cs.cur < 0 )
+        cs.cur = cd_open_cycle( st, cd_, before_.rem_ms, nullptr, /*recovered=*/true );
+      const std::int64_t saved = before_.rem_ms - after.rem_ms;
+      if ( saved != 0 )
+        cd_write_ref( st, cd_, cs.cur, saved, "set_max_charges", /*nobody=*/true );
+    }
+    else if ( open_before && !open_after )
+      cs.cur = -1;  // the recharge that ran before is abandoned
+    else if ( !open_before && open_after )
+      cs.cur = cd_open_cycle( st, cd_, after.rem_ms, nullptr, false, /*max_charge_change=*/true );
+    return;
+  }
 
   if ( cd_->charges <= 1 )
   {
@@ -3628,11 +3845,21 @@ void cd_scope_t::end()
   }
   if ( after.ev )
   {
-    const std::int32_t id = cd_open_cycle( st, cd_, len_ms, nullptr, false );
-    const std::int64_t elapsed = len_ms - after.rem_ms;
-    if ( elapsed != 0 )
-      cd_write_ref( st, cd_, id, elapsed, src );
-    cs.cur = id;
+    // Plan 12 (MN-05): a recharge that continues with more time left than its length (a delay came first) is a cycle of that longer
+    // length with nothing refunded; a negative refund would be booked to the press that reset the charge.
+    if ( after.rem_ms > len_ms )
+    {
+      ++st->cd_overlong_recharge;
+      cs.cur = cd_open_cycle( st, cd_, after.rem_ms, nullptr, false );
+    }
+    else
+    {
+      const std::int32_t id = cd_open_cycle( st, cd_, len_ms, nullptr, false );
+      const std::int64_t elapsed = len_ms - after.rem_ms;
+      if ( elapsed != 0 )
+        cd_write_ref( st, cd_, id, elapsed, src );
+      cs.cur = id;
+    }
   }
 }
 

@@ -368,9 +368,9 @@ struct buff_delay_t : public buff_event_t
   int stacks;
 
   // 261001-bac plan 05: the cause on the source player's stack at the moment of the trigger (promoted as
-  // rl_applied_cause is), kept so the delayed application can be stamped for the ledger. Unused (the
-  // default, "none") when the ledger is off.
-  rl_cause_t rl_bl_cause;
+  // rl_applied_cause is), kept so the delayed application can be stamped for the ledger. Plan 12 (NT-02): only constructed when
+  // the ledger is on (empty, one flag store, otherwise).
+  std::optional<rl_cause_t> rl_bl_cause;
 
   buff_delay_t( buff_t* b, int stacks, double value, timespan_t d )
     : buff_event_t( b, b->rng().gauss( b->sim->default_aura_delay ) ),
@@ -381,8 +381,9 @@ struct buff_delay_t : public buff_event_t
     if ( b->sim->rl_bl_on )
     {
       player_t* rl_source = rl_buff_source_player( b );
+      rl_bl_cause.emplace();
       if ( rl_source && !rl_source->rl_cause_stack.empty() )
-        rl_bl_cause = rl_credit::promote( rl_source->rl_cause_stack.back().cause );
+        *rl_bl_cause = rl_credit::promote( rl_source->rl_cause_stack.back().cause );
     }
   }
 
@@ -397,7 +398,7 @@ struct buff_delay_t : public buff_event_t
     if ( buff->cooldown->remains() == timespan_t::zero() )
     {
       if ( buff->sim->rl_bl_on )
-        buff->rl_bl_delay_cause = rl_bl_cause;
+        buff->rl_bl_delay_cause = rl_bl_cause.value_or( rl_cause_t{} );
       buff->execute( stacks, value, duration );
       if ( buff->sim->rl_bl_on )
         buff->rl_bl_delay_cause = rl_cause_t{};
@@ -2001,7 +2002,7 @@ timespan_t buff_t::refresh_duration( timespan_t new_duration ) const
     case buff_refresh_behavior::TICK:
     {
       assert( tick_event );
-      timespan_t residual = remains() % static_cast<tick_t*>( tick_event )->tick_time;
+      timespan_t residual = remains_own() % static_cast<tick_t*>( tick_event )->tick_time;
       if ( sim->debug )
       {
         sim->print_debug( "{} {} carryover duration from ongoing tick: {}, refresh_duration={} new_duration={}",
@@ -2012,7 +2013,7 @@ timespan_t buff_t::refresh_duration( timespan_t new_duration ) const
     }
     case buff_refresh_behavior::PANDEMIC:
     {
-      timespan_t residual = std::min( new_duration * 0.3, remains() );
+      timespan_t residual = std::min( new_duration * 0.3, remains_own() );
       if ( sim->debug )
       {
         sim->print_debug( "{} {} carryover from ongoing buff: {}, refresh_duration={} new_duration={}",
@@ -2022,9 +2023,9 @@ timespan_t buff_t::refresh_duration( timespan_t new_duration ) const
       return new_duration + residual;
     }
     case buff_refresh_behavior::EXTEND:
-      return remains() + new_duration;
+      return remains_own() + new_duration;
     case buff_refresh_behavior::MAX:
-      return std::max( remains(), new_duration );
+      return std::max( remains_own(), new_duration );
     case buff_refresh_behavior::CUSTOM:
       return refresh_duration_callback( this, new_duration );
     default:
@@ -2122,6 +2123,11 @@ timespan_t buff_t::remains() const
 {
   if ( rl_buff_ledger::g_reads_on )
     rl_buff_ledger::note_read( this, current_stack, current_value );
+  return remains_unnoted();
+}
+
+timespan_t buff_t::remains_unnoted() const
+{
   if ( current_stack <= 0 )
   {
     return timespan_t::zero();
@@ -2279,6 +2285,9 @@ bool buff_t::trigger( int stacks, double value, double chance, timespan_t durati
       if ( it != delay.end() )
       {
         auto d = static_cast<buff_delay_t*>( *it );
+        // Plan 12 (MN-02): the merged stacks keep the first trigger's cause; counted when the merging trigger's cause differs.
+        if ( sim->rl_bl_on && d->rl_bl_cause )
+          rl_buff_ledger::note_delay_merge( this, *d->rl_bl_cause, rl_bl_current_cause( this ) );
         d->stacks += stacks;
         d->value = value;
       }
@@ -2432,7 +2441,7 @@ void buff_t::extend_duration( timespan_t extra_seconds )
   if ( sim->rl_bl_shadow )
     return rl_buff_ledger::blocked( sim, "buff.extend_duration" );
 
-  if ( !check() )
+  if ( !check_own() )
   {
     return;
   }
@@ -2496,7 +2505,7 @@ void buff_t::extend_async_duration( timespan_t extra_seconds )
   if ( sim->rl_bl_shadow )
     return rl_buff_ledger::blocked( sim, "buff.extend_async_duration" );
 
-  if ( !check() )
+  if ( !check_own() )
   {
     return;
   }
@@ -2555,7 +2564,7 @@ void buff_t::extend_duration_or_trigger( timespan_t duration )
 
   timespan_t d = ( duration >= timespan_t::zero() ) ? duration : buff_duration();
 
-  if ( check() )
+  if ( check_own() )
   {
     extend_duration( d );
   }
@@ -2677,13 +2686,19 @@ void buff_t::start( int stacks, double value, timespan_t duration )
     }
   }
 
-  int before_stacks = check();
+  int before_stacks = check_own();
 
   // 261001-bac plan 06: the bump hook records this application (appliers, covering appliers of a single-stack buff).
-  rl_bl_applying = sim->rl_bl_on;
+  // Plan 12 (NT-02): the flag stores happen only when the ledger is on (the ledger-off path does one test of the sim's flag).
+  const bool rl_on = sim->rl_bl_on;
+  if ( rl_on )
+    rl_bl_applying = true;
   bump( stacks, value );
-  rl_bl_applying    = false;
-  rl_bl_next_expiry = timespan_t::min();
+  if ( rl_on )
+  {
+    rl_bl_applying    = false;
+    rl_bl_next_expiry = timespan_t::min();
+  }
 
   if ( last_start >= timespan_t::zero() )
   {
@@ -2771,12 +2786,23 @@ void buff_t::refresh( int stacks, double value, timespan_t duration )
                                                 : ( duration == timespan_t::zero() ? timespan_t::zero() : buff_duration() ) ) *
                 get_time_duration_multiplier();
     rl_bl_next_expiry = rl_bl_own > timespan_t::zero() ? sim->current_time() + rl_bl_own : timespan_t::max();
+    // Plan 12 (MJ-06): a refresh of a single-stack buff whose refresh behaviour is DISABLED moves nothing (the engine returns below with
+    // the same condition): hand the bump hook "no new coverage" (timespan_t::min()); it adds no covering applier and counts
+    // refresh_no_cover. Multi-stack buffs are left as they were (their stacks still were added).
+    if ( refresh_behavior == buff_refresh_behavior::DISABLED && duration != timespan_t::zero() && max_stack() == 1 )
+      rl_bl_next_expiry = timespan_t::min();
   }
 
-  rl_bl_applying = sim->rl_bl_on;
+  // Plan 12 (NT-02): the flag stores happen only when the ledger is on.
+  const bool rl_on = sim->rl_bl_on;
+  if ( rl_on )
+    rl_bl_applying = true;
   bump( stacks, value );
-  rl_bl_applying    = false;
-  rl_bl_next_expiry = timespan_t::min();
+  if ( rl_on )
+  {
+    rl_bl_applying    = false;
+    rl_bl_next_expiry = timespan_t::min();
+  }
 
   refresh_count++;
 
@@ -3003,7 +3029,7 @@ void buff_t::bump( int stacks, double value )
       cb( this, old_stack, current_stack );
   }
 
-  if ( expire_at_max_stack && at_max_stacks() )
+  if ( expire_at_max_stack && at_max_stacks_own() )
     make_event( *sim, [ this ] { expire(); } );
 
   if ( player )
@@ -3390,10 +3416,14 @@ void buff_t::reset()
   // expire() (iteration/fight boundary, not a genuine game-state expiry) does not leak the
   // previous iteration's applier into this call's expire_callback/stack_change_callback scope.
   rl_applied_cause = rl_cause_t{};
-  rl_bl_applied     = rl_cause_t{};
-  rl_bl_delay_cause = rl_cause_t{};
-  rl_bl_appliers.clear();
-  rl_bl_next_expiry = timespan_t::min();
+  // Plan 12 (NT-02): the ledger's members are written only with the ledger on, so only then do they need clearing.
+  if ( sim->rl_bl_on )
+  {
+    rl_bl_applied     = rl_cause_t{};
+    rl_bl_delay_cause = rl_cause_t{};
+    rl_bl_appliers.clear();
+    rl_bl_next_expiry = timespan_t::min();
+  }
   expire();
   last_start        = timespan_t::min();
   last_trigger      = timespan_t::min();
