@@ -32,9 +32,11 @@ namespace rl_target_select
 namespace
 {
 
-// The eight targeted registry tokens this plan governs (228-02-PLAN.md's TARGETED constant,
+// The nine targeted registry tokens this plan governs (228-02-PLAN.md's TARGETED constant,
 // re-derived from scripts/rl/specs/enhancement.json's specs.enhancement.actions[] at planning
 // time). SHAPED (crash_lightning, sundering) is plan 228-03's, deliberately absent here.
+// 261002-8rv adds flame_shock (a button from width 419), aimed by preference_voltaic_blaze (item
+// 261002-8rs, see preference_for); the aiming head's own spell list (RL_AIM_SPELLS) is unchanged.
 //
 // 230-02 (CK1-1, owner ruling Q1): this is also the target head's own one-hot registry (240-05
 // Task 2) -- run_target_head (below) walks this SAME array for its aiming-spell one-hot, so the
@@ -44,6 +46,7 @@ namespace
 constexpr const char* TARGETED_TOKENS[] = {
   "stormstrike", "lightning_bolt", "chain_lightning", "tempest",
   "windstrike",  "lava_lash",      "voltaic_blaze",   "primordial_storm",
+  "flame_shock",
 };
 
 // 259-05b (fork open question 3): every spell the aim head's one-hot names (RL_AIM_SPELLS, the
@@ -1580,13 +1583,12 @@ preference_fn preference_for( const action_t* resolved )
     rule = preference_tempest;
   else if ( n == "flame_shock" )
   {
-    // 261002-8rs (batch 261002-8rq, item 2): the aim rule for the Flame Shock button, written now and
-    // reached once the token joins TARGETED_TOKENS (it is NOT in that list at width 325: joining it
-    // adds a `flame_shock` block to every decision-dump row and decision-channel request and turns
-    // `chosen_pick` into an object for any chosen flame_shock, decision_dump.cpp:915-1088 -- not
-    // dormant; item 261002-8rv adds the token in the same fork commit as the header that offers the
-    // flame_shock button). Until then nothing consults this branch for a 17-button action table:
-    // is_targeted_action is only asked about tokens of that table.
+    // 261002-8rs (batch 261002-8rq, item 2): the aim rule for the Flame Shock button. It was written
+    // while the token was NOT in TARGETED_TOKENS (width 325: joining it adds a `flame_shock` block to
+    // every decision-dump row and decision-channel request and turns `chosen_pick` into an object for
+    // any chosen flame_shock, decision_dump.cpp:915-1088 -- not dormant). The token joined the list in
+    // 261002-8rv, in the same fork commit as the header that offers the flame_shock button, so this
+    // branch is reached from width 419 on.
     //
     // Why preference_voltaic_blaze. Its score is (new Flame Shocks inside Voltaic Blaze's cleave) x
     // 1e12 + (1e9 if the candidate lacks THIS caster's Flame Shock) + time to die. For flame_shock the

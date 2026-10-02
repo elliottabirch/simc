@@ -837,9 +837,12 @@ void rl_capability_assert_no_governed_action_legal( const player_t* p,
   {
     // 261002-8rs: a capability that governs no action has nothing to assert; every detector is a pure
     // read, so skipping it before its value is computed changes no result. This keeps the per-decision
-    // cost of the talent inputs (which govern columns only, registry-enforced) at zero -- without it
-    // each of about 55 talent inputs would run two linear scans of the trait table
-    // (trait_data.cpp:49-60) at every decision boundary.
+    // cost of the talent inputs at zero: most of them govern columns only and are skipped here, so
+    // the check pays for nothing it does not need -- without the skip each of about 55 talent inputs
+    // would run two linear scans of the trait table (trait_data.cpp:49-60) at every decision
+    // boundary. The seven talent / hero inputs that DO govern a button (261002-8rt/8ru: a talent input
+    // may govern a button only where that one talent is exactly the button's condition) are checked
+    // here at every decision like the gear and racial ones.
     if ( RL_CAPABILITIES[ ci ].governed_actions_count == 0 )
       continue;
     if ( rl_capability_effective_value( mutable_p, ci, memo ) )
