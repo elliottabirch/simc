@@ -48,7 +48,7 @@ constexpr std::size_t PASS_HIST_SIZE = 64;
 // The record kinds this build writes (the `hdr` record's `emits` list). stage0_checks.py reads
 // it to decide which identities it can assert.
 constexpr const char* EMITS_JSON =
-    "[\"hdr\",\"fb\",\"fe\",\"ftr\",\"pr\",\"hit\",\"xp\",\"app\",\"ln\",\"frm\",\"rd\",\"dr\",\"cs\",\"dotr\",\"zr\",\"cyc\",\"ref\",\"use\",\"cdn\"]";
+    "[\"hdr\",\"fb\",\"fe\",\"ftr\",\"pr\",\"hit\",\"xp\",\"app\",\"ln\",\"frm\",\"rd\",\"dr\",\"cs\",\"dotr\",\"zr\",\"cyc\",\"ref\",\"use\",\"cdn\",\"ext\"]";
 }  // namespace
 
 // The ledger's state, defined here so sim.hpp never sees it (sim.hpp forward-declares it).
@@ -260,6 +260,18 @@ struct state_t
   std::uint64_t uses_written = 0;
   std::uint64_t cdn_written = 0;
   std::uint64_t cd_recovered = 0;
+  // Plan 12: buff extensions (PREREG Amendment 1 item 3; records `ext`). Counted for buffs whose source player belongs to the
+  // RL actor, in a fight after reset_done(). ext_by_buff: buff name -> (records, seconds added). The probe latches
+  // (option rl_buff_ledger_ext_probe) allow one probed extension per fight and per buff family.
+  std::uint64_t ext_seen = 0;
+  std::uint64_t ext_in_frame = 0;
+  std::uint64_t ext_written = 0;
+  std::uint64_t ext_unattributed = 0;
+  std::uint64_t ext_probe_fired = 0;
+  std::uint64_t ext_matched_by_order = 0;
+  std::map<std::string, std::pair<std::uint64_t, double>> ext_by_buff;
+  bool ext_probe_single_done = false;
+  bool ext_probe_multi_done = false;
 };
 
 namespace
@@ -381,6 +393,8 @@ void open_and_write_header( sim_t* sim )
   b += "\"rl_buff_ledger\":";
   put_string( b, st->path );
   fmt::format_to( out_it( b ), ",\"rl_buff_ledger_cache\":{}", root->rl_buff_ledger_cache ? 1 : 0 );
+  fmt::format_to( out_it( b ), ",\"rl_buff_ledger_ext_probe\":{},\"rl_buff_ledger_charge_probe\":{}",
+                  root->rl_buff_ledger_ext_probe ? 1 : 0, root->rl_buff_ledger_charge_probe ? 1 : 0 );
   b += "},\"emits\":";
   b += EMITS_JSON;
   b += "}\n";
@@ -424,6 +438,8 @@ void fight_begin( sim_t* sim )
   g_switch_stack.clear();
   update_gate();
   s->probe_done = false;
+  s->ext_probe_single_done = false;
+  s->ext_probe_multi_done = false;
   // A fixed seed at every fight begin: the scratch stream is never a function of the fight's own streams.
   s->scratch_rng.seed( 0x5CA1AB1E0DDBA11FULL );
   s->next_press = 0;
@@ -643,7 +659,26 @@ void write_footer( sim_t* sim )
                   ",\"cycles_written\":{},\"refunds_written\":{},\"uses_written\":{},\"cdn_written\":{},"
                   "\"cd_recovered\":{}",
                   s->cycles_written, s->refunds_written, s->uses_written, s->cdn_written, s->cd_recovered );
-  b += "}\n";
+  // Plan 12 counters (optional footer keys; LEDGER-FORMAT.md amendment 2026-10-02, plan 12 group 1).
+  fmt::format_to( out_it( b ),
+                  ",\"ext_seen\":{},\"ext_in_frame\":{},\"ext_written\":{},\"ext_unattributed\":{},"
+                  "\"ext_probe_fired\":{},\"ext_matched_by_order\":{},\"ext_by_buff\":{{",
+                  s->ext_seen, s->ext_in_frame, s->ext_written, s->ext_unattributed, s->ext_probe_fired,
+                  s->ext_matched_by_order );
+  {
+    bool first = true;
+    for ( const auto& kv : s->ext_by_buff )
+    {
+      if ( !first )
+        b += ',';
+      first = false;
+      put_string( b, kv.first );
+      fmt::format_to( out_it( b ), ":[{},", kv.second.first );
+      put_double( b, kv.second.second );
+      b += ']';
+    }
+  }
+  b += "}}\n";
 
   s->out << b;
   s->out.flush();
@@ -948,6 +983,16 @@ bool is_press_class( const rl_cause_t& c )
   return ( c.cls == RL_CAUSE_PROC_OF_CAST || c.cls == RL_CAUSE_PROC_OF_DOT ) && c.press >= 0;
 }
 
+// Plan 12: whose the stacks of an entry are at `now`: the most recently added extension whose time window (old end to
+// new end) holds `now`, else the entry's own cause (a covering entry has no extensions).
+const rl_cause_t& effective_cause( const buff_t::rl_bl_applier_t& e, timespan_t now )
+{
+  for ( auto it = e.exts.rbegin(); it != e.exts.rend(); ++it )
+    if ( it->from <= now && now < it->to )
+      return it->cause;
+  return e.cause;
+}
+
 // The buff's appliers as `[[press,cls,stacks]...]` (one entry per (press, cls), stacks summed; a buff with more than
 // one stack) or `[[press,cls,1,true]...]` (a single-stack buff: the covering appliers, one entry per press for
 // presses, one per application for the rest). Returns true for the covering form.
@@ -978,18 +1023,20 @@ bool write_appliers( std::string& b, state_t* st, buff_t* c )
   else
   {
     std::vector<std::array<int, 3>> merged;
+    const timespan_t now = c->sim->current_time();
     for ( const buff_t::rl_bl_applier_t& e : c->rl_bl_appliers )
     {
-      bool found = false;
+      const rl_cause_t& who = effective_cause( e, now );
+      bool found            = false;
       for ( std::array<int, 3>& m : merged )
-        if ( m[ 0 ] == e.cause.press && m[ 1 ] == static_cast<int>( e.cause.cls ) )
+        if ( m[ 0 ] == who.press && m[ 1 ] == static_cast<int>( who.cls ) )
         {
           m[ 2 ] += e.stacks;
           found = true;
           break;
         }
       if ( !found )
-        merged.push_back( { static_cast<int>( e.cause.press ), static_cast<int>( e.cause.cls ), e.stacks } );
+        merged.push_back( { static_cast<int>( who.press ), static_cast<int>( who.cls ), e.stacks } );
     }
     for ( const std::array<int, 3>& m : merged )
     {
@@ -1064,6 +1111,13 @@ void note_read( const buff_t* b, int stack, double value )
   g_tap_reads.push_back( { b, stack, value } );
 }
 
+namespace
+{
+// Plan 12: true while the extension probe's own extend call runs (the `ext` record then says probe:true).
+bool g_ext_probing = false;
+void run_ext_probe( state_t* s, player_t* p, const rl_cause_t& cause );
+}  // namespace
+
 std::int32_t frame_push( player_t* p, const rl_cause_t& cause, const action_t* owner, const action_t* ctx,
                          const char* kind )
 {
@@ -1094,6 +1148,9 @@ std::int32_t frame_push( player_t* p, const rl_cause_t& cause, const action_t* o
   s->frames.push_back( std::move( f ) );
   g_frame_depth = s->frames.size();
   update_gate();
+  // Plan 12: the stage-0-only extension probe acts from inside a press frame (never set in an identity proof).
+  if ( sim->rl_buff_ledger_ext_probe )
+    run_ext_probe( s, p, cause );
   return id;
 }
 
@@ -1198,6 +1255,196 @@ void applier_expire_own( buff_t* b, int stacks )
       v.erase( v.begin() + static_cast<std::ptrdiff_t>( best ) );
   }
 }
+
+// ---- Plan 12: extensions (PREREG Amendment 1 item 3; ruling R1 of 2026-10-02) -------------------------------------
+//
+// An event that moves a buff's end later is an application by the cause that made it. Single-stack buff: the extender
+// is a covering applier from now until the new end, exactly as a refresh (add_covering). Multi-stack buff: the stacks
+// whose end moved (all of a synchronous buff; for an asynchronous buff the entries whose own expiry equals a moved
+// event's old end) get an extension {cause, from = old end, to = new end}: they belong to the extender only for the
+// time the extension added; before the old end they stay with the presses that added them.
+void applier_extend( buff_t* b, const rl_cause_t& cause, player_t* source, timespan_t extra, const timespan_t* old_ends,
+                     const timespan_t* new_ends, std::size_t n_exp, const char* fn )
+{
+  state_t* st = state_of( b->sim );
+  if ( st == nullptr || n_exp == 0 )
+    return;
+  const timespan_t now = b->sim->current_time();
+  bool changed         = false;
+
+  if ( covering_mode( b ) )
+  {
+    add_covering( b, cause, new_ends[ 0 ] );
+    changed = true;  // the extender is an entry of the covering list from here on
+  }
+  else
+  {
+    reconcile_appliers( st, b );
+    auto& v = b->rl_bl_appliers;
+    // Extension windows that have passed can never be the answer again (time only moves forward).
+    for ( buff_t::rl_bl_applier_t& e : v )
+      e.exts.erase( std::remove_if( e.exts.begin(), e.exts.end(),
+                                    [ & ]( const buff_t::rl_bl_ext_t& x ) { return !( x.to > now ); } ),
+                    e.exts.end() );
+    if ( b->stack_behavior != buff_stack_behavior::ASYNCHRONOUS )
+    {
+      // One expiration for all stacks: every entry's stacks moved.
+      for ( buff_t::rl_bl_applier_t& e : v )
+      {
+        e.exts.push_back( { cause, old_ends[ 0 ], new_ends[ 0 ] } );
+        changed = true;
+      }
+    }
+    else
+    {
+      // Independent stacks: each has its own expiration. Pair entries and moved events by the entry's own expiry
+      // (matched first, applied after, so an entry whose new expiry equals another event's old end is not matched twice).
+      std::vector<std::pair<std::size_t, std::size_t>> pairs;  // (entry, event)
+      for ( std::size_t i = 0; i < v.size(); ++i )
+        for ( std::size_t j = 0; j < n_exp; ++j )
+          if ( v[ i ].expiry == old_ends[ j ] )
+          {
+            pairs.emplace_back( i, j );
+            break;
+          }
+      if ( pairs.empty() )
+      {
+        // No entry names a moved event's end (entries of a buff that was reconciled, or whose expiry the engine changed
+        // elsewhere): pair entries and events by order of expiry, earliest with earliest.
+        std::vector<std::size_t> order( v.size() );
+        for ( std::size_t i = 0; i < order.size(); ++i )
+          order[ i ] = i;
+        auto key = [ & ]( std::size_t i ) { return v[ i ].expiry == timespan_t::min() ? timespan_t::max() : v[ i ].expiry; };
+        std::stable_sort( order.begin(), order.end(), [ & ]( std::size_t a, std::size_t c ) { return key( a ) < key( c ); } );
+        std::vector<std::size_t> events( n_exp );
+        for ( std::size_t j = 0; j < n_exp; ++j )
+          events[ j ] = j;
+        std::stable_sort( events.begin(), events.end(), [ & ]( std::size_t a, std::size_t c ) { return old_ends[ a ] < old_ends[ c ]; } );
+        for ( std::size_t k = 0; k < std::min( order.size(), events.size() ); ++k )
+          pairs.emplace_back( order[ k ], events[ k ] );
+        if ( !pairs.empty() )
+          ++st->ext_matched_by_order;
+      }
+      for ( const auto& pr : pairs )
+      {
+        buff_t::rl_bl_applier_t& e = v[ pr.first ];
+        e.exts.push_back( { cause, old_ends[ pr.second ], new_ends[ pr.second ] } );
+        e.expiry = new_ends[ pr.second ];
+        changed  = true;
+      }
+    }
+  }
+
+  // Counters and the record: buffs whose source player belongs to the RL actor, in a fight after reset_done().
+  if ( !st->in_fight || !st->cd_live || source == nullptr || !belongs_to_actor( *st, source ) )
+    return;
+  ++st->ext_seen;
+  if ( !changed )
+    ++st->ext_unattributed;
+  const std::int32_t f = innermost_frame( b->sim );
+  if ( f >= 0 )
+    ++st->ext_in_frame;
+  ++st->ext_written;
+  if ( g_ext_probing )
+    ++st->ext_probe_fired;
+  auto& by = st->ext_by_buff[ b->name_str ];
+  ++by.first;
+  by.second += extra.total_seconds();
+
+  std::string& o = st->fight_buf;
+  fmt::format_to( out_it( o ), "{{\"k\":\"ext\",\"it\":{},\"t\":", b->sim->current_iteration );
+  put_double( o, now.total_seconds() );
+  fmt::format_to( out_it( o ), ",\"f\":{},\"buff\":", f );
+  put_string( o, b->name_str );
+  o += ",\"owner\":";
+  put_string( o, b->player != nullptr ? std::string( b->player->name() ) : std::string() );
+  o += ",\"src\":";
+  put_string( o, std::string( source->name() ) );
+  o += ",\"sec\":";
+  put_double( o, extra.total_seconds() );
+  o += ",\"old_end\":";
+  put_double( o, old_ends[ 0 ].total_seconds() );
+  o += ",\"end\":";
+  put_double( o, new_ends[ 0 ].total_seconds() );
+  fmt::format_to( out_it( o ), ",\"n_exp\":{},\"stacks\":{},\"cov\":{},\"press\":{},\"cls\":{},\"seq\":{},\"launch\":{},\"fn\":",
+                  n_exp, b->current_stack, covering_mode( b ) ? "true" : "false", cause.press, static_cast<int>( cause.cls ),
+                  cause.seq, cause.launch );
+  put_string( o, fn );
+  if ( g_ext_probing )
+    o += ",\"probe\":true";
+  o += "}\n";
+}
+
+namespace
+{
+// The extension probe (stage-0 only; it changes the fight, so it is never set in an identity proof or the census). Called
+// from frame_push, so the press frame is the innermost frame and the cause stack's top names this press. Once per fight
+// and per family it extends, by 2 s, a buff the actor holds and that ends within the fight: a single-stack buff with one
+// pending expiration whose covering list has no entry of this press (the earliest remaining first, ties by name), and a
+// multi-stack buff (extend_duration when its stacks share one expiration, extend_async_duration when each has its own).
+void run_ext_probe( state_t* s, player_t* p, const rl_cause_t& cause )
+{
+  if ( s->ext_probe_single_done && s->ext_probe_multi_done )
+    return;
+  if ( !s->in_fight || !s->cd_live || p != s->actor || cause.cls != RL_CAUSE_CAST || cause.press < 0 ||
+       p->sim->rl_bl_shadow )
+    return;
+  busy_scope_t busy;  // the probe's own reads are no reads of the fight
+  const timespan_t two = timespan_t::from_seconds( 2.0 );
+  buff_t* single       = nullptr;
+  buff_t* multi        = nullptr;
+  auto better          = [ & ]( const buff_t* a, const buff_t* c ) {
+    if ( c == nullptr )
+      return true;
+    const timespan_t ra = a->expiration.front()->remains();
+    const timespan_t rc = c->expiration.front()->remains();
+    return ra < rc || ( ra == rc && a->name_str < c->name_str );
+  };
+  for ( buff_t* b : p->buff_list )
+  {
+    if ( b == nullptr || b->is_fallback || b->current_stack <= 0 || b->expiration.empty() )
+      continue;
+    if ( b->player != p || ( b->source != nullptr && b->source != p ) )
+      continue;
+    if ( b->max_stack() == 1 )
+    {
+      if ( s->ext_probe_single_done || b->stack_behavior == buff_stack_behavior::ASYNCHRONOUS || b->expiration.size() != 1 )
+        continue;
+      bool has_press = false;
+      reconcile_appliers( s, b );
+      for ( const buff_t::rl_bl_applier_t& e : b->rl_bl_appliers )
+        if ( e.cause.press == cause.press )
+          has_press = true;
+      if ( !has_press && better( b, single ) )
+        single = b;
+    }
+    else if ( b->max_stack() > 1 )
+    {
+      if ( s->ext_probe_multi_done )
+        continue;
+      if ( b->stack_behavior != buff_stack_behavior::ASYNCHRONOUS && b->expiration.size() != 1 )
+        continue;
+      if ( better( b, multi ) )
+        multi = b;
+    }
+  }
+  g_ext_probing = true;
+  if ( single != nullptr )
+  {
+    s->ext_probe_single_done = true;
+    single->extend_duration( two );
+  }
+  if ( multi != nullptr )
+  {
+    s->ext_probe_multi_done = true;
+    if ( multi->stack_behavior == buff_stack_behavior::ASYNCHRONOUS )
+      multi->extend_async_duration( two );
+    else
+      multi->extend_duration( two );
+  }
+  g_ext_probing = false;
+}
+}  // namespace
 
 void applier_clear( buff_t* b )
 {
@@ -1749,8 +1996,9 @@ bool press_applied( state_t* st, const buff_t* cb )
 {
   buff_t* b = const_cast<buff_t*>( cb );
   reconcile_appliers( st, b );
+  const timespan_t now = b->sim->current_time();
   for ( const buff_t::rl_bl_applier_t& e : b->rl_bl_appliers )
-    if ( is_press_class( e.cause ) )
+    if ( is_press_class( effective_cause( e, now ) ) )
       return true;
   return false;
 }

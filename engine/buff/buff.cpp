@@ -2453,7 +2453,18 @@ void buff_t::extend_duration( timespan_t extra_seconds )
 
   if ( extra_seconds > timespan_t::zero() )
   {
+    // 261001-bac plan 12: the end before the engine's own reschedule (read only).
+    const timespan_t rl_old_end = sim->rl_bl_on ? expiration.front()->occurs() : timespan_t::zero();
+
     expiration.front()->reschedule( expiration.front()->remains() + extra_seconds );
+
+    // Amendment 1 item 3: an extension is an application by whoever causes it.
+    if ( sim->rl_bl_on )
+    {
+      const timespan_t rl_new_end = expiration.front()->occurs();
+      rl_buff_ledger::applier_extend( this, rl_bl_current_cause( this ), rl_buff_source_player( this ), extra_seconds,
+                                      &rl_old_end, &rl_new_end, 1, "extend_duration" );
+    }
 
     sim->print_log( "{} extends {} by {}. New expiration time: {}", *source, *this, extra_seconds,
                     expiration.front()->occurs() );
@@ -2504,15 +2515,30 @@ void buff_t::extend_async_duration( timespan_t extra_seconds )
 
   if ( extra_seconds > timespan_t::zero() )
   {
+    // 261001-bac plan 12: the end of every expiration event, before and after the engine's own re-making (read only).
+    std::vector<timespan_t> rl_old_ends, rl_new_ends;
+    if ( sim->rl_bl_on )
+    {
+      rl_old_ends.reserve( expiration.size() );
+      rl_new_ends.reserve( expiration.size() );
+    }
     for ( size_t i = 0; i < expiration.size(); i++ )
     {
       // instead of rescheduling, cancel the events and create fresh ones to maintain expiration event ordering
       expiration_t* exp = debug_cast<expiration_t*>( expiration[ i ] );
+      if ( sim->rl_bl_on )
+        rl_old_ends.push_back( exp->occurs() );
       expiration[ i ] = make_event<expiration_t>( *sim, this, exp->stack, exp->remains() + extra_seconds );
       event_t::cancel( exp );
+      if ( sim->rl_bl_on )
+        rl_new_ends.push_back( expiration[ i ]->occurs() );
       sim->print_log( "{} extends {} by {}. New expiration time: {}", *source, *this, extra_seconds,
                      expiration[ i ]->occurs() );
     }
+    if ( sim->rl_bl_on )
+      rl_buff_ledger::applier_extend( this, rl_bl_current_cause( this ), rl_buff_source_player( this ), extra_seconds,
+                                      rl_old_ends.data(), rl_new_ends.data(), rl_old_ends.size(),
+                                      "extend_async_duration" );
   }
   else if ( extra_seconds < timespan_t::zero() )
   {

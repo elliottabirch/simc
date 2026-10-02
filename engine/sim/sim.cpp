@@ -4498,6 +4498,8 @@ void sim_t::create_options()
   add_option( opt_string( "rl_buff_ledger", rl_buff_ledger_str ) );
   add_option( opt_bool( "rl_buff_ledger_guard_probe", rl_buff_ledger_guard_probe ) );
   add_option( opt_bool( "rl_buff_ledger_cache", rl_buff_ledger_cache ) );
+  add_option( opt_bool( "rl_buff_ledger_ext_probe", rl_buff_ledger_ext_probe ) );
+  add_option( opt_bool( "rl_buff_ledger_charge_probe", rl_buff_ledger_charge_probe ) );
   // The replay option (tstl-sylvanas phase 253, plan 253-02, REP-01/D-01/D-16). See sim.hpp's
   // rl_rng_replay_file_str doc comment. Default empty, byte-identical to today's behavior when
   // unset. The address choice was removed in phase 254 (Gate 2 verdict); replay always reads

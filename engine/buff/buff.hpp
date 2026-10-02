@@ -28,6 +28,7 @@
 #include <vector>
 
 struct buff_t;
+struct player_t;
 
 // 261001-bac plan 03 (research clone only): the read tap. A buff read function reports itself here
 // only while the per-hit ledger's REFERENCE pass has an amount scope open (`g_tap_open`, a plain
@@ -50,6 +51,12 @@ void note_read( const buff_t* b, int stack, double value );
 void applier_pre_bump( buff_t* b );
 void applier_post_bump( buff_t* b, int requested, int old_stack, const rl_cause_t& cause );
 void applier_expire_own( buff_t* b, int stacks );
+// Plan 12 (PREREG Amendment 1 item 3): a positive extension moved this buff's end later. `old_ends` / `new_ends` hold the end
+// of every expiration event the engine moved (one for extend_duration, one per stack event for extend_async_duration), read
+// by buff.cpp before and after its own reschedule; `extra` is the time added (after the time multiplier); `source` is the
+// resolved source player (rl_buff_source_player), `fn` the extend function. The hook only reads.
+void applier_extend( buff_t* b, const rl_cause_t& cause, player_t* source, timespan_t extra, const timespan_t* old_ends,
+                     const timespan_t* new_ends, std::size_t n_exp, const char* fn );
 void applier_clear( buff_t* b );
 void note_consume( buff_t* b, const char* op, int removed );
 }  // namespace rl_buff_ledger
@@ -188,11 +195,21 @@ public:
   // application with its OWN expiry (now + the duration that application alone would give); the covering
   // appliers are the entries whose own expiry is still ahead. `rl_bl_next_expiry` is handed from start()/
   // refresh() to the bump hook (timespan_t::min() = none, ::max() = never expires).
+  // Plan 12: an extension of a multi-stack buff's end made by a later cause. The entry's stacks belong to `cause` from
+  // `from` (the end before the extension) to `to` (the end after it): only the time the extension added (ruled by the
+  // orchestrator 2026-10-02, PREREG Amendment 2). Empty unless the ledger is on; pruned once `to` has passed.
+  struct rl_bl_ext_t
+  {
+    rl_cause_t cause;
+    timespan_t from;
+    timespan_t to;
+  };
   struct rl_bl_applier_t
   {
     rl_cause_t cause;
     int stacks;
     timespan_t expiry;
+    std::vector<rl_bl_ext_t> exts;
   };
   std::vector<rl_bl_applier_t> rl_bl_appliers;
   timespan_t rl_bl_next_expiry = timespan_t::min();

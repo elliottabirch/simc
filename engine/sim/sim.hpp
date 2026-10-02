@@ -816,6 +816,12 @@ struct sim_t : private sc_thread_t
   // dealer and its owner) and skip the passes; every 16th cache hit also runs the full passes and compares at 1e-12
   // relative, counting disagreements (footer cache_check, cache_check_fail). Default 0. The census runs with it off.
   bool rl_buff_ledger_cache = false;
+  // 261001-bac plan 12 (stage-0 only, never set in an identity proof or the census): rl_buff_ledger_ext_probe=1 makes the
+  // ledger extend, once per fight and per buff family, a buff the RL actor holds from inside a press frame (the extension
+  // tracer: it CHANGES the fight). rl_buff_ledger_charge_probe=1 is declared for group 2 (cooldown charge-count probe) and is
+  // inert here. Both act only with the ledger on.
+  bool rl_buff_ledger_ext_probe = false;
+  bool rl_buff_ledger_charge_probe = false;
   std::shared_ptr<rl_buff_ledger::state_t> rl_bl_state;
   // The replay option (tstl-sylvanas phase 253, plan 253-02, REP-01/D-01/D-16). rl_rng_replay=
   // <path>, off by default (empty string), byte-identical to today's behaviour when unset. A
