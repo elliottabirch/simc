@@ -579,8 +579,6 @@ spec_t load_spec( const std::string& path )
         out.distance_yd = L.num( ef[ "distance_yd" ], ep + ".distance_yd", "distance_yd", false, -1e300, 0 );
       else if ( !ef[ "distance_yd" ].IsNull() )
         L.fail( ep + ".distance_yd", "distance_yd must be null for category " + out.category );
-      if ( out.category == "forced_movement" )  // 265-03 task-1 limit: removed in task 2
-        L.fail( ep + ".category", "this build does not play forced_movement yet (plan 265-03 task 2)" );
       const Value& cl = L.list( m, "casts", p );
       if ( cl.Size() == 0 )
         L.fail( p + ".casts", "casts must be a non-empty list" );
@@ -622,8 +620,6 @@ spec_t load_spec( const std::string& path )
         }
         else
           L.fail( ap + ".kind", "kind must be one of phase_time, boss_health, after_cast" );
-        if ( kind != "phase_time" )  // 265-03 task-1 limit: removed in task 2
-          L.fail( ap + ".kind", "this build plays only phase_time casts so far (plan 265-03 task 2)" );
         const Value& tj = cv[ "time_jitter" ];
         if ( !tj.IsNull() )
         {
@@ -844,6 +840,16 @@ struct sheet_fight_event_t::impl_t
     std::vector<player_t*> affected;  // the players the effect landed on (the end event gives them their turn back)
   };
   std::vector<std::vector<rm_rt_t>> rm_rt;
+
+  // ---- priority-mark windows (tstl-sylvanas 265-03) ------------------------------------------------
+  // A window opens when a mark becomes active on an instance and closes when it stops; one still open at the fight's end keeps
+  // end_s negative (written as null). Reported only: nothing acts on a window.
+  struct pw_t
+  {
+    int mark, instance;
+    double start_s, end_s;
+  };
+  std::vector<pw_t> pwindows;
 
   // ---- events ---------------------------------------------------------------------------------
   struct tick_event_t : event_t
@@ -1388,6 +1394,8 @@ struct sheet_fight_event_t::impl_t
       for ( size_t c = 0; c < spec.random_mechanics[ m ].casts.size(); ++c )
       {
         const auto& rc = spec.random_mechanics[ m ].casts[ c ];
+        if ( rc.at_kind == "boss_health" )
+          rm_rt[ m ][ c ].armed = rc.phase == j;  // armed from its phase's start; disarmed when another phase starts
         if ( rc.phase != j || rc.at_kind != "phase_time" )
           continue;
         make_event<rm_cast_event_t>( *sim, *sim, this, static_cast<int>( m ), static_cast<int>( c ), j, true,
@@ -1447,6 +1455,15 @@ struct sheet_fight_event_t::impl_t
         make_event<start_event_t>( *sim, *sim, this, static_cast<int>( j ),
                                    timespan_t::from_seconds( jit_value( st.after_jitter, st.after_s ) ) );  // tstl-sylvanas 261-04: the drawn break length
     }
+    // tstl-sylvanas 265-03: a random mechanic timed "after a named cast" fires after_s plus its shift after that cast of the
+    // same phase happens (never earlier than the cast).
+    for ( size_t mi = 0; mi < spec.random_mechanics.size(); ++mi )
+      for ( size_t ci = 0; ci < spec.random_mechanics[ mi ].casts.size(); ++ci )
+      {
+        const auto& rc = spec.random_mechanics[ mi ].casts[ ci ];
+        if ( rc.at_kind == "after_cast" && rc.phase == phase && rc.cast == c.name )
+          rm_schedule( static_cast<int>( mi ), static_cast<int>( ci ), rc.after_s );
+      }
   }
 
   // A boss crossed a health threshold (pct 0 = the 1-health zero callback): any phase starting on it becomes ready.
@@ -1490,6 +1507,7 @@ struct sheet_fight_event_t::impl_t
     // itself is unchanged.
     fire_armed_health_waves_above_zero( b );
     fire_health_waves( b, 0.0 );
+    fire_random_health( b, 0.0, true );  // tstl-sylvanas 265-03
     crossed( b, 0.0 );
   }
 
@@ -1529,6 +1547,7 @@ struct sheet_fight_event_t::impl_t
     if ( increasing || !b.spawned || b.dead )
       return;
     fire_health_waves( b, pct );  // before crossed(): a phase change would disarm them
+    fire_random_health( b, pct, false );  // tstl-sylvanas 265-03: likewise
     crossed( b, pct );
   }
 
@@ -1589,6 +1608,10 @@ struct sheet_fight_event_t::impl_t
     for ( auto& b : bosses )
       if ( !b.dead )
         sample( b );
+    // tstl-sylvanas 265-03: priority-mark windows, read once a tick (1 s resolution is enough for a report). No event is
+    // scheduled and nothing is drawn, so a /1 spec's event queue and draws are untouched.
+    if ( spec.format == 2 && !spec.priority_marks.empty() )
+      update_priority_windows();
     ++tick_index;
     make_event<tick_event_t>( *sim, *sim, this, timespan_t::from_seconds( interval ) );
   }
@@ -1756,9 +1779,11 @@ struct sheet_fight_event_t::impl_t
       if ( !p->is_pet() )
         rt.affected.push_back( p );
     }
-    if ( mech.category == "stun" )
+    if ( mech.category == "stun" || mech.category == "other_realm" )  // other_realm is played as a stun of its duration (A-05)
       for ( auto* p : rt.affected )
         sheet_fight_stun_start( p );
+    else  // forced_movement: a movement of its duration (distance_yd is recorded in the spec only)
+      sheet_fight_movement_begin( sim, rt.affected, mech.duration_s );
     make_event<rm_end_event_t>( *sim, *sim, this, m, c, timespan_t::from_seconds( mech.duration_s ) );
   }
 
@@ -1770,10 +1795,104 @@ struct sheet_fight_event_t::impl_t
     // As the stock raid event's finish does: a player who fell asleep meanwhile is dropped first.
     rt.affected.erase( std::remove_if( rt.affected.begin(), rt.affected.end(), []( const player_t* p ) { return p->is_sleeping(); } ),
                        rt.affected.end() );
-    if ( mech.category == "stun" )
+    if ( mech.category == "stun" || mech.category == "other_realm" )
       for ( auto* p : rt.affected )
         sheet_fight_stun_end( sim, p );
     rt.end_s = r3( rt.start_s + mech.duration_s );
+  }
+
+  // Schedule declared cast (m, c) base_s seconds from now plus its shift, never earlier than now. A cast with no delay is not
+  // dropped by a phase change in the same instant (it was triggered inside its phase); one with a delay is dropped if its phase
+  // has ended by then.
+  void rm_schedule( int m, int c, double base_s )
+  {
+    const double delay = std::max( 0.0, base_s + rm_rt[ m ][ c ].offset );
+    make_event<rm_cast_event_t>( *sim, *sim, this, m, c, spec.random_mechanics[ m ].casts[ c ].phase, delay > 0.0,
+                                 timespan_t::from_seconds( delay ) );
+  }
+
+  // A boss crossed a health threshold downward (pct 0 = the 1-health zero callback; zero_hit: that same hit also crossed every
+  // still-armed trigger above zero). Every armed boss_health cast naming this boss fires once. The cast itself runs in an event,
+  // never inside the damage callback.
+  void fire_random_health( const boss_rt_t& b, double pct, bool zero_hit )
+  {
+    for ( size_t m = 0; m < spec.random_mechanics.size(); ++m )
+      for ( size_t c = 0; c < spec.random_mechanics[ m ].casts.size(); ++c )
+      {
+        const auto& rc = spec.random_mechanics[ m ].casts[ c ];
+        auto& rt       = rm_rt[ m ][ c ];
+        if ( rc.at_kind != "boss_health" || !rt.armed || rc.boss != b.spec->actor )
+          continue;
+        if ( !( std::fabs( rc.pct - pct ) < 1e-9 || ( zero_hit && rc.pct > 0.0 ) ) )
+          continue;
+        rt.armed = false;
+        rm_schedule( static_cast<int>( m ), static_cast<int>( c ), 0.0 );
+      }
+  }
+
+  // ---- priority marks (tstl-sylvanas 265-03) ----------------------------------------------------
+  static bool has_absorb_buff( const player_t* a )
+  {
+    for ( const buff_t* b : a->buff_list )
+      if ( b->check() && b->name_str.rfind( "raid_event_absorb_", 0 ) == 0 )
+        return true;
+    return false;
+  }
+
+  // Which marks are active right now (see sheet_fight_mark_state_t). A pure read: no draw, no state change.
+  std::vector<sheet_fight_mark_state_t> priority_marks_now() const
+  {
+    std::vector<sheet_fight_mark_state_t> out;
+    if ( spec.format != 2 )
+      return out;
+    for ( size_t k = 0; k < spec.priority_marks.size(); ++k )
+    {
+      const auto& mk    = spec.priority_marks[ k ];
+      const bool absorb = mk.while_kind == "absorb_on_target";
+      bool is_boss      = false;
+      for ( const auto& b : bosses )
+        if ( b.spec->actor == mk.enemy )
+        {
+          is_boss     = true;
+          bool active = b.spawned && !b.dead;
+          if ( absorb )
+            active = active && has_absorb_buff( b.actor );
+          out.push_back( { static_cast<int>( k ), 0, active } );
+        }
+      if ( is_boss )
+        continue;
+      int n = 0;
+      for ( const auto& up : insts )
+      {
+        const auto& in = *up;
+        if ( spec.waves[ in.wave ].actor != mk.enemy )
+          continue;
+        bool active = in.alive;
+        if ( absorb )
+          active = active && has_absorb_buff( in.mob );
+        out.push_back( { static_cast<int>( k ), n, active } );
+        ++n;
+      }
+    }
+    return out;
+  }
+
+  // Diff the accessor's active set against the open windows: open on activation, close on deactivation.
+  void update_priority_windows()
+  {
+    const auto state = priority_marks_now();
+    const double t   = r3( now() );
+    for ( const auto& s : state )
+    {
+      pw_t* open = nullptr;
+      for ( auto& w : pwindows )
+        if ( w.mark == s.mark && w.instance == s.instance && w.end_s < 0 )
+          open = &w;
+      if ( s.active && !open )
+        pwindows.push_back( { s.mark, s.instance, t, -1.0 } );
+      else if ( !s.active && open )
+        open->end_s = t;
+    }
   }
 
   // ---- the fight record ----------------------------------------------------------------------
@@ -2012,6 +2131,19 @@ struct sheet_fight_event_t::impl_t
       w.EndArray();
       key( "priority_windows" );
       w.StartArray();
+      for ( const auto& pw : pwindows )
+      {
+        const auto& mk = spec.priority_marks[ pw.mark ];
+        w.StartObject();
+        key( "mark" ); w.String( mk.name.c_str() );
+        key( "actor" ); w.String( mk.enemy.c_str() );
+        key( "instance" ); w.Int( pw.instance );
+        key( "rank" ); w.String( mk.rank.c_str() );
+        key( "funnel" ); w.Bool( mk.funnel_all_damage );
+        key( "start_s" ); w.Double( pw.start_s );
+        key( "end_s" ); num_or_null( pw.end_s );
+        w.EndObject();
+      }
       w.EndArray();
     }
     w.EndObject();
@@ -2080,6 +2212,12 @@ sheet_fight_event_t::sheet_fight_event_t( sim_t* s, const std::string& spec_path
       for ( const auto& a : w.at )
         if ( a.kind == "boss_health" && a.boss == b.spec->actor )
           pcts.insert( a.pct );
+    // tstl-sylvanas 265-03: a random mechanic that fires when this boss reaches a health percent needs that percent callback
+    // too (zero percent is the always-registered 1-health callback). A /1 spec has no random mechanics: nothing is added.
+    for ( const auto& mech : im.spec.random_mechanics )
+      for ( const auto& rc : mech.casts )
+        if ( rc.at_kind == "boss_health" && rc.boss == b.spec->actor && rc.pct > 0 )
+          pcts.insert( rc.pct );
     b.pct_values.assign( pcts.begin(), pcts.end() );
   }
   // Registered ONCE per boss (the callback vector only grows, so never per fight): the 1-health zero callback, one
@@ -2154,6 +2292,7 @@ void sheet_fight_event_t::reset()
   for ( auto& mech : im.rm_rt )  // tstl-sylvanas 265-03
     for ( auto& rt : mech )
       rt = impl_t::rm_rt_t();
+  im.pwindows.clear();
   for ( auto& wr : im.wave_rt )
     std::fill( wr.armed.begin(), wr.armed.end(), 0 );
   im.trigger_ready.assign( im.spec.phases.size(), 0 );
@@ -2245,4 +2384,17 @@ sheet_fight_forecast_t sheet_fight_forecast( const sim_t* sim )
   if ( !sim || sim->fight_style != FIGHT_STYLE_SHEET_FIGHT || !sim->sheet_fight )
     return {};
   return sim->sheet_fight->forecast();
+}
+
+// tstl-sylvanas 265-03: the priority-mark view (a pure read; no consumer in Phase 265, see sheet_fight_mark_state_t).
+std::vector<sheet_fight_mark_state_t> sheet_fight_event_t::priority_marks_now() const
+{
+  return impl->priority_marks_now();
+}
+
+std::vector<sheet_fight_mark_state_t> sheet_fight_priority_marks( const sim_t* sim )
+{
+  if ( !sim || sim->fight_style != FIGHT_STYLE_SHEET_FIGHT || !sim->sheet_fight )
+    return {};
+  return sim->sheet_fight->priority_marks_now();
 }

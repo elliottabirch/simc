@@ -184,6 +184,9 @@ spec_t load_spec( const std::string& path );
 // behaviour byte for byte.
 void sheet_fight_stun_start( player_t* p );
 void sheet_fight_stun_end( sim_t* sim, player_t* p );
+// tstl-sylvanas 265-03: a forced movement of `duration_s` for the given players (the stock movement event's per-player start;
+// defined in raid_event.cpp). The vector must outlive the movement.
+void sheet_fight_movement_begin( sim_t* sim, const std::vector<player_t*>& players, double duration_s );
 
 // tstl-sylvanas 262-04: the read-only view of the fight the net is allowed to see (the fight.* inputs).
 // Every field is a thing the game shows a raider (a wave of adds announced or arrived, a boss health percent, a
@@ -209,6 +212,20 @@ struct sheet_fight_forecast_t
 // The all-unknown view when the fight style is not SheetFight or no controller exists.
 sheet_fight_forecast_t sheet_fight_forecast( const sim_t* sim );
 
+// tstl-sylvanas 265-03: which priority marks (sheet-fight-spec/2 priority_marks) are active right now, one entry per mark and
+// per spawned instance of the mark's enemy (a boss has the one instance 0; a wave actor has one per spawn this fight, in spawn
+// order). A mark of kind "alive" is active from the enemy's spawn to its death; "absorb_on_target" while a raid-event absorb
+// buff is up on the enemy. A PURE READ: no draw, no event, no state change. NO CONSUMER EXISTS IN PHASE 265: the controller
+// only reports the windows in the fight record (priority_windows); the priority-target system that will read this is deferred.
+struct sheet_fight_mark_state_t
+{
+  int mark = 0;      // index into the spec's priority_marks
+  int instance = 0;  // which copy of the enemy actor, from 0
+  bool active = false;
+};
+// Empty when the fight style is not SheetFight or no controller exists.
+std::vector<sheet_fight_mark_state_t> sheet_fight_priority_marks( const sim_t* sim );
+
 struct sheet_fight_event_t : public raid_event_t
 {
   sheet_fight_event_t( sim_t* sim, const std::string& spec_path );
@@ -231,6 +248,8 @@ struct sheet_fight_event_t : public raid_event_t
   std::optional<timespan_t> boss_time_to_percent( const player_t* boss, double percent ) const;
   // tstl-sylvanas 262-04: the fight.* view (see sheet_fight_forecast_t); a pure read, no draw, no state change.
   sheet_fight_forecast_t forecast() const;
+  // tstl-sylvanas 265-03: see sheet_fight_mark_state_t; a pure read, no consumer in Phase 265.
+  std::vector<sheet_fight_mark_state_t> priority_marks_now() const;
 
 private:
   void _start() override {}

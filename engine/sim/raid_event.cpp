@@ -1353,7 +1353,29 @@ struct movement_event_t final : public raid_event_t
 
 // Stun =====================================================================
 
-}  // UNNAMED NAMESPACE (closed for a moment: the two shared stun helpers below have external linkage)
+}  // UNNAMED NAMESPACE (closed for a moment: the helpers below have external linkage)
+
+// tstl-sylvanas 265-03: a forced movement for the sheet-fight controller. The per-player start of the stock movement raid
+// event (movement_event_t::_start above), for a movement of the given duration: the same distance the stock event derives from
+// a duration (its default 7 yards per second), the same direction default, the same stunned-player and in_combat handling,
+// and the same movement ticker. The stock event's finish does nothing (the movement ends when the distance is covered), so
+// there is no matching end helper. `players` must stay alive until the movement ends (the ticker keeps a reference to it);
+// the stock movement event itself is not changed.
+void sheet_fight_movement_begin( sim_t* sim, const std::vector<player_t*>& players, double duration_s )
+{
+  const double move = duration_s * 7.0;
+  for ( auto p : players )
+  {
+    p->trigger_movement( move, movement_direction_type::TOWARDS );
+
+    if ( p->buffs.stunned->check() )
+      continue;
+    p->in_combat = true;  // FIXME? this is done to ensure we don't end up in infinite loops of non-harmful actions with gcd=0
+    p->moving();
+  }
+  if ( !players.empty() )
+    make_event<movement_ticker_t>( *sim, *sim, players );
+}
 
 // tstl-sylvanas 265-03: the per-player start and end of a stun, in ONE place. The stock stun raid event below and the
 // sheet-fight controller's random stun (and its other-realm effect, which is played as a stun) both call these, so the
