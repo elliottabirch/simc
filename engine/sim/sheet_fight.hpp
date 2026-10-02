@@ -143,6 +143,13 @@ struct spec_t
 spec_t load_spec( const std::string& path );
 }  // namespace sheet_fight_spec
 
+// tstl-sylvanas 265-03: the per-player start and end of a stun (defined in raid_event.cpp). Both the engine's own stun raid
+// event and the sheet-fight controller's random stun call these, so the 262-09 turn hand-back (the player gets its next
+// decision the moment a stun ends in a sheet fight) lives in one function body. Every non-sheet fight runs the stock
+// behaviour byte for byte.
+void sheet_fight_stun_start( player_t* p );
+void sheet_fight_stun_end( sim_t* sim, player_t* p );
+
 // tstl-sylvanas 262-04: the read-only view of the fight the net is allowed to see (the fight.* inputs).
 // Every field is a thing the game shows a raider (a wave of adds announced or arrived, a boss health percent, a
 // scheduled downtime, a bloodlust that is coming) or the sheet's NOMINAL value; no drawn value that the game hides
