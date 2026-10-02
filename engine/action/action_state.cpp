@@ -320,7 +320,8 @@ void travel_event_t::execute()
     // action_t::impact()'s own body.
     rl_cause_scope_t rl_cause_guard(
         action->player,
-        rl_cause_t{ state->rl_cause_seq, state->rl_cause_class, state->rl_cause_press, state->rl_cause_launch } );
+        rl_cause_t{ state->rl_cause_seq, state->rl_cause_class, state->rl_cause_press, state->rl_cause_launch },
+        /*owner=*/nullptr, "impact", action );
     // 250-03 (REC-04): restores the press that was active when `state` was stamped, across this
     // SAME deferred travel-time boundary -- see do_schedule_travel's zero-travel-time branch
     // (action.cpp) for the sibling call this mirrors.

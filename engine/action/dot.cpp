@@ -643,8 +643,15 @@ std::unique_ptr<expr_t> dot_t::create_expression( dot_t* dot, action_t* action, 
 timespan_t dot_t::remains() const
 {
   if ( !ticking || !end_event )
+  {
+    if ( rl_buff_ledger::g_reads_on )
+      rl_buff_ledger::note_dot_read( this, false );
     return 0_ms;
-  return end_event->remains();
+  }
+  const timespan_t r = end_event->remains();
+  if ( rl_buff_ledger::g_reads_on )
+    rl_buff_ledger::note_dot_read( this, r > 0_ms );
+  return r;
 }
 
 timespan_t dot_t::time_to_next_full_tick() const
@@ -1132,8 +1139,10 @@ void dot_t::dot_tick_event_t::execute()
   // applied the dot). `owner` is nullptr -- this is not an action's own execute() dispatch.
   {
     rl_cause_scope_t rl_cause_guard(
-        dot->current_action->player, rl_cause_t{ dot->state->rl_cause_seq, RL_CAUSE_DOT_TICK,
-                                                 dot->state->rl_cause_press, dot->state->rl_cause_launch } );
+        dot->current_action->player,
+        rl_cause_t{ dot->state->rl_cause_seq, RL_CAUSE_DOT_TICK, dot->state->rl_cause_press,
+                    dot->state->rl_cause_launch },
+        /*owner=*/nullptr, "tick", dot->current_action );
     // 250-03 (REC-04): this scheduled tick's OWN tick press, covering the same skill-check gate
     // AND no-skill-check-required path the cause guard above spans (before the skill-check roll,
     // so that roll itself carries the tick's own press).

@@ -130,7 +130,15 @@ struct rl_cause_frame_t
 struct rl_cause_scope_t
 {
   player_t* p;
-  rl_cause_scope_t( player_t* p_, rl_cause_t cause, const action_t* owner = nullptr );
+  // 261001-bac plan 06 (research clone only): the id of the ledger frame this scope pushed (-1 when the
+  // ledger is off, the player is not the RL actor's, or the scope was opened inside a ledger pass). The
+  // destructor pops exactly what the constructor pushed, so the ledger's frame stack is LIFO by construction.
+  std::int32_t rl_bl_frame = -1;
+  // `kind` and `ctx` are read ONLY by the ledger (frame record: a short name for the scope's push site, and the
+  // action whose code runs inside a scope that has no `owner`, so a frame always names its action when one is
+  // known). Neither is read by any routing, roll or scheduling decision.
+  rl_cause_scope_t( player_t* p_, rl_cause_t cause, const action_t* owner = nullptr, const char* kind = nullptr,
+                    const action_t* ctx = nullptr );
   ~rl_cause_scope_t();
 };
 

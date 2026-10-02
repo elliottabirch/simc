@@ -35,10 +35,24 @@ struct buff_t;
 // costs one load and a branch). buff.hpp does not see sim_t, which is why this is a global and not
 // `sim->rl_bl_on`; the ledger refuses threads > 1, so there is exactly one writer. Reads made by
 // the APL, by expressions or by the observation code are never logged (the flag is false then).
+//
+// 261001-bac plan 06: the same call sites now also feed the frame reads of the gate check. `g_reads_on` is
+// true while the tap is open OR a ledger frame is open outside the ledger's own passes (one global, one load
+// and one branch per read, false in every run with rl_buff_ledger= unset); note_read tells the two apart.
 namespace rl_buff_ledger
 {
 extern bool g_tap_open;
+extern bool g_reads_on;
 void note_read( const buff_t* b, int stack, double value );
+
+// Plan 06: applier lists (buff.cpp calls these only when sim->rl_bl_on; all are no-ops on the buff's own
+// behaviour, they only maintain buff_t::rl_bl_appliers). `cause` is who is applying right now.
+void applier_pre_bump( buff_t* b );
+void applier_post_bump( buff_t* b, int requested, int old_stack, const rl_cause_t& cause );
+void applier_covering( buff_t* b, const rl_cause_t& cause, timespan_t own_duration );
+void applier_expire_own( buff_t* b, int stacks );
+void applier_clear( buff_t* b );
+void note_consume( buff_t* b, const char* op, int removed );
 }  // namespace rl_buff_ledger
 struct cooldown_t;
 struct event_t;
@@ -168,6 +182,22 @@ public:
   rl_cause_t rl_bl_applied;
   rl_cause_t rl_bl_delay_cause;
 
+  // 261001-bac plan 06 (research clone only, maintained only when rl_buff_ledger= is on, read only by the
+  // ledger): who applied each stack of this buff. For a buff with more than one stack: one entry per
+  // application with the stacks it added; stacks leave oldest first (consumption), or, for independent
+  // (asynchronous) stacks, with their own expiration. For a single-stack buff (max stack 1): one entry per
+  // application with its OWN expiry (now + the duration that application alone would give); the covering
+  // appliers are the entries whose own expiry is still ahead. `rl_bl_next_expiry` is handed from start()/
+  // refresh() to the bump hook (timespan_t::min() = none, ::max() = never expires).
+  struct rl_bl_applier_t
+  {
+    rl_cause_t cause;
+    int stacks;
+    timespan_t expiry;
+  };
+  std::vector<rl_bl_applier_t> rl_bl_appliers;
+  timespan_t rl_bl_next_expiry = timespan_t::min();
+
   // Ticking buff values
   unsigned current_tick;
   parsed_value_t<timespan_t> buff_period;
@@ -226,7 +256,7 @@ public:
    */
   int check() const
   {
-    if ( rl_buff_ledger::g_tap_open )
+    if ( rl_buff_ledger::g_reads_on )
       rl_buff_ledger::note_read( this, current_stack, current_value );
     return current_stack;
   }
@@ -263,7 +293,7 @@ public:
    */
   double stack_value()
   {
-    if ( rl_buff_ledger::g_tap_open )
+    if ( rl_buff_ledger::g_reads_on )
       rl_buff_ledger::note_read( this, current_stack, current_value );
     return current_stack * value();
   }
@@ -273,7 +303,7 @@ public:
    */
   virtual double check_value() const
   {
-    if ( rl_buff_ledger::g_tap_open )
+    if ( rl_buff_ledger::g_reads_on )
       rl_buff_ledger::note_read( this, current_stack, current_value );
     return current_value;
   }
@@ -283,7 +313,7 @@ public:
    */
   double check_stack_value() const
   {
-    if ( rl_buff_ledger::g_tap_open )
+    if ( rl_buff_ledger::g_reads_on )
       rl_buff_ledger::note_read( this, current_stack, current_value );
     return current_stack * check_value();
   }
@@ -304,7 +334,7 @@ public:
   bool has_common_school( school_e ) const;
   bool at_max_stacks( int mod = 0 ) const
   {
-    if ( rl_buff_ledger::g_tap_open )
+    if ( rl_buff_ledger::g_reads_on )
       rl_buff_ledger::note_read( this, current_stack, current_value );
     return check() + mod >= max_stack();
   }
@@ -666,7 +696,7 @@ struct damage_buff_t : public buff_t
   // Get current direct damage buff multiplier value + NO benefit tracking.
   double check_value_direct() const
   {
-    if ( rl_buff_ledger::g_tap_open )
+    if ( rl_buff_ledger::g_reads_on )
       rl_buff_ledger::note_read( this, current_stack, current_value );
     return current_stack ? get_mod_multiplier( direct_mod ) : 1.0;
   }
@@ -689,7 +719,7 @@ struct damage_buff_t : public buff_t
   // Get current periodic damage buff multiplier value + NO benefit tracking.
   double check_value_periodic() const
   {
-    if ( rl_buff_ledger::g_tap_open )
+    if ( rl_buff_ledger::g_reads_on )
       rl_buff_ledger::note_read( this, current_stack, current_value );
     return current_stack ? get_mod_multiplier( periodic_mod ) : 1.0;
   }
@@ -712,7 +742,7 @@ struct damage_buff_t : public buff_t
   // Get current AA damage buff multiplier value + NO benefit tracking.
   double check_value_auto_attack() const
   {
-    if ( rl_buff_ledger::g_tap_open )
+    if ( rl_buff_ledger::g_reads_on )
       rl_buff_ledger::note_read( this, current_stack, current_value );
     return current_stack ? get_mod_multiplier( auto_attack_mod ) : 1.0;
   }
@@ -735,7 +765,7 @@ struct damage_buff_t : public buff_t
   // Get current additive crit chance buff value + NO benefit tracking.
   double check_value_crit_chance() const
   {
-    if ( rl_buff_ledger::g_tap_open )
+    if ( rl_buff_ledger::g_reads_on )
       rl_buff_ledger::note_read( this, current_stack, current_value );
     return current_stack ? get_mod_multiplier( crit_chance_mod ) - 1.0 : 0.0;
   }

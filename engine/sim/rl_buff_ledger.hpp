@@ -34,6 +34,9 @@ struct sim_t;
 struct player_t;
 struct action_t;
 struct action_state_t;
+struct buff_t;
+struct dot_t;
+struct dbc_proc_callback_t;
 
 namespace rl_buff_ledger
 {
@@ -181,4 +184,49 @@ inline void blocked( sim_t* sim, const char* guard )
 // stream is used unchanged. `family` is one of "action", "player", "sim", "buff", "callback",
 // "proc_rng".
 rng::rng_t* rng_access( sim_t* sim, const char* family );
+
+// ==========================================================================
+// 261001-bac plan 06: frames, reads, draws, consumes, launches (the raw data of the gate check)
+// ==========================================================================
+
+// True while the read tap is open (reference pass) OR a ledger frame is open outside the ledger's own passes
+// (buff.hpp, dot.hpp: one load per read). Kept in step by every place that changes one of its inputs.
+extern bool g_reads_on;
+
+// rl_cause_scope_t's constructor / destructor (rl_translog.cpp): one ledger frame per scope pushed for the RL
+// actor or its pets outside the ledger's own passes. frame_push writes a `frm` record and returns the frame id
+// (-1 when no frame was pushed); frame_pop pops that frame (and counts frame_pop_mismatch if it was not the top).
+// `owner` is the action whose dispatch pushed the scope (or null); `ctx` names the action whose code runs inside a
+// scope that has no owner; `kind` is a short name of the push site (null: "scope", or "dispatch" with an owner).
+std::int32_t frame_push( player_t* p, const rl_cause_t& cause, const action_t* owner, const action_t* ctx,
+                         const char* kind );
+void frame_pop( player_t* p, std::int32_t frame );
+
+// The innermost open frame (-1 when none).
+std::int32_t innermost_frame( sim_t* sim );
+
+// A child action `child` is being started from the frame the RL actor's cause stack is in (the topmost ledger
+// frame of child->player), by execute_on_target (`kind` "execute_on_target"), by its own scope in execute()
+// ("execute") or by schedule_execute with or without a state ("schedule"). When such a frame is open and its
+// action differs from the child, writes an `ln` record (a `switch` launch when an engine proc switch is
+// running, see switch_scope_t) and returns the new launch id, which the caller puts into the child's cause.
+// Returns -1 when nothing was recorded.
+std::int32_t note_launch( action_t* child, player_t* child_target, const char* kind );
+
+// activate_with_buff / deactivate_with_buff register the generic proc switch (D-03's test-free gate); while a
+// switched callback's execute runs (switch_scope_t, dbc_proc_callback.cpp), the next launch written carries the
+// switch buff with its appliers.
+void switch_register( const dbc_proc_callback_t* cb, buff_t* buff, bool on );
+void switch_enter( const dbc_proc_callback_t* cb );
+void switch_leave();
+struct switch_scope_t
+{
+  explicit switch_scope_t( const dbc_proc_callback_t* cb ) { switch_enter( cb ); }
+  ~switch_scope_t() { switch_leave(); }
+  switch_scope_t( const switch_scope_t& )            = delete;
+  switch_scope_t& operator=( const switch_scope_t& ) = delete;
+};
+
+// dot.hpp: a damage-over-time condition read (is_ticking, current_stack, remains), counted per fight.
+void note_dot_read( const dot_t* d, bool non_zero );
 }  // namespace rl_buff_ledger

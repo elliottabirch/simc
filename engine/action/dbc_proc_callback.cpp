@@ -96,7 +96,8 @@ struct proc_event_t : public event_t
     {
       rl_cause_guard.emplace( cb->listener,
                                rl_credit::promote( rl_cause_t{ source_state->rl_cause_seq, source_state->rl_cause_class,
-                                                               source_state->rl_cause_press, source_state->rl_cause_launch } ) );
+                                                               source_state->rl_cause_press, source_state->rl_cause_launch } ),
+                               /*owner=*/nullptr, "proc_callback" );
     }
     // 250-03 (REC-04): restores the press active when source_state was stamped (the triggering
     // hit's own press), across this SAME detached-execution boundary the cause guard above
@@ -105,6 +106,11 @@ struct proc_event_t : public event_t
     std::optional<rl_rng_record::rl_press_scope_t> rl_press_guard;
     if ( source_state )
       rl_press_guard.emplace( cb->listener->sim, source_state );
+    // 261001-bac plan 06: while a callback that an engine switch (activate_with_buff) turned on executes, its
+    // launch is recorded as a switch launch carrying that buff (D-03's test-free gate).
+    std::optional<rl_buff_ledger::switch_scope_t> rl_switch_guard;
+    if ( cb->listener->sim->rl_bl_on )
+      rl_switch_guard.emplace( cb );
     cb->execute( spell, target, source_state );
   }
 };
@@ -160,6 +166,10 @@ void dbc_proc_callback_t::activate_with_buff( buff_t* buff, bool init )
 
   deactivate();
 
+  // 261001-bac plan 06: the engine's generic proc switch, for the ledger's gate check.
+  if ( listener->sim->rl_bl_on )
+    rl_buff_ledger::switch_register( this, buff, true );
+
   buff->add_stack_change_callback( [ this ]( buff_t*, int old_, int new_ ) {
     if ( !old_ )
       activate();
@@ -175,6 +185,10 @@ void dbc_proc_callback_t::deactivate_with_buff( buff_t* buff, bool init )
 
   if ( init )
     initialize();
+
+  // 261001-bac plan 06: this callback is on while the buff is NOT up, so the buff is not its switch.
+  if ( listener->sim->rl_bl_on )
+    rl_buff_ledger::switch_register( this, buff, false );
 
   buff->add_stack_change_callback( [ this ]( buff_t*, int old_, int new_ ) {
     if ( !old_ )

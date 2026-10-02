@@ -11,6 +11,8 @@
 
 #include "action/action.hpp"
 #include "action/action_state.hpp"
+#include "action/dbc_proc_callback.hpp"
+#include "action/dot.hpp"
 #include "buff/buff.hpp"
 #include "player/pet.hpp"
 #include "player/player.hpp"
@@ -44,7 +46,8 @@ constexpr std::size_t PASS_HIST_SIZE = 64;
 
 // The record kinds this build writes (the `hdr` record's `emits` list). stage0_checks.py reads
 // it to decide which identities it can assert.
-constexpr const char* EMITS_JSON = "[\"hdr\",\"fb\",\"fe\",\"ftr\",\"pr\",\"hit\",\"xp\",\"app\",\"ln\"]";
+constexpr const char* EMITS_JSON =
+    "[\"hdr\",\"fb\",\"fe\",\"ftr\",\"pr\",\"hit\",\"xp\",\"app\",\"ln\",\"frm\",\"rd\",\"dr\",\"cs\",\"dotr\",\"zr\"]";
 }  // namespace
 
 // The ledger's state, defined here so sim.hpp never sees it (sim.hpp forward-declares it).
@@ -76,6 +79,8 @@ struct state_t
     // Plan 05: the candidates written for the hit, so the footer's both_group_candidates is counted where the
     // record is written (hit_sink) and always equals a recount over the records.
     std::vector<buff_t*> cands;
+    // Plan 06: the innermost frame when the passes ran (-2: no passes ran, the sink takes its own frame).
+    std::int32_t fr = -2;
   };
   std::unordered_map<std::uint64_t, hit_entry_t> hit_table;
   std::uint64_t next_hit_id = 1;
@@ -111,6 +116,43 @@ struct state_t
   std::unordered_map<const player_t*, std::vector<stat_buff_t*>> stat_buffs;
   std::int32_t next_launch = 0;
   std::unordered_map<const action_t*, std::int32_t> swing_slot;
+
+  // Plan 06: the ledger's frame stack. One frame per rl_cause_scope_t pushed for the RL actor or its pets outside
+  // the ledger's own passes (LIFO by construction: the scope's destructor pops what its constructor pushed).
+  // Every `rd`, `dr`, `cs` and `ln` record names the frame it was made in, and takes its order from one counter
+  // per fight, so the order of records inside a fight is the order things happened in.
+  struct frame_t
+  {
+    std::int32_t id = -1;
+    const player_t* p = nullptr;
+    const action_t* owner = nullptr;
+    const action_t* act = nullptr;  // owner, else the action whose code runs in the scope (may be null)
+    // (buff, non-zero) pairs already written as `rd` in this frame: at most one record per pair.
+    std::vector<std::pair<const buff_t*, bool>> seen;
+    // True when the last record written in this frame is a `dr`: a run of draws with no read, consume or
+    // launch of this frame between them is one record (it cannot change what lies between a read and a launch).
+    bool last_dr = false;
+  };
+  std::vector<frame_t> frames;
+  std::int32_t next_frame = 0;
+  std::int64_t next_order = 0;
+  // Plan 06: damage-over-time condition reads of this fight, per dot: [frame non-zero, frame zero, pass
+  // non-zero, pass zero]. Written as one `dotr` record at fight end.
+  std::unordered_map<const dot_t*, std::array<std::uint64_t, 4>> dot_reads;
+  // Plan 06: the engine's generic proc switches: callback -> the buffs it was switched on with.
+  std::unordered_map<const dbc_proc_callback_t*, std::vector<buff_t*>> switches;
+  // Plan 06 run totals (footer): records written by kind and the guard counters.
+  std::uint64_t frames_written = 0;
+  std::uint64_t reads_written = 0;
+  std::uint64_t draws_written = 0;
+  std::uint64_t draws_raw = 0;
+  std::uint64_t consumes_written = 0;
+  std::uint64_t switch_launches = 0;
+  std::uint64_t zero_records = 0;
+  std::uint64_t dotr_rows = 0;
+  std::uint64_t applier_reconciled = 0;
+  std::uint64_t frame_pop_mismatch = 0;
+  std::map<std::string, std::uint64_t> launches_by_kind;
 
   // Per-fight
   std::int32_t next_press = 0;
@@ -223,6 +265,41 @@ void flush_fight( state_t& s )
   s.out.flush();
   s.fight_buf.clear();
 }
+
+// Plan 06: what decides whether a buff or damage-over-time read is logged. g_reads_on (declared in buff.hpp,
+// read by every read function) is true while the read tap is open (the reference pass of a hit) or while a ledger
+// frame is open outside the ledger's own passes (shadow scope) and outside the ledger's own code (busy).
+bool g_shadow_active        = false;
+int g_busy                  = 0;
+std::size_t g_frame_depth   = 0;
+std::vector<buff_t*> g_switch_stack;  // top = the buff of the proc switch whose callback is executing (or null)
+
+std::int32_t cur_frame( const state_t* st )
+{
+  return st->frames.empty() ? -1 : st->frames.back().id;
+}
+
+void update_gate()
+{
+  g_reads_on = g_tap_open || ( g_frame_depth > 0 && !g_shadow_active && g_busy == 0 );
+}
+
+// The ledger's own code reads buffs and actions (to write its records); none of that is a read of the fight.
+struct busy_scope_t
+{
+  busy_scope_t()
+  {
+    ++g_busy;
+    update_gate();
+  }
+  ~busy_scope_t()
+  {
+    --g_busy;
+    update_gate();
+  }
+  busy_scope_t( const busy_scope_t& )            = delete;
+  busy_scope_t& operator=( const busy_scope_t& ) = delete;
+};
 }  // namespace
 
 void open_and_write_header( sim_t* sim )
@@ -283,6 +360,13 @@ void fight_begin( sim_t* sim )
   s->stat_buffs.clear();
   s->next_launch = 0;
   s->swing_slot.clear();
+  s->frames.clear();
+  s->next_frame = 0;
+  s->next_order = 0;
+  s->dot_reads.clear();
+  g_frame_depth = 0;
+  g_switch_stack.clear();
+  update_gate();
   s->probe_done = false;
   // A fixed seed at every fight begin: the scratch stream is never a function of the fight's own streams.
   s->scratch_rng.seed( 0x5CA1AB1E0DDBA11FULL );
@@ -315,6 +399,52 @@ void fight_end( sim_t* sim )
   const bool collected = ( sim->iterations == 1 || sim->current_iteration >= 1 );
 
   std::string& b = s->fight_buf;
+  // Plan 06: the damage-over-time condition reads of the fight, one record per fight. `counts` is by dot name over
+  // both contexts ([non-zero reads, zero reads]); `by_ctx` is by "<dot>|<source actor>|<frame or pass>".
+  {
+    std::map<std::string, std::array<std::uint64_t, 2>> by_name;
+    std::map<std::string, std::array<std::uint64_t, 2>> by_ctx;
+    for ( const auto& kv : s->dot_reads )
+    {
+      const dot_t* d = kv.first;
+      const std::string src = d->source != nullptr ? std::string( d->source->name() ) : std::string();
+      auto& n               = by_name[ d->name_str ];
+      auto& f               = by_ctx[ fmt::format( "{}|{}|frame", d->name_str, src ) ];
+      auto& p               = by_ctx[ fmt::format( "{}|{}|pass", d->name_str, src ) ];
+      n[ 0 ] += kv.second[ 0 ] + kv.second[ 2 ];
+      n[ 1 ] += kv.second[ 1 ] + kv.second[ 3 ];
+      f[ 0 ] += kv.second[ 0 ];
+      f[ 1 ] += kv.second[ 1 ];
+      p[ 0 ] += kv.second[ 2 ];
+      p[ 1 ] += kv.second[ 3 ];
+    }
+    ++s->dotr_rows;
+    std::string& o = s->fight_buf;
+    fmt::format_to( out_it( o ), "{{\"k\":\"dotr\",\"it\":{},\"counts\":{{", sim->current_iteration );
+    bool first = true;
+    for ( const auto& kv : by_name )
+    {
+      if ( !first )
+        o += ',';
+      first = false;
+      put_string( o, kv.first );
+      fmt::format_to( out_it( o ), ":[{},{}]", kv.second[ 0 ], kv.second[ 1 ] );
+    }
+    o += "},\"by_ctx\":{";
+    first = true;
+    for ( const auto& kv : by_ctx )
+    {
+      if ( kv.second[ 0 ] == 0 && kv.second[ 1 ] == 0 )
+        continue;
+      if ( !first )
+        o += ',';
+      first = false;
+      put_string( o, kv.first );
+      fmt::format_to( out_it( o ), ":[{},{}]", kv.second[ 0 ], kv.second[ 1 ] );
+    }
+    o += "}}\n";
+  }
+
   fmt::format_to( out_it( b ), "{{\"k\":\"fe\",\"it\":{},\"t\":", sim->current_iteration );
   put_double( b, sim->current_time().total_seconds() );
   fmt::format_to( out_it( b ), ",\"collected\":{},\"real\":[", collected ? "true" : "false" );
@@ -413,6 +543,25 @@ void write_footer( sim_t* sim )
       fmt::format_to( out_it( b ), ":{}", kv.second );
     }
   }
+  b += "}";
+  // Plan 06 counters (optional footer keys; LEDGER-FORMAT.md amendment 2026-10-02, plan 06).
+  fmt::format_to( out_it( b ),
+                  ",\"frames_written\":{},\"reads_written\":{},\"draws_written\":{},\"draws_raw\":{},"
+                  "\"consumes_written\":{},\"switch_launches\":{},\"zero_records\":{},\"dotr_rows\":{},"
+                  "\"applier_reconciled\":{},\"frame_pop_mismatch\":{},\"launches_by_kind\":{{",
+                  s->frames_written, s->reads_written, s->draws_written, s->draws_raw, s->consumes_written,
+                  s->switch_launches, s->zero_records, s->dotr_rows, s->applier_reconciled, s->frame_pop_mismatch );
+  {
+    bool first = true;
+    for ( const auto& kv : s->launches_by_kind )
+    {
+      if ( !first )
+        b += ',';
+      first = false;
+      put_string( b, kv.first );
+      fmt::format_to( out_it( b ), ":{}", kv.second );
+    }
+  }
   b += "}}\n";
 
   s->out << b;
@@ -499,6 +648,7 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
   std::string cand_json;
   std::string pass_json;
   std::string guards_json;
+  std::int32_t fr = cur_frame( s );
   if ( state->rl_bl_hit != 0 )
   {
     auto it = s->hit_table.find( state->rl_bl_hit );
@@ -512,6 +662,8 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
       else
       {
         status = it->second.status;
+        if ( it->second.fr != -2 )
+          fr = it->second.fr;
         cand_json = std::move( it->second.cand_json );
         pass_json = std::move( it->second.pass_json );
         guards_json = std::move( it->second.guards_json );
@@ -574,6 +726,8 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
     b += guards_json;
     b += ']';
   }
+  // Plan 06: the frame the hit's passes ran in (the sink's own frame when it had none).
+  fmt::format_to( out_it( b ), ",\"fr\":{}", fr );
   b += "}\n";
 }
 
@@ -605,6 +759,7 @@ void xp_record( player_t* p, const rl_cause_t& cause, double amount, const char*
 // The read tap (buff.hpp declares both). g_tap_open is true only while the REFERENCE pass of a hit
 // runs; note_read records each buff once with a non-zero stack or value, in first-read order.
 bool g_tap_open = false;
+bool g_reads_on = false;
 
 namespace
 {
@@ -617,10 +772,190 @@ struct tap_read_t
 std::vector<tap_read_t> g_tap_reads;
 }  // namespace
 
+namespace
+{
+// ---- Plan 06: applier lists ------------------------------------------------------------------------------------
+//
+// buff_t::rl_bl_appliers is maintained by the hooks in buff.cpp (applications append, expiries of independent
+// stacks and clears remove) and brought up to the buff's real stack count lazily, at every read of the list and at
+// the start of every bump: consumes made through decrement() (and its stat_buff / cost_reduction overrides) take
+// the OLDEST stacks, which is exactly what trimming from the front does. A count that cannot be explained (the
+// list holds fewer stacks than the buff has) adds an "unknown" applier and is counted in the footer
+// (`applier_reconciled`); the check `appliers` reports it.
+
+bool covering_mode( const buff_t* b )
+{
+  return b->max_stack() == 1;
+}
+
+int applier_total( const buff_t* b )
+{
+  int total = 0;
+  for ( const buff_t::rl_bl_applier_t& e : b->rl_bl_appliers )
+    total += e.stacks;
+  return total;
+}
+
+void reconcile_appliers( state_t* st, buff_t* b )
+{
+  auto& v = b->rl_bl_appliers;
+  if ( covering_mode( b ) )
+  {
+    if ( b->current_stack <= 0 )
+    {
+      v.clear();
+      return;
+    }
+    if ( v.empty() )
+    {
+      v.push_back( { rl_cause_t{}, 1, timespan_t::max() } );
+      if ( st != nullptr )
+        ++st->applier_reconciled;
+      return;
+    }
+    // The covering appliers are the entries whose own expiry is still ahead. If none is (the buff is up through
+    // an extension or a longer duration some other function gave it), the latest application stays.
+    const timespan_t now = b->sim->current_time();
+    const buff_t::rl_bl_applier_t newest = v.back();
+    v.erase( std::remove_if( v.begin(), v.end(),
+                             [ & ]( const buff_t::rl_bl_applier_t& e ) { return !( e.expiry > now ); } ),
+             v.end() );
+    if ( v.empty() )
+      v.push_back( newest );
+    return;
+  }
+
+  int total       = applier_total( b );
+  const int stack = b->current_stack < 0 ? 0 : b->current_stack;
+  if ( total > stack )
+  {
+    int excess = total - stack;
+    while ( excess > 0 && !v.empty() )
+    {
+      if ( v.front().stacks <= excess )
+      {
+        excess -= v.front().stacks;
+        v.erase( v.begin() );
+      }
+      else
+      {
+        v.front().stacks -= excess;
+        excess = 0;
+      }
+    }
+  }
+  else if ( total < stack )
+  {
+    v.push_back( { rl_cause_t{}, stack - total, timespan_t::min() } );
+    if ( st != nullptr )
+      ++st->applier_reconciled;
+  }
+}
+
+bool is_press_class( const rl_cause_t& c )
+{
+  return ( c.cls == RL_CAUSE_PROC_OF_CAST || c.cls == RL_CAUSE_PROC_OF_DOT ) && c.press >= 0;
+}
+
+// The buff's appliers as `[[press,cls,stacks]...]` (one entry per (press, cls), stacks summed; a buff with more than
+// one stack) or `[[press,cls,1,true]...]` (a single-stack buff: the covering appliers, one entry per press for
+// presses, one per application for the rest). Returns true for the covering form.
+bool write_appliers( std::string& b, state_t* st, buff_t* c )
+{
+  reconcile_appliers( st, c );
+  const bool covering = covering_mode( c );
+  b += '[';
+  bool first = true;
+  if ( covering )
+  {
+    std::vector<std::pair<int, int>> seen;
+    for ( const buff_t::rl_bl_applier_t& e : c->rl_bl_appliers )
+    {
+      if ( e.cause.press >= 0 )
+      {
+        const std::pair<int, int> key{ e.cause.press, e.cause.cls };
+        if ( std::find( seen.begin(), seen.end(), key ) != seen.end() )
+          continue;
+        seen.push_back( key );
+      }
+      if ( !first )
+        b += ',';
+      first = false;
+      fmt::format_to( out_it( b ), "[{},{},1,true]", e.cause.press, static_cast<int>( e.cause.cls ) );
+    }
+  }
+  else
+  {
+    std::vector<std::array<int, 3>> merged;
+    for ( const buff_t::rl_bl_applier_t& e : c->rl_bl_appliers )
+    {
+      bool found = false;
+      for ( std::array<int, 3>& m : merged )
+        if ( m[ 0 ] == e.cause.press && m[ 1 ] == static_cast<int>( e.cause.cls ) )
+        {
+          m[ 2 ] += e.stacks;
+          found = true;
+          break;
+        }
+      if ( !found )
+        merged.push_back( { static_cast<int>( e.cause.press ), static_cast<int>( e.cause.cls ), e.stacks } );
+    }
+    for ( const std::array<int, 3>& m : merged )
+    {
+      if ( !first )
+        b += ',';
+      first = false;
+      fmt::format_to( out_it( b ), "[{},{},{}]", m[ 0 ], m[ 1 ], m[ 2 ] );
+    }
+  }
+  b += ']';
+  return covering;
+}
+
+// ---- Plan 06: frames ---------------------------------------------------------------------------------------------
+
+// One `rd` record for a buff read inside the innermost frame (a non-zero read carries the buff's appliers).
+void frame_read( const buff_t* cb, int stack, double value )
+{
+  if ( cb->sim == nullptr )
+    return;
+  state_t* s = state_of( cb->sim );
+  if ( s == nullptr || !s->in_fight || s->frames.empty() || cb->sim->rl_bl_shadow || g_busy > 0 )
+    return;
+  state_t::frame_t& f = s->frames.back();
+  const bool nz       = !( stack == 0 && value == 0.0 );
+  for ( const auto& e : f.seen )
+    if ( e.first == cb && e.second == nz )
+      return;
+  f.seen.emplace_back( cb, nz );
+  f.last_dr = false;
+  ++s->reads_written;
+
+  buff_t* b       = const_cast<buff_t*>( cb );
+  std::string& o  = s->fight_buf;
+  fmt::format_to( out_it( o ), "{{\"k\":\"rd\",\"it\":{},\"t\":", b->sim->current_iteration );
+  put_double( o, b->sim->current_time().total_seconds() );
+  fmt::format_to( out_it( o ), ",\"f\":{},\"o\":{},\"buff\":", f.id, s->next_order++ );
+  put_string( o, b->name_str );
+  o += ",\"owner\":";
+  put_string( o, b->player != nullptr ? std::string( b->player->name() ) : std::string() );
+  fmt::format_to( out_it( o ), ",\"nz\":{},\"stacks\":{},\"app\":", nz ? "true" : "false", stack );
+  bool covering = false;
+  if ( nz )
+    covering = write_appliers( o, s, b );
+  else
+    o += "[]";
+  fmt::format_to( out_it( o ), ",\"cov\":{}}}\n", covering ? "true" : "false" );
+}
+}  // namespace
+
 void note_read( const buff_t* b, int stack, double value )
 {
   if ( !g_tap_open )
+  {
+    frame_read( b, stack, value );
     return;
+  }
   // A buff read as zero cannot be a candidate (only a read that returned something is a dependency).
   if ( stack == 0 && value == 0.0 )
     return;
@@ -628,6 +963,293 @@ void note_read( const buff_t* b, int stack, double value )
     if ( r.b == b )
       return;
   g_tap_reads.push_back( { b, stack, value } );
+}
+
+std::int32_t frame_push( player_t* p, const rl_cause_t& cause, const action_t* owner, const action_t* ctx,
+                         const char* kind )
+{
+  sim_t* sim = p->sim;
+  state_t* s = state_of( sim );
+  if ( s == nullptr || !s->in_fight || sim->rl_bl_shadow || !belongs_to_actor( *s, p ) )
+    return -1;
+
+  state_t::frame_t f;
+  f.id    = s->next_frame++;
+  f.p     = p;
+  f.owner = owner;
+  f.act   = owner != nullptr ? owner : ctx;
+  const std::int32_t parent = s->frames.empty() ? -1 : s->frames.back().id;
+  ++s->frames_written;
+
+  std::string& o = s->fight_buf;
+  fmt::format_to( out_it( o ), "{{\"k\":\"frm\",\"it\":{},\"t\":", sim->current_iteration );
+  put_double( o, sim->current_time().total_seconds() );
+  fmt::format_to( out_it( o ), ",\"f\":{},\"pf\":{},\"kind\":", f.id, parent );
+  put_string( o, kind != nullptr ? std::string_view( kind ) : ( owner != nullptr ? "dispatch" : "scope" ) );
+  fmt::format_to( out_it( o ), ",\"seq\":{},\"cls\":{},\"press\":{},\"launch\":{},\"action\":", cause.seq,
+                  static_cast<int>( cause.cls ), cause.press, cause.launch );
+  put_string( o, f.act != nullptr ? std::string( f.act->name() ) : std::string() );
+  o += "}\n";
+
+  const std::int32_t id = f.id;
+  s->frames.push_back( std::move( f ) );
+  g_frame_depth = s->frames.size();
+  update_gate();
+  return id;
+}
+
+void frame_pop( player_t* p, std::int32_t frame )
+{
+  state_t* s = state_of( p->sim );
+  if ( s == nullptr )
+    return;
+  for ( std::size_t i = s->frames.size(); i-- > 0; )
+  {
+    if ( s->frames[ i ].id != frame )
+      continue;
+    if ( i + 1 != s->frames.size() )
+      ++s->frame_pop_mismatch;
+    s->frames.erase( s->frames.begin() + static_cast<std::ptrdiff_t>( i ), s->frames.end() );
+    g_frame_depth = s->frames.size();
+    update_gate();
+    return;
+  }
+  ++s->frame_pop_mismatch;
+}
+
+std::int32_t innermost_frame( sim_t* sim )
+{
+  state_t* s = state_of( sim );
+  return ( s == nullptr || s->frames.empty() ) ? -1 : s->frames.back().id;
+}
+
+// ---- Plan 06: applier hooks (called from buff.cpp, only when sim->rl_bl_on) ---------------------------------------
+
+void applier_pre_bump( buff_t* b )
+{
+  if ( covering_mode( b ) )
+    return;
+  reconcile_appliers( state_of( b->sim ), b );
+}
+
+void applier_post_bump( buff_t* b, int requested, int old_stack, const rl_cause_t& cause )
+{
+  if ( covering_mode( b ) )
+    return;
+  state_t* st = state_of( b->sim );
+  int added;
+  if ( b->max_stack() < 0 )
+    added = requested;
+  else if ( b->stack_behavior == buff_stack_behavior::ASYNCHRONOUS )
+    added = std::min( requested, b->max_stack() );
+  else
+    added = b->current_stack - old_stack;
+  if ( added > 0 )
+    b->rl_bl_appliers.push_back( { cause, added, b->rl_bl_next_expiry } );
+  reconcile_appliers( st, b );
+}
+
+void applier_covering( buff_t* b, const rl_cause_t& cause, timespan_t own_duration )
+{
+  if ( !covering_mode( b ) || b->current_stack <= 0 )
+    return;
+  const timespan_t now    = b->sim->current_time();
+  const timespan_t expiry = own_duration > timespan_t::zero() ? now + own_duration : timespan_t::max();
+  auto& v                 = b->rl_bl_appliers;
+  // Entries that can no longer cover go first (so the list stays short), then the application is added; a second
+  // application with the very same cause only extends the first one's expiry.
+  v.erase( std::remove_if( v.begin(), v.end(),
+                           [ & ]( const buff_t::rl_bl_applier_t& e ) { return !( e.expiry > now ); } ),
+           v.end() );
+  for ( buff_t::rl_bl_applier_t& e : v )
+  {
+    if ( e.cause.seq == cause.seq && e.cause.cls == cause.cls && e.cause.press == cause.press &&
+         e.cause.launch == cause.launch )
+    {
+      if ( expiry > e.expiry )
+        e.expiry = expiry;
+      return;
+    }
+  }
+  v.push_back( { cause, 1, expiry } );
+}
+
+void applier_expire_own( buff_t* b, int stacks )
+{
+  if ( covering_mode( b ) )
+    return;
+  reconcile_appliers( state_of( b->sim ), b );
+  auto& v = b->rl_bl_appliers;
+  int left = stacks;
+  while ( left > 0 && !v.empty() )
+  {
+    std::size_t best = 0;
+    auto key         = [ & ]( const buff_t::rl_bl_applier_t& e ) {
+      return e.expiry == timespan_t::min() ? timespan_t::max() : e.expiry;
+    };
+    for ( std::size_t i = 1; i < v.size(); ++i )
+      if ( key( v[ i ] ) < key( v[ best ] ) )
+        best = i;
+    const int take = std::min( left, v[ best ].stacks );
+    v[ best ].stacks -= take;
+    left -= take;
+    if ( v[ best ].stacks <= 0 )
+      v.erase( v.begin() + static_cast<std::ptrdiff_t>( best ) );
+  }
+}
+
+void applier_clear( buff_t* b )
+{
+  b->rl_bl_appliers.clear();
+}
+
+void note_consume( buff_t* b, const char* op, int removed )
+{
+  if ( b->sim == nullptr )
+    return;
+  state_t* s = state_of( b->sim );
+  if ( s == nullptr || !s->in_fight || s->frames.empty() || b->sim->rl_bl_shadow || g_busy > 0 )
+    return;
+  state_t::frame_t& f = s->frames.back();
+  f.last_dr           = false;
+  ++s->consumes_written;
+  const int after = std::strcmp( op, "expire" ) == 0 ? 0 : b->current_stack;
+
+  std::string& o = s->fight_buf;
+  fmt::format_to( out_it( o ), "{{\"k\":\"cs\",\"it\":{},\"t\":", b->sim->current_iteration );
+  put_double( o, b->sim->current_time().total_seconds() );
+  fmt::format_to( out_it( o ), ",\"f\":{},\"o\":{},\"buff\":", f.id, s->next_order++ );
+  put_string( o, b->name_str );
+  o += ",\"owner\":";
+  put_string( o, b->player != nullptr ? std::string( b->player->name() ) : std::string() );
+  o += ",\"op\":";
+  put_string( o, op );
+  fmt::format_to( out_it( o ), ",\"stacks\":{},\"rm\":{}}}\n", after, removed );
+}
+
+void note_dot_read( const dot_t* d, bool non_zero )
+{
+  if ( d->source == nullptr )
+    return;
+  sim_t* sim = d->source->sim;
+  state_t* s = state_of( sim );
+  if ( s == nullptr || !s->in_fight )
+    return;
+  const bool pass = g_tap_open;
+  if ( !pass && ( s->frames.empty() || sim->rl_bl_shadow || g_busy > 0 ) )
+    return;
+  std::array<std::uint64_t, 4>& c = s->dot_reads[ d ];
+  ++c[ ( pass ? 2 : 0 ) + ( non_zero ? 0 : 1 ) ];
+}
+
+void switch_register( const dbc_proc_callback_t* cb, buff_t* buff, bool on )
+{
+  if ( cb == nullptr || cb->listener == nullptr )
+    return;
+  state_t* s = state_of( cb->listener->sim );
+  if ( s == nullptr )
+    return;
+  auto& v = s->switches[ cb ];
+  if ( on )
+  {
+    if ( std::find( v.begin(), v.end(), buff ) == v.end() )
+      v.push_back( buff );
+  }
+  else
+  {
+    v.erase( std::remove( v.begin(), v.end(), buff ), v.end() );
+  }
+}
+
+void switch_enter( const dbc_proc_callback_t* cb )
+{
+  buff_t* sw = nullptr;
+  if ( cb != nullptr && cb->listener != nullptr )
+  {
+    state_t* s = state_of( cb->listener->sim );
+    if ( s != nullptr )
+    {
+      auto it = s->switches.find( cb );
+      if ( it != s->switches.end() && !it->second.empty() )
+      {
+        sw = it->second.front();
+        for ( buff_t* c : it->second )
+          if ( c->current_stack > 0 )
+          {
+            sw = c;
+            break;
+          }
+      }
+    }
+  }
+  g_switch_stack.push_back( sw );
+}
+
+void switch_leave()
+{
+  if ( !g_switch_stack.empty() )
+    g_switch_stack.pop_back();
+}
+
+std::int32_t note_launch( action_t* child, player_t* child_target, const char* kind )
+{
+  sim_t* sim = child->sim;
+  state_t* s = state_of( sim );
+  if ( s == nullptr || !s->in_fight || sim->rl_bl_shadow || g_busy > 0 )
+    return -1;
+  // The frame the child's own player is in: the topmost frame of that player (its cause stack's top).
+  state_t::frame_t* parent = nullptr;
+  for ( std::size_t i = s->frames.size(); i-- > 0; )
+    if ( s->frames[ i ].p == child->player )
+    {
+      parent = &s->frames[ i ];
+      break;
+    }
+  if ( parent == nullptr || parent->act == child )
+    return -1;
+
+  busy_scope_t busy;
+  const std::int32_t l     = s->next_launch++;
+  const std::int64_t order = s->next_order++;
+  parent->last_dr          = false;
+
+  const char* lk = kind;
+  buff_t* sw     = nullptr;
+  if ( !g_switch_stack.empty() && g_switch_stack.back() != nullptr )
+  {
+    sw                     = g_switch_stack.back();
+    g_switch_stack.back()  = nullptr;  // the next launch only
+    lk                     = "switch";
+    ++s->switch_launches;
+  }
+  ++s->launches_by_kind[ lk ];
+
+  std::string& o = s->fight_buf;
+  fmt::format_to( out_it( o ), "{{\"k\":\"ln\",\"it\":{},\"t\":", sim->current_iteration );
+  put_double( o, sim->current_time().total_seconds() );
+  fmt::format_to( out_it( o ), ",\"l\":{},\"frame\":{},\"order\":{},\"pa\":", l, parent->id, order );
+  put_string( o, parent->act != nullptr ? std::string( parent->act->name() ) : std::string() );
+  o += ",\"ca\":";
+  put_string( o, child->name() );
+  o += ",\"ct\":";
+  put_string( o, child_target != nullptr ? std::string( child_target->name() ) : std::string() );
+  o += ",\"lk\":";
+  put_string( o, lk );
+  o += ",\"sw\":";
+  if ( sw != nullptr )
+  {
+    o += "{\"buff\":";
+    put_string( o, sw->name_str );
+    o += ",\"owner\":";
+    put_string( o, sw->player != nullptr ? std::string( sw->player->name() ) : std::string() );
+    fmt::format_to( out_it( o ), ",\"stacks\":{},\"app\":", sw->current_stack );
+    const bool covering = write_appliers( o, s, sw );
+    fmt::format_to( out_it( o ), ",\"cov\":{}}}", covering ? "true" : "false" );
+  }
+  else
+    o += "null";
+  o += ",\"sf\":null}\n";
+  return l;
 }
 
 namespace
@@ -712,6 +1334,8 @@ public:
     sim_->debug  = false;
     sim_->log    = 0;
     sim_->rl_bl_shadow = true;
+    g_shadow_active    = true;
+    update_gate();
     action_ = a;
     saved_callback_state_ = a->rl_bl_callback_state();
     if ( dealer_->is_pet() )
@@ -746,6 +1370,8 @@ public:
     action_->rl_bl_set_callback_state( saved_callback_state_ );
     rng::rl_draw_sink  = saved_sink_;
     sim_->rl_bl_shadow = false;
+    g_shadow_active    = false;
+    update_gate();
     sim_->debug        = saved_debug_;
     sim_->log          = saved_log_;
   }
@@ -882,12 +1508,16 @@ struct tap_scope_t
     {
       g_tap_reads.clear();
       g_tap_open = true;
+      update_gate();
     }
   }
   ~tap_scope_t()
   {
     if ( on_ )
+    {
       g_tap_open = false;
+      update_gate();
+    }
   }
   bool on_;
 };
@@ -1012,10 +1642,16 @@ amount_t tick_pass( pass_env_t& env, double tick_multiplier, bool log_reads, std
   return out;
 }
 
-bool press_applied( const buff_t* b )
+// Plan 06: press-applied = at least one entry of the buff's applier list (the covering ones for a single-stack
+// buff) has class PROC_OF_CAST or PROC_OF_DOT and a press >= 0.
+bool press_applied( state_t* st, const buff_t* cb )
 {
-  const rl_cause_t& c = b->rl_bl_applied;
-  return ( c.cls == RL_CAUSE_PROC_OF_CAST || c.cls == RL_CAUSE_PROC_OF_DOT ) && c.press >= 0;
+  buff_t* b = const_cast<buff_t*>( cb );
+  reconcile_appliers( st, b );
+  for ( const buff_t::rl_bl_applier_t& e : b->rl_bl_appliers )
+    if ( is_press_class( e.cause ) )
+      return true;
+  return false;
 }
 
 // Candidates: the buffs the REFERENCE pass read (non-zero stack or value) that were applied by a
@@ -1054,7 +1690,7 @@ void collect_candidates( state_t* st, player_t* dealer, player_t* owner, player_
       ++st->noncandidate_reads[ fmt::format( "{}|foreign", b->name_str ) ];
       continue;
     }
-    if ( !press_applied( b ) )
+    if ( !press_applied( st, b ) )
     {
       ++st->noncandidate_reads[ fmt::format( "{}|cls{}|press{}", b->name_str, static_cast<int>( b->rl_bl_applied.cls ),
                                              b->rl_bl_applied.press >= 0 ? "pos" : "neg" ) ];
@@ -1068,7 +1704,7 @@ void collect_candidates( state_t* st, player_t* dealer, player_t* owner, player_
       continue;
     for ( stat_buff_t* sb : stat_buffs_of( st, p ) )
     {
-      if ( sb->current_stack > 0 && press_applied( sb ) && std::find( out.begin(), out.end(), sb ) == out.end() )
+      if ( sb->current_stack > 0 && press_applied( st, sb ) && std::find( out.begin(), out.end(), sb ) == out.end() )
         out.push_back( sb );
     }
   }
@@ -1094,7 +1730,7 @@ void put_pass( std::string& b, const pass_rec_t& p, const double* app_ref = null
   fmt::format_to( out_it( b ), ",\"viol\":{}}}", p.viol );
 }
 
-void put_candidate( std::string& b, std::size_t i, const buff_t* c, bool debuff )
+void put_candidate( std::string& b, state_t* st, std::size_t i, const buff_t* c, bool debuff )
 {
   if ( !b.empty() )
     b += ',';
@@ -1103,12 +1739,13 @@ void put_candidate( std::string& b, std::size_t i, const buff_t* c, bool debuff 
   b += ",\"owner\":";
   put_string( b, c->player->name() );
   const bool is_stat = dynamic_cast<const stat_buff_t*>( c ) != nullptr;
+  // The members, not check() / check_value(): the ledger's own writing is not a read of the fight.
   fmt::format_to( out_it( b ), ",\"kind\":\"{}\",\"stacks\":{},\"value\":", debuff ? "debuff" : ( is_stat ? "stat" : "buff" ),
-                  c->check() );
-  put_double( b, c->check_value() );
-  const rl_cause_t& ap = c->rl_bl_applied;
-  fmt::format_to( out_it( b ), ",\"app\":[[{},{},{}]],\"cov\":false}}", ap.press, static_cast<int>( ap.cls ),
-                  c->check() );
+                  c->current_stack );
+  put_double( b, c->current_value );
+  b += ",\"app\":";
+  const bool covering = write_appliers( b, st, const_cast<buff_t*>( c ) );
+  b += covering ? ",\"cov\":true}" : ",\"cov\":false}";
 }
 
 // What one pass set produced: the passes in record order, the candidates (bit i of a pass's hidden
@@ -1120,6 +1757,36 @@ struct split_t
   std::vector<buff_t*> cands;
   int status = 0;
 };
+
+// Plan 06: a reference pass that gave exactly 0 writes a `zr` record: the action, the frame it ran in and the buffs
+// the pass read non-zero (input of the detector for amounts kept in class-private storage: a hit that deals
+// nothing although buffs it reads are up). The hit's own record still carries the one reference pass entry.
+void write_zero_record( state_t* st, action_t* a, player_t* target )
+{
+  ++st->zero_records;
+  sim_t* sim     = a->sim;
+  std::string& o = st->fight_buf;
+  fmt::format_to( out_it( o ), "{{\"k\":\"zr\",\"it\":{},\"t\":", sim->current_iteration );
+  put_double( o, sim->current_time().total_seconds() );
+  o += ",\"action\":";
+  put_string( o, a->name() );
+  o += ",\"target\":";
+  put_string( o, target != nullptr ? std::string( target->name() ) : std::string() );
+  fmt::format_to( out_it( o ), ",\"f\":{},\"buffs\":[", cur_frame( st ) );
+  bool first = true;
+  for ( const tap_read_t& r : g_tap_reads )
+  {
+    if ( !first )
+      o += ',';
+    first = false;
+    o += "{\"buff\":";
+    put_string( o, r.b->name_str );
+    o += ",\"owner\":";
+    put_string( o, r.b->player != nullptr ? std::string( r.b->player->name() ) : std::string() );
+    fmt::format_to( out_it( o ), ",\"stacks\":{}}}", r.stack );
+  }
+  o += "]}\n";
+}
 
 // One pass of whatever kind the caller runs: nothing hidden unless the caller hid something first.
 // The first argument asks for the read tap (reference pass only); the second, when non-null, receives
@@ -1158,7 +1825,10 @@ split_t run_split( state_t* st, action_t* a, player_t* dealer, player_t* owner, 
     return out;
   }
   if ( ref.pre == 0.0 )
+  {
+    write_zero_record( st, a, target );
     return out;
+  }
 
   std::vector<buff_t*>& cands = out.cands;
   collect_candidates( st, dealer, owner, target, cands );
@@ -1250,12 +1920,12 @@ std::string finish_unsafe( state_t* st, split_t& sp )
 }
 
 // Candidate entries are written for any status with candidates (1 split, 2 unsafe, 4 restoring mismatch).
-void write_candidates( std::string& out, const split_t& sp, const player_t* target )
+void write_candidates( std::string& out, state_t* st, const split_t& sp, const player_t* target )
 {
   if ( sp.status != 1 && sp.status != 2 && sp.status != 4 )
     return;
   for ( std::size_t i = 0; i < sp.cands.size(); ++i )
-    put_candidate( out, i, sp.cands[ i ], sp.cands[ i ]->player == target );
+    put_candidate( out, st, i, sp.cands[ i ], sp.cands[ i ]->player == target );
 }
 
 action_state_t* scratch_for( state_t* st, action_t* a )
@@ -1304,7 +1974,7 @@ std::uint64_t write_app_record( state_t* st, action_t* a, action_state_t* s, con
   fmt::format_to( out_it( b ), ",\"seq\":{},\"cls\":{},\"press\":{},\"launch\":{},\"n_targets\":{},\"status\":{},\"cand\":[",
                   r_seq, r_cls, r_press, r_launch, s->n_targets, sp.status );
   std::string cand_json;
-  write_candidates( cand_json, sp, s->target );
+  write_candidates( cand_json, st, sp, s->target );
   b += cand_json;
   b += "],\"pass\":[";
   std::string pass_json;
@@ -1424,7 +2094,28 @@ void note_blocked( sim_t* sim, const char* guard )
 rng::rng_t* rng_access( sim_t* sim, const char* family )
 {
   if ( !sim->rl_bl_shadow )
+  {
+    // Plan 06: a random generator handed out inside a ledger frame (outside the ledger's own passes). A run of
+    // draws with no read, consume or launch of the frame between them is one `dr` record.
+    state_t* s = state_of( sim );
+    if ( s != nullptr && s->in_fight && !s->frames.empty() && g_busy == 0 )
+    {
+      ++s->draws_raw;
+      state_t::frame_t& f = s->frames.back();
+      if ( !f.last_dr )
+      {
+        f.last_dr = true;
+        ++s->draws_written;
+        std::string& o = s->fight_buf;
+        fmt::format_to( out_it( o ), "{{\"k\":\"dr\",\"it\":{},\"t\":", sim->current_iteration );
+        put_double( o, sim->current_time().total_seconds() );
+        fmt::format_to( out_it( o ), ",\"f\":{},\"o\":{},\"src\":", f.id, s->next_order++ );
+        put_string( o, family );
+        o += "}\n";
+      }
+    }
     return nullptr;
+  }
   state_t* st = state_of( sim );
   if ( st == nullptr )
     return nullptr;
@@ -1459,6 +2150,7 @@ void run_passes( action_t* a, action_state_t* s, const action_state_t* pre )
   state_t::hit_entry_t entry;
   entry.action = a;
   entry.target = s->target;
+  entry.fr     = cur_frame( st );
   split_t sp;
   {
     shadow_scope_t scope( st, a, s->target );
@@ -1486,7 +2178,7 @@ void run_passes( action_t* a, action_state_t* s, const action_state_t* pre )
   if ( will_sink )
   {
     entry.status = sp.status;
-    write_candidates( entry.cand_json, sp, s->target );
+    write_candidates( entry.cand_json, st, sp, s->target );
     if ( !entry.cand_json.empty() )
       entry.cands = sp.cands;
     for ( const pass_rec_t& p : sp.passes )
@@ -1556,6 +2248,7 @@ void premade_hit( action_t* a, action_state_t* s, const action_state_t* pre )
   entry.action = a;
   entry.target = s->target;
   entry.status = 6;
+  entry.fr     = cur_frame( st );
   const std::uint64_t id = st->next_hit_id++;
   st->hit_table.emplace( id, std::move( entry ) );
   s->rl_bl_hit = id;
@@ -1577,6 +2270,7 @@ void run_tick_passes( action_t* a, action_state_t* d_state, double tick_multipli
   state_t::hit_entry_t entry;
   entry.action = a;
   entry.target = d_state->target;
+  entry.fr     = cur_frame( st );
   split_t sp;
   {
     shadow_scope_t scope( st, a, d_state->target );
@@ -1600,7 +2294,7 @@ void run_tick_passes( action_t* a, action_state_t* d_state, double tick_multipli
     return;
 
   entry.status = sp.status;
-  write_candidates( entry.cand_json, sp, d_state->target );
+  write_candidates( entry.cand_json, st, sp, d_state->target );
   if ( !entry.cand_json.empty() )
     entry.cands = sp.cands;
   for ( const pass_rec_t& p : sp.passes )
@@ -1710,10 +2404,10 @@ void run_swing_passes( action_t* a )
       put_string( b, c->name_str );
       b += ",\"owner\":";
       put_string( b, c->player->name() );
-      const rl_cause_t& ap = c->rl_bl_applied;
-      fmt::format_to( out_it( b ), ",\"stacks\":{},\"kind\":\"{}\",\"app\":[[{},{},{}]],\"f\":", c->check(),
-                      dynamic_cast<const stat_buff_t*>( c ) != nullptr ? "stat" : "speed", ap.press,
-                      static_cast<int>( ap.cls ), c->check() );
+      fmt::format_to( out_it( b ), ",\"stacks\":{},\"kind\":\"{}\",\"app\":", c->current_stack,
+                      dynamic_cast<const stat_buff_t*>( c ) != nullptr ? "stat" : "speed" );
+      write_appliers( b, st, const_cast<buff_t*>( c ) );
+      b += ",\"f\":";
       put_double( b, static_cast<double>( hidden_times[ i ].total_millis() ) /
                          static_cast<double>( real.total_millis() ) );
       b += '}';

@@ -2074,7 +2074,16 @@ void action_t::execute()
   // 261001-bac stage 0: no longer const -- in the no-owner-frame case below, the pushed scope's
   // constructor may assign the ledger's press number to a fresh CAST cause, and the stamps written
   // by do_per_target_work (captured by reference) must carry it.
+  // 261001-bac plan 06: as in execute_on_target -- a direct execute() called from another action's frame is a launch.
+  const bool rl_launch_ok = sim->rl_bl_on && !have_owner_frame && !( pre_execute_state && pre_execute_state->rl_cause_seq >= 0 ) &&
+                            rl_pending_cause.seq < 0 && !player->rl_cause_stack.empty();
   rl_cause_t rl_cause = have_owner_frame ? player->rl_cause_stack.back().cause : rl_resolve_cause();
+  if ( rl_launch_ok )
+  {
+    const std::int32_t rl_l = rl_buff_ledger::note_launch( this, target, "execute" );
+    if ( rl_l >= 0 )
+      rl_cause.launch = rl_l;
+  }
 
   // The per-target work (tick_action snapshotting included) that stamps every action_state_t
   // this execute() produces with `rl_cause`. Extracted to a lambda so it can run either bare
@@ -2195,7 +2204,7 @@ void action_t::execute()
     // Pushed for the duration of the per-target work below so a proc fired synchronously
     // inside it -- a callback, a resource-gain trigger, a nested execute() -- inherits
     // `rl_cause` promoted to its PROC_OF_* sibling, by construction.
-    rl_cause_scope_t rl_cause_guard( player, rl_cause );
+    rl_cause_scope_t rl_cause_guard( player, rl_cause, /*owner=*/nullptr, "execute", this );
     // 261001-bac stage 0: the scope's constructor may just have numbered a fresh CAST cause;
     // re-read it so the states stamped below carry the press (one bool test when off).
     if ( sim->rl_bl_on )
@@ -2738,9 +2747,17 @@ void action_t::schedule_execute( action_state_t* state )
     // report for the trace evidence and recommended follow-up).
     const bool self_owns_top = !player->rl_cause_stack.empty() && player->rl_cause_stack.back().owner == this;
     const bool skip_parking  = self_owns_top || repeating;
-    const rl_cause_t rl_pending = ( player->rl_cause_stack.empty() || skip_parking )
-                                       ? rl_cause_t{}
-                                       : rl_credit::promote( player->rl_cause_stack.back().cause );
+    rl_cause_t rl_pending = ( player->rl_cause_stack.empty() || skip_parking )
+                                ? rl_cause_t{}
+                                : rl_credit::promote( player->rl_cause_stack.back().cause );
+    // 261001-bac plan 06: a cause that is being newly attached (to an unstamped state, or parked for the next
+    // execute) is a LAUNCH of this action from the frame the stack top belongs to.
+    if ( sim->rl_bl_on && rl_pending.seq >= 0 && ( state ? state->rl_cause_seq < 0 : true ) )
+    {
+      const std::int32_t rl_l = rl_buff_ledger::note_launch( this, state ? state->target : target, "schedule" );
+      if ( rl_l >= 0 )
+        rl_pending.launch = rl_l;
+    }
     if ( state )
     {
       if ( state->rl_cause_seq < 0 && rl_pending.seq >= 0 )
@@ -5053,7 +5070,8 @@ void action_t::do_schedule_travel( action_state_t* state, timespan_t time_ )
     // comment -- this wraps impact()'s full virtual dispatch (base body + any override's
     // post-Base::impact() tail), not just action_t::impact()'s own body.
     rl_cause_scope_t rl_cause_guard(
-        player, rl_cause_t{ state->rl_cause_seq, state->rl_cause_class, state->rl_cause_press, state->rl_cause_launch } );
+        player, rl_cause_t{ state->rl_cause_seq, state->rl_cause_class, state->rl_cause_press, state->rl_cause_launch },
+        /*owner=*/nullptr, "impact", this );
     // 250-03 (REC-04): restores the press that was active when `state` was stamped (the casting
     // action's own execute press) across this zero-travel-time boundary -- same span as the
     // cause guard just above. A never-stamped state (recorder was off) leaves the current frames
@@ -6107,7 +6125,20 @@ void action_t::execute_on_target( player_t* t, double amount )
   // falls through to the same CAST/AUTO/ORPHAN branches any other un-wrapped direct call would).
   // Either way this action's own execute() then sees ITS OWN frame on top (owner == this) and
   // reuses the cause resolved here rather than re-resolving or double-pushing.
-  rl_cause_scope_t rl_cause_guard( player, rl_resolve_cause(), /*owner=*/this );
+  //
+  // 261001-bac plan 06: when the cause is read off the player's own stack (the carried-state and pending-cause
+  // branches of rl_resolve_cause() already belong to a launch made earlier), this is a LAUNCH of a child action
+  // from the frame the stack top belongs to: the ledger writes an `ln` record and the child's cause carries its id.
+  const bool rl_launch_ok = sim->rl_bl_on && !( pre_execute_state && pre_execute_state->rl_cause_seq >= 0 ) &&
+                            rl_pending_cause.seq < 0 && !player->rl_cause_stack.empty();
+  rl_cause_t rl_c = rl_resolve_cause();
+  if ( rl_launch_ok )
+  {
+    const std::int32_t rl_l = rl_buff_ledger::note_launch( this, t, "execute_on_target" );
+    if ( rl_l >= 0 )
+      rl_c.launch = rl_l;
+  }
+  rl_cause_scope_t rl_cause_guard( player, rl_c, /*owner=*/this );
   // 250-03 (REC-04): opens this action's own execute press, spanning the same whole virtual
   // execute() call the cause guard above spans. No carried state -- execute_on_target() has no
   // deferred-dispatch carried state concept.

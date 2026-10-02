@@ -58,7 +58,9 @@ void rl_count_proc( player_t* p, rl_proc::id which, double chance, bool success 
 // rl_credit_route's own placement below). Pure bookkeeping: push/pop of the player-scoped
 // cause stack, nothing else. Stage A5: takes the owning action_t* (nullptr default) and pushes
 // an rl_cause_frame_t rather than a bare rl_cause_t.
-rl_cause_scope_t::rl_cause_scope_t( player_t* p_, rl_cause_t cause, const action_t* owner ) : p( p_ )
+rl_cause_scope_t::rl_cause_scope_t( player_t* p_, rl_cause_t cause, const action_t* owner, const char* kind,
+                                    const action_t* ctx )
+  : p( p_ )
 {
   // 261001-bac stage 0: a CAST-class cause with no press yet is a freshly resolved foreground
   // cast (action_t::rl_resolve_cause()'s only CAST producer) -- the ledger numbers it here, once.
@@ -67,10 +69,16 @@ rl_cause_scope_t::rl_cause_scope_t( player_t* p_, rl_cause_t cause, const action
   if ( p->sim->rl_bl_on && cause.cls == RL_CAUSE_CAST && cause.press < 0 )
     cause.press = rl_buff_ledger::open_press( p, cause );
   p->rl_cause_stack.push_back( rl_cause_frame_t{ cause, owner } );
+  // 261001-bac plan 06: the ledger's own frame (a `frm` record, and the stack the buff reads, draws, consumes and
+  // launches of the gate check are attached to). One bool test when rl_buff_ledger= is off.
+  if ( p->sim->rl_bl_on )
+    rl_bl_frame = rl_buff_ledger::frame_push( p, cause, owner, ctx, kind );
 }
 
 rl_cause_scope_t::~rl_cause_scope_t()
 {
+  if ( rl_bl_frame >= 0 )
+    rl_buff_ledger::frame_pop( p, rl_bl_frame );
   p->rl_cause_stack.pop_back();
 }
 

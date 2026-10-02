@@ -24,6 +24,15 @@ struct expr_t;
 struct player_t;
 struct sim_t;
 
+// 261001-bac plan 06 (research clone only): damage-over-time condition reads are counted by the per-hit ledger
+// (is_ticking, current_stack, remains), only while a ledger frame is open or the read tap is on. A forward-declared
+// free function, as in buff.hpp: this header does not include rl_buff_ledger.hpp.
+namespace rl_buff_ledger
+{
+extern bool g_reads_on;
+void note_dot_read( const dot_t* d, bool non_zero );
+}  // namespace rl_buff_ledger
+
 struct dot_t : private noncopyable
 {
 private:
@@ -89,10 +98,20 @@ public:
   double ticks_left_fractional() const;
   int num_ticks() const;
   const std::string& name() const { return name_str; }
-  bool is_ticking() const { return ticking; }
+  bool is_ticking() const
+  {
+    if ( rl_buff_ledger::g_reads_on )
+      rl_buff_ledger::note_dot_read( this, ticking );
+    return ticking;
+  }
   timespan_t get_extra_time() const { return extra_time; }
   double get_tick_factor() const;
-  int current_stack() const { return ticking ? stack : 0; }
+  int current_stack() const
+  {
+    if ( rl_buff_ledger::g_reads_on )
+      rl_buff_ledger::note_dot_read( this, ticking && stack > 0 );
+    return ticking ? stack : 0;
+  }
   bool at_max_stacks( int mod = 0 ) const { return current_stack() + mod >= max_stack; }
 
   void tick();
