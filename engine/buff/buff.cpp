@@ -2795,8 +2795,14 @@ void buff_t::refresh( int stacks, double value, timespan_t duration )
 
   // Plan 12 (NT-02): the flag stores happen only when the ledger is on.
   const bool rl_on = sim->rl_bl_on;
+  // Plan 13 (MJ-12-01): the shared end before this refresh (read only; the end moves below).
+  timespan_t rl_old_end = timespan_t::max();
   if ( rl_on )
+  {
     rl_bl_applying = true;
+    if ( !expiration.empty() )
+      rl_old_end = expiration.front()->occurs();
+  }
   bump( stacks, value );
   if ( rl_on )
   {
@@ -2864,6 +2870,9 @@ void buff_t::refresh( int stacks, double value, timespan_t duration )
       tick_callback( this, expiration.empty() ? -1 : static_cast<int>( remains() / tick_time() ), timespan_t::zero() );
     }
   }
+
+  if ( rl_on )
+    rl_buff_ledger::applier_end_moved( this, rl_old_end );
 
   if ( sim->log )
   {

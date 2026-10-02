@@ -1609,35 +1609,6 @@ void applier_post_bump( buff_t* b, int requested, int old_stack, const rl_cause_
     return;
   }
   state_t* st = state_of( b->sim );
-  // Plan 13 (review MJ-12-01): a refresh or an added stack of a synchronous multi-stack buff moves the ONE shared end, so from now on an
-  // earlier extension added nothing: every open extension window on its entries is clipped to end at this moment (to = min(to, now)),
-  // and a window with nothing left (it had not begun) is dropped. A refresh whose behaviour is disabled moves nothing and clips nothing.
-  if ( b->rl_bl_applying && b->stack_behavior != buff_stack_behavior::ASYNCHRONOUS &&
-       b->refresh_behavior != buff_refresh_behavior::DISABLED )
-  {
-    const timespan_t now = b->sim->current_time();
-    const bool counted   = st != nullptr && buff_of_actor( st, b );
-    for ( buff_t::rl_bl_applier_t& e : b->rl_bl_appliers )
-    {
-      for ( auto it = e.exts.begin(); it != e.exts.end(); )
-      {
-        if ( it->to > now )
-        {
-          it->to = now;
-          if ( !( it->from < it->to ) )
-          {
-            if ( counted )
-              ++st->ext_window_dropped;
-            it = e.exts.erase( it );
-            continue;
-          }
-          if ( counted )
-            ++st->ext_window_clipped;
-        }
-        ++it;
-      }
-    }
-  }
   int added;
   if ( b->max_stack() < 0 )
     added = requested;
@@ -1658,6 +1629,42 @@ void applier_post_bump( buff_t* b, int requested, int old_stack, const rl_cause_
     b->rl_bl_appliers.push_back( { cause, added, b->rl_bl_next_expiry } );
   }
   reconcile_appliers( st, b );
+}
+
+// Plan 13 (review MJ-12-01): a synchronous multi-stack buff has ONE shared end. buff_t::refresh moved it (it is not the end it had before, or the
+// buff has none now), so from this moment an earlier extension added nothing: the stacks would be up in [old end, new end) anyway. Every open
+// extension window {cause, from, to} of the buff's applier entries is clipped to end at this moment (to = min(to, now)); a window with nothing left
+// (from >= to: it had not begun) is dropped. A refresh that leaves the end where it was (refresh behaviour disabled, or the same end) clips nothing.
+void applier_end_moved( buff_t* b, timespan_t old_end )
+{
+  if ( b->stack_behavior == buff_stack_behavior::ASYNCHRONOUS || covering_mode( b ) )
+    return;
+  const timespan_t new_end = b->expiration.empty() ? timespan_t::max() : b->expiration.front()->occurs();
+  if ( new_end == old_end )
+    return;
+  state_t* st          = state_of( b->sim );
+  const timespan_t now = b->sim->current_time();
+  const bool counted   = st != nullptr && buff_of_actor( st, b );
+  for ( buff_t::rl_bl_applier_t& e : b->rl_bl_appliers )
+  {
+    for ( auto it = e.exts.begin(); it != e.exts.end(); )
+    {
+      if ( it->to > now )
+      {
+        it->to = now;
+        if ( !( it->from < it->to ) )
+        {
+          if ( counted )
+            ++st->ext_window_dropped;
+          it = e.exts.erase( it );
+          continue;
+        }
+        if ( counted )
+          ++st->ext_window_clipped;
+      }
+      ++it;
+    }
+  }
 }
 
 void applier_expire_own( buff_t* b, int stacks )
@@ -1877,6 +1884,7 @@ void run_ext_probe( state_t* s, player_t* p, const rl_cause_t& cause )
     s->ext_probe_sync_buff  = nullptr;
     if ( sb != nullptr && sb->current_stack > 0 && !sb->expiration.empty() && now < s->ext_probe_sync_end )
     {
+      const timespan_t end_before = sb->expiration.front()->occurs();
       sb->execute( 1 );
       std::string& o = s->fight_buf;
       fmt::format_to( out_it( o ), "{{\"k\":\"exr\",\"it\":{},\"t\":", sb->sim->current_iteration );
@@ -1885,6 +1893,8 @@ void run_ext_probe( state_t* s, player_t* p, const rl_cause_t& cause )
       put_string( o, sb->name_str );
       o += ",\"owner\":";
       put_string( o, sb->player != nullptr ? std::string( sb->player->name() ) : std::string() );
+      o += ",\"end_before\":";
+      put_double( o, end_before.total_seconds() );
       o += ",\"end\":";
       put_double( o, ( sb->expiration.empty() ? timespan_t::max() : sb->expiration.front()->occurs() ).total_seconds() );
       fmt::format_to( out_it( o ), ",\"stacks\":{},\"press\":{},\"cls\":{},\"seq\":{},\"launch\":{}}}\n", sb->current_stack, cause.press,
@@ -1929,7 +1939,9 @@ void run_ext_probe( state_t* s, player_t* p, const rl_cause_t& cause )
       if ( !s->ext_probe_multi_done && ( b->stack_behavior == buff_stack_behavior::ASYNCHRONOUS || b->expiration.size() == 1 ) &&
            better( b, multi ) )
         multi = b;
-      if ( want_late && b->stack_behavior != buff_stack_behavior::ASYNCHRONOUS && b->expiration.size() == 1 )
+      // Only a buff whose refresh moves the end (refresh behaviour not disabled) can show a window clipped by a refresh.
+      if ( want_late && b->stack_behavior != buff_stack_behavior::ASYNCHRONOUS && b->expiration.size() == 1 &&
+           b->refresh_behavior != buff_refresh_behavior::DISABLED )
       {
         const timespan_t rem = b->expiration.front()->remains();
         if ( rem > timespan_t::zero() && rem <= late && better( b, ending ) )

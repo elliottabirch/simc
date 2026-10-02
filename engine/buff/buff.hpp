@@ -57,6 +57,10 @@ void applier_expire_own( buff_t* b, int stacks );
 // resolved source player (rl_buff_source_player), `fn` the extend function. The hook only reads.
 void applier_extend( buff_t* b, const rl_cause_t& cause, player_t* source, timespan_t extra, const timespan_t* old_ends,
                      const timespan_t* new_ends, std::size_t n_exp, const char* fn );
+// Plan 13 (review MJ-12-01): buff_t::refresh moved (or removed) the buff's shared end, from `old_end` (timespan_t::max() for none) to the end it
+// has now. For a synchronous multi-stack buff every open extension window on its applier entries is clipped to end at this moment. The hook
+// only reads the buff and edits the ledger's own lists.
+void applier_end_moved( buff_t* b, timespan_t old_end );
 void applier_clear( buff_t* b );
 void note_consume( buff_t* b, const char* op, int removed );
 // Plan 12 (MN-04): an engine-internal bookkeeping read (start, the extend functions, refresh_duration, bump's maximum-stack test) that is no
