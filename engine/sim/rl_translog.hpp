@@ -349,6 +349,10 @@ inline constexpr std::uint32_t RECORD_SIZE = 3192u;  // 266-01 (format 13, 2026-
                                                        // 7-byte round-up pad absorbs the extra 4 bytes:
                                                        // PROC_BLOCK_OFFSET stays 2824). Confirmed by the
                                                        // static_assert below, not hand-verified.
+                                                       // 266-12 (width 325, RL_OBS_DIM 325): roundup8(45 + 4*325
+                                                       // + 4*16*23 + 7) = roundup8(2824) = 2824 (the pad was 4
+                                                       // bytes at 324, 0 now); chosen_enemy_actor_index sits at
+                                                       // 50 + 4*325 + 4*16*23 = 2822; record 3192 unchanged.
                                                        // 262-10 (format 12): 3056 -> 3080 -- RL_OBS_DIM moves
                                                        // 319 -> 324 (seven fight inputs added, two reserved
                                                        // scalars retired); RL_TARGET_SLOTS stays 16.

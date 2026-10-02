@@ -698,6 +698,13 @@ bool rl_capability_own_value( player_t* p, const rl_capability& cap )
     // be visible via the mask's own `!background` check on this same action.
     return !a->background;
   }
+  if ( std::strcmp( cap.sim_kind, "funnel_mode" ) == 0 )
+  {
+    // 266-12 (R16, 2026-10-02): the dedicated detector for the funnel-mode flag (capability
+    // `mode_funnel`, slot 324, group mode). It reads the simulator option itself, the potion_enabled
+    // pattern: a fact about this sim, fixed for the whole fight, governing no column and no action.
+    return p->sim->solver_funnel_mode;
+  }
   throw sc_runtime_error( fmt::format(
       "rl_policy::rl_capability_own_value: capability '{}' has unknown sim_kind '{}'", cap.id,
       cap.sim_kind ) );
