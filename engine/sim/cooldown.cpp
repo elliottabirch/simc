@@ -462,6 +462,9 @@ void cooldown_t::start( action_t* a, timespan_t _override, timespan_t delay )
   // Zero duration cooldowns are nonsense
   if ( _override == 0_ms || ( _override < 0_ms && duration <= 0_ms ) )
   {
+    // 261001-bac plan 07: the ledger notes the attempt (Storm Unleashed swaps Crash Lightning onto such a cooldown).
+    if ( sim.rl_bl_on )
+      rl_buff_ledger::cd_start_ignored( this, a );
     return;
   }
 

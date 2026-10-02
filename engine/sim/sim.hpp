@@ -810,6 +810,12 @@ struct sim_t : private sc_thread_t
   // gain, a cooldown adjust, a stat gain, one draw through the dealing action and one through the
   // candidate buff). Default 0. Its only purpose is to prove the guards block and count.
   bool rl_buff_ledger_guard_probe = false;
+  // 261001-bac plan 07 (stage-0 only): rl_buff_ledger_cache=1 lets the ledger reuse the per-pass amount ratios of an
+  // earlier identical pass set (same action, target, amount type, snapshot fields, real amount, and the same stack,
+  // value and press-applied state of every buff the earlier reference pass read and of every stat buff of the
+  // dealer and its owner) and skip the passes; every 16th cache hit also runs the full passes and compares at 1e-12
+  // relative, counting disagreements (footer cache_check, cache_check_fail). Default 0. The census runs with it off.
+  bool rl_buff_ledger_cache = false;
   std::shared_ptr<rl_buff_ledger::state_t> rl_bl_state;
   // The replay option (tstl-sylvanas phase 253, plan 253-02, REP-01/D-01/D-16). rl_rng_replay=
   // <path>, off by default (empty string), byte-identical to today's behaviour when unset. A

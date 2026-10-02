@@ -259,6 +259,10 @@ cd_snap_t cd_capture( const cooldown_t* cd );
 // recharge was already running, and the normal start). `before` was taken at the top of start().
 void cd_started( cooldown_t* cd, const cd_snap_t& before, const action_t* a );
 
+// cooldown_t::start() returned at once because the cooldown has no duration (nothing started): written as a `cdn`
+// record with `ign` true, so a swap onto such a cooldown still shows which action asked for it.
+void cd_start_ignored( cooldown_t* cd, const action_t* a );
+
 // recharge_event_t::execute(), after the engine's own logic: a charge came back on its own.
 void cd_recharged( cooldown_t* cd );
 

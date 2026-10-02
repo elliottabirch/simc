@@ -222,6 +222,34 @@ struct state_t
   };
   std::unordered_map<const cooldown_t*, cd_state_t> cds;
   std::int32_t next_cycle = 0;
+  // Plan 07: the optional pass cache (option rl_buff_ledger_cache). An entry is found by a key made of what the engine
+  // has in hand when a pass set starts (action, target, amount type, the real state's snapshot fields, the real
+  // amount); it names the buffs the last reference pass for that key read, and holds one stored result per
+  // combination of (stack, value, press-applied) of those buffs and of the stat buffs of the dealer and its owner.
+  // A stored result keeps the ratio of every pass to the reference pass. Kept for the whole run (nothing in it is a
+  // function of the fight), emptied when it grows past CACHE_MAX_VALUES stored results.
+  struct cache_pass_t
+  {
+    const char* kind = "";
+    std::uint64_t hid = 0;
+    double ratio = 1.0;  // pass pre-crit amount / reference pre-crit amount
+    double cc = 0.0;
+    double cb = 0.0;
+  };
+  struct cache_val_t
+  {
+    int status = 0;
+    double ref_pre = 0.0;
+    std::vector<cache_pass_t> passes;
+    std::vector<buff_t*> cands;
+  };
+  struct cache_entry_t
+  {
+    std::vector<const buff_t*> reads;
+    std::unordered_map<std::string, cache_val_t> by_values;
+  };
+  std::unordered_map<std::string, cache_entry_t> cache;
+  std::size_t cache_values_stored = 0;
   // Plan 07 run totals (footer): records written by kind, and cycles the ledger had to open late because a cooldown
   // was found recharging with no cycle known (diagnostic, expected 0).
   std::uint64_t cycles_written = 0;
@@ -349,6 +377,7 @@ void open_and_write_header( sim_t* sim )
   b += ",\"options\":{";
   b += "\"rl_buff_ledger\":";
   put_string( b, st->path );
+  fmt::format_to( out_it( b ), ",\"rl_buff_ledger_cache\":{}", root->rl_buff_ledger_cache ? 1 : 0 );
   b += "},\"emits\":";
   b += EMITS_JSON;
   b += "}\n";
@@ -1985,6 +2014,202 @@ void write_candidates( std::string& out, state_t* st, const split_t& sp, const p
     put_candidate( out, st, i, sp.cands[ i ], sp.cands[ i ]->player == target );
 }
 
+// ---- Plan 07: the optional pass cache --------------------------------------------------------------------------
+//
+// With rl_buff_ledger_cache=1 a pass set whose inputs equal those of an earlier one skips its passes and takes their
+// results from the earlier one: the ratio of every pass to the reference pass (the cache key holds the real amount,
+// so the reference amount is the stored one) and the crit chance and bonus of every pass. The key is what the engine
+// has in hand before a pass set starts; the buffs the amount code read are known only from the earlier reference
+// pass, so the second part of the lookup compares the stack, value and press-applied state of exactly those buffs
+// (plus every stat buff of the dealer and its owner, which act through the player's stats whether or not a read
+// shows them). Anything the amount code reads that is neither (a resource, the target's health, a dot) is not in the
+// key: every 16th cache hit therefore also runs the full passes, compares at 1e-12 relative and counts the
+// disagreements (footer cache_check, cache_check_fail); the fresh result is the one used on a recheck. Results of
+// sets that had a guard fire, a mismatch, a zero reference amount (the `zr` record needs the real reads) are never
+// stored. With the option off none of this runs.
+
+constexpr double CACHE_RECHECK_TOL         = 1e-12;
+constexpr std::uint64_t CACHE_RECHECK_EVERY = 16;
+constexpr std::size_t CACHE_MAX_VALUES     = std::size_t( 1 ) << 20;
+
+enum cache_kind_t : std::uint8_t
+{
+  CK_HIT,         // direct hit, snapshot made in execute
+  CK_HIT_TARGET,  // direct hit of a pre-made state, target part re-snapshotted per target
+  CK_APP,         // damage-over-time application
+  CK_PREMADE,     // pre-made / tick-action application snapshot
+  CK_TICK         // direct tick
+};
+
+struct cache_ctx_t
+{
+  bool active  = false;  // the cache was consulted for this pass set (the passes run, or ran, and may be stored)
+  bool recheck = false;  // a stored result is to be compared with the fresh passes
+  std::string k0;
+  state_t::cache_val_t stored;
+};
+
+template <class T>
+void key_put( std::string& k, const T& v )
+{
+  k.append( reinterpret_cast<const char*>( &v ), sizeof( T ) );
+}
+
+std::string cache_key0( cache_kind_t kind, const action_t* a, const action_state_t* s, double tick_multiplier,
+                        result_amount_type pre_rt )
+{
+  std::string k;
+  k.reserve( 256 );
+  key_put( k, static_cast<std::uint8_t>( kind ) );
+  key_put( k, a );
+  key_put( k, s->target );
+  key_put( k, static_cast<int>( s->result_type ) );
+  key_put( k, s->n_targets );
+  key_put( k, s->chain_target );
+  if ( kind != CK_APP && kind != CK_PREMADE )
+  {
+    key_put( k, static_cast<int>( s->result ) );
+    key_put( k, static_cast<int>( s->block_result ) );
+  }
+  if ( kind == CK_HIT || kind == CK_HIT_TARGET || kind == CK_TICK )
+    key_put( k, s->result_amount );
+  if ( kind == CK_TICK )
+    key_put( k, tick_multiplier );
+  if ( kind == CK_HIT_TARGET )
+    key_put( k, static_cast<int>( pre_rt ) );
+  for ( std::size_t i = 0; i < N_SNAPSHOT_FIELDS; ++i )
+    key_put( k, s->*( SNAPSHOT_FIELDS[ i ].member ) );
+  return k;
+}
+
+std::string cache_values( state_t* st, player_t* dealer, player_t* owner, const std::vector<const buff_t*>& reads )
+{
+  std::string v;
+  v.reserve( 16 * ( reads.size() + 32 ) );
+  auto put_buff = [ & ]( const buff_t* b ) {
+    const int stack    = b->current_stack;
+    const double value = b->current_value;
+    key_put( v, stack );
+    key_put( v, value );
+    const bool up = stack > 0 || value != 0.0;
+    key_put( v, static_cast<std::uint8_t>( up && press_applied( st, b ) ? 1 : 0 ) );
+  };
+  for ( const buff_t* b : reads )
+    put_buff( b );
+  for ( player_t* p : { dealer, owner } )
+  {
+    if ( p == nullptr )
+      continue;
+    for ( stat_buff_t* sb : stat_buffs_of( st, p ) )
+    {
+      put_buff( sb );
+      for ( const stat_buff_t::buff_stat_t& bs : sb->stats )
+        key_put( v, bs.current_value );
+    }
+  }
+  return v;
+}
+
+// Fills `out` and returns true when the passes can be skipped. Returns false, with `cx` telling the caller what to do
+// afterwards, when the cache is off, missed, or this hit is one of the 16th that are re-run and compared.
+bool cache_lookup( state_t* st, action_t* a, player_t* dealer, player_t* owner, const action_state_t* s,
+                   cache_kind_t kind, double tick_multiplier, result_amount_type pre_rt, split_t& out, cache_ctx_t& cx )
+{
+  if ( !a->sim->rl_buff_ledger_cache || a->sim->rl_buff_ledger_guard_probe )
+    return false;
+  cx.active = true;
+  cx.k0     = cache_key0( kind, a, s, tick_multiplier, pre_rt );
+  auto it   = st->cache.find( cx.k0 );
+  if ( it == st->cache.end() )
+  {
+    ++st->cache_misses;
+    return false;
+  }
+  const std::string v = cache_values( st, dealer, owner, it->second.reads );
+  auto vt             = it->second.by_values.find( v );
+  if ( vt == it->second.by_values.end() )
+  {
+    ++st->cache_misses;
+    return false;
+  }
+  ++st->cache_hits;
+  if ( st->cache_hits % CACHE_RECHECK_EVERY == 0 )
+  {
+    cx.recheck = true;
+    cx.stored  = vt->second;
+    return false;
+  }
+  const state_t::cache_val_t& val = vt->second;
+  out.status                      = val.status;
+  out.cands                       = val.cands;
+  out.passes.reserve( val.passes.size() );
+  for ( std::size_t i = 0; i < val.passes.size(); ++i )
+  {
+    const state_t::cache_pass_t& p = val.passes[ i ];
+    out.passes.push_back( { p.kind, p.hid, { i == 0 ? val.ref_pre : val.ref_pre * p.ratio, p.cc, p.cb }, 0 } );
+  }
+  return true;
+}
+
+bool cache_close( double x, double y )
+{
+  const double scale = std::max( std::fabs( x ), std::fabs( y ) );
+  return scale == 0.0 || std::fabs( x - y ) <= CACHE_RECHECK_TOL * scale;
+}
+
+// After the passes of a consulted pass set ran: compare with the stored result on a recheck, and store the fresh
+// result when it is clean (status 0 or 1, no guard, a non-zero reference amount).
+void cache_store( state_t* st, const cache_ctx_t& cx, player_t* dealer, player_t* owner, const split_t& sp,
+                  const std::string& guards )
+{
+  if ( !cx.active )
+    return;
+  const bool storable = guards.empty() && ( sp.status == 0 || sp.status == 1 ) && !sp.passes.empty() &&
+                        sp.passes[ 0 ].amount.pre != 0.0;
+  if ( cx.recheck )
+  {
+    ++st->cache_check;
+    bool same = storable && sp.status == cx.stored.status && sp.passes.size() == cx.stored.passes.size() &&
+                sp.cands == cx.stored.cands && cache_close( sp.passes[ 0 ].amount.pre, cx.stored.ref_pre );
+    for ( std::size_t i = 0; same && i < sp.passes.size(); ++i )
+    {
+      const pass_rec_t& p            = sp.passes[ i ];
+      const state_t::cache_pass_t& q = cx.stored.passes[ i ];
+      same = std::strcmp( p.kind, q.kind ) == 0 && p.hid == q.hid && cache_close( p.amount.cc, q.cc ) &&
+             cache_close( p.amount.cb, q.cb ) && cache_close( p.amount.pre / sp.passes[ 0 ].amount.pre, q.ratio );
+    }
+    if ( !same )
+      ++st->cache_check_fail;
+  }
+  if ( !storable )
+    return;
+  std::vector<const buff_t*> reads;
+  reads.reserve( g_tap_reads.size() );
+  for ( const tap_read_t& r : g_tap_reads )  // only the reference pass opens the tap: these are its reads
+    reads.push_back( r.b );
+  if ( st->cache_values_stored >= CACHE_MAX_VALUES )
+  {
+    st->cache.clear();
+    st->cache_values_stored = 0;
+  }
+  state_t::cache_entry_t& e = st->cache[ cx.k0 ];
+  if ( e.reads != reads )
+  {
+    st->cache_values_stored -= e.by_values.size();
+    e.by_values.clear();
+    e.reads = reads;
+  }
+  state_t::cache_val_t val;
+  val.status  = sp.status;
+  val.ref_pre = sp.passes[ 0 ].amount.pre;
+  val.cands   = sp.cands;
+  for ( const pass_rec_t& p : sp.passes )
+    val.passes.push_back( { p.kind, p.hid, p.amount.pre / val.ref_pre, p.amount.cc, p.amount.cb } );
+  auto ins = e.by_values.insert_or_assign( cache_values( st, dealer, owner, e.reads ), std::move( val ) );
+  if ( ins.second )
+    ++st->cache_values_stored;
+}
+
 action_state_t* scratch_for( state_t* st, action_t* a )
 {
   auto& slot = st->scratch[ a ];
@@ -2060,12 +2285,17 @@ void run_app_passes( state_t* st, action_t* a, action_state_t* s, action_state_t
 {
   split_t sp;
   std::string guards;
+  cache_ctx_t cx;
+  if ( !cache_lookup( st, a, dealer, owner, s, CK_APP, 0.0, result_amount_type::NONE, sp, cx ) )
   {
-    shadow_scope_t scope( st, a, s->target );
-    pass_env_t env{ a, s, scratch, &scope };
-    pass_fn_t fn = [ & ]( bool log_reads, std::uint64_t* viol ) { return app_pass( env, log_reads, viol ); };
-    sp     = run_split( st, a, dealer, owner, s->target, fn, /*allow_probe=*/false );
-    guards = finish_unsafe( st, sp );
+    {
+      shadow_scope_t scope( st, a, s->target );
+      pass_env_t env{ a, s, scratch, &scope };
+      pass_fn_t fn = [ & ]( bool log_reads, std::uint64_t* viol ) { return app_pass( env, log_reads, viol ); };
+      sp     = run_split( st, a, dealer, owner, s->target, fn, /*allow_probe=*/false );
+      guards = finish_unsafe( st, sp );
+    }
+    cache_store( st, cx, dealer, owner, sp, guards );
   }
   const double ref_periodic = sp.passes[ 0 ].amount.pre;
   if ( sp.status == 0 && ref_periodic == 0.0 )
@@ -2087,12 +2317,17 @@ void run_premade( state_t* st, action_t* a, action_state_t* s, const char* src, 
 
   split_t sp;
   std::string guards;
+  cache_ctx_t cx;
+  if ( !cache_lookup( st, a, dealer, owner, s, CK_PREMADE, 0.0, result_amount_type::NONE, sp, cx ) )
   {
-    shadow_scope_t scope( st, a, s->target );
-    pass_env_t env{ a, s, scratch, &scope };
-    pass_fn_t fn = [ & ]( bool log_reads, std::uint64_t* viol ) { return premade_pass( env, log_reads, viol ); };
-    sp     = run_split( st, a, dealer, owner, s->target, fn, /*allow_probe=*/false );
-    guards = finish_unsafe( st, sp );
+    {
+      shadow_scope_t scope( st, a, s->target );
+      pass_env_t env{ a, s, scratch, &scope };
+      pass_fn_t fn = [ & ]( bool log_reads, std::uint64_t* viol ) { return premade_pass( env, log_reads, viol ); };
+      sp     = run_split( st, a, dealer, owner, s->target, fn, /*allow_probe=*/false );
+      guards = finish_unsafe( st, sp );
+    }
+    cache_store( st, cx, dealer, owner, sp, guards );
   }
   const double ref = sp.passes[ 0 ].amount.pre;
   if ( sp.status == 0 && ref == 0.0 )
@@ -2209,28 +2444,34 @@ void run_passes( action_t* a, action_state_t* s, const action_state_t* pre )
   entry.target = s->target;
   entry.fr     = cur_frame( st );
   split_t sp;
+  cache_ctx_t cx;
+  if ( !cache_lookup( st, a, dealer, owner, s, pre != nullptr ? CK_HIT_TARGET : CK_HIT, 0.0,
+                      pre != nullptr ? pre->result_type : result_amount_type::NONE, sp, cx ) )
   {
-    shadow_scope_t scope( st, a, s->target );
-    pass_env_t env{ a, s, scratch, &scope };
-    if ( pre != nullptr )
     {
-      env.target_only = true;
-      env.target_rt   = pre->result_type;
-    }
-    // Reference and restoring passes must reproduce the real snapshot and pre-crit amount bit for bit.
-    pass_fn_t fn = [ & ]( bool log_reads, std::uint64_t* viol ) {
-      const amount_t am = amount_pass( env, log_reads );
-      if ( viol != nullptr )
+      shadow_scope_t scope( st, a, s->target );
+      pass_env_t env{ a, s, scratch, &scope };
+      if ( pre != nullptr )
       {
-        *viol = snapshot_diff( env.scratch, s );
-        if ( !same_bits( am.pre, s->result_amount ) )
-          *viol |= VIOL_PRE_CRIT;
+        env.target_only = true;
+        env.target_rt   = pre->result_type;
       }
-      return am;
-    };
-    sp                 = run_split( st, a, dealer, owner, s->target, fn, /*allow_probe=*/true );
-    entry.guards_json  = finish_unsafe( st, sp );
-  }  // scope ends: caches, debug, log, shadow flag, recorder hook restored; hidden buffs were restored per pass
+      // Reference and restoring passes must reproduce the real snapshot and pre-crit amount bit for bit.
+      pass_fn_t fn = [ & ]( bool log_reads, std::uint64_t* viol ) {
+        const amount_t am = amount_pass( env, log_reads );
+        if ( viol != nullptr )
+        {
+          *viol = snapshot_diff( env.scratch, s );
+          if ( !same_bits( am.pre, s->result_amount ) )
+            *viol |= VIOL_PRE_CRIT;
+        }
+        return am;
+      };
+      sp                 = run_split( st, a, dealer, owner, s->target, fn, /*allow_probe=*/true );
+      entry.guards_json  = finish_unsafe( st, sp );
+    }  // scope ends: caches, debug, log, shadow flag, recorder hook restored; hidden buffs were restored per pass
+    cache_store( st, cx, dealer, owner, sp, entry.guards_json );
+  }
 
   if ( will_sink )
   {
@@ -2329,14 +2570,19 @@ void run_tick_passes( action_t* a, action_state_t* d_state, double tick_multipli
   entry.target = d_state->target;
   entry.fr     = cur_frame( st );
   split_t sp;
+  cache_ctx_t cx;
+  if ( !cache_lookup( st, a, dealer, owner, d_state, CK_TICK, tick_multiplier, result_amount_type::NONE, sp, cx ) )
   {
-    shadow_scope_t scope( st, a, d_state->target );
-    pass_env_t env{ a, d_state, scratch, &scope };
-    pass_fn_t fn = [ & ]( bool log_reads, std::uint64_t* viol ) {
-      return tick_pass( env, tick_multiplier, log_reads, viol );
-    };
-    sp                = run_split( st, a, dealer, owner, d_state->target, fn, /*allow_probe=*/false );
-    entry.guards_json = finish_unsafe( st, sp );
+    {
+      shadow_scope_t scope( st, a, d_state->target );
+      pass_env_t env{ a, d_state, scratch, &scope };
+      pass_fn_t fn = [ & ]( bool log_reads, std::uint64_t* viol ) {
+        return tick_pass( env, tick_multiplier, log_reads, viol );
+      };
+      sp                = run_split( st, a, dealer, owner, d_state->target, fn, /*allow_probe=*/false );
+      entry.guards_json = finish_unsafe( st, sp );
+    }
+    cache_store( st, cx, dealer, owner, sp, entry.guards_json );
   }
 
   // (A tick that shares a candidate buff with its application is counted in hit_sink, where its record is
@@ -2593,7 +2839,7 @@ void cd_write_use( state_t* st, const cooldown_t* cd, std::int32_t c )
                   static_cast<int>( cause.cls ), cause.seq );
 }
 
-void cd_write_cdn( state_t* st, const cooldown_t* cd, const action_t* a )
+void cd_write_cdn( state_t* st, const cooldown_t* cd, const action_t* a, bool ignored = false )
 {
   const rl_cause_t cause = cd_top_cause( st, cd );
   ++st->cdn_written;
@@ -2603,8 +2849,11 @@ void cd_write_cdn( state_t* st, const cooldown_t* cd, const action_t* a )
   put_string( o, cd->name_str );
   o += ",\"action\":";
   put_string( o, a != nullptr ? std::string( a->name() ) : std::string() );
-  fmt::format_to( out_it( o ), ",\"press\":{},\"cls\":{},\"seq\":{}}}\n", cause.press, static_cast<int>( cause.cls ),
+  fmt::format_to( out_it( o ), ",\"press\":{},\"cls\":{},\"seq\":{}", cause.press, static_cast<int>( cause.cls ),
                   cause.seq );
+  if ( ignored )
+    o += ",\"ign\":true";
+  o += "}\n";
 }
 }  // namespace
 
@@ -2646,6 +2895,15 @@ void cd_started( cooldown_t* cd, const cd_snap_t& before, const action_t* a )
       cd_write_use( st, cd, cs.cur );
     cs.cur = cd_open_cycle( st, cd, cd_remaining_ms( cd ), a, false );
   }
+}
+
+void cd_start_ignored( cooldown_t* cd, const action_t* a )
+{
+  state_t* st = state_of( &cd->sim );
+  if ( !cd_tracked( st, cd ) )
+    return;
+  busy_scope_t busy;
+  cd_write_cdn( st, cd, a, /*ignored=*/true );
 }
 
 void cd_recharged( cooldown_t* cd )
