@@ -19,6 +19,7 @@
 #include "sim/cooldown.hpp"
 #include "sim/decision_dump.hpp"
 #include "sim/event.hpp"
+#include "sim/rl_proc_counters.hpp"
 #include "sim/sim.hpp"
 #include "util/io.hpp"
 #include "util/util.hpp"
@@ -33,6 +34,7 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <new>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -287,6 +289,19 @@ struct state_t
   std::map<std::string, std::uint64_t> tick_null_parent_by_reason;
   bool ext_probe_single_done = false;
   bool ext_probe_multi_done = false;
+  // Plan 12, group 2 (MJ-04): a pass entry point reached while a pass is running is refused and counted (footer
+  // nested_pass_refused, by entry point); the guard probe's nested scope and nested pass (probe_nesting_ok / _failed); the
+  // probe's one dot cancel per fight (first tick pass set); the event blocks handed out inside a pass (never the pool's).
+  std::uint64_t nested_pass_refused = 0;
+  std::map<std::string, std::uint64_t> nested_pass_refused_by_entry;
+  std::uint64_t probe_nesting_ok = 0;
+  std::uint64_t probe_nesting_failed = 0;
+  bool probe_tick_done = false;
+  std::vector<std::unique_ptr<unsigned char[]>> scratch_event_blocks;
+  // Plan 12, group 2 (MJ-05): the stage-0 charge probe (option rl_buff_ledger_charge_probe): once per fight, the first cooldown
+  // of the actor with two or more charges has its maximum raised by one and put back (the engine's own set_max_charges).
+  std::uint64_t charge_probe_fired = 0;
+  bool charge_probe_done = false;
 };
 
 namespace
@@ -319,6 +334,24 @@ void put_string( std::string& b, std::string_view s )
   b += '"';
   b += decision_dump::json_escape( s );
   b += '"';
+}
+
+// ,"key":{"name":count,...} (names in map order).
+void put_count_object( std::string& b, const char* key, const std::map<std::string, std::uint64_t>& m )
+{
+  b += ",\"";
+  b += key;
+  b += "\":{";
+  bool first = true;
+  for ( const auto& kv : m )
+  {
+    if ( !first )
+      b += ',';
+    first = false;
+    put_string( b, kv.first );
+    fmt::format_to( out_it( b ), ":{}", kv.second );
+  }
+  b += '}';
 }
 
 bool is_own_class( std::uint8_t cls )
@@ -455,6 +488,8 @@ void fight_begin( sim_t* sim )
   s->probe_done = false;
   s->ext_probe_single_done = false;
   s->ext_probe_multi_done = false;
+  s->probe_tick_done = false;
+  s->charge_probe_done = false;
   // A fixed seed at every fight begin: the scratch stream is never a function of the fight's own streams.
   s->scratch_rng.seed( 0x5CA1AB1E0DDBA11FULL );
   s->next_press = 0;
@@ -764,6 +799,12 @@ void write_footer( sim_t* sim )
     }
   }
   b += '}';
+  // Plan 12 counters, group 2, task 3 (MJ-04).
+  fmt::format_to( out_it( b ),
+                  ",\"nested_pass_refused\":{},\"probe_nesting_ok\":{},\"probe_nesting_failed\":{}",
+                  s->nested_pass_refused, s->probe_nesting_ok, s->probe_nesting_failed );
+  put_count_object( b, "nested_pass_refused_by_entry", s->nested_pass_refused_by_entry );
+  fmt::format_to( out_it( b ), ",\"charge_probe_fired\":{}", s->charge_probe_fired );
   b += "}\n";
 
   s->out << b;
@@ -1805,9 +1846,14 @@ class shadow_scope_t
 {
 public:
   shadow_scope_t( state_t* st, action_t* a, player_t* target )
-    : sim_( a->sim ), dealer_( a->player ), owner_( nullptr ), target_( target )
+    : st_( st ), sim_( a->sim ), dealer_( a->player ), owner_( nullptr ), target_( target )
   {
+    // Plan 12 (MJ-04): nestable. The running pass set's guard list is moved aside (the inner scope starts empty) and the shadow
+    // flags it found are put back by the destructor, so an inner scope never ends the outer scope's protection.
+    saved_guards_      = std::move( st->cur_guards );
     st->cur_guards.clear();
+    saved_prev_shadow_ = sim_->rl_bl_shadow;
+    saved_prev_active_ = g_shadow_active;
     saved_sink_  = rng::rl_draw_sink;
     rng::rl_draw_sink = nullptr;
     saved_debug_ = sim_->debug;
@@ -1850,14 +1896,19 @@ public:
       target_->cache = *saved_target_;
     action_->rl_bl_set_callback_state( saved_callback_state_ );
     rng::rl_draw_sink  = saved_sink_;
-    sim_->rl_bl_shadow = false;
-    g_shadow_active    = false;
+    sim_->rl_bl_shadow = saved_prev_shadow_;
+    g_shadow_active    = saved_prev_active_;
     update_gate();
     sim_->debug        = saved_debug_;
     sim_->log          = saved_log_;
+    st_->cur_guards    = std::move( saved_guards_ );
   }
 
 private:
+  state_t* st_;
+  std::vector<const char*> saved_guards_;
+  bool saved_prev_shadow_ = false;
+  bool saved_prev_active_ = false;
   sim_t* sim_;
   player_t* dealer_;
   player_t* owner_;
@@ -2279,7 +2330,9 @@ using pass_fn_t = std::function<amount_t( bool, std::uint64_t* )>;
 // The guard probe (stage-0 only, rl_buff_ledger_guard_probe=1): inside a pass set, once per fight, the
 // first time a pass set has a candidate, plant one deliberate violation of every guard. Each call must be
 // blocked (the fight must not change) and counted under its own guard name.
-void fire_guard_probe( action_t* a, player_t* dealer, buff_t* cand )
+action_state_t* scratch_for( state_t* st, action_t* a );
+
+void fire_guard_probe( state_t* st, action_t* a, player_t* dealer, player_t* target, buff_t* cand )
 {
   cand->expire();
   dealer->resource_gain( dealer->primary_resource(), 1.0 );
@@ -2287,6 +2340,41 @@ void fire_guard_probe( action_t* a, player_t* dealer, buff_t* cand )
   dealer->stat_gain( dealer->convert_hybrid_stat( STAT_STR_AGI_INT ), 1.0 );
   (void) a->rng().real();
   (void) cand->rng().real();
+
+  // Plan 12 (MJ-04): the families the review found unguarded, called through the BASE methods so no class override runs first
+  // (a class override acting before the base guard is a known gap, see the deferred-items todo).
+  action_state_t* scr = scratch_for( st, a );
+  a->action_t::execute();
+  a->action_t::schedule_execute( nullptr );
+  a->action_t::trigger_dot( scr );
+  {
+    // An event made inside a pass: its memory comes from the ledger, it is never queued; rescheduling and cancelling it are
+    // counted no-ops too.
+    event_t* ev = make_event( *a->sim, timespan_t::from_seconds( 1.0 ), [] {} );
+    ev->reschedule( timespan_t::from_seconds( 2.0 ) );
+    event_t::cancel( ev );
+  }
+  rl_count_proc( dealer, rl_proc::id::crit_hit, 0.5, true );
+  // A pass started inside the pass must be refused (counted under nested_pass_refused_by_entry["run_passes"]).
+  run_passes( a, scr );
+  // A scope opened and closed inside the pass must leave the outer scope's protection exactly as it was.
+  {
+    const std::vector<const char*> guards_before = st->cur_guards;
+    const bool shadow_before = a->sim->rl_bl_shadow;
+    const bool active_before = g_shadow_active;
+    const bool debug_before  = a->sim->debug;
+    const int log_before     = a->sim->log;
+    {
+      shadow_scope_t inner( st, a, target );
+    }
+    const bool intact = shadow_before && active_before && a->sim->rl_bl_shadow == shadow_before &&
+                        g_shadow_active == active_before && a->sim->debug == debug_before &&
+                        a->sim->log == log_before && st->cur_guards == guards_before;
+    if ( intact )
+      ++st->probe_nesting_ok;
+    else
+      ++st->probe_nesting_failed;
+  }
 }
 
 // The pass sequence shared by direct hits, application passes and ticks: a reference pass (nothing
@@ -2327,7 +2415,7 @@ split_t run_split( state_t* st, action_t* a, player_t* dealer, player_t* owner, 
   if ( allow_probe && a->sim->rl_buff_ledger_guard_probe && !st->probe_done )
   {
     st->probe_done = true;
-    fire_guard_probe( a, dealer, cands[ 0 ] );
+    fire_guard_probe( st, a, dealer, target, cands[ 0 ] );
   }
 
   auto hidden_pass = [ & ]( std::uint64_t mask ) {
@@ -2777,6 +2865,18 @@ constexpr family_name_t RNG_FAMILIES[] = {
 };
 }  // namespace
 
+void* scratch_event_block( sim_t* sim, std::size_t size )
+{
+  constexpr std::size_t BLOCK = util::next_power_of_two( 2 * sizeof( event_t ) );
+  if ( size > BLOCK )
+    throw std::bad_alloc();
+  state_t* st = state_of( sim );
+  if ( st == nullptr )
+    return ::operator new( BLOCK );
+  st->scratch_event_blocks.emplace_back( new unsigned char[ BLOCK ] );
+  return st->scratch_event_blocks.back().get();
+}
+
 void note_blocked( sim_t* sim, const char* guard )
 {
   state_t* st = state_of( sim );
@@ -2825,6 +2925,18 @@ rng::rng_t* rng_access( sim_t* sim, const char* family )
   return &st->scratch_rng;
 }
 
+// Plan 12 (MJ-04): every pass entry point calls this first. A pass that starts while another pass is running (an execute reached
+// from inside an amount computation) is refused: it would open a scope inside a scope and run mutators in the outer pass's name.
+// Counted in the footer (nested_pass_refused, by entry point); outside the guard probe the count is 0 (a check asserts it).
+static bool refuse_nested( state_t* st, const sim_t* sim, const char* entry )
+{
+  if ( !sim->rl_bl_shadow )
+    return false;
+  ++st->nested_pass_refused;
+  ++st->nested_pass_refused_by_entry[ entry ];
+  return true;
+}
+
 // Plan 12 (MJ-03): a dot-applying hit executed from a pre-made state writes no `app` record (its DoT state would rest on a
 // snapshot this execute did not make): the state says so, and the count tells the ticks' null parents apart from a zero reference.
 void note_app_missing_premade( state_t* st, action_t* a, action_state_t* s )
@@ -2867,6 +2979,8 @@ void run_passes( action_t* a, action_state_t* s, const action_state_t* pre )
 {
   state_t* st = state_of( a->sim );
   if ( st == nullptr || !st->in_fight || !belongs_to_actor( *st, a->player ) )
+    return;
+  if ( refuse_nested( st, a->sim, "run_passes" ) )
     return;
   // Plan 05: a pre-made state re-snapshotted per target (AoE execute). The entry written when it was handed
   // to schedule_execute rides this hit as its parent. Plan 12 (MJ-01): taken BEFORE the result-type return (an AoE execute
@@ -2977,6 +3091,8 @@ void premade_snapshot( action_t* a, action_state_t* s )
   state_t* st = state_of( a->sim );
   if ( st == nullptr || !st->in_fight || !belongs_to_actor( *st, a->player ) )
     return;
+  if ( refuse_nested( st, a->sim, "premade_snapshot" ) )
+    return;
   if ( s->result_type != result_amount_type::DMG_DIRECT && s->result_type != result_amount_type::DMG_OVER_TIME )
     return;
   run_premade( st, a, s, "premade" );
@@ -2987,6 +3103,8 @@ void tick_action_snapshot( action_t* tick_action, action_state_t* s, const rl_ca
   state_t* st = state_of( tick_action->sim );
   if ( st == nullptr || !st->in_fight || !belongs_to_actor( *st, tick_action->player ) )
     return;
+  if ( refuse_nested( st, tick_action->sim, "tick_action_snapshot" ) )
+    return;
   if ( s->result_type != result_amount_type::DMG_DIRECT && s->result_type != result_amount_type::DMG_OVER_TIME )
     return;
   run_premade( st, tick_action, s, "tick_action", &cause );
@@ -2996,6 +3114,8 @@ void premade_hit( action_t* a, action_state_t* s, const action_state_t* pre )
 {
   state_t* st = state_of( a->sim );
   if ( st == nullptr || !st->in_fight || !belongs_to_actor( *st, a->player ) )
+    return;
+  if ( refuse_nested( st, a->sim, "premade_hit" ) )
     return;
   s->rl_bl_pm = pre->rl_bl_pm;
   note_app_missing_premade( st, a, s );
@@ -3034,6 +3154,8 @@ void run_tick_passes( action_t* a, action_state_t* d_state, double tick_multipli
   state_t* st = state_of( a->sim );
   if ( st == nullptr || !st->in_fight || !belongs_to_actor( *st, a->player ) )
     return;
+  if ( refuse_nested( st, a->sim, "run_tick_passes" ) )
+    return;
 
   const bool will_sink =
       a->stats != nullptr && ( d_state->result_raw > 0 || action_t::result_is_miss( d_state->result ) );
@@ -3053,6 +3175,16 @@ void run_tick_passes( action_t* a, action_state_t* d_state, double tick_multipli
     {
       shadow_scope_t scope( st, a, d_state->target );
       pass_env_t env{ a, d_state, scratch, &scope };
+      // Plan 12 (MJ-04): the guard probe's second one-shot per fight, in the first tick pass set: cancel the ticking
+      // damage-over-time effect (a counted no-op, guard `dot.cancel`; the fight must not change).
+      if ( a->sim->rl_buff_ledger_guard_probe && !st->probe_tick_done )
+      {
+        if ( dot_t* probed = a->find_dot( d_state->target ) )
+        {
+          st->probe_tick_done = true;
+          probed->cancel();
+        }
+      }
       pass_fn_t fn = [ & ]( bool log_reads, std::uint64_t* viol ) {
         return tick_pass( env, tick_multiplier, log_reads, viol );
       };
@@ -3095,6 +3227,8 @@ void run_swing_passes( action_t* a )
 {
   state_t* st = state_of( a->sim );
   if ( st == nullptr || !st->in_fight || !belongs_to_actor( *st, a->player ) )
+    return;
+  if ( refuse_nested( st, a->sim, "run_swing_passes" ) )
     return;
 
   player_t* dealer = a->player;
@@ -3372,6 +3506,17 @@ void cd_started( cooldown_t* cd, const cd_snap_t& before, const action_t* a )
     if ( before.up && cs.cur >= 0 )
       cd_write_use( st, cd, cs.cur );
     cs.cur = cd_open_cycle( st, cd, cd_remaining_ms( cd ), a, false );
+  }
+
+  // Plan 12 (MJ-05): the stage-0 charge probe, once per fight, for the first tracked cooldown with two or more charges. The latch is
+  // set before the calls (set_max_charges starts the cooldown again, which comes back through here).
+  if ( cd->sim.rl_buff_ledger_charge_probe && !st->charge_probe_done && cd->charges >= 2 )
+  {
+    st->charge_probe_done = true;
+    ++st->charge_probe_fired;
+    const int original = cd->charges;
+    cd->set_max_charges( original + 1 );
+    cd->set_max_charges( original );
   }
 }
 

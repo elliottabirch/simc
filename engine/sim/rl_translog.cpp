@@ -35,6 +35,9 @@
 // because it needs player_t/pet_t complete.
 void rl_count_proc( player_t* p, rl_proc::id which, double chance, bool success )
 {
+  // 261001-bac plan 12 (MJ-04): inside a ledger pass a counted no-op (it would count a real proc and relabel the last real roll).
+  if ( p != nullptr && p->sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( p->sim, "translog.count_proc" );
   // 250-03 (REC-04, R-09): labels the last ROLL entry this call's own draw produced, BEFORE the
   // null/pet/enemy returns below -- a null player, a pet (routed to its owner below) or an enemy
   // still drew the roll being counted, and label_last_roll()'s own chance/outcome match (not this

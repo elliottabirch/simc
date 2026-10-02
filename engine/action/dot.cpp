@@ -9,6 +9,7 @@
 #include "player/player.hpp"
 #include "player/stats.hpp"
 #include "sim/expressions.hpp"
+#include "sim/rl_buff_ledger.hpp"
 #include "sim/rl_rng_record.hpp"
 #include "sim/sim.hpp"
 #include "sim/event.hpp"
@@ -75,6 +76,9 @@ dot_t::dot_t( util::string_view n, player_t* t, player_t* s )
 
 void dot_t::cancel()
 {
+  // 261001-bac plan 12 (MJ-04): inside a ledger pass a counted no-op.
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "dot.cancel" );
   if ( !ticking )
     return;
 
@@ -87,6 +91,9 @@ void dot_t::cancel()
 void dot_t::adjust_duration( timespan_t extra_seconds, timespan_t max_total_time, uint32_t state_flags,
                              bool count_as_refresh )
 {
+  // 261001-bac plan 12 (MJ-04): inside a ledger pass a counted no-op.
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "dot.adjust_duration" );
   if ( !ticking )
     return;
   if ( extra_seconds == 0_ms )
@@ -147,6 +154,9 @@ void dot_t::adjust_duration( timespan_t extra_seconds, timespan_t max_total_time
 
 void dot_t::refresh_duration( uint32_t state_flags )
 {
+  // 261001-bac plan 12 (MJ-04): inside a ledger pass a counted no-op.
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "dot.refresh_duration" );
   if ( !ticking )
     return;
 
@@ -184,6 +194,9 @@ void dot_t::reset()
  */
 void dot_t::trigger( timespan_t duration )
 {
+  // 261001-bac plan 12 (MJ-04): inside a ledger pass a counted no-op.
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "dot.trigger" );
   assert( duration > 0_ms && "Dot Trigger with duration <= 0 seconds." );
 
   current_tick = 0;
@@ -201,6 +214,9 @@ void dot_t::trigger( timespan_t duration )
 
 void dot_t::decrement( int stacks = 1 )
 {
+  // 261001-bac plan 12 (MJ-04): inside a ledger pass a counted no-op.
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "dot.decrement" );
   if ( max_stack == 0 || stack <= 0 )
     return;
 
@@ -220,6 +236,9 @@ void dot_t::decrement( int stacks = 1 )
 
 void dot_t::increment(int stacks = 1)
 {
+  // 261001-bac plan 12 (MJ-04): inside a ledger pass a counted no-op.
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "dot.increment" );
   if (max_stack == 0 || stack <= 0 || stack == max_stack)
     return;
 
@@ -241,6 +260,9 @@ void dot_t::increment(int stacks = 1)
 // To copy one DoT state to another DoT on the same target, a copy_action must be provided
 void dot_t::copy( player_t* destination, dot_copy_e copy_type, action_t* copy_action ) const
 {
+  // 261001-bac plan 12 (MJ-04): inside a ledger pass a counted no-op.
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "dot.copy" );
   if ( target == destination && ( !copy_action || copy_action == current_action ) )
     return;
 
@@ -1015,6 +1037,9 @@ bool dot_t::is_higher_priority_action_available() const
 
 void dot_t::reschedule_tick()
 {
+  // 261001-bac plan 12 (MJ-04): inside a ledger pass a counted no-op.
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "dot.reschedule_tick" );
   if ( !tick_event )
     return;
 
@@ -1040,6 +1065,9 @@ void dot_t::reschedule_tick()
 
 void dot_t::adjust( double coefficient )
 {
+  // 261001-bac plan 12 (MJ-04): inside a ledger pass a counted no-op.
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "dot.adjust" );
   if ( !ticking )
     return;
 
@@ -1071,6 +1099,9 @@ void dot_t::adjust( double coefficient )
 
 void dot_t::adjust_full_ticks( double coefficient )
 {
+  // 261001-bac plan 12 (MJ-04): inside a ledger pass a counted no-op.
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "dot.adjust_full_ticks" );
   if ( !ticking || target->is_sleeping() )
     return;
 

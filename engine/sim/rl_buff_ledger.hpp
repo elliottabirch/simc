@@ -28,6 +28,7 @@
 
 #include "util/rng.hpp"
 
+#include <cstddef>
 #include <cstdint>
 
 struct sim_t;
@@ -188,6 +189,12 @@ inline void blocked( sim_t* sim, const char* guard )
 {
   note_blocked( sim, guard );
 }
+
+// 261001-bac plan 12 (group 2, review MJ-04): event_t::operator new inside a pass (sim->rl_bl_shadow) takes its memory from here,
+// never from the event manager's pool or recycle list (a recycled block handed out and never queued would reorder the list and
+// change which block later events get). The blocks live until the ledger closes. event_t::schedule / reschedule / cancel inside
+// a pass are counted no-ops (guards `event.create`, `event.reschedule`, `event.cancel`; see event.cpp, event_manager.cpp).
+void* scratch_event_block( sim_t* sim, std::size_t size );
 
 // 261001-bac plan 04: the one hook behind all six accessors that hand out a random generator
 // (action_t, player_t, sim_t, buff_t, dbc_proc_callback_t, proc_rng_t). While the ledger's passes run

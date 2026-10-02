@@ -1992,6 +1992,9 @@ rl_cause_t action_t::rl_resolve_cause()
 
 void action_t::execute()
 {
+  // 261001-bac plan 12 (MJ-04): inside a ledger pass a counted no-op (class overrides run before this base guard).
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "action.execute" );
 #ifndef NDEBUG
   if ( !initialized )
   {
@@ -2690,6 +2693,9 @@ void action_t::start_gcd()
 
 void action_t::schedule_execute( action_state_t* state )
 {
+  // 261001-bac plan 12 (MJ-04): inside a ledger pass a counted no-op.
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "action.schedule_execute" );
   if ( target->is_sleeping() )
   {
     sim->print_debug( "{} action={} attempted to schedule on a dead target {}",
@@ -5145,6 +5151,9 @@ void action_t::impact( action_state_t* s )
 
 void action_t::trigger_dot( action_state_t* s )
 {
+  // 261001-bac plan 12 (MJ-04): inside a ledger pass a counted no-op.
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "action.trigger_dot" );
   timespan_t duration = composite_dot_duration( s );
   if ( duration <= timespan_t::zero() )
     return;
