@@ -44,7 +44,7 @@ constexpr std::size_t PASS_HIST_SIZE = 64;
 
 // The record kinds this build writes (the `hdr` record's `emits` list). stage0_checks.py reads
 // it to decide which identities it can assert.
-constexpr const char* EMITS_JSON = "[\"hdr\",\"fb\",\"fe\",\"ftr\",\"pr\",\"hit\",\"xp\",\"app\"]";
+constexpr const char* EMITS_JSON = "[\"hdr\",\"fb\",\"fe\",\"ftr\",\"pr\",\"hit\",\"xp\",\"app\",\"ln\"]";
 }  // namespace
 
 // The ledger's state, defined here so sim.hpp never sees it (sim.hpp forward-declares it).
@@ -101,6 +101,14 @@ struct state_t
   rng::rng_t scratch_rng;
   bool probe_done = false;
 
+  // Plan 05: the stat buffs of each player the passes touch (the dealer and its owner), found once per
+  // fight from the player's buff list, and the swing launches: the next launch id of the fight and the
+  // launch each repeating action scheduled its next swing under (taken by rl_resolve_cause when that swing
+  // executes). Cleared at every fight begin.
+  std::unordered_map<const player_t*, std::vector<stat_buff_t*>> stat_buffs;
+  std::int32_t next_launch = 0;
+  std::unordered_map<const action_t*, std::int32_t> swing_slot;
+
   // Per-fight
   std::int32_t next_press = 0;
   std::int16_t last_press = -1;
@@ -146,6 +154,13 @@ struct state_t
   std::uint64_t premade_records = 0;
   std::uint64_t tick_action_records = 0;
   std::uint64_t premade_uncovered = 0;
+  // Plan 05: swing launches written (`ln` records of kind swing).
+  std::uint64_t swing_launches = 0;
+  // Plan 05 diagnostic (footer `noncandidate_reads`): buffs a reference pass read non-zero that did not
+  // become candidates, counted per pass set under "<name>|<reason>": `noplayer`, `foreign` (not the
+  // dealer's or its owner's own buff, and not a debuff the dealer put on the hit's own target), or
+  // `cls<N>|press<pos|neg>` (the buff's own applier stamp is not a press: class N, press >= 0 or not).
+  std::map<std::string, std::uint64_t> noncandidate_reads;
 };
 
 namespace
@@ -260,6 +275,9 @@ void fight_begin( sim_t* sim )
   s->hit_table.clear();
   s->apps.clear();
   s->cur_guards.clear();
+  s->stat_buffs.clear();
+  s->next_launch = 0;
+  s->swing_slot.clear();
   s->probe_done = false;
   // A fixed seed at every fight begin: the scratch stream is never a function of the fight's own streams.
   s->scratch_rng.seed( 0x5CA1AB1E0DDBA11FULL );
@@ -362,10 +380,23 @@ void write_footer( sim_t* sim )
                   "],\"swing_rescaled\":{},\"foreign_press\":{},\"cache_hits\":{},\"cache_misses\":{},"
                   "\"cache_check\":{},\"cache_check_fail\":{},\"no_stats_hits\":{},"
                   "\"both_group_candidates\":{},\"app_records\":{},\"app_passes\":{},"
-                  "\"premade_records\":{},\"tick_action_records\":{},\"premade_uncovered\":{}}}\n",
+                  "\"premade_records\":{},\"tick_action_records\":{},\"premade_uncovered\":{},"
+                  "\"swing_launches\":{},\"noncandidate_reads\":{{",
                   s->swing_rescaled, s->foreign_press, s->cache_hits, s->cache_misses, s->cache_check,
                   s->cache_check_fail, s->no_stats_hits, s->both_group_candidates, s->app_records, s->app_passes,
-                  s->premade_records, s->tick_action_records, s->premade_uncovered );
+                  s->premade_records, s->tick_action_records, s->premade_uncovered, s->swing_launches );
+  {
+    bool first = true;
+    for ( const auto& kv : s->noncandidate_reads )
+    {
+      if ( !first )
+        b += ',';
+      first = false;
+      put_string( b, kv.first );
+      fmt::format_to( out_it( b ), ":{}", kv.second );
+    }
+  }
+  b += "}}\n";
 
   s->out << b;
   s->out.flush();
@@ -707,15 +738,58 @@ private:
   std::optional<player_stat_cache_t> saved_target_;
 };
 
+// Removes one stat buff entry's current contribution from the player's stats, with the routing
+// player_t::stat_gain / stat_loss use for the stats that live in `current.stats` (never through
+// stat_gain / stat_loss themselves: for haste they reschedule swings and cooldowns). A stat those functions
+// route to a resource, or ignore for this class, changes no amount and is left alone. The caller restores
+// `current.stats` by assignment from its own copy, never by adding back.
+void remove_stat_contribution( player_t* p, stat_e stat, double amount )
+{
+  if ( amount == 0.0 || p->convert_hybrid_stat( stat ) == STAT_NONE )
+    return;
+  switch ( stat )
+  {
+    case STAT_ALL:
+      for ( attribute_e i = ATTRIBUTE_NONE; i < ATTRIBUTE_MAX; i++ )
+        p->current.stats.attribute[ i ] -= amount;
+      break;
+    case STAT_HEALTH:
+    case STAT_MANA:
+    case STAT_RAGE:
+    case STAT_ENERGY:
+    case STAT_FOCUS:
+    case STAT_RUNIC:
+    case STAT_MAX_HEALTH:
+    case STAT_MAX_MANA:
+    case STAT_MAX_RAGE:
+    case STAT_MAX_ENERGY:
+    case STAT_MAX_FOCUS:
+    case STAT_MAX_RUNIC:
+    case STAT_RESILIENCE_RATING:
+      break;
+    default:
+      p->current.stats.add_stat( stat, -amount );
+      break;
+  }
+}
+
 // Hiding a buff = what buff_t::expire leaves: stack 0 and value 0. Zeroing the fields (not a flag in
 // the read functions) also catches damage_buff_t's inline readers, remains() and any engine loop.
-// Restored bit for bit by the destructor.
+// Plan 05: a stat buff additionally has its stat amounts removed from its player's current stats (copied
+// first, restored by assignment). Everything is restored bit for bit by the destructor, in reverse order.
 class hidden_buffs_t
 {
 public:
   void hide( buff_t* b )
   {
-    saved_.push_back( { b, b->current_stack, b->current_value } );
+    saved_.push_back( { b, b->current_stack, b->current_value, nullptr, {} } );
+    if ( auto* sb = dynamic_cast<stat_buff_t*>( b ) )
+    {
+      saved_.back().stat_owner = sb->player;
+      saved_.back().stats      = sb->player->current.stats;
+      for ( const stat_buff_t::buff_stat_t& bs : sb->stats )
+        remove_stat_contribution( sb->player, bs.stat, bs.current_value );
+    }
     b->current_stack = 0;
     b->current_value = 0.0;
   }
@@ -725,6 +799,8 @@ public:
     {
       it->b->current_stack = it->stack;
       it->b->current_value = it->value;
+      if ( it->stat_owner != nullptr )
+        it->stat_owner->current.stats = *it->stats;
     }
   }
 
@@ -734,6 +810,8 @@ private:
     buff_t* b;
     int stack;
     double value;
+    player_t* stat_owner;
+    std::optional<gear_stats_t> stats;
   };
   std::vector<saved_t> saved_;
 };
@@ -916,17 +994,56 @@ bool press_applied( const buff_t* b )
 // Candidates: the buffs the REFERENCE pass read (non-zero stack or value) that were applied by a
 // press: the dealer's own buffs, its owner's when the dealer is a pet, and debuffs on the hit's own
 // target whose source is the dealer or its owner. First-read order, which is deterministic.
-void collect_candidates( player_t* dealer, player_t* owner, player_t* target, std::vector<buff_t*>& out )
+// Plan 05: a stat buff acts through the player's stats, not through a read the amount code makes, so it is
+// a candidate of every pass set while it is up (and press-applied), on the dealer or on its owner.
+const std::vector<stat_buff_t*>& stat_buffs_of( state_t* st, player_t* p )
+{
+  auto it = st->stat_buffs.find( p );
+  if ( it == st->stat_buffs.end() )
+  {
+    std::vector<stat_buff_t*> v;
+    for ( buff_t* b : p->buff_list )
+      if ( auto* sb = dynamic_cast<stat_buff_t*>( b ) )
+        v.push_back( sb );
+    it = st->stat_buffs.emplace( p, std::move( v ) ).first;
+  }
+  return it->second;
+}
+
+void collect_candidates( state_t* st, player_t* dealer, player_t* owner, player_t* target, std::vector<buff_t*>& out )
 {
   for ( const tap_read_t& r : g_tap_reads )
   {
     buff_t* b = const_cast<buff_t*>( r.b );
-    if ( b->player == nullptr || !press_applied( b ) )
+    if ( b->player == nullptr )
+    {
+      ++st->noncandidate_reads[ fmt::format( "{}|noplayer", b->name_str ) ];
       continue;
+    }
     const bool own    = b->player == dealer || ( owner != nullptr && b->player == owner );
     const bool debuff = b->player == target && ( b->source == dealer || ( owner != nullptr && b->source == owner ) );
-    if ( own || debuff )
-      out.push_back( b );
+    if ( !own && !debuff )
+    {
+      ++st->noncandidate_reads[ fmt::format( "{}|foreign", b->name_str ) ];
+      continue;
+    }
+    if ( !press_applied( b ) )
+    {
+      ++st->noncandidate_reads[ fmt::format( "{}|cls{}|press{}", b->name_str, static_cast<int>( b->rl_applied_cause.cls ),
+                                             b->rl_applied_cause.press >= 0 ? "pos" : "neg" ) ];
+      continue;
+    }
+    out.push_back( b );
+  }
+  for ( player_t* p : { dealer, owner } )
+  {
+    if ( p == nullptr )
+      continue;
+    for ( stat_buff_t* sb : stat_buffs_of( st, p ) )
+    {
+      if ( sb->current_stack > 0 && press_applied( sb ) && std::find( out.begin(), out.end(), sb ) == out.end() )
+        out.push_back( sb );
+    }
   }
 }
 
@@ -958,7 +1075,9 @@ void put_candidate( std::string& b, std::size_t i, const buff_t* c, bool debuff 
   put_string( b, c->name_str );
   b += ",\"owner\":";
   put_string( b, c->player->name() );
-  fmt::format_to( out_it( b ), ",\"kind\":\"{}\",\"stacks\":{},\"value\":", debuff ? "debuff" : "buff", c->check() );
+  const bool is_stat = dynamic_cast<const stat_buff_t*>( c ) != nullptr;
+  fmt::format_to( out_it( b ), ",\"kind\":\"{}\",\"stacks\":{},\"value\":", debuff ? "debuff" : ( is_stat ? "stat" : "buff" ),
+                  c->check() );
   put_double( b, c->check_value() );
   const rl_cause_t& ap = c->rl_applied_cause;
   fmt::format_to( out_it( b ), ",\"app\":[[{},{},{}]],\"cov\":false}}", ap.press, static_cast<int>( ap.cls ),
@@ -1015,7 +1134,7 @@ split_t run_split( state_t* st, action_t* a, player_t* dealer, player_t* owner, 
     return out;
 
   std::vector<buff_t*>& cands = out.cands;
-  collect_candidates( dealer, owner, target, cands );
+  collect_candidates( st, dealer, owner, target, cands );
   if ( cands.size() > 40 )
   {
     throw sc_runtime_error( fmt::format( "rl_buff_ledger=: {} candidate buffs on one hit of '{}'; the hidden-set "
@@ -1125,7 +1244,8 @@ action_state_t* scratch_for( state_t* st, action_t* a )
 // ride) and registers it in the fight's table. Its id is drawn from the same per-fight serial as `hit.h`.
 // `ref` is the reference pass's `pre`, the divisor of every pass's `per`.
 std::uint64_t write_app_record( state_t* st, action_t* a, action_state_t* s, const split_t& sp,
-                                const std::string& guards, double ref, const char* src )
+                                const std::string& guards, double ref, const char* src,
+                                const rl_cause_t* cause = nullptr )
 {
   const std::uint64_t h = st->next_hit++;
   ++st->app_records;
@@ -1148,9 +1268,14 @@ std::uint64_t write_app_record( state_t* st, action_t* a, action_state_t* s, con
   put_string( b, a->name() );
   b += ",\"target\":";
   put_string( b, s->target->name() );
+  // A tick action's application snapshot is not stamped (the stamp is written on the states of the hits);
+  // the caller hands in the cause of the cast that is executing.
+  const std::int64_t r_seq   = cause != nullptr ? cause->seq : s->rl_cause_seq;
+  const int r_cls            = static_cast<int>( cause != nullptr ? cause->cls : s->rl_cause_class );
+  const std::int16_t r_press = cause != nullptr ? cause->press : s->rl_cause_press;
+  const std::int32_t r_launch = cause != nullptr ? cause->launch : s->rl_cause_launch;
   fmt::format_to( out_it( b ), ",\"seq\":{},\"cls\":{},\"press\":{},\"launch\":{},\"n_targets\":{},\"status\":{},\"cand\":[",
-                  s->rl_cause_seq, static_cast<int>( s->rl_cause_class ), s->rl_cause_press, s->rl_cause_launch,
-                  s->n_targets, sp.status );
+                  r_seq, r_cls, r_press, r_launch, s->n_targets, sp.status );
   std::string cand_json;
   write_candidates( cand_json, sp, s->target );
   b += cand_json;
@@ -1200,7 +1325,7 @@ void run_app_passes( state_t* st, action_t* a, action_state_t* s, action_state_t
 // (src "tick_action"). The result is an `app` record (the direct amounts under every hidden set,
 // `per` = pre / reference pre) whose id is stamped on the state (`rl_bl_pm`); the hits made from this state
 // name it in `par`. A state whose reference amount is exactly 0 writes nothing.
-void run_premade( state_t* st, action_t* a, action_state_t* s, const char* src )
+void run_premade( state_t* st, action_t* a, action_state_t* s, const char* src, const rl_cause_t* cause = nullptr )
 {
   action_state_t* scratch = scratch_for( st, a );
   player_t* dealer        = a->player;
@@ -1219,7 +1344,7 @@ void run_premade( state_t* st, action_t* a, action_state_t* s, const char* src )
   if ( sp.status == 0 && ref == 0.0 )
     return;
 
-  s->rl_bl_pm = write_app_record( st, a, s, sp, guards, ref, src );
+  s->rl_bl_pm = write_app_record( st, a, s, sp, guards, ref, src, cause );
   if ( std::strcmp( src, "premade" ) == 0 )
     ++st->premade_records;
   else
@@ -1365,14 +1490,14 @@ void premade_snapshot( action_t* a, action_state_t* s )
   run_premade( st, a, s, "premade" );
 }
 
-void tick_action_snapshot( action_t* tick_action, action_state_t* s )
+void tick_action_snapshot( action_t* tick_action, action_state_t* s, const rl_cause_t& cause )
 {
   state_t* st = state_of( tick_action->sim );
   if ( st == nullptr || !st->in_fight || !belongs_to_actor( *st, tick_action->player ) )
     return;
   if ( s->result_type != result_amount_type::DMG_DIRECT && s->result_type != result_amount_type::DMG_OVER_TIME )
     return;
-  run_premade( st, tick_action, s, "tick_action" );
+  run_premade( st, tick_action, s, "tick_action", &cause );
 }
 
 void premade_hit( action_t* a, action_state_t* s, const action_state_t* pre )
@@ -1458,6 +1583,144 @@ void run_tick_passes( action_t* a, action_state_t* d_state, double tick_multipli
   const std::uint64_t id = st->next_hit_id++;
   st->hit_table.emplace( id, std::move( entry ) );
   d_state->rl_bl_hit = id;
+}
+
+// ==========================================================================
+// Plan 05: swing passes and swing launches
+// ==========================================================================
+
+void run_swing_passes( action_t* a )
+{
+  state_t* st = state_of( a->sim );
+  if ( st == nullptr || !st->in_fight || !belongs_to_actor( *st, a->player ) )
+    return;
+
+  player_t* dealer = a->player;
+  player_t* owner  = dealer->is_pet() ? static_cast<pet_t*>( dealer )->owner : nullptr;
+  const timespan_t real = a->time_to_execute;
+
+  int status = 0;
+  std::vector<buff_t*> cands;
+  std::vector<timespan_t> hidden_times;
+  std::string guards;
+  {
+    shadow_scope_t scope( st, a, a->target );
+    // Reference: the engine's own swing time on invalidated caches, with the read tap open. It must be the
+    // swing time the action just computed, bit for bit (timespan_t is an integer number of milliseconds).
+    scope.invalidate_caches();
+    timespan_t ref;
+    {
+      tap_scope_t tap( true );
+      ref = a->execute_time();
+    }
+    if ( ref != real )
+    {
+      ++st->reference_mismatch;
+      status = 3;
+    }
+    else
+    {
+      collect_candidates( st, dealer, owner, a->target, cands );
+      for ( buff_t* c : cands )
+      {
+        hidden_buffs_t hidden;
+        hidden.hide( c );
+        scope.invalidate_caches();
+        hidden_times.push_back( a->execute_time() );
+      }
+      // Restoring pass: nothing hidden again, fresh caches; the swing time must come back.
+      scope.invalidate_caches();
+      if ( a->execute_time() != real )
+      {
+        ++st->restoring_mismatch;
+        status = 4;
+      }
+    }
+    // Guards that fired inside the scope (a mutator or a draw reached from execute_time).
+    if ( !st->cur_guards.empty() )
+    {
+      ++st->unsafe_hits;
+      if ( status == 0 )
+        status = 2;
+      for ( const char* g : st->cur_guards )
+      {
+        if ( !guards.empty() )
+          guards += ',';
+        put_string( guards, g );
+      }
+    }
+  }
+
+  const std::int32_t l = st->next_launch++;
+  st->swing_slot[ a ]  = l;
+  ++st->swing_launches;
+
+  sim_t* sim     = a->sim;
+  std::string& b = st->fight_buf;
+  fmt::format_to( out_it( b ), "{{\"k\":\"ln\",\"it\":{},\"t\":", sim->current_iteration );
+  put_double( b, sim->current_time().total_seconds() );
+  fmt::format_to( out_it( b ), ",\"l\":{},\"frame\":-1,\"order\":-1,\"pa\":", l );
+  put_string( b, a->name() );
+  b += ",\"ca\":";
+  put_string( b, a->name() );
+  b += ",\"ct\":";
+  put_string( b, a->target->name() );
+  b += ",\"lk\":\"swing\",\"sw\":null,\"sf\":[";
+  // One entry per candidate whose hiding changes the swing time. f = the swing time with the buff hidden
+  // divided by the real swing time (> 1 for a speed buff: without it the swing takes longer).
+  bool first = true;
+  if ( status == 0 || status == 2 )
+  {
+    for ( std::size_t i = 0; i < cands.size(); ++i )
+    {
+      if ( hidden_times[ i ] == real || real.total_millis() == 0 )
+        continue;
+      const buff_t* c = cands[ i ];
+      if ( !first )
+        b += ',';
+      first = false;
+      b += "{\"buff\":";
+      put_string( b, c->name_str );
+      b += ",\"owner\":";
+      put_string( b, c->player->name() );
+      const rl_cause_t& ap = c->rl_applied_cause;
+      fmt::format_to( out_it( b ), ",\"stacks\":{},\"kind\":\"{}\",\"app\":[[{},{},{}]],\"f\":", c->check(),
+                      dynamic_cast<const stat_buff_t*>( c ) != nullptr ? "stat" : "speed", ap.press,
+                      static_cast<int>( ap.cls ), c->check() );
+      put_double( b, static_cast<double>( hidden_times[ i ].total_millis() ) /
+                         static_cast<double>( real.total_millis() ) );
+      b += '}';
+    }
+  }
+  fmt::format_to( out_it( b ), "],\"status\":{},\"tx\":{}", status, real.total_millis() );
+  if ( !guards.empty() )
+  {
+    b += ",\"guards\":[";
+    b += guards;
+    b += ']';
+  }
+  b += "}\n";
+}
+
+std::int32_t take_swing_launch( const action_t* a )
+{
+  state_t* st = state_of( a->sim );
+  if ( st == nullptr || !st->in_fight )
+    return -1;
+  auto it = st->swing_slot.find( a );
+  if ( it == st->swing_slot.end() )
+    return -1;
+  const std::int32_t l = it->second;
+  st->swing_slot.erase( it );
+  return l;
+}
+
+void note_swing_rescaled( action_t* a )
+{
+  state_t* st = state_of( a->sim );
+  if ( st == nullptr || !st->in_fight || !belongs_to_actor( *st, a->player ) )
+    return;
+  ++st->swing_rescaled;
 }
 
 }  // namespace rl_buff_ledger

@@ -118,8 +118,9 @@ void premade_snapshot( action_t* a, action_state_t* s );
 
 // 261001-bac plan 05: the same for a tick action's application snapshot (`execute_state` of the tick
 // action, snapshotted in the driver's execute); src "tick_action". The id is stamped on that state
-// (rl_bl_pm) and copied by action_t::tick to every tick's state.
-void tick_action_snapshot( action_t* tick_action, action_state_t* s );
+// (rl_bl_pm) and copied by action_t::tick to every tick's state. `cause` is the cause of the driver's
+// cast that is executing (the tick action's state itself is not stamped).
+void tick_action_snapshot( action_t* tick_action, action_state_t* s, const rl_cause_t& cause );
 
 // 261001-bac plan 05: execute() with a pre-made state in a SINGLE-target execute (no per-target
 // re-snapshot): `s` is the real state (a copy of `pre`), after the real amount. Carries the entry id
@@ -136,6 +137,25 @@ void premade_hit( action_t* a, action_state_t* s, const action_state_t* pre );
 // The result is parked under a fresh id written to d->state->rl_bl_hit, attached by hit_sink, and the
 // tick's hit record names the application (`parent`, the `app` record the DoT's state carries).
 void run_tick_passes( action_t* a, action_state_t* dot_state, double tick_multiplier );
+
+// 261001-bac plan 05: the swing-speed channel. A speed buff changes how many swings happen, not how much a
+// swing deals, so it is hidden at the moment a swing is SCHEDULED: for a repeating, non-special action (an
+// auto-attack of the RL actor or its pets) schedule_execute calls this right after it computed
+// time_to_execute. The reference pass (the read tap open) must reproduce time_to_execute bit for bit, one
+// pass per candidate hides it (stat buffs have their stats removed too) and records the swing time without
+// it, a restoring pass must reproduce it again. The result is an `ln` record of kind `swing` (launch id from
+// the fight's launch counter; `sf` lists the candidates whose hiding changes the swing time, with
+// f = hidden swing time / real swing time) and the launch id is kept in a per-action slot.
+void run_swing_passes( action_t* a );
+
+// 261001-bac plan 05: rl_resolve_cause's AUTO branch takes the slot's launch id (-1 if none) into the new
+// cause and clears the slot: the swing's hit and everything it sets off carry it through the existing
+// promote / state carriers.
+std::int32_t take_swing_launch( const action_t* a );
+
+// 261001-bac plan 05: attack_t::reschedule_auto_attack actually rebooked a swing because the auto-attack
+// speed changed mid-swing (footer swing_rescaled). The swing keeps its launch's original factors.
+void note_swing_rescaled( action_t* a );
 
 // 261001-bac plan 04 shadow guards. Inside the ledger's own passes (sim->rl_bl_shadow) every function
 // that changes a buff, a cooldown, a resource, a stat or a proc counter returns at once through one of

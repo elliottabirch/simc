@@ -1975,7 +1975,11 @@ rl_cause_t action_t::rl_resolve_cause()
   {
     rl_cause_t out{ static_cast<std::int64_t>( sim->solver_control_seq ), RL_CAUSE_AUTO };
     if ( sim->rl_bl_on )
+    {
       out.press = rl_buff_ledger::PRESS_AUTO;
+      // Plan 05: the launch (swing) the schedule-time passes recorded for this swing.
+      out.launch = rl_buff_ledger::take_swing_launch( this );
+    }
     return out;
   }
   rl_cause_t out{ static_cast<std::int64_t>( sim->solver_control_seq ), RL_CAUSE_ORPHAN };
@@ -2087,6 +2091,11 @@ void action_t::execute()
         tick_action->execute_state->initialize();
 
       tick_action->snapshot_state( tick_action->execute_state, amount_type( tick_action->execute_state, tick_action->direct_tick ) );
+
+      // 261001-bac plan 05: the tick action's application snapshot gets its hidden passes now; the entry's
+      // id rides the state and is copied to every tick's state (action_t::tick). One bool test when off.
+      if ( sim->rl_bl_on )
+        rl_buff_ledger::tick_action_snapshot( tick_action, tick_action->execute_state, rl_cause );
     }
 
     if ( num_targets == -1 || num_targets > 0 )  // aoe
@@ -2372,6 +2381,11 @@ void action_t::tick( dot_t* d )
     // tick action's later (deferred) execute() restores the tick press as ITS outer press --
     // exactly the rl_cause_seq inheritance just above, for the press instead of the cause.
     rl_rng_record::stamp_state( sim, tick_state );
+
+    // 261001-bac plan 05: the application entry of this tick action's snapshot (the hits of the tick name
+    // it as parent; copy_state does not carry it).
+    if ( sim->rl_bl_on && tick_action->execute_state )
+      tick_state->rl_bl_pm = tick_action->execute_state->rl_bl_pm;
 
     tick_action->schedule_execute( tick_state );
 
@@ -2759,6 +2773,11 @@ void action_t::schedule_execute( action_state_t* state )
   sim->print_log( "{} schedules execute for {}", *player, *this );
 
   time_to_execute = execute_time();
+
+  // 261001-bac plan 05: the swing-speed channel -- hidden passes over the swing time of an auto-attack, at
+  // the moment the swing is scheduled. One bool test when the ledger is off.
+  if ( sim->rl_bl_on && !sim->rl_bl_shadow && repeating && !special )
+    rl_buff_ledger::run_swing_passes( this );
 
   // Study-only swing trace/pin (tstl-sylvanas phase 257, plan 257-09, D-18): the booking
   // override (and the trace's own book/rebook/restart row) now lives in
