@@ -67,6 +67,8 @@ void action_state_t::initialize()
   rl_cause_launch = -1;
   rl_bl_hit       = 0;
   rl_bl_app       = 0;
+  rl_bl_snap      = -1;
+  rl_bl_pm        = 0;
   // 250-03 (REC-04): reset to "never stamped" (kind 0, TRIGGER_KIND_NONE) -- a state pulled from
   // state_cache can otherwise still carry a stale press stamp from a PREVIOUS execute().
   rl_press_outer_kind = 0;
@@ -143,6 +145,10 @@ void action_state_t::copy_state( const action_state_t* o )
   rl_bl_hit       = 0;
   // Plan 04: the application's `app` id rides the copy (a DoT's state is a copy of the applying hit's).
   rl_bl_app       = o->rl_bl_app;
+  // Plan 05: a copy is neither a full snapshot nor a premade state; the premade entry id is carried
+  // explicitly where it matters (see action_state.hpp).
+  rl_bl_snap      = -1;
+  rl_bl_pm        = 0;
   // 250-03 (REC-04): carries the press stamp alongside the cause stamp, for the same reason --
   // a DoT's own state at application/refresh remembers which press applied it.
   rl_press_outer_kind    = o->rl_press_outer_kind;

@@ -47,6 +47,16 @@ struct action_state_t : private noncopyable
   // copy_state, so the DoT's own state (a copy of the applying hit's state) carries it to every
   // later tick, which names it as its parent. 0 = none.
   std::uint64_t   rl_bl_app = 0;
+  // 261001-bac plan 05 (research clone only; neither field is copied by copy_state, both are reset by
+  // initialize): `rl_bl_snap` is the sim time (ms) of the last FULL snapshot_internal of this very state
+  // (flags equal to the action's snapshot_flags, outside a ledger pass), -1 = none; action_t::
+  // schedule_execute uses it to recognise a state class code snapshotted itself and hands over at once.
+  // `rl_bl_pm` is the id (`h`) of the `app` record (src "premade" or "tick_action") that holds the
+  // schedule-time (or application-time) passes of the snapshot this state's amount rests on, 0 = none.
+  // It is set explicitly at three sites (the hand-over, the tick-action tick, execute()) so that a DoT
+  // state or a child state copied from a premade state never inherits it.
+  std::int64_t    rl_bl_snap = -1;
+  std::uint64_t   rl_bl_pm = 0;
   // tstl-sylvanas phase 250, plan 250-03 (REC-04): the press active when this state was stamped
   // (rl_rng_record::stamp_state(), called beside the rl_cause_seq stamp above at every site that
   // sets it) -- outer is the outermost active press (the button that was pressed), inner is the

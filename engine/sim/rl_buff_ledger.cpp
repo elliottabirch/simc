@@ -88,6 +88,9 @@ struct state_t
     const action_t* action = nullptr;
     const player_t* target = nullptr;
     std::vector<const buff_t*> cands;
+    // Plan 05: the reference (nothing hidden) pre-crit amount of a premade / tick-action entry, which the
+    // single-target execute compares with the real amount (premade_drift).
+    double ref_pre = 0.0;
   };
   std::unordered_map<std::uint64_t, app_info_t> apps;
 
@@ -136,6 +139,13 @@ struct state_t
   std::uint64_t both_group_candidates = 0;
   std::uint64_t app_records = 0;
   std::uint64_t app_passes = 0;
+  // Plan 05: `app` records written for a class-made snapshot handed to schedule_execute (premade) and for
+  // a tick action's application snapshot (both are also counted in app_records / app_passes); direct
+  // hits executed from a pre-made state that had no entry (nothing was handed to schedule_execute at the
+  // time of its snapshot).
+  std::uint64_t premade_records = 0;
+  std::uint64_t tick_action_records = 0;
+  std::uint64_t premade_uncovered = 0;
 };
 
 namespace
@@ -351,9 +361,11 @@ void write_footer( sim_t* sim )
   fmt::format_to( out_it( b ),
                   "],\"swing_rescaled\":{},\"foreign_press\":{},\"cache_hits\":{},\"cache_misses\":{},"
                   "\"cache_check\":{},\"cache_check_fail\":{},\"no_stats_hits\":{},"
-                  "\"both_group_candidates\":{},\"app_records\":{},\"app_passes\":{}}}\n",
+                  "\"both_group_candidates\":{},\"app_records\":{},\"app_passes\":{},"
+                  "\"premade_records\":{},\"tick_action_records\":{},\"premade_uncovered\":{}}}\n",
                   s->swing_rescaled, s->foreign_press, s->cache_hits, s->cache_misses, s->cache_check,
-                  s->cache_check_fail, s->no_stats_hits, s->both_group_candidates, s->app_records, s->app_passes );
+                  s->cache_check_fail, s->no_stats_hits, s->both_group_candidates, s->app_records, s->app_passes,
+                  s->premade_records, s->tick_action_records, s->premade_uncovered );
 
   s->out << b;
   s->out.flush();
@@ -483,13 +495,19 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
   b += pass_json;
   // Plan 04: a tick of a damage-over-time effect names the `app` record its state carries (null when
   // the effect came from a state that had none); `par` repeats it as the format's parent list.
+  // Plan 05: a tick action's tick (no rl_bl_app of its own) names the `app` record of the tick action's
+  // application snapshot; a direct hit made from a pre-made state names the `app` record (src "premade")
+  // written when the state was handed to schedule_execute. Direct hits never carry `parent`.
   if ( tick )
   {
-    if ( state->rl_bl_app != 0 )
-      fmt::format_to( out_it( b ), "],\"par\":[{0}],\"parent\":{0}", state->rl_bl_app );
+    const std::uint64_t parent = state->rl_bl_app != 0 ? state->rl_bl_app : state->rl_bl_pm;
+    if ( parent != 0 )
+      fmt::format_to( out_it( b ), "],\"par\":[{0}],\"parent\":{0}", parent );
     else
       b += "],\"par\":[],\"parent\":null";
   }
+  else if ( state->rl_bl_pm != 0 )
+    fmt::format_to( out_it( b ), "],\"par\":[{}]", state->rl_bl_pm );
   else
     b += "],\"par\":[]";
   if ( !guards_json.empty() )
@@ -741,6 +759,10 @@ struct pass_env_t
   action_state_t* real;
   action_state_t* scratch;
   shadow_scope_t* scope;
+  // Plan 05: a pre-made state re-snapshotted per target in an AoE execute: the passes re-run only the
+  // target part of the snapshot (snapshot_flags & STATE_TARGET with `target_rt`), as execute() did.
+  bool target_only                 = false;
+  result_amount_type target_rt     = result_amount_type::NONE;
 };
 
 // One amount pass: the engine's own snapshot and direct-amount code on the scratch state, which is
@@ -776,7 +798,10 @@ amount_t amount_pass( pass_env_t& env, bool log_reads = false )
   sc->block_result = BLOCK_RESULT_UNBLOCKED;
   sc->result_raw = sc->result_total = sc->result_mitigated = sc->result_absorbed = sc->result_amount =
       sc->self_absorb_amount = 0.0;
-  env.action->snapshot_state( sc, env.real->result_type );
+  if ( env.target_only )
+    env.action->snapshot_internal( sc, env.action->snapshot_flags & STATE_TARGET, env.target_rt );
+  else
+    env.action->snapshot_state( sc, env.real->result_type );
   sc->result       = env.real->result;
   sc->block_result = env.real->block_result;
 
@@ -812,6 +837,40 @@ amount_t app_pass( pass_env_t& env, bool log_reads, std::uint64_t* viol_out )
 
   amount_t out;
   out.pre = env.action->calculate_tick_amount( sc, 1.0 );
+  out.cc  = sc->composite_crit_chance();
+  out.cb  = env.action->total_crit_bonus( sc );
+  return out;
+}
+
+// Plan 05, pre-made pass: a state class code (or a tick action's application) snapshotted itself. The
+// engine's own virtual snapshot of a scratch copy (exactly the call the class made, on a state whose
+// n_targets and chain_target are what the class's state had), then the pre-crit direct amount the
+// execute of that state will compute: calculate_direct_amount on a plain hit with n_targets 1 and
+// chain_target 0 (what a single-target execute sets; an AoE execute re-snapshots its own target part
+// and carries its own entries, which name this one as their parent). A split_aoe_damage action would
+// otherwise divide by the class state's n_targets of 0. `viol_out` receives the snapshot mismatch against
+// the real state (there is no real amount at hand-over to compare with).
+amount_t premade_pass( pass_env_t& env, bool log_reads, std::uint64_t* viol_out )
+{
+  env.scope->invalidate_caches();
+  tap_scope_t tap( log_reads );
+  action_state_t* sc = env.scratch;
+  sc->copy_state( env.real );
+  sc->action = env.action;
+  sc->result       = RESULT_NONE;
+  sc->block_result = BLOCK_RESULT_UNBLOCKED;
+  sc->result_raw = sc->result_total = sc->result_mitigated = sc->result_absorbed = sc->result_amount =
+      sc->self_absorb_amount = 0.0;
+  env.action->snapshot_state( sc, env.real->result_type );
+  if ( viol_out != nullptr )
+    *viol_out = snapshot_diff( sc, env.real );
+  sc->result       = RESULT_HIT;
+  sc->block_result = BLOCK_RESULT_UNBLOCKED;
+  sc->n_targets    = 1;
+  sc->chain_target = 0;
+
+  amount_t out;
+  out.pre = env.action->calculate_direct_amount( sc );
   out.cc  = sc->composite_crit_chance();
   out.cb  = env.action->total_crit_bonus( sc );
   return out;
@@ -1061,34 +1120,20 @@ action_state_t* scratch_for( state_t* st, action_t* a )
   return slot.get();
 }
 
-// Plan 04: the application's periodic passes, written as an `app` record at once (an application with
-// no direct damage has no hit record to ride). Only for a hit that applies a damage-over-time effect
-// with no tick_action (those are plan 05's). The record's id is drawn from the same per-fight serial as
-// `hit.h` and is stamped on the state, so the DoT's state (a copy) and every later tick can name it.
-// An application whose reference periodic amount is exactly 0 writes nothing.
-void run_app_passes( state_t* st, action_t* a, action_state_t* s, action_state_t* scratch, player_t* dealer,
-                     player_t* owner )
+// Writes one `app` record (plan 04: a DoT application's periodic amounts; plan 05: a premade or tick-action
+// snapshot's direct amounts, `src` non-null) at once (an application with no direct damage has no hit to
+// ride) and registers it in the fight's table. Its id is drawn from the same per-fight serial as `hit.h`.
+// `ref` is the reference pass's `pre`, the divisor of every pass's `per`.
+std::uint64_t write_app_record( state_t* st, action_t* a, action_state_t* s, const split_t& sp,
+                                const std::string& guards, double ref, const char* src )
 {
-  split_t sp;
-  std::string guards;
-  {
-    shadow_scope_t scope( st, a, s->target );
-    pass_env_t env{ a, s, scratch, &scope };
-    pass_fn_t fn = [ & ]( bool log_reads, std::uint64_t* viol ) { return app_pass( env, log_reads, viol ); };
-    sp     = run_split( st, a, dealer, owner, s->target, fn, /*allow_probe=*/false );
-    guards = finish_unsafe( st, sp );
-  }
-  const double ref_periodic = sp.passes[ 0 ].amount.pre;
-  if ( sp.status == 0 && ref_periodic == 0.0 )
-    return;
-
   const std::uint64_t h = st->next_hit++;
-  s->rl_bl_app          = h;
   ++st->app_records;
   st->app_passes += sp.passes.size();
   state_t::app_info_t info;
-  info.action = a;
-  info.target = s->target;
+  info.action  = a;
+  info.target  = s->target;
+  info.ref_pre = ref;
   for ( const buff_t* c : sp.cands )
     info.cands.push_back( c );
   st->apps.emplace( h, std::move( info ) );
@@ -1112,9 +1157,11 @@ void run_app_passes( state_t* st, action_t* a, action_state_t* s, action_state_t
   b += "],\"pass\":[";
   std::string pass_json;
   for ( const pass_rec_t& p : sp.passes )
-    put_pass( pass_json, p, &ref_periodic );
+    put_pass( pass_json, p, &ref );
   b += pass_json;
   b += ']';
+  if ( src != nullptr )
+    fmt::format_to( out_it( b ), ",\"src\":\"{}\"", src );
   if ( !guards.empty() )
   {
     b += ",\"guards\":[";
@@ -1122,6 +1169,80 @@ void run_app_passes( state_t* st, action_t* a, action_state_t* s, action_state_t
     b += ']';
   }
   b += "}\n";
+  return h;
+}
+
+// Plan 04: the application's periodic passes, written as an `app` record. Only for a hit that applies a
+// damage-over-time effect with no tick_action (those are plan 05's, see run_premade). The record's id is
+// stamped on the state, so the DoT's state (a copy) and every later tick can name it. An application
+// whose reference periodic amount is exactly 0 writes nothing.
+void run_app_passes( state_t* st, action_t* a, action_state_t* s, action_state_t* scratch, player_t* dealer,
+                     player_t* owner )
+{
+  split_t sp;
+  std::string guards;
+  {
+    shadow_scope_t scope( st, a, s->target );
+    pass_env_t env{ a, s, scratch, &scope };
+    pass_fn_t fn = [ & ]( bool log_reads, std::uint64_t* viol ) { return app_pass( env, log_reads, viol ); };
+    sp     = run_split( st, a, dealer, owner, s->target, fn, /*allow_probe=*/false );
+    guards = finish_unsafe( st, sp );
+  }
+  const double ref_periodic = sp.passes[ 0 ].amount.pre;
+  if ( sp.status == 0 && ref_periodic == 0.0 )
+    return;
+
+  s->rl_bl_app = write_app_record( st, a, s, sp, guards, ref_periodic, nullptr );
+}
+
+// Plan 05: the passes of a state whose snapshot was made before its execute: a state class code snapshotted
+// itself and handed to schedule_execute (src "premade"), or a tick action's application snapshot
+// (src "tick_action"). The result is an `app` record (the direct amounts under every hidden set,
+// `per` = pre / reference pre) whose id is stamped on the state (`rl_bl_pm`); the hits made from this state
+// name it in `par`. A state whose reference amount is exactly 0 writes nothing.
+void run_premade( state_t* st, action_t* a, action_state_t* s, const char* src )
+{
+  action_state_t* scratch = scratch_for( st, a );
+  player_t* dealer        = a->player;
+  player_t* owner         = dealer->is_pet() ? static_cast<pet_t*>( dealer )->owner : nullptr;
+
+  split_t sp;
+  std::string guards;
+  {
+    shadow_scope_t scope( st, a, s->target );
+    pass_env_t env{ a, s, scratch, &scope };
+    pass_fn_t fn = [ & ]( bool log_reads, std::uint64_t* viol ) { return premade_pass( env, log_reads, viol ); };
+    sp     = run_split( st, a, dealer, owner, s->target, fn, /*allow_probe=*/false );
+    guards = finish_unsafe( st, sp );
+  }
+  const double ref = sp.passes[ 0 ].amount.pre;
+  if ( sp.status == 0 && ref == 0.0 )
+    return;
+
+  s->rl_bl_pm = write_app_record( st, a, s, sp, guards, ref, src );
+  if ( std::strcmp( src, "premade" ) == 0 )
+    ++st->premade_records;
+  else
+    ++st->tick_action_records;
+}
+
+// A candidate shared between a hit's own passes and the entry its state names as parent is counted once
+// per hit (footer both_group_candidates): the product rule of LEDGER-FORMAT.md is then only approximate.
+void count_both_group( state_t* st, std::uint64_t parent_id, const std::vector<buff_t*>& cands )
+{
+  if ( parent_id == 0 || cands.empty() )
+    return;
+  auto app = st->apps.find( parent_id );
+  if ( app == st->apps.end() )
+    return;
+  for ( const buff_t* c : cands )
+  {
+    if ( std::find( app->second.cands.begin(), app->second.cands.end(), c ) != app->second.cands.end() )
+    {
+      ++st->both_group_candidates;
+      return;
+    }
+  }
 }
 
 // The two guard-name tables of rng_access.
@@ -1163,13 +1284,17 @@ rng::rng_t* rng_access( sim_t* sim, const char* family )
   return &st->scratch_rng;
 }
 
-void run_passes( action_t* a, action_state_t* s )
+void run_passes( action_t* a, action_state_t* s, const action_state_t* pre )
 {
   state_t* st = state_of( a->sim );
   if ( st == nullptr || !st->in_fight || !belongs_to_actor( *st, a->player ) )
     return;
   if ( s->result_type != result_amount_type::DMG_DIRECT )
     return;
+  // Plan 05: a pre-made state re-snapshotted per target (AoE execute). The entry written when it was handed
+  // to schedule_execute rides this hit as its parent.
+  if ( pre != nullptr )
+    s->rl_bl_pm = pre->rl_bl_pm;
 
   // A state that will never reach hit_sink (assess_damage skips a zero-raw hit that is not a miss;
   // an action without stats routes nothing) gets its snapshot checked but nothing parked.
@@ -1186,6 +1311,11 @@ void run_passes( action_t* a, action_state_t* s )
   {
     shadow_scope_t scope( st, a, s->target );
     pass_env_t env{ a, s, scratch, &scope };
+    if ( pre != nullptr )
+    {
+      env.target_only = true;
+      env.target_rt   = pre->result_type;
+    }
     // Reference and restoring passes must reproduce the real snapshot and pre-crit amount bit for bit.
     pass_fn_t fn = [ & ]( bool log_reads, std::uint64_t* viol ) {
       const amount_t am = amount_pass( env, log_reads );
@@ -1214,10 +1344,69 @@ void run_passes( action_t* a, action_state_t* s )
     s->rl_bl_hit = id;
   }
 
+  if ( pre != nullptr )
+    count_both_group( st, pre->rl_bl_pm, sp.cands );
+
   // Plan 04: a hit that applies a damage-over-time effect (no tick_action) also records what the effect's
-  // periodic amount will be under every hidden set. A miss applies nothing.
-  if ( a->tick_action == nullptr && a->dot_duration > timespan_t::zero() && action_t::result_is_hit( s->result ) )
+  // periodic amount will be under every hidden set. A miss applies nothing. (Not for a pre-made state:
+  // its DoT state would rest on a snapshot this execute did not make.)
+  if ( pre == nullptr && a->tick_action == nullptr && a->dot_duration > timespan_t::zero() &&
+       action_t::result_is_hit( s->result ) )
     run_app_passes( st, a, s, scratch, dealer, owner );
+}
+
+void premade_snapshot( action_t* a, action_state_t* s )
+{
+  state_t* st = state_of( a->sim );
+  if ( st == nullptr || !st->in_fight || !belongs_to_actor( *st, a->player ) )
+    return;
+  if ( s->result_type != result_amount_type::DMG_DIRECT && s->result_type != result_amount_type::DMG_OVER_TIME )
+    return;
+  run_premade( st, a, s, "premade" );
+}
+
+void tick_action_snapshot( action_t* tick_action, action_state_t* s )
+{
+  state_t* st = state_of( tick_action->sim );
+  if ( st == nullptr || !st->in_fight || !belongs_to_actor( *st, tick_action->player ) )
+    return;
+  if ( s->result_type != result_amount_type::DMG_DIRECT && s->result_type != result_amount_type::DMG_OVER_TIME )
+    return;
+  run_premade( st, tick_action, s, "tick_action" );
+}
+
+void premade_hit( action_t* a, action_state_t* s, const action_state_t* pre )
+{
+  state_t* st = state_of( a->sim );
+  if ( st == nullptr || !st->in_fight || !belongs_to_actor( *st, a->player ) )
+    return;
+  s->rl_bl_pm = pre->rl_bl_pm;
+  if ( pre->rl_bl_pm == 0 )
+  {
+    ++st->premade_uncovered;
+    return;
+  }
+  auto it = st->apps.find( pre->rl_bl_pm );
+  if ( it == st->apps.end() || it->second.action != a )
+    return;
+  // A miss, dodge or parry computes an amount of 0; a glancing blow scales it: neither is a drift.
+  if ( action_t::result_is_miss( s->result ) || s->result == RESULT_GLANCE )
+    return;
+  if ( same_bits( s->result_amount, it->second.ref_pre ) )
+    return;
+
+  // The real amount is not what the hand-over reference predicted: the hit's split is ignored (status 6).
+  ++st->premade_drift;
+  const bool will_sink = a->stats != nullptr && ( s->result_raw > 0 || action_t::result_is_miss( s->result ) );
+  if ( !will_sink )
+    return;
+  state_t::hit_entry_t entry;
+  entry.action = a;
+  entry.target = s->target;
+  entry.status = 6;
+  const std::uint64_t id = st->next_hit_id++;
+  st->hit_table.emplace( id, std::move( entry ) );
+  s->rl_bl_hit = id;
 }
 
 void run_tick_passes( action_t* a, action_state_t* d_state, double tick_multiplier )
@@ -1249,21 +1438,7 @@ void run_tick_passes( action_t* a, action_state_t* d_state, double tick_multipli
 
   // A tick that shares a candidate buff with its application: the product rule in LEDGER-FORMAT.md is
   // then only approximate for that buff.
-  if ( d_state->rl_bl_app != 0 && !sp.cands.empty() )
-  {
-    auto app = st->apps.find( d_state->rl_bl_app );
-    if ( app != st->apps.end() )
-    {
-      for ( const buff_t* c : sp.cands )
-      {
-        if ( std::find( app->second.cands.begin(), app->second.cands.end(), c ) != app->second.cands.end() )
-        {
-          ++st->both_group_candidates;
-          break;
-        }
-      }
-    }
-  }
+  count_both_group( st, d_state->rl_bl_app, sp.cands );
 
   // A previous tick's parked entry that never reached the sink (zero raw amount) is dropped.
   if ( d_state->rl_bl_hit != 0 )

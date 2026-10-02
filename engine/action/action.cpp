@@ -2128,8 +2128,10 @@ void action_t::execute()
 
         // 261001-bac plan 03: as in the single-target branch below. The scratch copies carry this
         // state's n_targets and chain_target; target_list() is never called by the ledger.
-        if ( sim->rl_bl_on && !pre_execute_state )
-          rl_buff_ledger::run_passes( this, s );
+        // Plan 05: a pre-made state re-snapshotted per target gets target-only passes whose entry names
+        // the hand-over entry as its parent.
+        if ( sim->rl_bl_on )
+          rl_buff_ledger::run_passes( this, s, pre_execute_state );
 
         schedule_travel( s );
       }
@@ -2159,10 +2161,17 @@ void action_t::execute()
       if ( sim->debug )
         s->debug();
 
-      // 261001-bac plan 03: hide-and-recompute passes for a state snapshotted right here (class-made
-      // pre_execute_states are plan 05's). One bool test when the ledger is off.
-      if ( sim->rl_bl_on && !pre_execute_state )
-        rl_buff_ledger::run_passes( this, s );
+      // 261001-bac plan 03: hide-and-recompute passes for a state snapshotted right here. Plan 05: a
+      // pre-made state (class code snapshotted it) has no snapshot here; its entry was written at
+      // hand-over, the real amount is only checked against that entry's reference. One bool test when
+      // the ledger is off.
+      if ( sim->rl_bl_on )
+      {
+        if ( !pre_execute_state )
+          rl_buff_ledger::run_passes( this, s );
+        else
+          rl_buff_ledger::premade_hit( this, s, pre_execute_state );
+      }
 
       schedule_travel( s );
     }
@@ -2740,6 +2749,13 @@ void action_t::schedule_execute( action_state_t* state )
   // whose target is behind the player never reaches this point: the picker refuses it upstream
   // (generic_filter's G4 for the RL arm, this file's own target-ready check's restored fourth
   // clause for the scripted arm).
+  // 261001-bac plan 05: a state class code snapshotted itself, at this very sim time, and handed to
+  // schedule_execute: the hidden passes run now, before anything can change the buffs (the state's amount
+  // rests on this snapshot). The stamp above has already given the state its press.
+  if ( sim->rl_bl_on && !sim->rl_bl_shadow && state && state->rl_bl_pm == 0 &&
+       state->rl_bl_snap == sim->current_time().total_millis() )
+    rl_buff_ledger::premade_snapshot( this, state );
+
   sim->print_log( "{} schedules execute for {}", *player, *this );
 
   time_to_execute = execute_time();
@@ -4879,6 +4895,13 @@ void action_t::snapshot_internal( action_state_t* state, unsigned flags, result_
   assert( state );
 
   state->result_type = rt;
+
+  // 261001-bac plan 05: a FULL snapshot (the action's own snapshot_flags) made outside a ledger pass is
+  // noted on the state with the sim time; action_t::schedule_execute( state ) then recognises a state class
+  // code snapshotted itself and runs the hidden passes at hand-over. A partial re-snapshot (target part,
+  // update flags) leaves the note as it was.
+  if ( sim->rl_bl_on && !sim->rl_bl_shadow && flags == snapshot_flags )
+    state->rl_bl_snap = sim->current_time().total_millis();
 
   if ( flags & STATE_CRIT )
     state->crit_chance = composite_crit_chance() * composite_crit_chance_multiplier();

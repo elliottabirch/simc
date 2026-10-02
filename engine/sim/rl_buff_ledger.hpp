@@ -102,7 +102,31 @@ void xp_record( player_t* p, const rl_cause_t& cause, double amount, const char*
 // pass (nothing hidden; its snapshot fields and pre-crit amount must equal the real state's bit
 // for bit). The result is parked in a side table under a fresh id written to state->rl_bl_hit and
 // attached to the hit record by hit_sink.
-void run_passes( action_t* a, action_state_t* s );
+//
+// 261001-bac plan 05: with `pre` non-null the state is a PRE-MADE state (class code snapshotted it) that an
+// AoE execute re-snapshotted per target: the passes re-run only the target part of the snapshot
+// (snapshot_flags & STATE_TARGET, as execute() did), and the hit's entry names the entry written when the
+// pre-made state was handed to schedule_execute (`pre->rl_bl_pm`) as its parent.
+void run_passes( action_t* a, action_state_t* s, const action_state_t* pre = nullptr );
+
+// 261001-bac plan 05: a state class code snapshotted itself (a full snapshot_internal at this very sim
+// time, recorded in action_state_t::rl_bl_snap) is being handed to schedule_execute: run the passes now,
+// before the buffs can change (Crash Lightning's bonus hit is snapshotted at the strike, "as the buff may
+// be scheduled to expire on the same timestamp"). The result is an `app` record (src "premade") whose id
+// is stamped on the state (rl_bl_pm); the hits made from the state name it in `par`.
+void premade_snapshot( action_t* a, action_state_t* s );
+
+// 261001-bac plan 05: the same for a tick action's application snapshot (`execute_state` of the tick
+// action, snapshotted in the driver's execute); src "tick_action". The id is stamped on that state
+// (rl_bl_pm) and copied by action_t::tick to every tick's state.
+void tick_action_snapshot( action_t* tick_action, action_state_t* s );
+
+// 261001-bac plan 05: execute() with a pre-made state in a SINGLE-target execute (no per-target
+// re-snapshot): `s` is the real state (a copy of `pre`), after the real amount. Carries the entry id
+// (rl_bl_pm) and compares the real pre-crit amount with the entry's reference amount bit for bit; a
+// difference counts premade_drift and marks the hit status 6. A pre-made state with no entry counts
+// premade_uncovered.
+void premade_hit( action_t* a, action_state_t* s, const action_state_t* pre );
 
 // 261001-bac plan 04: the same hide-and-recompute passes for one DIRECT tick of a damage-over-time
 // effect (an action with no tick_action), called from action_t::tick after calculate_tick_amount and
