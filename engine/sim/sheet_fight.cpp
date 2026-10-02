@@ -1370,6 +1370,8 @@ struct sheet_fight_event_t::impl_t
       b.life_start_s = b.spawn_s;
       b.life_dmg_base = a->iteration_dmg_taken;
       b.max_at_spawn = a->resources.max[ RESOURCE_HEALTH ];
+      if ( dnh_on() )  // tstl-sylvanas 264-05 (O4): an entry becomes active the moment its boss is spawned
+        update_dnh_windows();
     }
     else if ( b.benched )
     {
@@ -1470,6 +1472,8 @@ struct sheet_fight_event_t::impl_t
     for ( auto& b : bosses )
       if ( b.spawned && !b.dead )
         apply_phase_effects( j, b );
+    if ( dnh_on() )  // tstl-sylvanas 264-05 (O4): a phase-kind do-not-hit window opens/closes at the phase's exact start
+      update_dnh_windows();
     if ( ph.heal )
       make_event<heal_event_t>( *sim, *sim, this, j, 0, timespan_t::from_seconds( ph.heal->first_tick_after_start_s ) );
     for ( auto& b : bosses )
@@ -1650,6 +1654,8 @@ struct sheet_fight_event_t::impl_t
       return;
     b.dead = true;
     b.death_s = now();
+    if ( dnh_on() )  // tstl-sylvanas 264-05 (O4): an entry ends the moment its boss dies
+      update_dnh_windows();
     sample( b );
     for ( auto& o : bosses )
       if ( o.spec->must_die && !o.dead )
@@ -2035,20 +2041,36 @@ struct sheet_fight_event_t::impl_t
           }
   }
 
+  // Opens and closes the recorded windows from the entries' exact state. Called from the tick AND from the exact moments the state
+  // changes (a phase starts, a boss spawns, a boss dies), so a phase-kind window carries the phase's own start and end; a window-kind
+  // entry is stamped with its declared edge (from_s, to_s) unless its boss spawned later or died earlier.
   void update_dnh_windows()
   {
     const double t = r3( now() );
     for ( size_t k = 0; k < spec.do_not_hit.size(); ++k )
     {
+      const auto& e = spec.do_not_hit[ k ];
       dnh_window_t* open = nullptr;
       for ( auto& w : dnh_windows )
         if ( w.entry == static_cast<int>( k ) && w.end_s < 0 )
           open = &w;
       const bool active = dnh_entry_active( k );
+      const boss_rt_t* boss = nullptr;
+      for ( const auto& b : bosses )
+        if ( b.spec->actor == e.enemy )
+          boss = &b;
       if ( active && !open )
-        dnh_windows.push_back( { static_cast<int>( k ), t, -1.0 } );
+      {
+        const double start = e.while_kind == "window" && boss != nullptr ? std::max( e.from_s, boss->spawn_s ) : t;
+        dnh_windows.push_back( { static_cast<int>( k ), r3( std::min( start, t ) ), -1.0 } );
+      }
       else if ( !active && open )
-        open->end_s = t;
+      {
+        double end = t;
+        if ( e.while_kind == "window" && boss != nullptr )
+          end = boss->dead ? boss->death_s : std::min( e.to_s, t );
+        open->end_s = r3( std::max( end, open->start_s ) );
+      }
     }
   }
 
