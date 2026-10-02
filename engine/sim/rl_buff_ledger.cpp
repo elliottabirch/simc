@@ -224,6 +224,7 @@ struct state_t
   };
   std::unordered_map<const cooldown_t*, cd_state_t> cds;
   std::int32_t next_cycle = 0;
+  bool cd_live = false;  // false from fight begin until reset_done(): the iteration's reset phase writes no cooldown record
   // Plan 07: the optional pass cache (option rl_buff_ledger_cache). An entry is found by a key made of what the engine
   // has in hand when a pass set starts (action, target, amount type, the real state's snapshot fields, the real
   // amount); it names the buffs the last reference pass for that key read, and holds one stored result per
@@ -418,6 +419,7 @@ void fight_begin( sim_t* sim )
   s->dot_reads.clear();
   s->cds.clear();
   s->next_cycle = 0;
+  s->cd_live = false;
   g_frame_depth = 0;
   g_switch_stack.clear();
   update_gate();
@@ -437,6 +439,13 @@ void fight_begin( sim_t* sim )
   fmt::format_to( out_it( b ), ",\"seed\":{},\"actor\":", sim->seed );
   put_string( b, s->actor->name() );
   b += "}\n";
+}
+
+void reset_done( sim_t* sim )
+{
+  state_t* s = state_of( sim );
+  if ( s != nullptr && s->in_fight )
+    s->cd_live = true;
 }
 
 void fight_end( sim_t* sim )
@@ -2771,7 +2780,7 @@ std::vector<const cooldown_t*> g_cd_active;
 
 bool cd_tracked( const state_t* st, const cooldown_t* cd )
 {
-  return st != nullptr && st->in_fight && cd->charges >= 1 && cd->player != nullptr && belongs_to_actor( *st, cd->player );
+  return st != nullptr && st->in_fight && st->cd_live && cd->charges >= 1 && cd->player != nullptr && belongs_to_actor( *st, cd->player );
 }
 
 // Time left in the cycle in progress, in milliseconds (0: none). The recharge event's remains for a multi-charge

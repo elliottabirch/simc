@@ -2123,6 +2123,10 @@ void sim_t::combat_begin()
 
   reset();
 
+  // 261001-bac plan 07: from here on a fight's cooldown records are written (the reset phase above is not part of it).
+  if ( rl_bl_on )
+    rl_buff_ledger::reset_done( this );
+
   // TEMPORARY checkpoint trace (260919-scb T1 follow-up, see SCB-RECEIPT.md Section 7.4/8).
   if ( getenv( "RL_TRACE_RNG" ) != nullptr )
     fmt::print( stderr, "[RL_TRACE_RNG] iter={} seed={} n={} site=cb_after_reset player_list_size={}\n",

@@ -59,6 +59,11 @@ void open_and_write_header( sim_t* sim );
 // and starts the fight's record buffer with an `fb` record.
 void fight_begin( sim_t* sim );
 
+// 261001-bac plan 07: sim_t::combat_begin() calls this right after reset() returns. Cooldown records (cycles, refunds,
+// uses, cooldown starts) are written only from here on in a fight: the reset phase of an iteration resets cooldowns that
+// still hold the previous iteration's state (a 364 s item cooldown found recharging), which is not part of the fight.
+void reset_done( sim_t* sim );
+
 // Fight end (sim_t::combat_end() beside the roll recorder's call): appends the `fe` record
 // (the RL actor's six realised and six expected credit streams, which include its pets) and
 // flushes the fight's buffered records to disk.
