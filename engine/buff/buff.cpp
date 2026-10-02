@@ -225,7 +225,8 @@ struct tick_t : public buff_event_t
         {
           player_t* rl_source = rl_buff_source_player( buff );
           if ( rl_source )
-            rl_scope.emplace( rl_source, rl_cause_t{ buff->rl_applied_cause.seq, RL_CAUSE_DOT_TICK } );
+            rl_scope.emplace( rl_source, rl_cause_t{ buff->rl_applied_cause.seq, RL_CAUSE_DOT_TICK,
+                                                     buff->rl_applied_cause.press, buff->rl_applied_cause.launch } );
         }
         buff->tick_callback( buff, total_ticks, tick_time );
       }
@@ -306,7 +307,8 @@ struct expiration_t : public buff_event_t
         {
           player_t* rl_source = rl_buff_source_player( buff );
           if ( rl_source )
-            rl_scope.emplace( rl_source, rl_cause_t{ buff->rl_applied_cause.seq, RL_CAUSE_DOT_TICK } );
+            rl_scope.emplace( rl_source, rl_cause_t{ buff->rl_applied_cause.seq, RL_CAUSE_DOT_TICK,
+                                                     buff->rl_applied_cause.press, buff->rl_applied_cause.launch } );
         }
         buff->tick_callback( buff, buff->current_tick, actual_tick_time );
       }
@@ -3073,7 +3075,8 @@ void buff_t::expire( timespan_t d )
   {
     player_t* rl_source = rl_buff_source_player( this );
     if ( rl_source )
-      rl_expire_scope.emplace( rl_source, rl_cause_t{ rl_applied_cause.seq, RL_CAUSE_DOT_TICK } );
+      rl_expire_scope.emplace( rl_source, rl_cause_t{ rl_applied_cause.seq, RL_CAUSE_DOT_TICK, rl_applied_cause.press,
+                                                     rl_applied_cause.launch } );
   }
 
   if ( expire_callback )

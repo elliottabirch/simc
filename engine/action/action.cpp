@@ -24,6 +24,7 @@
 #include "sim/event.hpp"
 #include "sim/expressions.hpp"
 #include "sim/proc.hpp"
+#include "sim/rl_buff_ledger.hpp"
 #include "sim/rl_credit.hpp"
 #include "sim/rl_target_select.hpp"
 #include "sim/sim.hpp"
@@ -1950,8 +1951,9 @@ rl_cause_t action_t::rl_resolve_cause()
   {
     // Already stamped at schedule_execute() time (or copied down from a parent state via
     // copy_state()) -- promote() is idempotent, so re-applying it here is harmless.
-    return rl_credit::promote(
-        rl_cause_t{ pre_execute_state->rl_cause_seq, pre_execute_state->rl_cause_class } );
+    // 261001-bac stage 0: the ledger's press and launch numbers ride the carried stamp.
+    return rl_credit::promote( rl_cause_t{ pre_execute_state->rl_cause_seq, pre_execute_state->rl_cause_class,
+                                           pre_execute_state->rl_cause_press, pre_execute_state->rl_cause_launch } );
   }
   if ( rl_pending_cause.seq >= 0 )
   {
@@ -2057,7 +2059,10 @@ void action_t::execute()
   // push a scope of our own around the per-target work, exactly Stage A4's behaviour.
   const bool have_owner_frame =
       !player->rl_cause_stack.empty() && player->rl_cause_stack.back().owner == this;
-  const rl_cause_t rl_cause = have_owner_frame ? player->rl_cause_stack.back().cause : rl_resolve_cause();
+  // 261001-bac stage 0: no longer const -- in the no-owner-frame case below, the pushed scope's
+  // constructor may assign the ledger's press number to a fresh CAST cause, and the stamps written
+  // by do_per_target_work (captured by reference) must carry it.
+  rl_cause_t rl_cause = have_owner_frame ? player->rl_cause_stack.back().cause : rl_resolve_cause();
 
   // The per-target work (tick_action snapshotting included) that stamps every action_state_t
   // this execute() produces with `rl_cause`. Extracted to a lambda so it can run either bare
@@ -2100,6 +2105,8 @@ void action_t::execute()
         }
         s->rl_cause_seq   = rl_cause.seq;
         s->rl_cause_class = rl_cause.cls;
+        s->rl_cause_press  = rl_cause.press;
+        s->rl_cause_launch = rl_cause.launch;
         // 250-03 (REC-04): stamp this state's press alongside its cause -- a later restore (a
         // travel/proc/tick boundary) recovers the press active right now.
         rl_rng_record::stamp_state( sim, s );
@@ -2126,6 +2133,8 @@ void action_t::execute()
         snapshot_state( s, amount_type( s ) );
       s->rl_cause_seq   = rl_cause.seq;
       s->rl_cause_class = rl_cause.cls;
+      s->rl_cause_press  = rl_cause.press;
+      s->rl_cause_launch = rl_cause.launch;
       // 250-03 (REC-04): stamp this state's press alongside its cause -- a later restore (a
       // travel/proc/tick boundary) recovers the press active right now.
       rl_rng_record::stamp_state( sim, s );
@@ -2151,6 +2160,10 @@ void action_t::execute()
     // inside it -- a callback, a resource-gain trigger, a nested execute() -- inherits
     // `rl_cause` promoted to its PROC_OF_* sibling, by construction.
     rl_cause_scope_t rl_cause_guard( player, rl_cause );
+    // 261001-bac stage 0: the scope's constructor may just have numbered a fresh CAST cause;
+    // re-read it so the states stamped below carry the press (one bool test when off).
+    if ( sim->rl_bl_on )
+      rl_cause = player->rl_cause_stack.back().cause;
     do_per_target_work();
   }
 
@@ -2323,6 +2336,10 @@ void action_t::tick( dot_t* d )
     // inherit its seq, force the class.
     tick_state->rl_cause_seq   = d->state->rl_cause_seq;
     tick_state->rl_cause_class = RL_CAUSE_DOT_TICK;
+    // 261001-bac stage 0: the class changes, the ledger's press and launch stay (the chain is the
+    // applying cast's).
+    tick_state->rl_cause_press  = d->state->rl_cause_press;
+    tick_state->rl_cause_launch = d->state->rl_cause_launch;
     // 250-03 (REC-04): stamp tick_state with the CURRENT press (this dot tick's own tick press,
     // opened around this call by dot.cpp's dot_tick_event_t::execute()/check_tick_zero()) so the
     // tick action's later (deferred) execute() restores the tick press as ITS outer press --
@@ -2436,7 +2453,8 @@ void action_t::assess_damage( result_amount_type rt, action_state_t* state )
     // `state` is still in scope -- for the routing done at the realized sink in stats.cpp. A
     // pet action routes its realized damage to the OWNER's accumulator (stats.cpp's own
     // pet->owner rule), so the owner's own rl_sink_cause must carry it too.
-    player->rl_sink_cause = rl_cause_t{ state->rl_cause_seq, state->rl_cause_class };
+    player->rl_sink_cause = rl_cause_t{ state->rl_cause_seq, state->rl_cause_class, state->rl_cause_press,
+                                        state->rl_cause_launch };
     if ( player->is_pet() )
       player->cast_pet()->owner->rl_sink_cause = player->rl_sink_cause;
 
@@ -2478,10 +2496,22 @@ void action_t::record_data( action_state_t* data )
 void action_t::accrue_expected_damage( action_state_t* state )
 {
   if ( !stats )
+  {
+    // 261001-bac stage 0: such an action routes neither realised nor expected credit; the ledger
+    // only counts it (footer `no_stats_hits`).
+    if ( sim->rl_bl_on )
+      rl_buff_ledger::note_no_stats_hit( this );
     return;
+  }
 
   if ( is_windfury_occurrence )
+  {
+    // 261001-bac stage 0: a Windfury-occurrence hit is realised damage with no expected pricing
+    // of its own (priced once, at the roll site) -- a `hit` with exp 0 and exp_excl set.
+    if ( sim->rl_bl_on )
+      rl_buff_ledger::hit_sink( this, state, 0.0, /*exp_excl=*/true );
     return;
+  }
 
   double crit_bonus = total_crit_bonus( state );
 
@@ -2496,7 +2526,16 @@ void action_t::accrue_expected_damage( action_state_t* state )
   // already adds to solver_damage_expected_so_far into the matching credit stream, so
   // sum(streams) stays an identity against it rather than a tolerance. `state` is still in
   // scope here (unlike stats_t::add_result's realized sink), so no rl_sink_cause detour needed.
-  const rl_cause_t cause{ state->rl_cause_seq, state->rl_cause_class };
+  const rl_cause_t cause{ state->rl_cause_seq, state->rl_cause_class, state->rl_cause_press,
+                          state->rl_cause_launch };
+  // 261001-bac stage 0: one `hit` record per damage state, written here where realised
+  // (state->result_amount, what stats_t::add_result routes) and expected are both in hand. The
+  // flag stops rl_credit_route from also writing accrue's own expected-side routes as `xp`.
+  if ( sim->rl_bl_on )
+  {
+    rl_buff_ledger::hit_sink( this, state, expected_amount, /*exp_excl=*/false );
+    rl_buff_ledger::set_in_hit_sink( sim, true );
+  }
   if ( !player->is_pet() )
   {
     player->solver_damage_expected_so_far += expected_amount;
@@ -2513,6 +2552,8 @@ void action_t::accrue_expected_damage( action_state_t* state )
       rl_credit_route( player, cause, sim->solver_control_seq, expected_amount, /*expected=*/true );
     }
   }
+  if ( sim->rl_bl_on )
+    rl_buff_ledger::set_in_hit_sink( sim, false );
 }
 
 // Should be called only by foreground action executions (i.e., Player-Ready event calls
@@ -2660,6 +2701,9 @@ void action_t::schedule_execute( action_state_t* state )
       {
         state->rl_cause_seq   = rl_pending.seq;
         state->rl_cause_class = rl_pending.cls;
+        // 261001-bac stage 0: the ledger's numbers ride the parked cause too.
+        state->rl_cause_press  = rl_pending.press;
+        state->rl_cause_launch = rl_pending.launch;
       }
     }
     else if ( rl_pending.seq >= 0 )
@@ -4943,7 +4987,8 @@ void action_t::do_schedule_travel( action_state_t* state, timespan_t time_ )
     // tstl-sylvanas quick task 260918-cbc (Stage A4): see rl_credit.hpp's rl_cause_scope_t doc
     // comment -- this wraps impact()'s full virtual dispatch (base body + any override's
     // post-Base::impact() tail), not just action_t::impact()'s own body.
-    rl_cause_scope_t rl_cause_guard( player, rl_cause_t{ state->rl_cause_seq, state->rl_cause_class } );
+    rl_cause_scope_t rl_cause_guard(
+        player, rl_cause_t{ state->rl_cause_seq, state->rl_cause_class, state->rl_cause_press, state->rl_cause_launch } );
     // 250-03 (REC-04): restores the press that was active when `state` was stamped (the casting
     // action's own execute press) across this zero-travel-time boundary -- same span as the
     // cause guard just above. A never-stamped state (recorder was off) leaves the current frames

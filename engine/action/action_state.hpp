@@ -35,6 +35,13 @@ struct action_state_t : private noncopyable
   // copy_state() below. Pure bookkeeping: never read by any RNG or scheduling decision.
   std::int64_t    rl_cause_seq = -1;
   std::uint8_t    rl_cause_class = RL_CAUSE_ORPHAN;
+  // 261001-bac stage 0: the per-hit buff ledger's own numbers, stamped beside the cause above at
+  // every site that sets it (see rl_cause_t::press / ::launch). -1 whenever rl_buff_ledger= is
+  // off; never read by anything but the ledger. `rl_bl_hit` is the ledger's per-hit entry id
+  // (0 = none); declared now, first written by plan 03.
+  std::int16_t    rl_cause_press = -1;    // widths match rl_cause_t's (see its comment)
+  std::int32_t    rl_cause_launch = -1;
+  std::uint64_t   rl_bl_hit = 0;
   // tstl-sylvanas phase 250, plan 250-03 (REC-04): the press active when this state was stamped
   // (rl_rng_record::stamp_state(), called beside the rl_cause_seq stamp above at every site that
   // sets it) -- outer is the outermost active press (the button that was pressed), inner is the

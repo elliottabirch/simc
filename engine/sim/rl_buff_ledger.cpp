@@ -34,7 +34,7 @@ constexpr std::size_t PASS_HIST_SIZE = 64;
 
 // The record kinds this build writes (the `hdr` record's `emits` list). stage0_checks.py reads
 // it to decide which identities it can assert.
-constexpr const char* EMITS_JSON = "[\"hdr\",\"fb\",\"fe\",\"ftr\"]";
+constexpr const char* EMITS_JSON = "[\"hdr\",\"fb\",\"fe\",\"ftr\",\"pr\",\"hit\",\"xp\"]";
 }  // namespace
 
 // The ledger's state, defined here so sim.hpp never sees it (sim.hpp forward-declares it).
@@ -52,8 +52,8 @@ struct state_t
   player_t* actor = nullptr;  // the one non-pet, non-enemy player; its pets' hits are included
 
   // Per-fight
-  std::int64_t next_press = 0;
-  std::int64_t last_press = -1;
+  std::int32_t next_press = 0;
+  std::int16_t last_press = -1;
   std::uint64_t next_hit = 1;
   std::uint64_t fight_hits = 0;
   std::uint64_t fight_presses = 0;
@@ -115,6 +115,23 @@ void put_string( std::string& b, std::string_view s )
   b += '"';
   b += decision_dump::json_escape( s );
   b += '"';
+}
+
+bool is_own_class( std::uint8_t cls )
+{
+  return cls == RL_CAUSE_CAST || cls == RL_CAUSE_PROC_OF_CAST || cls == RL_CAUSE_DOT_TICK ||
+         cls == RL_CAUSE_PROC_OF_DOT;
+}
+
+// True for the RL actor and its pets.
+bool belongs_to_actor( const state_t& s, const player_t* p )
+{
+  if ( p == nullptr )
+    return false;
+  const player_t* top = p;
+  if ( p->is_pet() )
+    top = static_cast<const pet_t*>( p )->owner;
+  return top != nullptr && top == s.actor;
 }
 
 void flush_fight( state_t& s )
@@ -257,6 +274,115 @@ void write_footer( sim_t* sim )
   s->out << b;
   s->out.flush();
   s->out.close();
+}
+
+std::int16_t open_press( player_t* p, const rl_cause_t& cause )
+{
+  state_t* s = state_of( p->sim );
+  if ( s == nullptr || !s->in_fight || !belongs_to_actor( *s, p ) )
+    return -1;
+
+  if ( p->is_pet() )
+  {
+    // A pet's own cast is credited to the current decision by the existing cause model; it is
+    // not a button choice. It rides the latest press a non-pet opened.
+    ++s->foreign_press;
+    return s->last_press;
+  }
+
+  // rl_cause_t's press is an int16 (its width is load-bearing, see rl_credit.hpp): refuse a fight
+  // that would need more than 32767 presses rather than wrap.
+  if ( s->next_press >= 32767 )
+  {
+    throw sc_runtime_error( "rl_buff_ledger=: more than 32767 presses in one fight (press numbers are 16-bit)." );
+  }
+  const std::int16_t press = static_cast<std::int16_t>( s->next_press++ );
+  s->last_press = press;
+  ++s->fight_presses;
+
+  std::string& b = s->fight_buf;
+  fmt::format_to( out_it( b ), "{{\"k\":\"pr\",\"it\":{},\"t\":", p->sim->current_iteration );
+  put_double( b, p->sim->current_time().total_seconds() );
+  fmt::format_to( out_it( b ), ",\"press\":{},\"seq\":{},\"actor\":", press, cause.seq );
+  put_string( b, p->name() );
+  b += ",\"action\":";
+  put_string( b, p->last_foreground_action ? p->last_foreground_action->name() : std::string() );
+  fmt::format_to( out_it( b ), ",\"cls\":{}}}\n", static_cast<int>( cause.cls ) );
+  return press;
+}
+
+void note_no_stats_hit( action_t* a )
+{
+  state_t* s = state_of( a->sim );
+  if ( s == nullptr || !s->in_fight || !belongs_to_actor( *s, a->player ) )
+    return;
+  ++s->no_stats_hits;
+}
+
+void set_in_hit_sink( sim_t* sim, bool on )
+{
+  state_t* s = state_of( sim );
+  if ( s != nullptr )
+    s->in_hit_sink = on;
+}
+
+void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool exp_excl )
+{
+  sim_t* sim = a->sim;
+  state_t* s = state_of( sim );
+  if ( s == nullptr || !s->in_fight || !belongs_to_actor( *s, a->player ) )
+    return;
+
+  const bool pet = a->player->is_pet();
+  const std::uint64_t h = s->next_hit++;
+  ++s->fight_hits;
+
+  if ( is_own_class( state->rl_cause_class ) && state->rl_cause_press < 0 )
+    ++s->lost_press;
+
+  const result_amount_type rt = a->report_amount_type( state );
+  const bool tick = rt == result_amount_type::DMG_OVER_TIME || rt == result_amount_type::HEAL_OVER_TIME;
+
+  std::string& b = s->fight_buf;
+  fmt::format_to( out_it( b ), "{{\"k\":\"hit\",\"it\":{},\"t\":", sim->current_iteration );
+  put_double( b, sim->current_time().total_seconds() );
+  fmt::format_to( out_it( b ), ",\"h\":{},\"actor\":", h );
+  put_string( b, a->player->name() );
+  fmt::format_to( out_it( b ), ",\"pet\":{},\"action\":", pet ? "true" : "false" );
+  put_string( b, a->name() );
+  b += ",\"target\":";
+  put_string( b, state->target->name() );
+  fmt::format_to( out_it( b ), ",\"at\":\"{}\",\"res\":\"{}\",\"ra\":", tick ? 't' : 'd',
+                  util::result_type_string( state->result ) );
+  put_double( b, state->result_amount );
+  b += ",\"exp\":";
+  put_double( b, expected_amount );
+  fmt::format_to( out_it( b ),
+                  ",\"exp_excl\":{},\"seq\":{},\"cls\":{},\"press\":{},\"launch\":{},\"n_targets\":{},"
+                  "\"status\":0,\"cand\":[],\"pass\":[],\"par\":[]}}\n",
+                  exp_excl ? "true" : "false", state->rl_cause_seq, static_cast<int>( state->rl_cause_class ),
+                  state->rl_cause_press, state->rl_cause_launch, state->n_targets );
+}
+
+void xp_record( player_t* p, const rl_cause_t& cause, double amount, const char* action_name )
+{
+  sim_t* sim = p->sim;
+  state_t* s = state_of( sim );
+  if ( s == nullptr || !s->in_fight || s->in_hit_sink || !belongs_to_actor( *s, p ) )
+    return;
+
+  ++s->fight_xp;
+  std::string& b = s->fight_buf;
+  fmt::format_to( out_it( b ), "{{\"k\":\"xp\",\"it\":{},\"t\":", sim->current_iteration );
+  put_double( b, sim->current_time().total_seconds() );
+  fmt::format_to( out_it( b ), ",\"seq\":{},\"cls\":{},\"press\":{},\"launch\":{},\"amount\":", cause.seq,
+                  static_cast<int>( cause.cls ), cause.press, cause.launch );
+  put_double( b, amount );
+  b += ",\"action\":";
+  put_string( b, action_name != nullptr ? action_name : "" );
+  b += ",\"actor\":";
+  put_string( b, p->name() );
+  b += "}\n";
 }
 
 }  // namespace rl_buff_ledger

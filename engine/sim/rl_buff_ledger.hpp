@@ -52,4 +52,28 @@ void fight_end( sim_t* sim );
 // `"complete": true` and every counter the stage uses, then closes the file.
 void write_footer( sim_t* sim );
 
+// Assigns the next press number for a CAST-class cause that does not carry one yet, writes a
+// `pr` record, and returns the number (stored by rl_cause_scope_t's constructor in the pushed
+// frame's cause). A pet's CAST-class frame does NOT open a press: it adopts the latest press
+// opened by a non-pet (a pet's own cast is credited to the current decision by the existing
+// cause model, not a button choice of its own) and is counted as `foreign_press`.
+std::int16_t open_press( player_t* p, const rl_cause_t& cause );
+
+// One `hit` record per damage hit or tick of the RL actor and its pets, called from
+// action_t::accrue_expected_damage. realised = state->result_amount (exactly what
+// stats_t::add_result routes); `expected_amount` is the value accrue just computed, or 0 with
+// `exp_excl` set for a Windfury-occurrence hit (priced separately, see the `xp` record).
+void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool exp_excl );
+
+// A hit of an action that has no stats object routes neither realised nor expected credit; the
+// footer counts them (`no_stats_hits`).
+void note_no_stats_hit( action_t* a );
+
+// While set, rl_credit_route's expected-side calls are accrue_expected_damage's own (already
+// written as `hit` records) and are not written again as `xp`.
+void set_in_hit_sink( sim_t* sim, bool on );
+
+// Expected-only pricing outside hits (the Windfury occurrence price), called from
+// rl_credit_route on every expected-side route not made by accrue_expected_damage.
+void xp_record( player_t* p, const rl_cause_t& cause, double amount, const char* action_name );
 }  // namespace rl_buff_ledger

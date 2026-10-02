@@ -94,7 +94,8 @@ struct proc_event_t : public event_t
     if ( source_state && source_state->rl_cause_seq >= 0 )
     {
       rl_cause_guard.emplace( cb->listener,
-                               rl_credit::promote( rl_cause_t{ source_state->rl_cause_seq, source_state->rl_cause_class } ) );
+                               rl_credit::promote( rl_cause_t{ source_state->rl_cause_seq, source_state->rl_cause_class,
+                                                               source_state->rl_cause_press, source_state->rl_cause_launch } ) );
     }
     // 250-03 (REC-04): restores the press active when source_state was stamped (the triggering
     // hit's own press), across this SAME detached-execution boundary the cause guard above

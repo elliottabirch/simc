@@ -62,6 +62,10 @@ void action_state_t::initialize()
   // through execute() (routing treats it identically to an explicit ORPHAN).
   rl_cause_seq   = -1;
   rl_cause_class = RL_CAUSE_ORPHAN;
+  // 261001-bac stage 0: the ledger's own numbers reset with the cause stamp.
+  rl_cause_press  = -1;
+  rl_cause_launch = -1;
+  rl_bl_hit       = 0;
   // 250-03 (REC-04): reset to "never stamped" (kind 0, TRIGGER_KIND_NONE) -- a state pulled from
   // state_cache can otherwise still carry a stale press stamp from a PREVIOUS execute().
   rl_press_outer_kind = 0;
@@ -129,6 +133,10 @@ void action_state_t::copy_state( const action_state_t* o )
   // still remembers which decision applied it.
   rl_cause_seq   = o->rl_cause_seq;
   rl_cause_class = o->rl_cause_class;
+  // 261001-bac stage 0: the ledger's own numbers ride the same copy.
+  rl_cause_press  = o->rl_cause_press;
+  rl_cause_launch = o->rl_cause_launch;
+  rl_bl_hit       = o->rl_bl_hit;
   // 250-03 (REC-04): carries the press stamp alongside the cause stamp, for the same reason --
   // a DoT's own state at application/refresh remembers which press applied it.
   rl_press_outer_kind    = o->rl_press_outer_kind;
@@ -298,7 +306,9 @@ void travel_event_t::execute()
     // comment -- this wraps impact()'s full virtual dispatch (base body + any override's
     // post-Base::impact() tail) across the DEFERRED travel-time boundary, not just
     // action_t::impact()'s own body.
-    rl_cause_scope_t rl_cause_guard( action->player, rl_cause_t{ state->rl_cause_seq, state->rl_cause_class } );
+    rl_cause_scope_t rl_cause_guard(
+        action->player,
+        rl_cause_t{ state->rl_cause_seq, state->rl_cause_class, state->rl_cause_press, state->rl_cause_launch } );
     // 250-03 (REC-04): restores the press that was active when `state` was stamped, across this
     // SAME deferred travel-time boundary -- see do_schedule_travel's zero-travel-time branch
     // (action.cpp) for the sibling call this mirrors.

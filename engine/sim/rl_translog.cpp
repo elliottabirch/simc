@@ -13,6 +13,7 @@
 
 #include "player/pet.hpp"
 #include "player/player.hpp"
+#include "sim/rl_buff_ledger.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_rng_record.hpp"
 #include "sim/sim.hpp"
@@ -59,6 +60,12 @@ void rl_count_proc( player_t* p, rl_proc::id which, double chance, bool success 
 // an rl_cause_frame_t rather than a bare rl_cause_t.
 rl_cause_scope_t::rl_cause_scope_t( player_t* p_, rl_cause_t cause, const action_t* owner ) : p( p_ )
 {
+  // 261001-bac stage 0: a CAST-class cause with no press yet is a freshly resolved foreground
+  // cast (action_t::rl_resolve_cause()'s only CAST producer) -- the ledger numbers it here, once.
+  // Every re-push of an existing cast's cause (travel, impact, ticks) carries its press from the
+  // state and skips this. One bool test when rl_buff_ledger= is off.
+  if ( p->sim->rl_bl_on && cause.cls == RL_CAUSE_CAST && cause.press < 0 )
+    cause.press = rl_buff_ledger::open_press( p, cause );
   p->rl_cause_stack.push_back( rl_cause_frame_t{ cause, owner } );
 }
 
@@ -106,6 +113,11 @@ void rl_credit_route( player_t* p, rl_cause_t cause, std::uint64_t now_seq, doub
   }
 
   ( expected ? p->rl_credit.exp : p->rl_credit.real )[ index ] += amount;
+
+  // 261001-bac stage 0: expected-side routings made outside accrue_expected_damage (the Windfury
+  // occurrence price) are written as `xp` records; accrue's own are `hit` records already.
+  if ( expected && p->sim->rl_bl_on )
+    rl_buff_ledger::xp_record( p, cause, amount, action_name );
 
   // Orphan census: realized-only, keyed by the contributing stats_t's own name (the only
   // identity a realized sink has -- stats_t::add_result carries no action_state_t/action_t).
