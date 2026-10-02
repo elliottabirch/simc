@@ -51,6 +51,12 @@ inline constexpr std::int16_t PRESS_NONE   = -1;
 inline constexpr std::int16_t PRESS_AUTO   = -2;  // the chain began at an AUTO swing (rl_resolve_cause)
 inline constexpr std::int16_t PRESS_ORPHAN = -3;  // the chain began with no cause context at all
 
+// Plan 12 (MJ-03): an action state's application id (`rl_bl_app`) is either 0 (none stamped), the `h` of an `app` record, or one of
+// these two reserved values (no record id can take them), which say why no application record exists for that state. Every
+// reader of the id treats a reserved value as "no parent".
+inline constexpr std::uint64_t APP_ZERO_REF = ~std::uint64_t( 0 );      // the application's reference periodic amount was 0
+inline constexpr std::uint64_t APP_PREMADE  = ~std::uint64_t( 0 ) - 1;  // a dot-applying hit executed from a pre-made state
+
 // Opens the output file (root sim only; refusals were already made by the caller, sim_t::setup)
 // and writes the `hdr` record. Sets up the ledger state on the root sim.
 void open_and_write_header( sim_t* sim );

@@ -143,8 +143,10 @@ void action_state_t::copy_state( const action_state_t* o )
   // so a DoT state copied from a hit state, a child action's state, or the ledger's own scratch
   // copies must not inherit it. Only the state run_passes() stamped carries an id.
   rl_bl_hit       = 0;
-  // Plan 04: the application's `app` id rides the copy (a DoT's state is a copy of the applying hit's).
-  rl_bl_app       = o->rl_bl_app;
+  // Plan 12 (MJ-03): the application's `app` id does NOT ride the copy: a child state copied from a hit that applied a DoT
+  // would hand its parent's application to the child's own DoT. It is carried explicitly where a DoT's state is copied from
+  // the applying hit's (action_t::trigger_dot, dot_t::copy).
+  rl_bl_app       = 0;
   // Plan 05: a copy is neither a full snapshot nor a premade state; the premade entry id is carried
   // explicitly where it matters (see action_state.hpp).
   rl_bl_snap      = -1;

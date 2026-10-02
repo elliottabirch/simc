@@ -84,6 +84,8 @@ struct state_t
     std::int32_t fr = -2;
     // Plan 07: the passes were taken from the cache (record field `cached`).
     bool cached = false;
+    // Plan 12 (MJ-01): the check result of an AoE pre-made hit (empty: not an AoE pre-made hit).
+    std::string pmc;
   };
   std::unordered_map<std::uint64_t, hit_entry_t> hit_table;
   std::uint64_t next_hit_id = 1;
@@ -270,6 +272,19 @@ struct state_t
   std::uint64_t ext_probe_fired = 0;
   std::uint64_t ext_matched_by_order = 0;
   std::map<std::string, std::pair<std::uint64_t, double>> ext_by_buff;
+  // Plan 12 (MJ-01, MJ-03): AoE pre-made hits drift-checked against their entry (ok + drift) or not checked (by reason); applications
+  // that wrote no `app` record (zero reference, pre-made state); ticks that named no parent, by reason; links that named another
+  // action's application.
+  std::uint64_t premade_aoe_checked = 0;
+  std::map<std::string, std::uint64_t> premade_aoe_unchecked;
+  std::uint64_t app_zero_ref = 0;
+  std::map<std::string, std::uint64_t> app_zero_ref_by_action;
+  std::uint64_t app_missing_premade = 0;
+  std::map<std::string, std::uint64_t> app_missing_premade_by_action;
+  std::uint64_t tick_parent_stale = 0;
+  std::map<std::string, std::uint64_t> tick_parent_stale_by_action;
+  std::uint64_t tick_null_parent = 0;
+  std::map<std::string, std::uint64_t> tick_null_parent_by_reason;
   bool ext_probe_single_done = false;
   bool ext_probe_multi_done = false;
 };
@@ -678,7 +693,78 @@ void write_footer( sim_t* sim )
       b += ']';
     }
   }
-  b += "}}\n";
+  b += "}";
+  // Plan 12 counters, task 2 (MJ-01, MJ-03).
+  fmt::format_to( out_it( b ),
+                  ",\"premade_aoe_checked\":{},\"app_zero_ref\":{},\"app_missing_premade\":{},\"tick_parent_stale\":{},"
+                  "\"tick_null_parent\":{}",
+                  s->premade_aoe_checked, s->app_zero_ref, s->app_missing_premade, s->tick_parent_stale, s->tick_null_parent );
+  b += ",\"premade_aoe_unchecked\":{";
+  {
+    bool first = true;
+    for ( const auto& kv : s->premade_aoe_unchecked )
+    {
+      if ( !first )
+        b += ',';
+      first = false;
+      put_string( b, kv.first );
+      fmt::format_to( out_it( b ), ":{}", kv.second );
+    }
+  }
+  b += '}';
+  b += ",\"app_zero_ref_by_action\":{";
+  {
+    bool first = true;
+    for ( const auto& kv : s->app_zero_ref_by_action )
+    {
+      if ( !first )
+        b += ',';
+      first = false;
+      put_string( b, kv.first );
+      fmt::format_to( out_it( b ), ":{}", kv.second );
+    }
+  }
+  b += '}';
+  b += ",\"app_missing_premade_by_action\":{";
+  {
+    bool first = true;
+    for ( const auto& kv : s->app_missing_premade_by_action )
+    {
+      if ( !first )
+        b += ',';
+      first = false;
+      put_string( b, kv.first );
+      fmt::format_to( out_it( b ), ":{}", kv.second );
+    }
+  }
+  b += '}';
+  b += ",\"tick_parent_stale_by_action\":{";
+  {
+    bool first = true;
+    for ( const auto& kv : s->tick_parent_stale_by_action )
+    {
+      if ( !first )
+        b += ',';
+      first = false;
+      put_string( b, kv.first );
+      fmt::format_to( out_it( b ), ":{}", kv.second );
+    }
+  }
+  b += '}';
+  b += ",\"tick_null_parent_by_reason\":{";
+  {
+    bool first = true;
+    for ( const auto& kv : s->tick_null_parent_by_reason )
+    {
+      if ( !first )
+        b += ',';
+      first = false;
+      put_string( b, kv.first );
+      fmt::format_to( out_it( b ), ":{}", kv.second );
+    }
+  }
+  b += '}';
+  b += "\n";
 
   s->out << b;
   s->out.flush();
@@ -757,6 +843,42 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
   const result_amount_type rt = a->report_amount_type( state );
   const bool tick = rt == result_amount_type::DMG_OVER_TIME || rt == result_amount_type::HEAL_OVER_TIME;
 
+  // Plan 12 (MJ-03): the parent of a tick. The application id the DoT's state carries, unless it is a reserved value (no
+  // record exists: say why) or names the application of another action (stale); a tick action's tick names its entry. Every
+  // tick with no parent is counted by reason.
+  std::uint64_t parent = 0;
+  if ( tick )
+  {
+    const char* null_reason = nullptr;
+    const std::uint64_t id  = state->rl_bl_app;
+    if ( id == APP_ZERO_REF )
+      null_reason = "zero_ref";
+    else if ( id == APP_PREMADE )
+      null_reason = "premade";
+    else if ( id != 0 )
+    {
+      auto ap = s->apps.find( id );
+      if ( ap != s->apps.end() && ap->second.action == a )
+        parent = id;
+      else
+      {
+        null_reason = "stale";
+        ++s->tick_parent_stale;
+        ++s->tick_parent_stale_by_action[ a->name() ];
+      }
+    }
+    else if ( state->rl_bl_pm != 0 )
+      parent = state->rl_bl_pm;
+    else
+      null_reason = "none";
+    if ( parent == 0 )
+    {
+      ++s->tick_null_parent;
+      ++s->tick_null_parent_by_reason[ fmt::format( "{}|{}", a->name(), null_reason ) ];
+    }
+  }
+  std::string pmc_text;
+
   // Plan 03: attach the hide-and-recompute result run_passes() parked for this state, if any. An
   // id that is not in the table was already consumed (or the state never ran passes) and is not an
   // error; an id whose action or target differs from this hit's is STALE (status 5, counted).
@@ -785,11 +907,18 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
         pass_json = std::move( it->second.pass_json );
         guards_json = std::move( it->second.guards_json );
         cached = it->second.cached;
+        pmc_text = std::move( it->second.pmc );
+        if ( !pmc_text.empty() )
+        {
+          if ( pmc_text == "ok" || pmc_text == "drift" )
+            ++s->premade_aoe_checked;
+          else
+            ++s->premade_aoe_unchecked[ pmc_text ];
+        }
         // Plan 05: a hit that shares a candidate with the entry it names as parent (a tick's application, a
         // pre-made state's hand-over entry).
         if ( !it->second.cands.empty() )
-          count_both_group( s, tick ? ( state->rl_bl_app != 0 ? state->rl_bl_app : state->rl_bl_pm ) : state->rl_bl_pm,
-                            it->second.cands );
+          count_both_group( s, tick ? parent : state->rl_bl_pm, it->second.cands );
         const std::uint32_t n = it->second.n_passes;
         s->passes_total += n;
         ++s->pass_hist[ std::min<std::size_t>( n, PASS_HIST_SIZE - 1 ) ];
@@ -828,7 +957,6 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
   // written when the state was handed to schedule_execute. Direct hits never carry `parent`.
   if ( tick )
   {
-    const std::uint64_t parent = state->rl_bl_app != 0 ? state->rl_bl_app : state->rl_bl_pm;
     if ( parent != 0 )
       fmt::format_to( out_it( b ), "],\"par\":[{0}],\"parent\":{0}", parent );
     else
@@ -846,6 +974,11 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
   }
   // Plan 06: the frame the hit's passes ran in (the sink's own frame when it had none).
   fmt::format_to( out_it( b ), ",\"fr\":{}", fr );
+  if ( !pmc_text.empty() )
+  {
+    b += ",\"pmc\":";
+    put_string( b, pmc_text );
+  }
   if ( cached )
     b += ",\"cached\":true";
   b += "}\n";
@@ -2566,7 +2699,13 @@ void run_app_passes( state_t* st, action_t* a, action_state_t* s, action_state_t
   }
   const double ref_periodic = sp.passes[ 0 ].amount.pre;
   if ( sp.status == 0 && ref_periodic == 0.0 )
+  {
+    // Plan 12 (MJ-03): no record is written; the state says why, so a tick of this application is a counted null parent.
+    s->rl_bl_app = APP_ZERO_REF;
+    ++st->app_zero_ref;
+    ++st->app_zero_ref_by_action[ a->name() ];
     return;
+  }
 
   s->rl_bl_app = write_app_record( st, a, s, sp, guards, ref_periodic, nullptr );
 }
@@ -2686,17 +2825,64 @@ rng::rng_t* rng_access( sim_t* sim, const char* family )
   return &st->scratch_rng;
 }
 
+// Plan 12 (MJ-03): a dot-applying hit executed from a pre-made state writes no `app` record (its DoT state would rest on a
+// snapshot this execute did not make): the state says so, and the count tells the ticks' null parents apart from a zero reference.
+void note_app_missing_premade( state_t* st, action_t* a, action_state_t* s )
+{
+  if ( a->tick_action == nullptr && a->dot_duration > timespan_t::zero() && action_t::result_is_hit( s->result ) )
+  {
+    s->rl_bl_app = APP_PREMADE;
+    ++st->app_missing_premade;
+    ++st->app_missing_premade_by_action[ a->name() ];
+  }
+}
+
+// Plan 12 (MJ-01): the check result of an AoE pre-made hit: "ok" (the real amount equals the entry's reference amount bit for
+// bit), "drift" (it does not; `drift` is set), or why it could not be checked: "multi_target" (more than one target, or a chain),
+// "other_target" (the hit's target is not the target the state was made for), "no_entry" (nothing was handed over, or the entry
+// belongs to another action), "target_changed" (the re-snapshotted fields differ from the hand-over snapshot), "result" (a miss,
+// dodge, parry or glancing blow: its amount is not the reference amount).
+const char* aoe_premade_check( state_t* st, action_t* a, action_state_t* s, const action_state_t* pre, bool& drift )
+{
+  if ( s->n_targets != 1 || s->chain_target != 0 )
+    return "multi_target";
+  if ( s->target != pre->target )
+    return "other_target";
+  if ( pre->rl_bl_pm == 0 )
+    return "no_entry";
+  auto it = st->apps.find( pre->rl_bl_pm );
+  if ( it == st->apps.end() || it->second.action != a )
+    return "no_entry";
+  if ( snapshot_diff( s, pre ) != 0 )
+    return "target_changed";
+  if ( action_t::result_is_miss( s->result ) || s->result == RESULT_GLANCE )
+    return "result";
+  if ( same_bits( s->result_amount, it->second.ref_pre ) )
+    return "ok";
+  drift = true;
+  return "drift";
+}
+
 void run_passes( action_t* a, action_state_t* s, const action_state_t* pre )
 {
   state_t* st = state_of( a->sim );
   if ( st == nullptr || !st->in_fight || !belongs_to_actor( *st, a->player ) )
     return;
+  // Plan 05: a pre-made state re-snapshotted per target (AoE execute). The entry written when it was handed
+  // to schedule_execute rides this hit as its parent. Plan 12 (MJ-01): taken BEFORE the result-type return (an AoE execute
+  // of a pre-made DMG_OVER_TIME state named no parent), and a pre-made state with no entry is counted here as it is in
+  // premade_hit (premade_uncovered now covers both branches).
+  if ( pre != nullptr )
+  {
+    s->rl_bl_pm = pre->rl_bl_pm;
+    if ( pre->rl_bl_pm == 0 )
+    {
+      ++st->premade_uncovered;
+      ++st->uncovered_by_action[ a->name() ];
+    }
+  }
   if ( s->result_type != result_amount_type::DMG_DIRECT )
     return;
-  // Plan 05: a pre-made state re-snapshotted per target (AoE execute). The entry written when it was handed
-  // to schedule_execute rides this hit as its parent.
-  if ( pre != nullptr )
-    s->rl_bl_pm = pre->rl_bl_pm;
 
   // A state that will never reach hit_sink (assess_damage skips a zero-raw hit that is not a miss;
   // an action without stats routes nothing) gets its snapshot checked but nothing parked.
@@ -2710,6 +2896,26 @@ void run_passes( action_t* a, action_state_t* s, const action_state_t* pre )
   entry.action = a;
   entry.target = s->target;
   entry.fr     = cur_frame( st );
+
+  // Plan 12 (MJ-01): an AoE pre-made hit at one target is drift-checked against its entry's reference amount exactly as
+  // premade_hit does for a single-target execute. Every AoE pre-made hit carries the result of this check (record field pmc).
+  if ( pre != nullptr )
+  {
+    bool drift = false;
+    entry.pmc  = aoe_premade_check( st, a, s, pre, drift );
+    if ( drift )
+    {
+      ++st->premade_drift;
+      if ( will_sink )
+      {
+        entry.status           = 6;
+        const std::uint64_t id = st->next_hit_id++;
+        st->hit_table.emplace( id, std::move( entry ) );
+        s->rl_bl_hit = id;
+      }
+      return;
+    }
+  }
   split_t sp;
   cache_ctx_t cx;
   if ( !cache_lookup( st, a, dealer, owner, s, pre != nullptr ? CK_HIT_TARGET : CK_HIT, 0.0,
@@ -2762,6 +2968,8 @@ void run_passes( action_t* a, action_state_t* s, const action_state_t* pre )
   if ( pre == nullptr && a->tick_action == nullptr && a->dot_duration > timespan_t::zero() &&
        action_t::result_is_hit( s->result ) )
     run_app_passes( st, a, s, scratch, dealer, owner );
+  else if ( pre != nullptr )
+    note_app_missing_premade( st, a, s );
 }
 
 void premade_snapshot( action_t* a, action_state_t* s )
@@ -2790,6 +2998,7 @@ void premade_hit( action_t* a, action_state_t* s, const action_state_t* pre )
   if ( st == nullptr || !st->in_fight || !belongs_to_actor( *st, a->player ) )
     return;
   s->rl_bl_pm = pre->rl_bl_pm;
+  note_app_missing_premade( st, a, s );
   if ( pre->rl_bl_pm == 0 )
   {
     ++st->premade_uncovered;

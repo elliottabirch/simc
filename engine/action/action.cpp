@@ -5164,6 +5164,9 @@ void action_t::trigger_dot( action_state_t* s )
   if ( !dot->state )
     dot->state = get_state();
   dot->state->copy_state( s );
+  // 261001-bac plan 12 (MJ-03): the DoT's state is a copy of the applying hit's: it keeps that hit's application id.
+  if ( sim->rl_bl_on )
+    dot->state->rl_bl_app = s->rl_bl_app;
 
   if ( !dot->is_ticking() )
   {

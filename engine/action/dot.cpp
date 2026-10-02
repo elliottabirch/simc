@@ -271,6 +271,9 @@ void dot_t::copy( player_t* destination, dot_copy_e copy_type, action_t* copy_ac
     target_state = other_dot->state;
     target_state->copy_state( state );
   }
+  // 261001-bac plan 12 (MJ-03): a spread dot keeps its parent application (the copy no longer carries the id).
+  if ( sim.rl_bl_on )
+    target_state->rl_bl_app = state->rl_bl_app;
   target_state->target = other_dot->target;
   target_state->action = copy_action;
 
