@@ -73,6 +73,9 @@ struct state_t
     std::string pass_json;  // the entries of hit.pass, comma separated, no brackets
     std::string guards_json;  // plan 04: names of the shadow guards that fired (status 2), quoted, comma separated
     std::uint32_t n_passes = 0;
+    // Plan 05: the candidates written for the hit, so the footer's both_group_candidates is counted where the
+    // record is written (hit_sink) and always equals a recount over the records.
+    std::vector<buff_t*> cands;
   };
   std::unordered_map<std::uint64_t, hit_entry_t> hit_table;
   std::uint64_t next_hit_id = 1;
@@ -467,6 +470,11 @@ void set_in_hit_sink( sim_t* sim, bool on )
     s->in_hit_sink = on;
 }
 
+namespace
+{
+void count_both_group( state_t* st, std::uint64_t parent_id, const std::vector<buff_t*>& cands );
+}
+
 void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool exp_excl )
 {
   sim_t* sim = a->sim;
@@ -507,6 +515,11 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
         cand_json = std::move( it->second.cand_json );
         pass_json = std::move( it->second.pass_json );
         guards_json = std::move( it->second.guards_json );
+        // Plan 05: a hit that shares a candidate with the entry it names as parent (a tick's application, a
+        // pre-made state's hand-over entry).
+        if ( !it->second.cands.empty() )
+          count_both_group( s, tick ? ( state->rl_bl_app != 0 ? state->rl_bl_app : state->rl_bl_pm ) : state->rl_bl_pm,
+                            it->second.cands );
         const std::uint32_t n = it->second.n_passes;
         s->passes_total += n;
         ++s->pass_hist[ std::min<std::size_t>( n, PASS_HIST_SIZE - 1 ) ];
@@ -1474,6 +1487,8 @@ void run_passes( action_t* a, action_state_t* s, const action_state_t* pre )
   {
     entry.status = sp.status;
     write_candidates( entry.cand_json, sp, s->target );
+    if ( !entry.cand_json.empty() )
+      entry.cands = sp.cands;
     for ( const pass_rec_t& p : sp.passes )
       put_pass( entry.pass_json, p );
     entry.n_passes = static_cast<std::uint32_t>( sp.passes.size() );
@@ -1481,9 +1496,6 @@ void run_passes( action_t* a, action_state_t* s, const action_state_t* pre )
     const std::uint64_t id = st->next_hit_id++;
     st->hit_table.emplace( id, std::move( entry ) );
     s->rl_bl_hit = id;
-    // Counted only for a hit that will be written (the recount reads the records).
-    if ( pre != nullptr )
-      count_both_group( st, pre->rl_bl_pm, sp.cands );
   }
 
   // Plan 04: a hit that applies a damage-over-time effect (no tick_action) also records what the effect's
@@ -1576,11 +1588,8 @@ void run_tick_passes( action_t* a, action_state_t* d_state, double tick_multipli
     entry.guards_json = finish_unsafe( st, sp );
   }
 
-  // A tick that shares a candidate buff with its application: the product rule in LEDGER-FORMAT.md is
-  // then only approximate for that buff.
-  if ( will_sink )
-    count_both_group( st, d_state->rl_bl_app, sp.cands );
-
+  // (A tick that shares a candidate buff with its application is counted in hit_sink, where its record is
+  // written: the product rule in LEDGER-FORMAT.md is then only approximate for that buff.)
   // A previous tick's parked entry that never reached the sink (zero raw amount) is dropped.
   if ( d_state->rl_bl_hit != 0 )
   {
@@ -1592,6 +1601,8 @@ void run_tick_passes( action_t* a, action_state_t* d_state, double tick_multipli
 
   entry.status = sp.status;
   write_candidates( entry.cand_json, sp, d_state->target );
+  if ( !entry.cand_json.empty() )
+    entry.cands = sp.cands;
   for ( const pass_rec_t& p : sp.passes )
     put_pass( entry.pass_json, p );
   entry.n_passes = static_cast<std::uint32_t>( sp.passes.size() );
