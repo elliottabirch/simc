@@ -82,6 +82,8 @@ struct state_t
     std::vector<buff_t*> cands;
     // Plan 06: the innermost frame when the passes ran (-2: no passes ran, the sink takes its own frame).
     std::int32_t fr = -2;
+    // Plan 07: the passes were taken from the cache (record field `cached`).
+    bool cached = false;
   };
   std::unordered_map<std::uint64_t, hit_entry_t> hit_table;
   std::uint64_t next_hit_id = 1;
@@ -718,6 +720,7 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
   std::string cand_json;
   std::string pass_json;
   std::string guards_json;
+  bool cached = false;
   std::int32_t fr = cur_frame( s );
   if ( state->rl_bl_hit != 0 )
   {
@@ -737,6 +740,7 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
         cand_json = std::move( it->second.cand_json );
         pass_json = std::move( it->second.pass_json );
         guards_json = std::move( it->second.guards_json );
+        cached = it->second.cached;
         // Plan 05: a hit that shares a candidate with the entry it names as parent (a tick's application, a
         // pre-made state's hand-over entry).
         if ( !it->second.cands.empty() )
@@ -798,6 +802,8 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
   }
   // Plan 06: the frame the hit's passes ran in (the sink's own frame when it had none).
   fmt::format_to( out_it( b ), ",\"fr\":{}", fr );
+  if ( cached )
+    b += ",\"cached\":true";
   b += "}\n";
 }
 
@@ -1841,7 +1847,8 @@ struct split_t
 {
   std::vector<pass_rec_t> passes;
   std::vector<buff_t*> cands;
-  int status = 0;
+  int status   = 0;
+  bool cached  = false;  // plan 07: the passes were taken from the cache, not run
 };
 
 // Plan 06: a reference pass that gave exactly 0 writes a `zr` record: the action, the frame it ran in and the buffs
@@ -2142,6 +2149,7 @@ bool cache_lookup( state_t* st, action_t* a, player_t* dealer, player_t* owner, 
   const state_t::cache_val_t& val = vt->second;
   out.status                      = val.status;
   out.cands                       = val.cands;
+  out.cached                      = true;
   out.passes.reserve( val.passes.size() );
   for ( std::size_t i = 0; i < val.passes.size(); ++i )
   {
@@ -2266,6 +2274,8 @@ std::uint64_t write_app_record( state_t* st, action_t* a, action_state_t* s, con
   b += ']';
   if ( src != nullptr )
     fmt::format_to( out_it( b ), ",\"src\":\"{}\"", src );
+  if ( sp.cached )
+    b += ",\"cached\":true";
   if ( !guards.empty() )
   {
     b += ",\"guards\":[";
@@ -2476,6 +2486,7 @@ void run_passes( action_t* a, action_state_t* s, const action_state_t* pre )
   if ( will_sink )
   {
     entry.status = sp.status;
+    entry.cached = sp.cached;
     write_candidates( entry.cand_json, st, sp, s->target );
     if ( !entry.cand_json.empty() )
       entry.cands = sp.cands;
@@ -2597,6 +2608,7 @@ void run_tick_passes( action_t* a, action_state_t* d_state, double tick_multipli
     return;
 
   entry.status = sp.status;
+  entry.cached = sp.cached;
   write_candidates( entry.cand_json, st, sp, d_state->target );
   if ( !entry.cand_json.empty() )
     entry.cands = sp.cands;
