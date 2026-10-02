@@ -161,6 +161,8 @@ struct state_t
   // dealer's or its owner's own buff, and not a debuff the dealer put on the hit's own target), or
   // `cls<N>|press<pos|neg>` (the buff's own applier stamp is not a press: class N, press >= 0 or not).
   std::map<std::string, std::uint64_t> noncandidate_reads;
+  // Plan 05 diagnostic (footer `premade_uncovered_by_action`): premade_uncovered per action name.
+  std::map<std::string, std::uint64_t> uncovered_by_action;
 };
 
 namespace
@@ -388,6 +390,18 @@ void write_footer( sim_t* sim )
   {
     bool first = true;
     for ( const auto& kv : s->noncandidate_reads )
+    {
+      if ( !first )
+        b += ',';
+      first = false;
+      put_string( b, kv.first );
+      fmt::format_to( out_it( b ), ":{}", kv.second );
+    }
+  }
+  b += "},\"premade_uncovered_by_action\":{";
+  {
+    bool first = true;
+    for ( const auto& kv : s->uncovered_by_action )
     {
       if ( !first )
         b += ',';
@@ -987,7 +1001,7 @@ amount_t tick_pass( pass_env_t& env, double tick_multiplier, bool log_reads, std
 
 bool press_applied( const buff_t* b )
 {
-  const rl_cause_t& c = b->rl_applied_cause;
+  const rl_cause_t& c = b->rl_bl_applied;
   return ( c.cls == RL_CAUSE_PROC_OF_CAST || c.cls == RL_CAUSE_PROC_OF_DOT ) && c.press >= 0;
 }
 
@@ -1029,8 +1043,8 @@ void collect_candidates( state_t* st, player_t* dealer, player_t* owner, player_
     }
     if ( !press_applied( b ) )
     {
-      ++st->noncandidate_reads[ fmt::format( "{}|cls{}|press{}", b->name_str, static_cast<int>( b->rl_applied_cause.cls ),
-                                             b->rl_applied_cause.press >= 0 ? "pos" : "neg" ) ];
+      ++st->noncandidate_reads[ fmt::format( "{}|cls{}|press{}", b->name_str, static_cast<int>( b->rl_bl_applied.cls ),
+                                             b->rl_bl_applied.press >= 0 ? "pos" : "neg" ) ];
       continue;
     }
     out.push_back( b );
@@ -1079,7 +1093,7 @@ void put_candidate( std::string& b, std::size_t i, const buff_t* c, bool debuff 
   fmt::format_to( out_it( b ), ",\"kind\":\"{}\",\"stacks\":{},\"value\":", debuff ? "debuff" : ( is_stat ? "stat" : "buff" ),
                   c->check() );
   put_double( b, c->check_value() );
-  const rl_cause_t& ap = c->rl_applied_cause;
+  const rl_cause_t& ap = c->rl_bl_applied;
   fmt::format_to( out_it( b ), ",\"app\":[[{},{},{}]],\"cov\":false}}", ap.press, static_cast<int>( ap.cls ),
                   c->check() );
 }
@@ -1509,6 +1523,7 @@ void premade_hit( action_t* a, action_state_t* s, const action_state_t* pre )
   if ( pre->rl_bl_pm == 0 )
   {
     ++st->premade_uncovered;
+    ++st->uncovered_by_action[ a->name() ];
     return;
   }
   auto it = st->apps.find( pre->rl_bl_pm );
@@ -1683,7 +1698,7 @@ void run_swing_passes( action_t* a )
       put_string( b, c->name_str );
       b += ",\"owner\":";
       put_string( b, c->player->name() );
-      const rl_cause_t& ap = c->rl_applied_cause;
+      const rl_cause_t& ap = c->rl_bl_applied;
       fmt::format_to( out_it( b ), ",\"stacks\":{},\"kind\":\"{}\",\"app\":[[{},{},{}]],\"f\":", c->check(),
                       dynamic_cast<const stat_buff_t*>( c ) != nullptr ? "stat" : "speed", ap.press,
                       static_cast<int>( ap.cls ), c->check() );

@@ -156,6 +156,18 @@ public:
   // path keeps the last known applier). Reset in buff_t::reset(). Pure bookkeeping.
   rl_cause_t rl_applied_cause;
 
+  // 261001-bac plan 05 (research clone only, written only when rl_buff_ledger= is on, read only by the
+  // per-hit ledger): the ledger's own "who applied this buff" stamp. It equals rl_applied_cause except for
+  // a buff whose trigger was DEFERRED by the engine's aura delay (buff_delay_t, default_aura_delay 30 ms for
+  // every non-activated buff triggered in combat): that event runs with no cause on the stack, so
+  // rl_applied_cause is left as "unknown" (class ORPHAN, seq -1) -- measured on the stock rotation, Crash
+  // Lightning and Crackling Surge were never press-applied for that reason. rl_bl_applied instead takes the
+  // cause the delay event captured when the trigger was made (rl_bl_delay_cause, set around the delayed
+  // execute only). rl_applied_cause itself is untouched, so buff ticks, expiry scopes and the existing
+  // credit routing stay exactly as they are.
+  rl_cause_t rl_bl_applied;
+  rl_cause_t rl_bl_delay_cause;
+
   // Ticking buff values
   unsigned current_tick;
   parsed_value_t<timespan_t> buff_period;

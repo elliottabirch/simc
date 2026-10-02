@@ -348,12 +348,23 @@ struct buff_delay_t : public buff_event_t
   timespan_t duration;
   int stacks;
 
+  // 261001-bac plan 05: the cause on the source player's stack at the moment of the trigger (promoted as
+  // rl_applied_cause is), kept so the delayed application can be stamped for the ledger. Unused (the
+  // default, "none") when the ledger is off.
+  rl_cause_t rl_bl_cause;
+
   buff_delay_t( buff_t* b, int stacks, double value, timespan_t d )
     : buff_event_t( b, b->rng().gauss( b->sim->default_aura_delay ) ),
       value( value ),
       duration( d ),
       stacks( stacks )
   {
+    if ( b->sim->rl_bl_on )
+    {
+      player_t* rl_source = rl_buff_source_player( b );
+      if ( rl_source && !rl_source->rl_cause_stack.empty() )
+        rl_bl_cause = rl_credit::promote( rl_source->rl_cause_stack.back().cause );
+    }
   }
 
   const char* name() const override
@@ -365,7 +376,13 @@ struct buff_delay_t : public buff_event_t
   {
     // Add a Cooldown check here to avoid extra processing due to delays
     if ( buff->cooldown->remains() == timespan_t::zero() )
+    {
+      if ( buff->sim->rl_bl_on )
+        buff->rl_bl_delay_cause = rl_bl_cause;
       buff->execute( stacks, value, duration );
+      if ( buff->sim->rl_bl_on )
+        buff->rl_bl_delay_cause = rl_cause_t{};
+    }
 
     auto it = range::find_if( buff->delay, [ this ]( const event_t* e ) {
       return e == this;
@@ -2552,6 +2569,10 @@ void buff_t::start( int stacks, double value, timespan_t duration )
       rl_applied_cause = rl_credit::promote( rl_source->rl_cause_stack.back().cause );
     else
       rl_applied_cause = rl_cause_t{};
+    // 261001-bac plan 05: the ledger's own stamp (see buff.hpp): the cause a deferred (aura delay) trigger
+    // captured when the stack is empty here.
+    if ( sim->rl_bl_on )
+      rl_bl_applied = ( rl_source && !rl_source->rl_cause_stack.empty() ) ? rl_applied_cause : rl_bl_delay_cause;
   }
 
   if ( value == DEFAULT_VALUE() )
@@ -2669,6 +2690,14 @@ void buff_t::refresh( int stacks, double value, timespan_t duration )
     player_t* rl_source = rl_buff_source_player( this );
     if ( rl_source && !rl_source->rl_cause_stack.empty() )
       rl_applied_cause = rl_credit::promote( rl_source->rl_cause_stack.back().cause );
+    // 261001-bac plan 05: as in start(); an empty stack with no deferred trigger leaves the stamp unchanged.
+    if ( sim->rl_bl_on )
+    {
+      if ( rl_source && !rl_source->rl_cause_stack.empty() )
+        rl_bl_applied = rl_applied_cause;
+      else if ( rl_bl_delay_cause.seq >= 0 )
+        rl_bl_applied = rl_bl_delay_cause;
+    }
   }
 
   if ( value == DEFAULT_VALUE() )
@@ -3269,6 +3298,8 @@ void buff_t::reset()
   // expire() (iteration/fight boundary, not a genuine game-state expiry) does not leak the
   // previous iteration's applier into this call's expire_callback/stack_change_callback scope.
   rl_applied_cause = rl_cause_t{};
+  rl_bl_applied     = rl_cause_t{};
+  rl_bl_delay_cause = rl_cause_t{};
   expire();
   last_start        = timespan_t::min();
   last_trigger      = timespan_t::min();
