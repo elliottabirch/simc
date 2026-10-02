@@ -251,6 +251,14 @@ struct sheet_fight_event_t : public raid_event_t
   // tstl-sylvanas 265-03: see sheet_fight_mark_state_t; a pure read, no consumer in Phase 265.
   std::vector<sheet_fight_mark_state_t> priority_marks_now() const;
 
+  // tstl-sylvanas 265-03: stun bookkeeping for a sheet-fight-spec/2 fight (see sheet_fight_stun_start in raid_event.cpp). Every stun,
+  // the engine's own and the controller's, goes through the shared start and end helpers; the controller counts how many hold
+  // each player so overlapping stuns do not release each other. Not used (tracks_stuns() false) for a /1 spec.
+  bool tracks_stuns() const;
+  void stun_claim_add( const player_t* p );
+  // Drops one claim; true when none is left (the stunned buff may now be lowered), also true when no claim was recorded.
+  bool stun_claim_release( const player_t* p );
+
 private:
   void _start() override {}
   void _finish() override {}

@@ -1382,6 +1382,12 @@ void sheet_fight_movement_begin( sim_t* sim, const std::vector<player_t*>& playe
 // 262-09 turn hand-back lives in exactly one function body. Every non-sheet fight runs the stock behaviour byte for byte.
 void sheet_fight_stun_start( player_t* p )
 {
+  // tstl-sylvanas 265-03: the engine's stunned buff holds ONE stack, so two stuns that overlap (a random stun landing while a
+  // sheet's own stun is up, or touching it) would be released by whichever ends first. Under a sheet-fight-spec/2 fight the
+  // controller counts the stuns holding each player and the buff is lowered only when the last one ends. A /1 spec, and every
+  // other fight style, takes the stock path.
+  if ( p->sim->fight_style == FIGHT_STYLE_SHEET_FIGHT && p->sim->sheet_fight && p->sim->sheet_fight->tracks_stuns() )
+    p->sim->sheet_fight->stun_claim_add( p );
   p->buffs.stunned->increment();
   p->in_combat = true;  // FIXME? this is done to ensure we don't end up in infinite loops of non-harmful actions with gcd=0
   p->stun();
@@ -1389,6 +1395,10 @@ void sheet_fight_stun_start( player_t* p )
 
 void sheet_fight_stun_end( sim_t* sim, player_t* p )
 {
+  // tstl-sylvanas 265-03: another stun still holds this player (see sheet_fight_stun_start): keep the buff up, no hand-back yet.
+  if ( sim->fight_style == FIGHT_STYLE_SHEET_FIGHT && sim->sheet_fight && sim->sheet_fight->tracks_stuns() &&
+       !sim->sheet_fight->stun_claim_release( p ) )
+    return;
   p->buffs.stunned->decrement();
 
   // tstl-sylvanas 262-09: stock interrupt() cancels the actor's Player-Ready event while it is stunned

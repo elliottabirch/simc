@@ -851,6 +851,9 @@ struct sheet_fight_event_t::impl_t
   };
   std::vector<pw_t> pwindows;
 
+  // ---- stun claims (tstl-sylvanas 265-03): per actor index, how many stuns currently hold that player (a /2 spec only).
+  std::vector<int> stun_depth;
+
   // ---- events ---------------------------------------------------------------------------------
   struct tick_event_t : event_t
   {
@@ -2293,6 +2296,7 @@ void sheet_fight_event_t::reset()
     for ( auto& rt : mech )
       rt = impl_t::rm_rt_t();
   im.pwindows.clear();
+  im.stun_depth.clear();
   for ( auto& wr : im.wave_rt )
     std::fill( wr.armed.begin(), wr.armed.end(), 0 );
   im.trigger_ready.assign( im.spec.phases.size(), 0 );
@@ -2384,6 +2388,29 @@ sheet_fight_forecast_t sheet_fight_forecast( const sim_t* sim )
   if ( !sim || sim->fight_style != FIGHT_STYLE_SHEET_FIGHT || !sim->sheet_fight )
     return {};
   return sim->sheet_fight->forecast();
+}
+
+bool sheet_fight_event_t::tracks_stuns() const
+{
+  return impl->spec.format == 2;
+}
+
+void sheet_fight_event_t::stun_claim_add( const player_t* p )
+{
+  auto& d       = impl->stun_depth;
+  const size_t i = p->actor_index;
+  if ( d.size() <= i )
+    d.resize( i + 1, 0 );
+  ++d[ i ];
+}
+
+bool sheet_fight_event_t::stun_claim_release( const player_t* p )
+{
+  auto& d       = impl->stun_depth;
+  const size_t i = p->actor_index;
+  if ( i >= d.size() || d[ i ] <= 0 )
+    return true;  // no claim was recorded: behave as the stock path does
+  return --d[ i ] == 0;
 }
 
 // tstl-sylvanas 265-03: the priority-mark view (a pure read; no consumer in Phase 265, see sheet_fight_mark_state_t).
