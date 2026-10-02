@@ -2473,3 +2473,9 @@ void note_swing_rescaled( action_t* a )
 }
 
 }  // namespace rl_buff_ledger
+
+// Plan 06 note (kept at the end of the file so no line number above it moves): the engine's generic proc switch --
+// dbc_proc_callback_t::activate_with_buff( buff ) turns a callback on while `buff` is up, deactivate_with_buff( buff )
+// while it is not -- registers itself with switch_register() (action/dbc_proc_callback.cpp), and the detached execution of
+// the callback (proc_event_t::execute) wraps cb->execute in a switch_scope_t, so the first launch the callback makes is
+// written as a `switch` launch carrying that buff and its appliers (D-03: a gate that needs no test).
