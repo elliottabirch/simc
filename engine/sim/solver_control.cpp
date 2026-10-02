@@ -1477,6 +1477,12 @@ void finish( sim_t* sim )
 // for the full justification; this body is deliberately just the clear.
 void reset_iteration( sim_t* sim )
 {
+  // Phase 266 (266-09, R7): re-seed the chooser's own dice once per fight, in scripted fights too (the
+  // chooser runs there as well, R13), BEFORE the early return below. The seed is derived from the sim seed,
+  // the thread, the fight index and a source name of its own; seeding takes nothing from any other stream.
+  sim->solver_target_rng.seed(
+      rng::per_source_seed( sim->seed, sim->thread_index, sim->rng_iteration_index(), "sim|solver_target" ) );
+
   if ( sim->solver_control_str.empty() && sim->solver_policy_str.empty() )
     return;
 

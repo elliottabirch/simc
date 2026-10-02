@@ -46,6 +46,7 @@
 #include "util/xml.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -1693,6 +1694,7 @@ sim_t::sim_t()
     target_select_enabled( false ),  // CR-06 (260902/cr4)
     target_scorer_force_rules( false ),  // 230-02 (SCOR-01, D-02/R-K)
     solver_funnel_mode( false ),  // 266-09 (R11)
+    solver_random_chosen_enemy( false ),  // 266-09 (R7, R11)
     ignore_invulnerable_targets( false ),
     enable_dps_healing( false ),
     count_overheal_as_heal( false ),
@@ -2128,6 +2130,21 @@ void sim_t::combat_begin()
   // own doc comment in sim/solver_control.hpp for why this hook (not
   // reset() itself) and exactly which four members it clears.
   solver_control::reset_iteration( this );
+
+  // Phase 266 (266-09): the funnel notice, ONCE per process at the first fight start, only when either funnel
+  // option is set (both off print nothing). SimulationCraft ignores an option it does not know with only a
+  // warning, so the launch support probe (scripts/rl/funnel.py check_support_output, es_polish.py
+  // check_funnel_launch_output) looks for exactly this line; an older binary never prints it.
+  if ( solver_funnel_mode || solver_random_chosen_enemy )
+  {
+    static std::atomic<bool> funnel_notice_printed{ false };
+    if ( !funnel_notice_printed.exchange( true ) )
+    {
+      fmt::print( "[RL_FUNNEL] funnel_mode={} random_chosen_enemy={}\n", solver_funnel_mode ? 1 : 0,
+                  solver_random_chosen_enemy ? 1 : 0 );
+      std::fflush( stdout );
+    }
+  }
 
   // Mid-fight per-source RNG re-salt (tstl-sylvanas quick task 260919-frk): schedule ONE event
   // per iteration at per_source_rng_resalt_at (relative to fight start -- current_time() is
@@ -4667,6 +4684,7 @@ void sim_t::create_options()
   add_option( opt_bool( "target_select_enabled", target_select_enabled ) );  // CR-06 (260902/cr4)
   add_option( opt_bool( "target_scorer_force_rules", target_scorer_force_rules ) );  // 230-02 (SCOR-01)
   add_option( opt_bool( "solver_funnel_mode", solver_funnel_mode ) );  // 266-09 (R11)
+  add_option( opt_bool( "solver_random_chosen_enemy", solver_random_chosen_enemy ) );  // 266-09 (R7, R11)
   add_option( opt_bool( "ignore_invulnerable_targets", ignore_invulnerable_targets ) );
   add_option( opt_bool( "enable_dps_healing", enable_dps_healing ) );
   add_option( opt_bool( "count_overheal_as_heal", count_overheal_as_heal ) );

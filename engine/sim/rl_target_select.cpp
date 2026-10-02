@@ -462,26 +462,31 @@ void refresh_chosen( player_t* p )
     return;
   }
 
-  // Otherwise pick the first enemy, in the list order, that can be hit AND is legal for this player's
-  // Stormstrike; failing that, the first that can be hit at all (R3). This plan builds only the
-  // first-in-order branch (the random branch is plan 266-09, R7).
-  const action_t* stormstrike = p->find_action( "stormstrike" );
-  player_t* first_hittable = nullptr;
-  player_t* pick          = nullptr;
+  // Otherwise pick among the enemies that can be hit AND are legal for this player's Stormstrike; failing
+  // that, among those that can be hit at all (R3). With the random option off the pick is the first in the
+  // list order. With it on (266-09, R7) and two or more eligible, the pick is uniform at random, one draw
+  // from the chooser's own per-fight stream (solver_target_rng): never the exploration stream, never the
+  // engine's. With fewer than two eligible there is no draw. It acts whatever the funnel flag is.
+  const action_t*        stormstrike = p->find_action( "stormstrike" );
+  std::vector<player_t*> hittable;
+  std::vector<player_t*> melee_legal;
   for ( player_t* t : p->sim->target_non_sleeping_list )
   {
     if ( !t->is_enemy() || !rl_can_be_hit( p, t ) )
       continue;
-    if ( first_hittable == nullptr )
-      first_hittable = t;
+    hittable.push_back( t );
     if ( stormstrike != nullptr && generic_filter( stormstrike, t, /*harmful=*/true ) )
-    {
-      pick = t;
-      break;
-    }
+      melee_legal.push_back( t );
   }
-  if ( pick == nullptr )
-    pick = first_hittable;
+  const std::vector<player_t*>& eligible = melee_legal.empty() ? hittable : melee_legal;
+  player_t*                     pick     = eligible.empty() ? nullptr : eligible.front();
+  if ( p->sim->solver_random_chosen_enemy && eligible.size() >= 2 )
+  {
+    size_t k = static_cast<size_t>( p->sim->solver_target_rng.range( 0.0, static_cast<double>( eligible.size() ) ) );
+    if ( k >= eligible.size() )
+      k = eligible.size() - 1;
+    pick = eligible[ k ];
+  }
 
   // With nothing hittable the old tag is kept (R2).
   if ( pick != nullptr )
