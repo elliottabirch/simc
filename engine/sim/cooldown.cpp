@@ -46,6 +46,10 @@ struct recharge_event_t : event_t
       cooldown_->last_charged = sim().current_time();
     }
 
+    // 261001-bac plan 07: the ledger sees a charge come back on its own (a ledger record only).
+    if ( sim().rl_bl_on )
+      rl_buff_ledger::cd_recharged( cooldown_ );
+
     if ( sim().debug )
     {
       auto base_duration = cooldown_->base_duration.total_seconds();
@@ -188,6 +192,7 @@ void cooldown_t::adjust_base_duration()
 {
   if ( sim.rl_bl_shadow )
     return rl_buff_ledger::blocked( &sim, "cooldown.adjust_base_duration" );
+  rl_buff_ledger::cd_scope_t rl_scope( this, "adjust_base_duration", sim.rl_bl_on );
 
   if ( !ongoing() )
   {
@@ -217,6 +222,7 @@ void cooldown_t::adjust_remaining_duration( double delta )
 {
   if ( sim.rl_bl_shadow )
     return rl_buff_ledger::blocked( &sim, "cooldown.adjust_remaining_duration" );
+  rl_buff_ledger::cd_scope_t rl_scope( this, "adjust_remaining_duration", sim.rl_bl_on );
 
   assert( ongoing() && delta > 0.0 );
   assert( charges > 0 && "Cooldown charges must be positive");
@@ -265,6 +271,7 @@ void cooldown_t::adjust( timespan_t amount, bool requires_reaction, bool apply_r
 {
   if ( sim.rl_bl_shadow )
     return rl_buff_ledger::blocked( &sim, "cooldown.adjust" );
+  rl_buff_ledger::cd_scope_t rl_scope( this, "adjust", sim.rl_bl_on );
 
   if ( amount == 0_ms )
     return;
@@ -384,6 +391,7 @@ void cooldown_t::reset( bool require_reaction, int charges_ )
 {
   if ( sim.rl_bl_shadow )
     return rl_buff_ledger::blocked( &sim, "cooldown.reset" );
+  rl_buff_ledger::cd_scope_t rl_scope( this, "reset", sim.rl_bl_on );
 
   if ( charges_ == 0 )
     return;
@@ -446,6 +454,11 @@ void cooldown_t::start( action_t* a, timespan_t _override, timespan_t delay )
   if ( sim.rl_bl_shadow )
     return rl_buff_ledger::blocked( &sim, "cooldown.start" );
 
+  // 261001-bac plan 07: what the ledger needs to see of the cooldown before it changes (a read, nothing else).
+  rl_buff_ledger::cd_snap_t rl_before;
+  if ( sim.rl_bl_on )
+    rl_before = rl_buff_ledger::cd_capture( this );
+
   // Zero duration cooldowns are nonsense
   if ( _override == 0_ms || ( _override < 0_ms && duration <= 0_ms ) )
   {
@@ -490,6 +503,8 @@ void cooldown_t::start( action_t* a, timespan_t _override, timespan_t delay )
     {
       ready = recharge_event->occurs() + 1_ms;
     }
+    if ( sim.rl_bl_on )
+      rl_buff_ledger::cd_started( this, rl_before, a );
     return;
   }
 
@@ -564,6 +579,9 @@ void cooldown_t::start( action_t* a, timespan_t _override, timespan_t delay )
   {
     ready_trigger_event = make_event<ready_trigger_event_t>( sim, *player, this );
   }
+
+  if ( sim.rl_bl_on )
+    rl_buff_ledger::cd_started( this, rl_before, a );
 }
 
 void cooldown_t::start( timespan_t _override, timespan_t delay )

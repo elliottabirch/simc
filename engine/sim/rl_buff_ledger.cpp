@@ -18,6 +18,7 @@
 #include "player/player.hpp"
 #include "sim/cooldown.hpp"
 #include "sim/decision_dump.hpp"
+#include "sim/event.hpp"
 #include "sim/sim.hpp"
 #include "util/io.hpp"
 #include "util/util.hpp"
@@ -47,7 +48,7 @@ constexpr std::size_t PASS_HIST_SIZE = 64;
 // The record kinds this build writes (the `hdr` record's `emits` list). stage0_checks.py reads
 // it to decide which identities it can assert.
 constexpr const char* EMITS_JSON =
-    "[\"hdr\",\"fb\",\"fe\",\"ftr\",\"pr\",\"hit\",\"xp\",\"app\",\"ln\",\"frm\",\"rd\",\"dr\",\"cs\",\"dotr\",\"zr\"]";
+    "[\"hdr\",\"fb\",\"fe\",\"ftr\",\"pr\",\"hit\",\"xp\",\"app\",\"ln\",\"frm\",\"rd\",\"dr\",\"cs\",\"dotr\",\"zr\",\"cyc\",\"ref\",\"use\",\"cdn\"]";
 }  // namespace
 
 // The ledger's state, defined here so sim.hpp never sees it (sim.hpp forward-declares it).
@@ -210,6 +211,24 @@ struct state_t
   std::map<std::string, std::uint64_t> noncandidate_reads;
   // Plan 05 diagnostic (footer `premade_uncovered_by_action`): premade_uncovered per action name.
   std::map<std::string, std::uint64_t> uncovered_by_action;
+
+  // Plan 07: the refund ledger. Per cooldown of the RL actor (and its pets): the recharge cycle in progress (-1:
+  // none) and the cycles whose charge is still held, oldest first (multi-charge cooldowns; a single-charge cooldown
+  // names its last cycle in `cur` and that cycle is complete as soon as the cooldown is up). Cleared at fight begin.
+  struct cd_state_t
+  {
+    std::int32_t cur = -1;
+    std::vector<std::int32_t> done;
+  };
+  std::unordered_map<const cooldown_t*, cd_state_t> cds;
+  std::int32_t next_cycle = 0;
+  // Plan 07 run totals (footer): records written by kind, and cycles the ledger had to open late because a cooldown
+  // was found recharging with no cycle known (diagnostic, expected 0).
+  std::uint64_t cycles_written = 0;
+  std::uint64_t refunds_written = 0;
+  std::uint64_t uses_written = 0;
+  std::uint64_t cdn_written = 0;
+  std::uint64_t cd_recovered = 0;
 };
 
 namespace
@@ -366,6 +385,8 @@ void fight_begin( sim_t* sim )
   s->next_frame = 0;
   s->next_order = 0;
   s->dot_reads.clear();
+  s->cds.clear();
+  s->next_cycle = 0;
   g_frame_depth = 0;
   g_switch_stack.clear();
   update_gate();
@@ -576,7 +597,13 @@ void write_footer( sim_t* sim )
       fmt::format_to( out_it( b ), ":{}", kv.second );
     }
   }
-  b += "}}\n";
+  b += "}";
+  // Plan 07 counters (optional footer keys; LEDGER-FORMAT.md amendment 2026-10-02, plan 07).
+  fmt::format_to( out_it( b ),
+                  ",\"cycles_written\":{},\"refunds_written\":{},\"uses_written\":{},\"cdn_written\":{},"
+                  "\"cd_recovered\":{}",
+                  s->cycles_written, s->refunds_written, s->uses_written, s->cdn_written, s->cd_recovered );
+  b += "}\n";
 
   s->out << b;
   s->out.flush();
@@ -2472,6 +2499,260 @@ void note_swing_rescaled( action_t* a )
   if ( st == nullptr || !st->in_fight || !belongs_to_actor( *st, a->player ) )
     return;
   ++st->swing_rescaled;
+}
+
+// ==========================================================================
+// Plan 07: the refund ledger (cooldown cycles, refunds, uses, cooldown starts)
+// ==========================================================================
+
+namespace
+{
+// The cooldowns whose scope is open right now (outermost first): a scope opened for a cooldown that already has one
+// (adjust -> reset) writes nothing, the outermost scope owns the change and names itself as its source.
+std::vector<const cooldown_t*> g_cd_active;
+
+bool cd_tracked( const state_t* st, const cooldown_t* cd )
+{
+  return st != nullptr && st->in_fight && cd->charges >= 1 && cd->player != nullptr && belongs_to_actor( *st, cd->player );
+}
+
+// Time left in the cycle in progress, in milliseconds (0: none). The recharge event's remains for a multi-charge
+// cooldown, ready - now otherwise.
+std::int64_t cd_remaining_ms( const cooldown_t* cd )
+{
+  if ( cd->charges > 1 )
+    return cd->recharge_event != nullptr ? cd->recharge_event->remains().total_millis() : 0;
+  const timespan_t now = cd->sim.current_time();
+  return cd->ready > now ? ( cd->ready - now ).total_millis() : 0;
+}
+
+// The cause on top of the cooldown owner's cause stack (the refunding press); an owner with no frame open falls back
+// to the actor's stack, and none at all is an orphan with press -1 (refunds with no press cause refund nobody).
+rl_cause_t cd_top_cause( const state_t* st, const cooldown_t* cd )
+{
+  if ( !cd->player->rl_cause_stack.empty() )
+    return cd->player->rl_cause_stack.back().cause;
+  if ( st->actor != nullptr && st->actor != cd->player && !st->actor->rl_cause_stack.empty() )
+    return st->actor->rl_cause_stack.back().cause;
+  return rl_cause_t{};
+}
+
+void cd_begin_record( std::string& o, const char* kind, const cooldown_t* cd )
+{
+  fmt::format_to( out_it( o ), "{{\"k\":\"{}\",\"it\":{},\"t\":", kind, cd->sim.current_iteration );
+  put_double( o, cd->sim.current_time().total_seconds() );
+}
+
+double ms_to_seconds( std::int64_t ms )
+{
+  return static_cast<double>( ms ) / 1000.0;
+}
+
+std::int32_t cd_open_cycle( state_t* st, const cooldown_t* cd, std::int64_t len_ms, const action_t* a, bool recovered )
+{
+  const std::int32_t id = st->next_cycle++;
+  ++st->cycles_written;
+  if ( recovered )
+    ++st->cd_recovered;
+  std::string& o = st->fight_buf;
+  cd_begin_record( o, "cyc", cd );
+  fmt::format_to( out_it( o ), ",\"c\":{},\"cd\":", id );
+  put_string( o, cd->name_str );
+  o += ",\"actor\":";
+  put_string( o, cd->player->name() );
+  o += ",\"len\":";
+  put_double( o, ms_to_seconds( len_ms ) );
+  o += ",\"action\":";
+  put_string( o, a != nullptr ? std::string( a->name() ) : std::string() );
+  fmt::format_to( out_it( o ), ",\"ch\":{}", cd->charges > 1 ? cd->current_charge : 0 );
+  if ( recovered )
+    o += ",\"rec\":true";
+  o += "}\n";
+  return id;
+}
+
+void cd_write_ref( state_t* st, const cooldown_t* cd, std::int32_t c, std::int64_t ms, const char* src )
+{
+  const rl_cause_t cause = cd_top_cause( st, cd );
+  ++st->refunds_written;
+  std::string& o = st->fight_buf;
+  cd_begin_record( o, "ref", cd );
+  fmt::format_to( out_it( o ), ",\"c\":{},\"sec\":", c );
+  put_double( o, ms_to_seconds( ms ) );
+  fmt::format_to( out_it( o ), ",\"press\":{},\"cls\":{},\"src\":\"{}\",\"seq\":{},\"launch\":{}}}\n", cause.press,
+                  static_cast<int>( cause.cls ), src, cause.seq, cause.launch );
+}
+
+void cd_write_use( state_t* st, const cooldown_t* cd, std::int32_t c )
+{
+  const rl_cause_t cause = cd_top_cause( st, cd );
+  ++st->uses_written;
+  std::string& o = st->fight_buf;
+  cd_begin_record( o, "use", cd );
+  fmt::format_to( out_it( o ), ",\"c\":{},\"press\":{},\"cls\":{},\"seq\":{}}}\n", c, cause.press,
+                  static_cast<int>( cause.cls ), cause.seq );
+}
+
+void cd_write_cdn( state_t* st, const cooldown_t* cd, const action_t* a )
+{
+  const rl_cause_t cause = cd_top_cause( st, cd );
+  ++st->cdn_written;
+  std::string& o = st->fight_buf;
+  cd_begin_record( o, "cdn", cd );
+  o += ",\"cd\":";
+  put_string( o, cd->name_str );
+  o += ",\"action\":";
+  put_string( o, a != nullptr ? std::string( a->name() ) : std::string() );
+  fmt::format_to( out_it( o ), ",\"press\":{},\"cls\":{},\"seq\":{}}}\n", cause.press, static_cast<int>( cause.cls ),
+                  cause.seq );
+}
+}  // namespace
+
+cd_snap_t cd_capture( const cooldown_t* cd )
+{
+  cd_snap_t s;
+  s.up     = cd->up();
+  s.cc     = cd->current_charge;
+  s.ev     = cd->recharge_event != nullptr;
+  s.rem_ms = cd_remaining_ms( cd );
+  return s;
+}
+
+void cd_started( cooldown_t* cd, const cd_snap_t& before, const action_t* a )
+{
+  state_t* st = state_of( &cd->sim );
+  if ( !cd_tracked( st, cd ) )
+    return;
+  busy_scope_t busy;
+  state_t::cd_state_t& cs = st->cds[ cd ];
+  cd_write_cdn( st, cd, a );
+  if ( cd->charges > 1 )
+  {
+    // A charge was consumed: the oldest one that came from a completed cycle, unless an initial charge (older than
+    // every cycle of this fight) is still held.
+    if ( before.cc <= static_cast<int>( cs.done.size() ) && !cs.done.empty() )
+    {
+      cd_write_use( st, cd, cs.done.front() );
+      cs.done.erase( cs.done.begin() );
+    }
+    if ( cd->recharge_event != nullptr && ( !before.ev || cs.cur < 0 ) )
+      cs.cur = cd_open_cycle( st, cd, cd_remaining_ms( cd ), a, /*recovered=*/before.ev );
+  }
+  else
+  {
+    // One charge: the cycle that ran before this cast produced the charge it uses, if the cooldown was up (a cooldown
+    // restarted while it was still down abandons its cycle, nothing was produced).
+    if ( before.up && cs.cur >= 0 )
+      cd_write_use( st, cd, cs.cur );
+    cs.cur = cd_open_cycle( st, cd, cd_remaining_ms( cd ), a, false );
+  }
+}
+
+void cd_recharged( cooldown_t* cd )
+{
+  state_t* st = state_of( &cd->sim );
+  if ( !cd_tracked( st, cd ) )
+    return;
+  busy_scope_t busy;
+  state_t::cd_state_t& cs = st->cds[ cd ];
+  if ( cs.cur >= 0 )
+  {
+    cs.done.push_back( cs.cur );
+    cs.cur = -1;
+  }
+  if ( cd->recharge_event != nullptr )
+    cs.cur = cd_open_cycle( st, cd, cd_remaining_ms( cd ), nullptr, false );
+}
+
+void cd_scope_t::begin( cooldown_t* cd, const char* src )
+{
+  begun_ = true;
+  cd_    = cd;
+  if ( std::find( g_cd_active.begin(), g_cd_active.end(), cd ) != g_cd_active.end() )
+  {
+    nested_ = true;
+    return;
+  }
+  g_cd_active.push_back( cd );
+  state_t* st = state_of( &cd->sim );
+  if ( !cd_tracked( st, cd ) )
+    return;
+  track_  = true;
+  src_    = src;
+  before_ = cd_capture( cd );
+}
+
+void cd_scope_t::end()
+{
+  if ( nested_ )
+    return;
+  if ( !g_cd_active.empty() )
+    g_cd_active.pop_back();
+  if ( !track_ )
+    return;
+  state_t* st = state_of( &cd_->sim );
+  if ( !cd_tracked( st, cd_ ) )
+    return;
+  busy_scope_t busy;
+  state_t::cd_state_t& cs = st->cds[ cd_ ];
+  const cd_snap_t after   = cd_capture( cd_ );
+  const char* src         = src_;
+
+  if ( cd_->charges <= 1 )
+  {
+    // The one cycle: the net change of its remaining time. A cooldown that was up has no cycle in progress.
+    if ( before_.rem_ms <= 0 )
+      return;
+    if ( cs.cur < 0 )
+      cs.cur = cd_open_cycle( st, cd_, before_.rem_ms, nullptr, /*recovered=*/true );
+    const std::int64_t saved = before_.rem_ms - after.rem_ms;
+    if ( saved != 0 )
+      cd_write_ref( st, cd_, cs.cur, saved, ( std::strcmp( src, "adjust" ) == 0 && saved < 0 ) ? "delay" : src );
+    return;
+  }
+
+  // Several charges: the recharge event serves one charge at a time.
+  const int gained = after.cc - before_.cc;
+  const std::int64_t len_ms = ( cd_->recharge_multiplier * cd_->base_duration ).total_millis();
+  if ( gained <= 0 )
+  {
+    if ( !before_.ev || !after.ev || before_.rem_ms == after.rem_ms )
+      return;
+    if ( cs.cur < 0 )
+      cs.cur = cd_open_cycle( st, cd_, before_.rem_ms, nullptr, /*recovered=*/true );
+    const std::int64_t saved = before_.rem_ms - after.rem_ms;
+    cd_write_ref( st, cd_, cs.cur, saved, ( std::strcmp( src, "adjust" ) == 0 && saved < 0 ) ? "delay" : src );
+    return;
+  }
+
+  // Charges came back at once: the cycle in progress completes with what it had left, every further charge is a
+  // cycle that never had to run (refunded in full), and a recharge that continues is a new cycle that opens already
+  // partly elapsed (length - what it has left).
+  int first_extra = 0;
+  if ( before_.ev )
+  {
+    if ( cs.cur < 0 )
+      cs.cur = cd_open_cycle( st, cd_, before_.rem_ms, nullptr, /*recovered=*/true );
+    if ( before_.rem_ms != 0 )
+      cd_write_ref( st, cd_, cs.cur, before_.rem_ms, src );
+    cs.done.push_back( cs.cur );
+    cs.cur      = -1;
+    first_extra = 1;
+  }
+  for ( int i = first_extra; i < gained; ++i )
+  {
+    const std::int32_t id = cd_open_cycle( st, cd_, len_ms, nullptr, false );
+    cd_write_ref( st, cd_, id, len_ms, src );
+    cs.done.push_back( id );
+  }
+  if ( after.ev )
+  {
+    const std::int32_t id = cd_open_cycle( st, cd_, len_ms, nullptr, false );
+    const std::int64_t elapsed = len_ms - after.rem_ms;
+    if ( elapsed != 0 )
+      cd_write_ref( st, cd_, id, elapsed, src );
+    cs.cur = id;
+  }
 }
 
 }  // namespace rl_buff_ledger

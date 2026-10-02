@@ -229,4 +229,67 @@ struct switch_scope_t
 
 // dot.hpp: a damage-over-time condition read (is_ticking, current_stack, remains), counted per fight.
 void note_dot_read( const dot_t* d, bool non_zero );
+
+// ==========================================================================
+// 261001-bac plan 07: the refund ledger (cooldown recharge cycles, refunds, uses, cooldown starts)
+// ==========================================================================
+//
+// Every cooldown of the RL actor and its pets keeps a list of recharge cycles. A cycle opens when a recharge starts
+// (cooldown_t::start, or the next charge of a multi-charge cooldown starting to recharge) with its real length, and
+// every change to the time it has left is an entry (`ref`) carrying the cause on top of the actor's cause stack at
+// that moment; the cast that consumes the charge a cycle produced is a `use` naming the cycle (oldest charge first).
+// A cast that starts a cooldown object is also written as `cdn` (so cooldown swaps, Storm Unleashed's second Crash
+// Lightning cooldown, show up in the audit even though no cooldown function sees them).
+//
+// All of it reads cooldown fields and writes ledger records after the engine's own logic, behind one `sim->rl_bl_on`
+// test at the call site; nothing here changes a cooldown, an event or a random number.
+
+struct cooldown_t;
+
+// What the ledger needs to see of a cooldown before a mutator runs (milliseconds, integers as the engine keeps them).
+struct cd_snap_t
+{
+  std::int64_t rem_ms = 0;  // time left in the cycle in progress (0: none); the recharge event's remains for charges > 1
+  int cc              = 0;  // current_charge
+  bool up             = true;
+  bool ev             = false;  // a recharge event was running
+};
+cd_snap_t cd_capture( const cooldown_t* cd );
+
+// cooldown_t::start(), after the engine's own logic, on the two paths that start something (a charge consumed while a
+// recharge was already running, and the normal start). `before` was taken at the top of start().
+void cd_started( cooldown_t* cd, const cd_snap_t& before, const action_t* a );
+
+// recharge_event_t::execute(), after the engine's own logic: a charge came back on its own.
+void cd_recharged( cooldown_t* cd );
+
+// RAII around adjust / reset / adjust_remaining_duration / adjust_base_duration (placed after the shadow guard). The
+// constructor takes the snapshot, the destructor writes the net change as `ref` entries. A scope opened inside
+// another (adjust -> reset) writes nothing: the outermost one owns the change and names itself as the source.
+class cd_scope_t
+{
+public:
+  cd_scope_t( cooldown_t* cd, const char* src, bool on )
+  {
+    if ( on )
+      begin( cd, src );
+  }
+  ~cd_scope_t()
+  {
+    if ( begun_ )
+      end();
+  }
+  cd_scope_t( const cd_scope_t& )            = delete;
+  cd_scope_t& operator=( const cd_scope_t& ) = delete;
+
+private:
+  void begin( cooldown_t* cd, const char* src );
+  void end();
+  cooldown_t* cd_  = nullptr;
+  const char* src_ = nullptr;
+  bool begun_      = false;
+  bool nested_     = false;  // another scope of the same cooldown is open: this one writes nothing
+  bool track_      = false;  // the cooldown belongs to the RL actor or its pets and a fight is running
+  cd_snap_t before_;
+};
 }  // namespace rl_buff_ledger
