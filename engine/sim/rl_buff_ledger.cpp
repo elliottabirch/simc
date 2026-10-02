@@ -11,6 +11,7 @@
 
 #include "action/action.hpp"
 #include "action/action_state.hpp"
+#include "buff/buff.hpp"
 #include "player/pet.hpp"
 #include "player/player.hpp"
 #include "sim/decision_dump.hpp"
@@ -20,10 +21,16 @@
 
 #include "fmt/format.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <iterator>
+#include <memory>
+#include <optional>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace rl_buff_ledger
 {
@@ -50,6 +57,25 @@ struct state_t
   bool in_hit_sink = false;
 
   player_t* actor = nullptr;  // the one non-pet, non-enemy player; its pets' hits are included
+
+  // Plan 03: results of the hide-and-recompute passes of hits that are in flight (snapshotted in
+  // execute, not yet at the hit sink). Keyed by the fresh id written to state->rl_bl_hit; the
+  // action and target are kept to detect a stale id. Emptied at every fight boundary.
+  struct hit_entry_t
+  {
+    const action_t* action = nullptr;
+    const player_t* target = nullptr;
+    int status = 0;
+    std::string cand_json;  // the entries of hit.cand, comma separated, no brackets
+    std::string pass_json;  // the entries of hit.pass, comma separated, no brackets
+    std::uint32_t n_passes = 0;
+  };
+  std::unordered_map<std::uint64_t, hit_entry_t> hit_table;
+  std::uint64_t next_hit_id = 1;
+  // One scratch state per action, owned here. NEVER taken from, or released into, an action's own
+  // free list (get_state / action_state_t::release): that would reorder the list and could change
+  // which recycled object later code receives.
+  std::unordered_map<const action_t*, std::unique_ptr<action_state_t>> scratch;
 
   // Per-fight
   std::int32_t next_press = 0;
@@ -145,6 +171,14 @@ void flush_fight( state_t& s )
 void open_and_write_header( sim_t* sim )
 {
   sim_t* root = root_of( sim );
+  // The passes re-run action_t::calculate_direct_amount on scratch states. Under average_range=1
+  // (the default) it draws no random number; with average_range=0 it would draw (a rounding draw
+  // at the end), and a ledgered run must be the same run as an unledgered one.
+  if ( !root->average_range )
+  {
+    throw sc_runtime_error( "rl_buff_ledger= requires average_range=1: the hide-and-recompute passes would "
+                            "draw random numbers from the action's generator." );
+  }
   auto st = std::make_shared<state_t>();
   st->path = root->rl_buff_ledger_str;
   st->out.open( st->path );
@@ -186,6 +220,7 @@ void fight_begin( sim_t* sim )
   s->fight_buf.clear();
   s->in_fight = true;
   s->in_hit_sink = false;
+  s->hit_table.clear();
   s->next_press = 0;
   s->last_press = -1;
   s->next_hit = 1;
@@ -207,6 +242,7 @@ void fight_end( sim_t* sim )
   if ( s == nullptr || !s->in_fight )
     return;
   s->in_fight = false;
+  s->hit_table.clear();
 
   // Same predicate rl_translog::record_close() writes as FLAG_COLLECTED (and sim_t's
   // datacollection_end() guard): iteration 0 is the warm-up fight unless there is only one.
@@ -343,6 +379,36 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
   const result_amount_type rt = a->report_amount_type( state );
   const bool tick = rt == result_amount_type::DMG_OVER_TIME || rt == result_amount_type::HEAL_OVER_TIME;
 
+  // Plan 03: attach the hide-and-recompute result run_passes() parked for this state, if any. An
+  // id that is not in the table was already consumed (or the state never ran passes) and is not an
+  // error; an id whose action or target differs from this hit's is STALE (status 5, counted).
+  int status = 0;
+  std::string cand_json;
+  std::string pass_json;
+  if ( state->rl_bl_hit != 0 )
+  {
+    auto it = s->hit_table.find( state->rl_bl_hit );
+    if ( it != s->hit_table.end() )
+    {
+      if ( it->second.action != a || it->second.target != state->target )
+      {
+        status = 5;
+        ++s->stale_hit_id;
+      }
+      else
+      {
+        status = it->second.status;
+        cand_json = std::move( it->second.cand_json );
+        pass_json = std::move( it->second.pass_json );
+        const std::uint32_t n = it->second.n_passes;
+        s->passes_total += n;
+        ++s->pass_hist[ std::min<std::size_t>( n, PASS_HIST_SIZE - 1 ) ];
+      }
+      s->hit_table.erase( it );
+    }
+    state->rl_bl_hit = 0;
+  }
+
   std::string& b = s->fight_buf;
   fmt::format_to( out_it( b ), "{{\"k\":\"hit\",\"it\":{},\"t\":", sim->current_iteration );
   put_double( b, sim->current_time().total_seconds() );
@@ -359,9 +425,13 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
   put_double( b, expected_amount );
   fmt::format_to( out_it( b ),
                   ",\"exp_excl\":{},\"seq\":{},\"cls\":{},\"press\":{},\"launch\":{},\"n_targets\":{},"
-                  "\"status\":0,\"cand\":[],\"pass\":[],\"par\":[]}}\n",
+                  "\"status\":{},\"cand\":[",
                   exp_excl ? "true" : "false", state->rl_cause_seq, static_cast<int>( state->rl_cause_class ),
-                  state->rl_cause_press, state->rl_cause_launch, state->n_targets );
+                  state->rl_cause_press, state->rl_cause_launch, state->n_targets, status );
+  b += cand_json;
+  b += "],\"pass\":[";
+  b += pass_json;
+  b += "],\"par\":[]}\n";
 }
 
 void xp_record( player_t* p, const rl_cause_t& cause, double amount, const char* action_name )
@@ -384,5 +454,356 @@ void xp_record( player_t* p, const rl_cause_t& cause, double amount, const char*
   put_string( b, p->name() );
   b += "}\n";
 }
+
+// ==========================================================================
+// Plan 03: hide-and-recompute passes
+// ==========================================================================
+namespace
+{
+// The snapshot fields compared bit for bit between a scratch pass and the real state. A mismatch is
+// reported in the pass entry's `viol` as a bitmask: bit i = SNAPSHOT_FIELDS[ i ], then the bits below.
+struct snapshot_field_t
+{
+  const char* name;
+  double action_state_t::*member;
+};
+
+const snapshot_field_t SNAPSHOT_FIELDS[] = {
+    { "crit_chance", &action_state_t::crit_chance },
+    { "target_crit_chance", &action_state_t::target_crit_chance },
+    { "haste", &action_state_t::haste },
+    { "attack_power", &action_state_t::attack_power },
+    { "spell_power", &action_state_t::spell_power },
+    { "versatility", &action_state_t::versatility },
+    { "da_multiplier", &action_state_t::da_multiplier },
+    { "ta_multiplier", &action_state_t::ta_multiplier },
+    { "rolling_ta_multiplier", &action_state_t::rolling_ta_multiplier },
+    { "player_multiplier", &action_state_t::player_multiplier },
+    { "versus_multiplier", &action_state_t::versus_multiplier },
+    { "persistent_multiplier", &action_state_t::persistent_multiplier },
+    { "pet_multiplier", &action_state_t::pet_multiplier },
+    { "target_da_multiplier", &action_state_t::target_da_multiplier },
+    { "target_ta_multiplier", &action_state_t::target_ta_multiplier },
+    { "target_pet_multiplier", &action_state_t::target_pet_multiplier },
+    { "target_mitigation_da_multiplier", &action_state_t::target_mitigation_da_multiplier },
+    { "target_mitigation_ta_multiplier", &action_state_t::target_mitigation_ta_multiplier },
+    { "target_armor", &action_state_t::target_armor },
+};
+constexpr std::size_t N_SNAPSHOT_FIELDS = sizeof( SNAPSHOT_FIELDS ) / sizeof( SNAPSHOT_FIELDS[ 0 ] );
+constexpr std::uint64_t VIOL_RESULT_TYPE = std::uint64_t( 1 ) << N_SNAPSHOT_FIELDS;
+constexpr std::uint64_t VIOL_PRE_CRIT = std::uint64_t( 1 ) << ( N_SNAPSHOT_FIELDS + 1 );
+
+// Bit-for-bit double equality (no tolerance, NaN-safe).
+bool same_bits( double x, double y )
+{
+  return std::memcmp( &x, &y, sizeof( double ) ) == 0;
+}
+
+std::uint64_t snapshot_diff( const action_state_t* x, const action_state_t* y )
+{
+  std::uint64_t mask = 0;
+  for ( std::size_t i = 0; i < N_SNAPSHOT_FIELDS; ++i )
+  {
+    if ( !same_bits( x->*( SNAPSHOT_FIELDS[ i ].member ), y->*( SNAPSHOT_FIELDS[ i ].member ) ) )
+      mask |= std::uint64_t( 1 ) << i;
+  }
+  if ( x->result_type != y->result_type )
+    mask |= VIOL_RESULT_TYPE;
+  return mask;
+}
+
+// A shadow scope: everything a hidden pass could leave behind is saved here and put back.
+//   * sim->debug / sim->log are cleared (print_debug, print_log and the class code that writes to
+//     sim->out_debug under `if ( sim->debug )` all go quiet) and restored;
+//   * sim->rl_bl_shadow is set, which buff_t::stack() (benefit counters) and the parse-effects
+//     snapshot_internal (post-snapshot callbacks) consult;
+//   * the stat caches of the dealer, of its owner when the dealer is a pet, and of the hit's target
+//     are saved by copy, invalidated before EVERY pass (with asserts compiled in, a read of a valid
+//     entry re-computes and asserts equality, so a hidden pass that found an entry the previous pass
+//     left valid would abort the program), and restored by assignment on exit. The recursive,
+//     side-effecting player_t::invalidate_cache() is never called.
+class shadow_scope_t
+{
+public:
+  shadow_scope_t( action_t* a, player_t* target )
+    : sim_( a->sim ), dealer_( a->player ), owner_( nullptr ), target_( target )
+  {
+    saved_debug_ = sim_->debug;
+    saved_log_   = sim_->log;
+    sim_->debug  = false;
+    sim_->log    = 0;
+    sim_->rl_bl_shadow = true;
+    if ( dealer_->is_pet() )
+      owner_ = static_cast<pet_t*>( dealer_ )->owner;
+    saved_dealer_.emplace( dealer_->cache );
+    if ( owner_ != nullptr && owner_ != dealer_ )
+      saved_owner_.emplace( owner_->cache );
+    if ( target_ != dealer_ && target_ != owner_ )
+      saved_target_.emplace( target_->cache );
+  }
+
+  shadow_scope_t( const shadow_scope_t& )            = delete;
+  shadow_scope_t& operator=( const shadow_scope_t& ) = delete;
+
+  // Before every pass.
+  void invalidate_caches()
+  {
+    dealer_->cache.invalidate_all();
+    if ( saved_owner_ )
+      owner_->cache.invalidate_all();
+    if ( saved_target_ )
+      target_->cache.invalidate_all();
+  }
+
+  ~shadow_scope_t()
+  {
+    dealer_->cache = *saved_dealer_;
+    if ( saved_owner_ )
+      owner_->cache = *saved_owner_;
+    if ( saved_target_ )
+      target_->cache = *saved_target_;
+    sim_->rl_bl_shadow = false;
+    sim_->debug        = saved_debug_;
+    sim_->log          = saved_log_;
+  }
+
+private:
+  sim_t* sim_;
+  player_t* dealer_;
+  player_t* owner_;
+  player_t* target_;
+  bool saved_debug_ = false;
+  int saved_log_    = 0;
+  std::optional<player_stat_cache_t> saved_dealer_;
+  std::optional<player_stat_cache_t> saved_owner_;
+  std::optional<player_stat_cache_t> saved_target_;
+};
+
+// Hiding a buff = what buff_t::expire leaves: stack 0 and value 0. Zeroing the fields (not a flag in
+// the read functions) also catches damage_buff_t's inline readers, remains() and any engine loop.
+// Restored bit for bit by the destructor.
+class hidden_buffs_t
+{
+public:
+  void hide( buff_t* b )
+  {
+    saved_.push_back( { b, b->current_stack, b->current_value } );
+    b->current_stack = 0;
+    b->current_value = 0.0;
+  }
+  ~hidden_buffs_t()
+  {
+    for ( auto it = saved_.rbegin(); it != saved_.rend(); ++it )
+    {
+      it->b->current_stack = it->stack;
+      it->b->current_value = it->value;
+    }
+  }
+
+private:
+  struct saved_t
+  {
+    buff_t* b;
+    int stack;
+    double value;
+  };
+  std::vector<saved_t> saved_;
+};
+
+struct amount_t
+{
+  double pre = 0.0;  // pre-crit amount (what calculate_direct_amount returns)
+  double cc  = 0.0;  // composite crit chance of the pass's state
+  double cb  = 0.0;  // total_crit_bonus of the pass's state
+};
+
+struct pass_rec_t
+{
+  const char* kind;
+  std::uint64_t hid;
+  amount_t amount;
+  std::uint64_t viol;
+};
+
+struct pass_env_t
+{
+  action_t* action;
+  action_state_t* real;
+  action_state_t* scratch;
+  shadow_scope_t* scope;
+};
+
+// One amount pass: the engine's own snapshot and direct-amount code on the scratch state, which is
+// first made to look like the real state did at its snapshot (fresh result fields, then the real
+// result and block result put back for the amount, as in the real order: snapshot, crit roll,
+// amount). Caches are invalidated first. Leaves the pass's snapshot in env.scratch.
+amount_t amount_pass( pass_env_t& env )
+{
+  env.scope->invalidate_caches();
+  action_state_t* sc = env.scratch;
+  sc->copy_state( env.real );
+  sc->action = env.action;
+  sc->result       = RESULT_NONE;
+  sc->block_result = BLOCK_RESULT_UNBLOCKED;
+  sc->result_raw = sc->result_total = sc->result_mitigated = sc->result_absorbed = sc->result_amount =
+      sc->self_absorb_amount = 0.0;
+  env.action->snapshot_state( sc, env.real->result_type );
+  sc->result       = env.real->result;
+  sc->block_result = env.real->block_result;
+
+  amount_t out;
+  out.pre = env.action->calculate_direct_amount( sc );
+  out.cc  = sc->composite_crit_chance();
+  out.cb  = env.action->total_crit_bonus( sc );
+  return out;
+}
+
+bool press_applied( const buff_t* b )
+{
+  const rl_cause_t& c = b->rl_applied_cause;
+  return ( c.cls == RL_CAUSE_PROC_OF_CAST || c.cls == RL_CAUSE_PROC_OF_DOT ) && c.press >= 0;
+}
+
+// Task 1's simple candidate rule (replaced by the read-log rule): every buff of the dealer (and of
+// its owner), and every buff on the target whose source is the dealer (or its owner), that is up and
+// was applied by a press.
+void collect_candidates_simple( player_t* dealer, player_t* owner, player_t* target, std::vector<buff_t*>& out )
+{
+  auto take = [ & ]( buff_t* b ) {
+    if ( b->check() > 0 && press_applied( b ) )
+      out.push_back( b );
+  };
+  for ( buff_t* b : dealer->buff_list )
+    take( b );
+  if ( owner != nullptr && owner != dealer )
+    for ( buff_t* b : owner->buff_list )
+      take( b );
+  for ( buff_t* b : target->buff_list )
+    if ( b->source == dealer || ( owner != nullptr && b->source == owner ) )
+      take( b );
+}
+
+void put_pass( std::string& b, const pass_rec_t& p )
+{
+  if ( !b.empty() )
+    b += ',';
+  fmt::format_to( out_it( b ), "{{\"kind\":\"{}\",\"hid\":{},\"pre\":", p.kind, p.hid );
+  put_double( b, p.amount.pre );
+  b += ",\"cc\":";
+  put_double( b, p.amount.cc );
+  b += ",\"cb\":";
+  put_double( b, p.amount.cb );
+  fmt::format_to( out_it( b ), ",\"per\":null,\"viol\":{}}}", p.viol );
+}
+
+void put_candidate( std::string& b, std::size_t i, const buff_t* c, bool debuff )
+{
+  if ( !b.empty() )
+    b += ',';
+  fmt::format_to( out_it( b ), "{{\"i\":{},\"name\":", i );
+  put_string( b, c->name_str );
+  b += ",\"owner\":";
+  put_string( b, c->player->name() );
+  fmt::format_to( out_it( b ), ",\"kind\":\"{}\",\"stacks\":{},\"value\":", debuff ? "debuff" : "buff", c->check() );
+  put_double( b, c->check_value() );
+  const rl_cause_t& ap = c->rl_applied_cause;
+  fmt::format_to( out_it( b ), ",\"app\":[[{},{},{}]],\"cov\":false}}", ap.press, static_cast<int>( ap.cls ),
+                  c->check() );
+}
+}  // namespace
+
+void run_passes( action_t* a, action_state_t* s )
+{
+  state_t* st = state_of( a->sim );
+  if ( st == nullptr || !st->in_fight || !belongs_to_actor( *st, a->player ) )
+    return;
+  if ( s->result_type != result_amount_type::DMG_DIRECT )
+    return;
+
+  // A state that will never reach hit_sink (assess_damage skips a zero-raw hit that is not a miss;
+  // an action without stats routes nothing) gets its snapshot checked but nothing parked.
+  const bool will_sink = a->stats != nullptr && ( s->result_raw > 0 || action_t::result_is_miss( s->result ) );
+
+  auto& scratch_slot = st->scratch[ a ];
+  if ( !scratch_slot )
+    scratch_slot.reset( a->new_state() );
+
+  player_t* dealer = a->player;
+  player_t* owner  = dealer->is_pet() ? static_cast<pet_t*>( dealer )->owner : nullptr;
+
+  state_t::hit_entry_t entry;
+  entry.action = a;
+  entry.target = s->target;
+  std::vector<pass_rec_t> passes;
+  std::vector<buff_t*> cands;
+
+  {
+    shadow_scope_t scope( a, s->target );
+    pass_env_t env{ a, s, scratch_slot.get(), &scope };
+
+    // Reference pass: nothing hidden. Must reproduce the real snapshot and pre-crit amount.
+    const amount_t ref = amount_pass( env );
+    std::uint64_t viol = snapshot_diff( env.scratch, s );
+    if ( !same_bits( ref.pre, s->result_amount ) )
+      viol |= VIOL_PRE_CRIT;
+    passes.push_back( { "ref", 0, ref, viol } );
+    if ( viol != 0 )
+    {
+      ++st->reference_mismatch;
+      entry.status = 3;
+    }
+    else if ( ref.pre != 0.0 )
+    {
+      collect_candidates_simple( dealer, owner, s->target, cands );
+      if ( cands.size() > 40 )
+      {
+        throw sc_runtime_error( fmt::format( "rl_buff_ledger=: {} candidate buffs on one hit of '{}'; the hidden-set "
+                                             "bitmask supports at most 40.",
+                                             cands.size(), a->name() ) );
+      }
+      if ( !cands.empty() )
+      {
+        for ( std::size_t i = 0; i < cands.size(); ++i )
+        {
+          hidden_buffs_t hidden;
+          hidden.hide( cands[ i ] );
+          passes.push_back( { "hide", std::uint64_t( 1 ) << i, amount_pass( env ), 0 } );
+        }
+
+        // Restoring pass: nothing hidden again, a fresh snapshot, so class members written by the
+        // hidden passes (shaman's mw_affected_stacks / mw_consumed_stacks) return to their real values.
+        const amount_t rest = amount_pass( env );
+        std::uint64_t rviol = snapshot_diff( env.scratch, s );
+        if ( !same_bits( rest.pre, s->result_amount ) )
+          rviol |= VIOL_PRE_CRIT;
+        passes.push_back( { "restore", 0, rest, rviol } );
+        if ( rviol != 0 )
+        {
+          ++st->restoring_mismatch;
+          entry.status = 4;
+        }
+        else
+          entry.status = 1;
+      }
+    }
+  }  // scope ends: caches, debug, log, shadow flag restored; hidden buffs were restored per pass
+
+  if ( !will_sink )
+    return;
+
+  if ( entry.status == 1 || entry.status == 4 )
+  {
+    for ( std::size_t i = 0; i < cands.size(); ++i )
+      put_candidate( entry.cand_json, i, cands[ i ], cands[ i ]->player == s->target );
+  }
+  for ( const pass_rec_t& p : passes )
+    put_pass( entry.pass_json, p );
+  entry.n_passes = static_cast<std::uint32_t>( passes.size() );
+
+  const std::uint64_t id = st->next_hit_id++;
+  st->hit_table.emplace( id, std::move( entry ) );
+  s->rl_bl_hit = id;
+}
+
 
 }  // namespace rl_buff_ledger

@@ -797,6 +797,10 @@ struct sim_t : private sc_thread_t
   // no profilesets. `rl_bl_on` is set once, in sim_t::init, from a non-empty option value.
   std::string rl_buff_ledger_str;
   bool rl_bl_on = false;
+  // True only while the ledger runs its extra (hidden / reference / restoring) amount passes
+  // (rl_buff_ledger.cpp, shadow_scope_t). Consulted by buff_t::stack() (no benefit-counter update)
+  // and by the parse-effects snapshot_internal (no post-snapshot callbacks). Never set otherwise.
+  bool rl_bl_shadow = false;
   std::shared_ptr<rl_buff_ledger::state_t> rl_bl_state;
   // The replay option (tstl-sylvanas phase 253, plan 253-02, REP-01/D-01/D-16). rl_rng_replay=
   // <path>, off by default (empty string), byte-identical to today's behaviour when unset. A

@@ -136,7 +136,10 @@ void action_state_t::copy_state( const action_state_t* o )
   // 261001-bac stage 0: the ledger's own numbers ride the same copy.
   rl_cause_press  = o->rl_cause_press;
   rl_cause_launch = o->rl_cause_launch;
-  rl_bl_hit       = o->rl_bl_hit;
+  // The ledger's per-hit entry id is NOT copied (plan 03): it names one hit's parked pass results,
+  // so a DoT state copied from a hit state, a child action's state, or the ledger's own scratch
+  // copies must not inherit it. Only the state run_passes() stamped carries an id.
+  rl_bl_hit       = 0;
   // 250-03 (REC-04): carries the press stamp alongside the cause stamp, for the same reason --
   // a DoT's own state at application/refresh remembers which press applied it.
   rl_press_outer_kind    = o->rl_press_outer_kind;

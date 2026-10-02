@@ -86,4 +86,19 @@ void set_in_hit_sink( sim_t* sim, bool on );
 // Expected-only pricing outside hits (the Windfury occurrence price), called from
 // rl_credit_route on every expected-side route not made by accrue_expected_damage.
 void xp_record( player_t* p, const rl_cause_t& cause, double amount, const char* action_name );
+
+// 261001-bac plan 03: hide-and-recompute for a direct hit whose state the engine snapshotted
+// inside action_t::execute. Called from execute()'s per-target work after the real amount
+// (`s->result_amount = calculate_direct_amount( s )`) and before schedule_travel( s ), only when
+// the state was snapshotted there (no pre_execute_state). The real hit is NOT touched: every pass
+// runs on a ledger-owned scratch copy inside a shadow scope (debug/log silenced, stat caches of the
+// dealer, its owner and the target saved, invalidated before every pass and restored by
+// assignment, benefit counters / post-snapshot callbacks / the parse-callback mask left as the
+// real pass had them). Passes: a REFERENCE pass (nothing hidden; its snapshot fields and pre-crit
+// amount must equal the real state's bit for bit), one pass per candidate buff hidden, every
+// hidden subset for up to 3 effective candidates (the all-hidden pass above 3), then a RESTORING
+// pass (nothing hidden; its snapshot fields and pre-crit amount must equal the real state's bit
+// for bit). The result is parked in a side table under a fresh id written to state->rl_bl_hit and
+// attached to the hit record by hit_sink.
+void run_passes( action_t* a, action_state_t* s );
 }  // namespace rl_buff_ledger

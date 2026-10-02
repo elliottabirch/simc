@@ -2154,6 +2154,11 @@ void action_t::execute()
       if ( sim->debug )
         s->debug();
 
+      // 261001-bac plan 03: hide-and-recompute passes for a state snapshotted right here (class-made
+      // pre_execute_states are plan 05's). One bool test when the ledger is off.
+      if ( sim->rl_bl_on && !pre_execute_state )
+        rl_buff_ledger::run_passes( this, s );
+
       schedule_travel( s );
     }
   };
