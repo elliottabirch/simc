@@ -43,9 +43,10 @@ struct action_state_t : private noncopyable
   std::int32_t    rl_cause_launch = -1;
   std::uint64_t   rl_bl_hit = 0;
   // 261001-bac plan 04: the id (`h`) of the `app` record written for the application this state was
-  // snapshotted in (a hit that applies a damage-over-time effect). Unlike rl_bl_hit it IS copied by
-  // copy_state, so the DoT's own state (a copy of the applying hit's state) carries it to every
-  // later tick, which names it as its parent. 0 = none.
+  // snapshotted in (a hit that applies a damage-over-time effect). The DoT's own state carries it to every
+  // later tick, which names it as its parent. Plan 12 (MJ-03): copy_state does NOT copy it (a child state copied
+  // from a hit that applied a DoT would hand its parent's application to the child's own DoT); it is carried
+  // explicitly where a DoT's state is copied from the applying hit's (action_t::trigger_dot, dot_t::copy). 0 = none.
   std::uint64_t   rl_bl_app = 0;
   // 261001-bac plan 05 (research clone only; neither field is copied by copy_state, both are reset by
   // initialize): `rl_bl_snap` is the sim time (ms) of the last FULL snapshot_internal of this very state

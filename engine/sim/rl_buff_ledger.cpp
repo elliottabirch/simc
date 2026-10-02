@@ -50,7 +50,7 @@ constexpr std::size_t PASS_HIST_SIZE = 64;
 // The record kinds this build writes (the `hdr` record's `emits` list). stage0_checks.py reads
 // it to decide which identities it can assert.
 constexpr const char* EMITS_JSON =
-    "[\"hdr\",\"fb\",\"fe\",\"ftr\",\"pr\",\"hit\",\"xp\",\"app\",\"ln\",\"frm\",\"rd\",\"dr\",\"cs\",\"dotr\",\"zr\",\"cyc\",\"ref\",\"use\",\"cdn\",\"ext\",\"rps\"]";
+    "[\"hdr\",\"fb\",\"fe\",\"ftr\",\"pr\",\"hit\",\"xp\",\"app\",\"ln\",\"frm\",\"rd\",\"dr\",\"cs\",\"dotr\",\"zr\",\"cyc\",\"ref\",\"use\",\"cdn\",\"ext\",\"exr\",\"rps\"]";
 }  // namespace
 
 // The ledger's state, defined here so sim.hpp never sees it (sim.hpp forward-declares it).
@@ -287,6 +287,14 @@ struct state_t
   std::uint64_t ext_unattributed = 0;
   std::uint64_t ext_probe_fired = 0;
   std::uint64_t ext_matched_by_order = 0;
+  // Plan 13 group 2c (review MJ-12-01, MN-12-02): extension windows of a synchronous multi-stack buff clipped (or dropped, nothing left)
+  // by a refresh that moved the shared end; asynchronous entries paired by order AFTER exact matching (some entries matched exactly);
+  // the extension probe's own refreshes (records `exr`) and its late extensions of a synchronous multi-stack buff.
+  std::uint64_t ext_partial_by_order = 0;
+  std::uint64_t ext_window_clipped = 0;
+  std::uint64_t ext_window_dropped = 0;
+  std::uint64_t ext_probe_refreshed = 0;
+  std::uint64_t ext_probe_sync_late = 0;
   std::map<std::string, std::pair<std::uint64_t, double>> ext_by_buff;
   // Plan 12 (MJ-01, MJ-03): AoE pre-made hits drift-checked against their entry (ok + drift) or not checked (by reason); applications
   // that wrote no `app` record (zero reference, pre-made state); ticks that named no parent, by reason; links that named another
@@ -303,6 +311,12 @@ struct state_t
   std::map<std::string, std::uint64_t> tick_null_parent_by_reason;
   bool ext_probe_single_done = false;
   bool ext_probe_multi_done = false;
+  // Plan 13 group 2c (MJ-12-02 c): per fight, a late extension of a synchronous multi-stack buff (stage 0 -> 1), then, once its window has
+  // passed, a second late extension (1 -> 2) followed by a refresh of that buff at the next press frame while the second window is
+  // still ahead (2 -> 3, record `exr`): the refresh moves the shared end inside the window (review MJ-12-01).
+  int ext_probe_sync_stage = 0;
+  buff_t* ext_probe_sync_buff = nullptr;
+  timespan_t ext_probe_sync_end = timespan_t::zero();
   // Plan 12, group 2 (MJ-04): a pass entry point reached while a pass is running is refused and counted (footer
   // nested_pass_refused, by entry point); the guard probe's nested scope and nested pass (probe_nesting_ok / _failed); the
   // probe's one dot cancel per fight (first tick pass set); the event blocks handed out inside a pass (never the pool's).
@@ -518,6 +532,8 @@ void fight_begin( sim_t* sim )
   s->probe_done = false;
   s->ext_probe_single_done = false;
   s->ext_probe_multi_done = false;
+  s->ext_probe_sync_stage = 0;
+  s->ext_probe_sync_buff = nullptr;
   s->probe_tick_done = false;
   s->charge_probe_done = false;
   // A fixed seed at every fight begin: the scratch stream is never a function of the fight's own streams.
@@ -744,9 +760,12 @@ void write_footer( sim_t* sim )
   // Plan 12 counters (optional footer keys; LEDGER-FORMAT.md amendment 2026-10-02, plan 12 group 1).
   fmt::format_to( out_it( b ),
                   ",\"ext_seen\":{},\"ext_in_frame\":{},\"ext_written\":{},\"ext_unattributed\":{},"
-                  "\"ext_probe_fired\":{},\"ext_matched_by_order\":{},\"ext_by_buff\":{{",
+                  "\"ext_probe_fired\":{},\"ext_matched_by_order\":{},"
+                  "\"ext_partial_by_order\":{},\"ext_window_clipped\":{},\"ext_window_dropped\":{},"
+                  "\"ext_probe_refreshed\":{},\"ext_probe_sync_late\":{},\"ext_by_buff\":{{",
                   s->ext_seen, s->ext_in_frame, s->ext_written, s->ext_unattributed, s->ext_probe_fired,
-                  s->ext_matched_by_order );
+                  s->ext_matched_by_order, s->ext_partial_by_order, s->ext_window_clipped, s->ext_window_dropped,
+                  s->ext_probe_refreshed, s->ext_probe_sync_late );
   {
     bool first = true;
     for ( const auto& kv : s->ext_by_buff )
@@ -1590,6 +1609,35 @@ void applier_post_bump( buff_t* b, int requested, int old_stack, const rl_cause_
     return;
   }
   state_t* st = state_of( b->sim );
+  // Plan 13 (review MJ-12-01): a refresh or an added stack of a synchronous multi-stack buff moves the ONE shared end, so from now on an
+  // earlier extension added nothing: every open extension window on its entries is clipped to end at this moment (to = min(to, now)),
+  // and a window with nothing left (it had not begun) is dropped. A refresh whose behaviour is disabled moves nothing and clips nothing.
+  if ( b->rl_bl_applying && b->stack_behavior != buff_stack_behavior::ASYNCHRONOUS &&
+       b->refresh_behavior != buff_refresh_behavior::DISABLED )
+  {
+    const timespan_t now = b->sim->current_time();
+    const bool counted   = st != nullptr && buff_of_actor( st, b );
+    for ( buff_t::rl_bl_applier_t& e : b->rl_bl_appliers )
+    {
+      for ( auto it = e.exts.begin(); it != e.exts.end(); )
+      {
+        if ( it->to > now )
+        {
+          it->to = now;
+          if ( !( it->from < it->to ) )
+          {
+            if ( counted )
+              ++st->ext_window_dropped;
+            it = e.exts.erase( it );
+            continue;
+          }
+          if ( counted )
+            ++st->ext_window_clipped;
+        }
+        ++it;
+      }
+    }
+  }
   int added;
   if ( b->max_stack() < 0 )
     added = requested;
@@ -1651,6 +1699,7 @@ void applier_extend( buff_t* b, const rl_cause_t& cause, player_t* source, times
     return;
   const timespan_t now = b->sim->current_time();
   bool changed         = false;
+  std::size_t unpaired = 0;  // plan 13 (MN-12-02): events with no entry plus entries with no event (asynchronous branch)
 
   if ( covering_mode( b ) )
   {
@@ -1677,32 +1726,68 @@ void applier_extend( buff_t* b, const rl_cause_t& cause, player_t* source, times
     }
     else
     {
-      // Independent stacks: each has its own expiration. Pair entries and moved events by the entry's own expiry
-      // (matched first, applied after, so an entry whose new expiry equals another event's old end is not matched twice).
-      std::vector<std::pair<std::size_t, std::size_t>> pairs;  // (entry, event)
+      // Independent stacks: each has its own expiration. Plan 13 (review MN-12-02), three steps, stack-weighted (an entry of k stacks holds
+      // k expiration events with its expiry):
+      //   1. exact: an entry takes the moved events whose old end equals its own expiry (at most its stacks), matched first and
+      //      applied after, so an entry whose new expiry equals another event's old end is not matched twice;
+      //   2. by order: the entries left over and the events left over are paired earliest with earliest (an entry takes up to its stacks);
+      //      pairs made when step 1 found nothing at all count in ext_matched_by_order (plan 12), pairs made after some exact match count
+      //      in ext_partial_by_order;
+      //   3. what is still unpaired (an event with no entry, an entry with no event) counts in ext_unattributed.
+      std::vector<std::pair<std::size_t, std::size_t>> pairs;  // (entry, first event taken)
+      std::vector<char> event_used( n_exp, 0 );
+      std::vector<char> entry_used( v.size(), 0 );
       for ( std::size_t i = 0; i < v.size(); ++i )
-        for ( std::size_t j = 0; j < n_exp; ++j )
-          if ( v[ i ].expiry == old_ends[ j ] )
-          {
-            pairs.emplace_back( i, j );
-            break;
-          }
-      if ( pairs.empty() )
       {
-        // No entry names a moved event's end (entries of a buff that was reconciled, or whose expiry the engine changed
-        // elsewhere): pair entries and events by order of expiry, earliest with earliest.
-        std::vector<std::size_t> order( v.size() );
-        for ( std::size_t i = 0; i < order.size(); ++i )
-          order[ i ] = i;
-        auto key = [ & ]( std::size_t i ) { return v[ i ].expiry == timespan_t::min() ? timespan_t::max() : v[ i ].expiry; };
-        std::stable_sort( order.begin(), order.end(), [ & ]( std::size_t a, std::size_t c ) { return key( a ) < key( c ); } );
-        std::vector<std::size_t> events( n_exp );
-        for ( std::size_t j = 0; j < n_exp; ++j )
-          events[ j ] = j;
-        std::stable_sort( events.begin(), events.end(), [ & ]( std::size_t a, std::size_t c ) { return old_ends[ a ] < old_ends[ c ]; } );
-        for ( std::size_t k = 0; k < std::min( order.size(), events.size() ); ++k )
-          pairs.emplace_back( order[ k ], events[ k ] );
-        if ( !pairs.empty() )
+        int room                = v[ i ].stacks > 0 ? v[ i ].stacks : 1;
+        std::size_t first_event = n_exp;
+        for ( std::size_t j = 0; j < n_exp && room > 0; ++j )
+          if ( !event_used[ j ] && v[ i ].expiry == old_ends[ j ] )
+          {
+            event_used[ j ] = 1;
+            --room;
+            if ( first_event == n_exp )
+              first_event = j;
+          }
+        if ( first_event != n_exp )
+        {
+          entry_used[ i ] = 1;
+          pairs.emplace_back( i, first_event );
+        }
+      }
+      const bool any_exact = !pairs.empty();
+      std::vector<std::size_t> order;
+      for ( std::size_t i = 0; i < v.size(); ++i )
+        if ( !entry_used[ i ] )
+          order.push_back( i );
+      auto key = [ & ]( std::size_t i ) { return v[ i ].expiry == timespan_t::min() ? timespan_t::max() : v[ i ].expiry; };
+      std::stable_sort( order.begin(), order.end(), [ & ]( std::size_t a, std::size_t c ) { return key( a ) < key( c ); } );
+      std::vector<std::size_t> events;
+      for ( std::size_t j = 0; j < n_exp; ++j )
+        if ( !event_used[ j ] )
+          events.push_back( j );
+      std::stable_sort( events.begin(), events.end(), [ & ]( std::size_t a, std::size_t c ) { return old_ends[ a ] < old_ends[ c ]; } );
+      std::size_t next_event = 0;
+      std::size_t by_order   = 0;
+      for ( std::size_t k = 0; k < order.size() && next_event < events.size(); ++k )
+      {
+        int room                = v[ order[ k ] ].stacks > 0 ? v[ order[ k ] ].stacks : 1;
+        const std::size_t first = events[ next_event ];
+        while ( room > 0 && next_event < events.size() )
+        {
+          event_used[ events[ next_event ] ] = 1;
+          ++next_event;
+          --room;
+        }
+        entry_used[ order[ k ] ] = 1;
+        pairs.emplace_back( order[ k ], first );
+        ++by_order;
+      }
+      if ( by_order > 0 )
+      {
+        if ( any_exact )
+          st->ext_partial_by_order += by_order;
+        else
           ++st->ext_matched_by_order;
       }
       for ( const auto& pr : pairs )
@@ -1712,6 +1797,12 @@ void applier_extend( buff_t* b, const rl_cause_t& cause, player_t* source, times
         e.expiry = new_ends[ pr.second ];
         changed  = true;
       }
+      for ( std::size_t j = 0; j < n_exp; ++j )
+        if ( !event_used[ j ] )
+          ++unpaired;
+      for ( std::size_t i = 0; i < v.size(); ++i )
+        if ( !entry_used[ i ] )
+          ++unpaired;
     }
   }
 
@@ -1721,6 +1812,8 @@ void applier_extend( buff_t* b, const rl_cause_t& cause, player_t* source, times
   ++st->ext_seen;
   if ( !changed )
     ++st->ext_unattributed;
+  else
+    st->ext_unattributed += unpaired;
   const std::int32_t f = innermost_frame( b->sim );
   if ( f >= 0 )
     ++st->ext_in_frame;
@@ -1764,16 +1857,49 @@ namespace
 // multi-stack buff (extend_duration when its stacks share one expiration, extend_async_duration when each has its own).
 void run_ext_probe( state_t* s, player_t* p, const rl_cause_t& cause )
 {
-  if ( s->ext_probe_single_done && s->ext_probe_multi_done )
+  if ( s->ext_probe_single_done && s->ext_probe_multi_done && s->ext_probe_sync_stage == 3 )
     return;
   if ( !s->in_fight || !s->cd_live || p != s->actor || cause.cls != RL_CAUSE_CAST || cause.press < 0 ||
        p->sim->rl_bl_shadow )
     return;
   busy_scope_t busy;  // the probe's own reads are no reads of the fight
-  const timespan_t two = timespan_t::from_seconds( 2.0 );
-  buff_t* single       = nullptr;
-  buff_t* multi        = nullptr;
-  auto better          = [ & ]( const buff_t* a, const buff_t* c ) {
+  const timespan_t two  = timespan_t::from_seconds( 2.0 );
+  const timespan_t late = timespan_t::from_seconds( 1.5 );
+  const timespan_t now  = p->sim->current_time();
+
+  // Plan 13 (MJ-12-02 c): the refresh that follows the second late extension of a synchronous multi-stack buff, at the next press frame while
+  // the extension's window is still ahead. It is an application by this press that moves the shared end (the engine clips the window);
+  // the probe writes `exr` as the independent evidence the checker clips the window by.
+  if ( s->ext_probe_sync_stage == 2 )
+  {
+    buff_t* sb              = s->ext_probe_sync_buff;
+    s->ext_probe_sync_stage = 3;
+    s->ext_probe_sync_buff  = nullptr;
+    if ( sb != nullptr && sb->current_stack > 0 && !sb->expiration.empty() && now < s->ext_probe_sync_end )
+    {
+      sb->execute( 1 );
+      std::string& o = s->fight_buf;
+      fmt::format_to( out_it( o ), "{{\"k\":\"exr\",\"it\":{},\"t\":", sb->sim->current_iteration );
+      put_double( o, now.total_seconds() );
+      fmt::format_to( out_it( o ), ",\"f\":{},\"buff\":", innermost_frame( sb->sim ) );
+      put_string( o, sb->name_str );
+      o += ",\"owner\":";
+      put_string( o, sb->player != nullptr ? std::string( sb->player->name() ) : std::string() );
+      o += ",\"end\":";
+      put_double( o, ( sb->expiration.empty() ? timespan_t::max() : sb->expiration.front()->occurs() ).total_seconds() );
+      fmt::format_to( out_it( o ), ",\"stacks\":{},\"press\":{},\"cls\":{},\"seq\":{},\"launch\":{}}}\n", sb->current_stack, cause.press,
+                      static_cast<int>( cause.cls ), cause.seq, cause.launch );
+      ++s->ext_probe_refreshed;
+    }
+  }
+
+  const bool want_late = s->ext_probe_sync_stage == 0 || ( s->ext_probe_sync_stage == 1 && now >= s->ext_probe_sync_end );
+  if ( s->ext_probe_single_done && s->ext_probe_multi_done && !want_late )
+    return;
+  buff_t* single = nullptr;
+  buff_t* multi  = nullptr;
+  buff_t* ending = nullptr;  // a synchronous multi-stack buff within 1.5 s of its end
+  auto better    = [ & ]( const buff_t* a, const buff_t* c ) {
     if ( c == nullptr )
       return true;
     const timespan_t ra = a->expiration.front()->remains();
@@ -1800,14 +1926,19 @@ void run_ext_probe( state_t* s, player_t* p, const rl_cause_t& cause )
     }
     else if ( b->max_stack() > 1 )
     {
-      if ( s->ext_probe_multi_done )
-        continue;
-      if ( b->stack_behavior != buff_stack_behavior::ASYNCHRONOUS && b->expiration.size() != 1 )
-        continue;
-      if ( better( b, multi ) )
+      if ( !s->ext_probe_multi_done && ( b->stack_behavior == buff_stack_behavior::ASYNCHRONOUS || b->expiration.size() == 1 ) &&
+           better( b, multi ) )
         multi = b;
+      if ( want_late && b->stack_behavior != buff_stack_behavior::ASYNCHRONOUS && b->expiration.size() == 1 )
+      {
+        const timespan_t rem = b->expiration.front()->remains();
+        if ( rem > timespan_t::zero() && rem <= late && better( b, ending ) )
+          ending = b;
+      }
     }
   }
+  if ( ending == multi )
+    ending = nullptr;  // never both in one call: the late extension waits for the next press frame
   g_ext_probing = true;
   if ( single != nullptr )
   {
@@ -1821,6 +1952,22 @@ void run_ext_probe( state_t* s, player_t* p, const rl_cause_t& cause )
       multi->extend_async_duration( two );
     else
       multi->extend_duration( two );
+  }
+  if ( ending != nullptr )
+  {
+    // Shortly before its end, so the window (old end to new end) is reached while moved stacks are still up. The first one is left alone
+    // (stage 1); once its window has passed the second is followed by a refresh (stage 2, executed at the next press frame).
+    const bool refreshed_next = s->ext_probe_sync_stage == 1;
+    ending->extend_duration( two );
+    ++s->ext_probe_sync_late;
+    s->ext_probe_sync_end = ending->expiration.empty() ? now : ending->expiration.front()->occurs();
+    if ( refreshed_next )
+    {
+      s->ext_probe_sync_stage = 2;
+      s->ext_probe_sync_buff  = ending;
+    }
+    else
+      s->ext_probe_sync_stage = 1;
   }
   g_ext_probing = false;
 }
@@ -2110,7 +2257,22 @@ public:
     update_gate();
     sim_->debug        = saved_debug_;
     sim_->log          = saved_log_;
-    st_->cur_guards    = std::move( saved_guards_ );
+    // Plan 13 (review MN-12-08): the guards that fired inside this scope are appended to the restored outer list (names already in it are
+    // not repeated), so a violation inside a nested scope still marks the outer pass set unsafe.
+    std::vector<const char*> inner = std::move( st_->cur_guards );
+    st_->cur_guards                = std::move( saved_guards_ );
+    for ( const char* g : inner )
+    {
+      bool known = false;
+      for ( const char* o : st_->cur_guards )
+        if ( std::strcmp( o, g ) == 0 )
+        {
+          known = true;
+          break;
+        }
+      if ( !known )
+        st_->cur_guards.push_back( g );
+    }
   }
 
 private:
@@ -2573,12 +2735,24 @@ void fire_guard_probe( state_t* st, action_t* a, player_t* dealer, player_t* tar
     const bool active_before = g_shadow_active;
     const bool debug_before  = a->sim->debug;
     const int log_before     = a->sim->log;
+    // Plan 13 (review MN-12-08): one guard is taken out of the outer list; a violation of it inside the inner scope must come back into
+    // the outer list when the inner scope is destroyed (the outer pass set is then marked unsafe by it).
+    const char* const planted = "buff.expire";
+    std::vector<const char*> without;
+    for ( const char* g : guards_before )
+      if ( std::strcmp( g, planted ) != 0 )
+        without.push_back( g );
+    st->cur_guards = without;
     {
       shadow_scope_t inner( st, a, target );
+      cand->expire();
     }
+    const bool came_back = std::any_of( st->cur_guards.begin(), st->cur_guards.end(),
+                                        [ & ]( const char* g ) { return std::strcmp( g, planted ) == 0; } );
+    st->cur_guards = guards_before;
     const bool intact = shadow_before && active_before && a->sim->rl_bl_shadow == shadow_before &&
                         g_shadow_active == active_before && a->sim->debug == debug_before &&
-                        a->sim->log == log_before && st->cur_guards == guards_before;
+                        a->sim->log == log_before && came_back;
     if ( intact )
       ++st->probe_nesting_ok;
     else
@@ -3862,14 +4036,17 @@ void cd_scope_t::begin( cooldown_t* cd, const char* src )
   track_      = false;
   src_        = src;
   before_max_ = cd->charges;
+  // Plan 13 (review MN-12-01): a set_max_charges scope marks its cooldown BEFORE the nested test, so it suppresses the restarts' records
+  // (and the outer scope's "charges came back" refund) when it runs inside another open scope of the same cooldown too; end() pops it
+  // for every scope of that source, nested or not.
+  if ( std::strcmp( src, "set_max_charges" ) == 0 )
+    g_cd_mc_active.push_back( cd );
   if ( std::find( g_cd_active.begin(), g_cd_active.end(), cd ) != g_cd_active.end() )
   {
     nested_ = true;
     return;
   }
   g_cd_active.push_back( cd );
-  if ( std::strcmp( src, "set_max_charges" ) == 0 )
-    g_cd_mc_active.push_back( cd );
   state_t* st = state_of( &cd->sim );
   if ( !cd_tracked( st, cd ) )
     return;
@@ -3879,12 +4056,12 @@ void cd_scope_t::begin( cooldown_t* cd, const char* src )
 
 void cd_scope_t::end()
 {
+  if ( std::strcmp( src_, "set_max_charges" ) == 0 && !g_cd_mc_active.empty() )
+    g_cd_mc_active.pop_back();
   if ( nested_ )
     return;
   if ( !g_cd_active.empty() )
     g_cd_active.pop_back();
-  if ( std::strcmp( src_, "set_max_charges" ) == 0 && !g_cd_mc_active.empty() )
-    g_cd_mc_active.pop_back();
   if ( !track_ )
     return;
   state_t* st = state_of( &cd_->sim );
