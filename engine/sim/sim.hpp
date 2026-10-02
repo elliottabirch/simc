@@ -81,6 +81,14 @@ namespace rl_rng_record
 class recorder_t;
 }
 
+// 261001-bac stage 0: per-hit buff ledger (research clone only). Forward declaration only --
+// sim.hpp must NOT include rl_buff_ledger.hpp; the state type is defined in rl_buff_ledger.cpp.
+// Held in a std::shared_ptr (type-erased deleter), exactly like rl_rng_recorder below.
+namespace rl_buff_ledger
+{
+struct state_t;
+}
+
 struct sim_progress_t
 {
   int current_iterations;
@@ -782,6 +790,14 @@ struct sim_t : private sc_thread_t
   // and drop this pointer, never instantiate its destructor.
   std::string rl_rng_record_file_str;
   std::shared_ptr<rl_rng_record::recorder_t> rl_rng_recorder;
+  // 261001-bac stage 0 (research clone only, never in production): rl_buff_ledger=<path> writes
+  // a per-hit JSON-lines ledger (see rl_buff_ledger.hpp). OFF by default (empty string). With it
+  // off every hook is the single bool test `rl_bl_on` and nothing else; with it on the ledger is
+  // a pure observer (reads, never rolls, never schedules). Refused by name unless threads=1 and
+  // no profilesets. `rl_bl_on` is set once, in sim_t::init, from a non-empty option value.
+  std::string rl_buff_ledger_str;
+  bool rl_bl_on = false;
+  std::shared_ptr<rl_buff_ledger::state_t> rl_bl_state;
   // The replay option (tstl-sylvanas phase 253, plan 253-02, REP-01/D-01/D-16). rl_rng_replay=
   // <path>, off by default (empty string), byte-identical to today's behaviour when unset. A
   // second fight loads the recording at <path> and, at every roll, reuses the recorded raw
