@@ -216,6 +216,12 @@ struct actor_cache_key_hash_t
 std::unordered_map<actor_cache_key_t, vb_lava_lash_geometry_t, actor_cache_key_hash_t>
     g_vb_lava_lash_geometry_cache;
 
+// 261002 (quick 261001-qpr): per-actor "does this character have the Chain Lightning talent"
+// answer, resolved once per actor per iteration (a plain spell-data lookup that never changes
+// mid-fight) and cleared by reset( sim_t* ) below, same keying and same stale-address reason as
+// g_vb_lava_lash_geometry_cache above.
+std::unordered_map<actor_cache_key_t, bool, actor_cache_key_hash_t> g_chain_lightning_talent_cache;
+
 } // anonymous namespace
 
 // 260914-rbp Task 1 (R5, HIT-INPUTS-DESIGN.md ss2.1): see rl_target_select.hpp's own declaration
@@ -578,6 +584,10 @@ chain_geometry resolve_thorims_branch_geometry( const action_t* resolved, prefer
     // form); the Totemic profile (neither Chaining Storms nor Tempest) also logs aoe=3, radius 10.
     // Neither untalented build refused over 5 seeds x {1, 5} targets x 300 s. So {3, 5} stays the
     // full legal set and the check below still catches a genuinely wrong third value.
+    // 261002 (quick 261001-qpr): a character with no Chain Lightning talent (whose cap resolves to 1)
+    // never reaches this function on the chain_lightning branch -- the strike rule routes it to the
+    // base rule first -- so {3, 5} stays the full legal set for every character who CAN cast Chain
+    // Lightning and this check is unchanged.
     if ( geo.cap != 3 && geo.cap != 5 )
     {
       throw sc_runtime_error( fmt::format(
@@ -1351,6 +1361,8 @@ void reset( sim_t* )
   // read a STALE geometry from an unrelated earlier actor. Cleared every iteration, same as the
   // five tables above.
   g_vb_lava_lash_geometry_cache.clear();
+  // 261002 (quick 261001-qpr): the Chain Lightning talent answer cache -- same stale-address reason.
+  g_chain_lightning_talent_cache.clear();
   // 260914-rbp Task 2c (ADD-2): the sibling per-actor find_action() handle cache
   // rl_policy_obs.cpp owns (a DIFFERENT translation unit) -- same stale-address hazard, same
   // per-iteration clear, routed through this file's own reset() since sim.cpp's sim_t::reset()
@@ -1382,6 +1394,21 @@ const char* const* targeted_action_tokens()
 
 namespace
 {
+// 261002 (quick 261001-qpr): whether this character has the Chain Lightning class talent -- the
+// identical lookup sc_shaman.cpp:11819-11831 builds talent.chain_lightning from, which gates
+// action.chain_lightning_ti (sc_shaman.cpp:11341). A pure spell-data lookup (player.cpp:11625-11639),
+// cached per actor so the per-decision strike rule below never repeats it.
+bool has_chain_lightning_talent( player_t* p )
+{
+  const actor_cache_key_t key{ p->sim, p };
+  auto found = g_chain_lightning_talent_cache.find( key );
+  if ( found != g_chain_lightning_talent_cache.end() )
+    return found->second;
+  const bool has_talent = p->find_talent_spell( talent_tree::CLASS, "Chain Lightning" ).ok();
+  g_chain_lightning_talent_cache.emplace( key, has_talent );
+  return has_talent;
+}
+
 // 233.1-02 Task 2 (R6-15, R6-20): the Thorim's-aware strike SUBSTITUTION -- called once per
 // decision from preference_for() below, for the two strike tokens only (windstrike, stormstrike).
 // primordial_storm and lightning_bolt stay routed to preference_shortest_time_to_die directly by
@@ -1407,6 +1434,12 @@ namespace
 // `windstrike_t::impact`). Maelstrom Weapon's stack count or the Tempest buff can change between
 // the two, so this function is a close model of `trigger_thorims_invocation`, never an exact one
 // -- the addon's own strike-aim rule shares this exact divergence (enhancementTargetRules.ts).
+//
+// 261002 (quick 261001-qpr): a character WITHOUT the Chain Lightning talent takes the base rule on
+// the non-Tempest branch, because Thorim's Invocation casts Lightning Bolt for it, never Chain
+// Lightning (sc_shaman.cpp:13462-13464 thorims_can_chain is false without the Thorim's Chain
+// Lightning action; sc_shaman.cpp:13511-13514 the Lightning Bolt cast). Tempest stays first, as in
+// trigger_thorims_invocation (sc_shaman.cpp:13501-13504).
 preference_fn preference_for_thorims_aware_strike( const action_t* resolved, bool is_stormstrike )
 {
   player_t* p = resolved->player;
@@ -1432,6 +1465,9 @@ preference_fn preference_for_thorims_aware_strike( const action_t* resolved, boo
   buff_t* tempest = buff_t::find( p, "tempest" );
   if ( tempest && tempest->check() )
     return preference_tempest;
+
+  if ( !has_chain_lightning_talent( p ) )
+    return preference_shortest_time_to_die;
 
   return preference_chain_lightning;
 }
