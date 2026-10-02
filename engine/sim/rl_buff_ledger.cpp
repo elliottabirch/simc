@@ -764,7 +764,7 @@ void write_footer( sim_t* sim )
     }
   }
   b += '}';
-  b += "\n";
+  b += "}\n";
 
   s->out << b;
   s->out.flush();
