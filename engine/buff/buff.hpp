@@ -49,7 +49,6 @@ void note_read( const buff_t* b, int stack, double value );
 // behaviour, they only maintain buff_t::rl_bl_appliers). `cause` is who is applying right now.
 void applier_pre_bump( buff_t* b );
 void applier_post_bump( buff_t* b, int requested, int old_stack, const rl_cause_t& cause );
-void applier_covering( buff_t* b, const rl_cause_t& cause, timespan_t own_duration );
 void applier_expire_own( buff_t* b, int stacks );
 void applier_clear( buff_t* b );
 void note_consume( buff_t* b, const char* op, int removed );
@@ -197,6 +196,9 @@ public:
   };
   std::vector<rl_bl_applier_t> rl_bl_appliers;
   timespan_t rl_bl_next_expiry = timespan_t::min();
+  // True while start() / refresh() runs its bump: the bump hook then records this application (a single-stack buff
+  // remembers applications, not bumps made by ticks), before any callback of the bump can read the buff.
+  bool rl_bl_applying = false;
 
   // Ticking buff values
   unsigned current_tick;

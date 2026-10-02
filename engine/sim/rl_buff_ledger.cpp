@@ -1060,32 +1060,13 @@ void applier_pre_bump( buff_t* b )
   reconcile_appliers( state_of( b->sim ), b );
 }
 
-void applier_post_bump( buff_t* b, int requested, int old_stack, const rl_cause_t& cause )
+// A single-stack buff: one entry per application (start / refresh), with its own expiry, added by the bump hook before
+// any callback of the bump can read the buff. Entries that can no longer cover go first (so the list stays short); a
+// second application with the very same cause only extends the first one's expiry.
+static void add_covering( buff_t* b, const rl_cause_t& cause, timespan_t expiry )
 {
-  if ( covering_mode( b ) )
-    return;
-  state_t* st = state_of( b->sim );
-  int added;
-  if ( b->max_stack() < 0 )
-    added = requested;
-  else if ( b->stack_behavior == buff_stack_behavior::ASYNCHRONOUS )
-    added = std::min( requested, b->max_stack() );
-  else
-    added = b->current_stack - old_stack;
-  if ( added > 0 )
-    b->rl_bl_appliers.push_back( { cause, added, b->rl_bl_next_expiry } );
-  reconcile_appliers( st, b );
-}
-
-void applier_covering( buff_t* b, const rl_cause_t& cause, timespan_t own_duration )
-{
-  if ( !covering_mode( b ) || b->current_stack <= 0 )
-    return;
-  const timespan_t now    = b->sim->current_time();
-  const timespan_t expiry = own_duration > timespan_t::zero() ? now + own_duration : timespan_t::max();
-  auto& v                 = b->rl_bl_appliers;
-  // Entries that can no longer cover go first (so the list stays short), then the application is added; a second
-  // application with the very same cause only extends the first one's expiry.
+  const timespan_t now = b->sim->current_time();
+  auto& v              = b->rl_bl_appliers;
   v.erase( std::remove_if( v.begin(), v.end(),
                            [ & ]( const buff_t::rl_bl_applier_t& e ) { return !( e.expiry > now ); } ),
            v.end() );
@@ -1100,6 +1081,27 @@ void applier_covering( buff_t* b, const rl_cause_t& cause, timespan_t own_durati
     }
   }
   v.push_back( { cause, 1, expiry } );
+}
+
+void applier_post_bump( buff_t* b, int requested, int old_stack, const rl_cause_t& cause )
+{
+  if ( covering_mode( b ) )
+  {
+    if ( b->rl_bl_applying && b->current_stack > 0 )
+      add_covering( b, cause, b->rl_bl_next_expiry );
+    return;
+  }
+  state_t* st = state_of( b->sim );
+  int added;
+  if ( b->max_stack() < 0 )
+    added = requested;
+  else if ( b->stack_behavior == buff_stack_behavior::ASYNCHRONOUS )
+    added = std::min( requested, b->max_stack() );
+  else
+    added = b->current_stack - old_stack;
+  if ( added > 0 )
+    b->rl_bl_appliers.push_back( { cause, added, b->rl_bl_next_expiry } );
+  reconcile_appliers( st, b );
 }
 
 void applier_expire_own( buff_t* b, int stacks )

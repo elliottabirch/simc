@@ -2653,14 +2653,11 @@ void buff_t::start( int stacks, double value, timespan_t duration )
 
   int before_stacks = check();
 
+  // 261001-bac plan 06: the bump hook records this application (appliers, covering appliers of a single-stack buff).
+  rl_bl_applying = sim->rl_bl_on;
   bump( stacks, value );
-
-  // 261001-bac plan 06: a single-stack buff remembers every application that would still have it up.
-  if ( sim->rl_bl_on )
-  {
-    rl_buff_ledger::applier_covering( this, rl_bl_current_cause( this ), d );
-    rl_bl_next_expiry = timespan_t::min();
-  }
+  rl_bl_applying    = false;
+  rl_bl_next_expiry = timespan_t::min();
 
   if ( last_start >= timespan_t::zero() )
   {
@@ -2750,13 +2747,10 @@ void buff_t::refresh( int stacks, double value, timespan_t duration )
     rl_bl_next_expiry = rl_bl_own > timespan_t::zero() ? sim->current_time() + rl_bl_own : timespan_t::max();
   }
 
+  rl_bl_applying = sim->rl_bl_on;
   bump( stacks, value );
-
-  if ( sim->rl_bl_on )
-  {
-    rl_buff_ledger::applier_covering( this, rl_bl_current_cause( this ), rl_bl_own );
-    rl_bl_next_expiry = timespan_t::min();
-  }
+  rl_bl_applying    = false;
+  rl_bl_next_expiry = timespan_t::min();
 
   refresh_count++;
 
