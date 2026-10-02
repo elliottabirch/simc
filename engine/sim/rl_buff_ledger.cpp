@@ -1481,10 +1481,10 @@ void run_passes( action_t* a, action_state_t* s, const action_state_t* pre )
     const std::uint64_t id = st->next_hit_id++;
     st->hit_table.emplace( id, std::move( entry ) );
     s->rl_bl_hit = id;
+    // Counted only for a hit that will be written (the recount reads the records).
+    if ( pre != nullptr )
+      count_both_group( st, pre->rl_bl_pm, sp.cands );
   }
-
-  if ( pre != nullptr )
-    count_both_group( st, pre->rl_bl_pm, sp.cands );
 
   // Plan 04: a hit that applies a damage-over-time effect (no tick_action) also records what the effect's
   // periodic amount will be under every hidden set. A miss applies nothing. (Not for a pre-made state:
@@ -1578,7 +1578,8 @@ void run_tick_passes( action_t* a, action_state_t* d_state, double tick_multipli
 
   // A tick that shares a candidate buff with its application: the product rule in LEDGER-FORMAT.md is
   // then only approximate for that buff.
-  count_both_group( st, d_state->rl_bl_app, sp.cands );
+  if ( will_sink )
+    count_both_group( st, d_state->rl_bl_app, sp.cands );
 
   // A previous tick's parked entry that never reached the sink (zero raw amount) is dropped.
   if ( d_state->rl_bl_hit != 0 )
