@@ -4465,8 +4465,9 @@ void sim_t::create_options()
   // block immediately after solver_hold_windows_str's own -- see sim.hpp's
   // solver_force_decision_str doc comment.
   add_option( opt_string( "solver_force_decision", solver_force_decision_str ) );
-  // S1 (260927-s1-spend-timing): forbids lightning_bolt/tempest (the third Lightning-family
-  // spender is untouched) below n stacks of Maelstrom Weapon. 0..10 range-checked and
+  // S1 (260927-s1-spend-timing): forbids lightning_bolt/tempest (and, 261002-8rs, primordial_storm
+  // when the action table offers it; the third Lightning-family spender is untouched) below n stacks
+  // of Maelstrom Weapon. 0..10 range-checked and
   // non-integer input refused right here by
   // opt_int's own min/max converter -- see sim.hpp's solver_min_maelstrom_spend doc comment for
   // why no separate hand-rolled parse block is needed (unlike solver_force_decision_str above).
@@ -5474,8 +5475,8 @@ void sim_t::setup( sim_control_t* c )
     }
   }
 
-  // S1 (260927-s1-spend-timing): resolve lightning_bolt/tempest indices ONCE by name from
-  // RL_ACTIONS -- never a hard-coded index (own doc comment, sim.hpp). Only runs when the option
+  // S1 (260927-s1-spend-timing): resolve lightning_bolt/tempest indices (and, 261002-8rs, the optional
+  // primordial_storm index) ONCE by name from RL_ACTIONS -- never a hard-coded index (own doc comment, sim.hpp). Only runs when the option
   // is actually on (0/absent stays exactly as fast as a run built before this option existed: one
   // int comparison, zero array walk). Own fail-closed block, placed immediately after
   // solver_force_decision_str's own above, same ordering rationale as that block's own comment.
@@ -5491,6 +5492,9 @@ void sim_t::setup( sim_control_t* c )
       else if ( solver_min_maelstrom_spend_tempest_idx < 0 &&
                 std::strcmp( RL_ACTIONS[ i ].token, "tempest" ) == 0 )
         solver_min_maelstrom_spend_tempest_idx = static_cast<int>( i );
+      else if ( solver_min_maelstrom_spend_primordial_storm_idx < 0 &&
+                std::strcmp( RL_ACTIONS[ i ].token, "primordial_storm" ) == 0 )
+        solver_min_maelstrom_spend_primordial_storm_idx = static_cast<int>( i );
     }
     // Refuse by name rather than silently disabling the override or masking the wrong action --
     // a future registry regeneration that renamed or dropped either token must be a loud failure
