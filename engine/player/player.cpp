@@ -14317,6 +14317,9 @@ void player_t::check_resource_change_for_callback( resource_e resource, double p
 
 rng::rng_t& player_t::rng()
 {
+  if ( sim->rl_bl_on )
+    if ( auto* r = rl_buff_ledger::rng_access( sim, "player" ) )
+      return *r;
   if ( sim->per_source_rng )
     return source_rng_;
   return sim -> rng();
@@ -14324,6 +14327,9 @@ rng::rng_t& player_t::rng()
 
 rng::rng_t& player_t::rng() const
 {
+  if ( sim->rl_bl_on )
+    if ( auto* r = rl_buff_ledger::rng_access( sim, "player" ) )
+      return *r;
   if ( sim->per_source_rng )
     return const_cast<player_t*>( this )->source_rng_;
   return sim -> rng();

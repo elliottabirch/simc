@@ -3532,6 +3532,9 @@ util::string_view buff_t::source_name() const
 
 rng::rng_t& buff_t::rng()
 {
+  if ( sim->rl_bl_on )
+    if ( auto* r = rl_buff_ledger::rng_access( sim, "buff" ) )
+      return *r;
   if ( sim->per_source_rng )
     return source_rng_;
   return sim->rng();
@@ -3539,6 +3542,9 @@ rng::rng_t& buff_t::rng()
 
 rng::rng_t& buff_t::rng() const
 {
+  if ( sim->rl_bl_on )
+    if ( auto* r = rl_buff_ledger::rng_access( sim, "buff" ) )
+      return *r;
   if ( sim->per_source_rng )
     return const_cast<buff_t*>( this )->source_rng_;
   return sim -> rng();

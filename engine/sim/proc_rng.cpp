@@ -11,6 +11,7 @@
 #include "sim/sim.hpp"
 #include "sim/rl_rng_record.hpp"
 #include "util/rng.hpp"
+#include "sim/rl_buff_ledger.hpp"
 
 proc_rng_t::proc_rng_t( rng_type_e type_ ) : player( nullptr ), rng_type_( type_ )
 {}
@@ -21,6 +22,9 @@ proc_rng_t::proc_rng_t( rng_type_e type_, std::string_view n, player_t* p )
 
 rng::rng_t& proc_rng_t::rng()
 {
+  if ( player->sim->rl_bl_on )
+    if ( auto* r = rl_buff_ledger::rng_access( player->sim, "proc_rng" ) )
+      return *r;
   if ( player->sim->per_source_rng )
     return source_rng_;
   return player->rng();

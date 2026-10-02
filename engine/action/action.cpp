@@ -5676,6 +5676,9 @@ void action_t::reschedule_queue_event()
 }
 rng::rng_t& action_t::rng()
 {
+  if ( sim->rl_bl_on )
+    if ( auto* r = rl_buff_ledger::rng_access( sim, "action" ) )
+      return *r;
   if ( sim->per_source_rng )
     return source_rng_;
   return sim->rng();
@@ -5683,6 +5686,9 @@ rng::rng_t& action_t::rng()
 
 rng::rng_t& action_t::rng() const
 {
+  if ( sim->rl_bl_on )
+    if ( auto* r = rl_buff_ledger::rng_access( sim, "action" ) )
+      return *r;
   if ( sim->per_source_rng )
     return const_cast<action_t*>( this )->source_rng_;
   return sim -> rng();

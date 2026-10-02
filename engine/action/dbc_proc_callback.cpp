@@ -21,6 +21,7 @@
 
 #include <cassert>
 #include <optional>
+#include "sim/rl_buff_ledger.hpp"
 
 struct proc_event_t : public event_t
 {
@@ -430,6 +431,9 @@ player_t* dbc_proc_callback_t::get_target( player_t* target, action_state_t* sta
 
 rng::rng_t& dbc_proc_callback_t::rng() const
 {
+  if ( listener->sim->rl_bl_on )
+    if ( auto* r = rl_buff_ledger::rng_access( listener->sim, "callback" ) )
+      return *r;
   if ( listener->sim->per_source_rng )
     return const_cast<dbc_proc_callback_t*>( this )->source_rng_;
   return listener->rng();
