@@ -252,6 +252,10 @@ struct fight_wide_aggregates_t
                                             // (add-blind, walks target_list -- misses raid-event
                                             // adds entirely, see compute_fight_wide_aggregates'
                                             // own note); NOT up() (mutates benefit bookkeeping).
+  int    lashing_flames_carrier_count = 0; // 261002-8rs: enemies on the non-sleeping list carrying
+                                            // THIS player's lashing_flames debuff (buff_t::find( t,
+                                            // "lashing_flames", p ), check() > 0) -- the lightning_rod
+                                            // idiom one field above, over the same enemy set.
   bool   has_soonest_time_to_die    = false;
   double soonest_time_to_die        = 0.0;
   bool   has_longest_time_to_die    = false;

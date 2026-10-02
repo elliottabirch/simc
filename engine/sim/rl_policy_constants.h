@@ -102,7 +102,8 @@ struct rl_talent_gate
 // columns; several capabilities govern zero). sim_name/sim_driver_spell_id/sim_set/
 // sim_pieces are populated ONLY for the matching sim_kind (racial_spell/
 // special_effect/set_bonus respectively) -- nullptr/0 otherwise, never a sentinel
-// string baked INTO sim_kind itself.
+// string baked INTO sim_kind itself. sim_trait_entry_id/sim_min_rank are populated
+// ONLY for sim_kind talent (261002-8rs) -- 0 otherwise.
 struct rl_capability
 {
   const char* id;
@@ -112,6 +113,8 @@ struct rl_capability
   long long   sim_driver_spell_id;   // special_effect only; 0 otherwise
   const char* sim_set;               // set_bonus only; nullptr otherwise
   int         sim_pieces;             // set_bonus only; 0 otherwise
+  long long   sim_trait_entry_id;     // talent only; 0 otherwise
+  int         sim_min_rank;           // talent only; 0 otherwise
   std::size_t requires_offset;
   std::size_t requires_count;
   std::size_t governed_slots_offset;
@@ -1249,24 +1252,24 @@ inline constexpr std::size_t RL_TALENT_GATE_COUNT = 4;
 
 inline constexpr std::size_t RL_CAPABILITY_COUNT = 18;
 inline constexpr rl_capability RL_CAPABILITIES[RL_CAPABILITY_COUNT] = {
-  { "racial_berserking", 307, "racial_spell", "Berserking", 0, nullptr, 0, 0, 0, 0, 4, 0, 1 },
-  { "trinket_voracious_heart_of_ulatek", 308, "special_effect", nullptr, 1297761, nullptr, 0, 0, 0, 4, 5, 1, 1 },
-  { "consumable_potion_of_recklessness", 309, "potion_enabled", nullptr, 0, nullptr, 0, 0, 0, 9, 6, 2, 1 },
-  { "enchant_arcane_mastery", 310, "special_effect", nullptr, 1236721, nullptr, 0, 0, 0, 15, 1, 3, 0 },
-  { "enchant_berserkers_rage", 311, "special_effect", nullptr, 1236728, nullptr, 0, 0, 0, 16, 1, 3, 0 },
-  { "embellishment_arcanoweave_lining", 312, "special_effect", nullptr, 1283697, nullptr, 0, 0, 0, 17, 1, 3, 0 },
-  { "embellishment_hunters_ritual_stone", 313, "special_effect", nullptr, 1297382, nullptr, 0, 0, 0, 18, 4, 3, 0 },
-  { "item_venomcursed_mastery", 314, "special_effect", nullptr, 1307923, nullptr, 0, 0, 0, 22, 1, 3, 0 },
-  { "item_venomcursed_ascendance", 315, "special_effect", nullptr, 1317582, nullptr, 0, 0, 0, 23, 1, 3, 0 },
-  { "weapon_venomfang", 316, "special_effect", nullptr, 1291718, nullptr, 0, 0, 0, 24, 21, 3, 0 },
-  { "set_bite_of_zuljan_2pc", 317, "set_bonus", nullptr, 0, "MID_BOZ", 2, 0, 0, 45, 0, 3, 0 },
-  { "tier_mid2_enh_2pc", 318, "set_bonus", nullptr, 0, "MID2", 2, 0, 0, 45, 13, 3, 0 },
-  { "tier_mid2_enh_4pc", 319, "set_bonus", nullptr, 0, "MID2", 4, 0, 0, 58, 2, 3, 0 },
-  { "omnium_rune_burning_haste", 320, "special_effect", nullptr, 1279610, nullptr, 0, 0, 1, 60, 2, 3, 0 },
-  { "omnium_core_rune_unleashed_fire", 321, "special_effect", nullptr, 1279599, nullptr, 0, 1, 0, 62, 0, 3, 0 },
-  { "omnium_rune_lingering", 322, "special_effect", nullptr, 1287555, nullptr, 0, 1, 1, 62, 7, 3, 0 },
-  { "trinket_void_execution_mandate", 323, "special_effect", nullptr, 1250557, nullptr, 0, 2, 0, 69, 6, 3, 1 },
-  { "mode_funnel", 324, "funnel_mode", nullptr, 0, nullptr, 0, 2, 0, 75, 0, 4, 0 },
+  { "racial_berserking", 307, "racial_spell", "Berserking", 0, nullptr, 0, 0, 0, 0, 0, 0, 4, 0, 1 },
+  { "trinket_voracious_heart_of_ulatek", 308, "special_effect", nullptr, 1297761, nullptr, 0, 0, 0, 0, 0, 4, 5, 1, 1 },
+  { "consumable_potion_of_recklessness", 309, "potion_enabled", nullptr, 0, nullptr, 0, 0, 0, 0, 0, 9, 6, 2, 1 },
+  { "enchant_arcane_mastery", 310, "special_effect", nullptr, 1236721, nullptr, 0, 0, 0, 0, 0, 15, 1, 3, 0 },
+  { "enchant_berserkers_rage", 311, "special_effect", nullptr, 1236728, nullptr, 0, 0, 0, 0, 0, 16, 1, 3, 0 },
+  { "embellishment_arcanoweave_lining", 312, "special_effect", nullptr, 1283697, nullptr, 0, 0, 0, 0, 0, 17, 1, 3, 0 },
+  { "embellishment_hunters_ritual_stone", 313, "special_effect", nullptr, 1297382, nullptr, 0, 0, 0, 0, 0, 18, 4, 3, 0 },
+  { "item_venomcursed_mastery", 314, "special_effect", nullptr, 1307923, nullptr, 0, 0, 0, 0, 0, 22, 1, 3, 0 },
+  { "item_venomcursed_ascendance", 315, "special_effect", nullptr, 1317582, nullptr, 0, 0, 0, 0, 0, 23, 1, 3, 0 },
+  { "weapon_venomfang", 316, "special_effect", nullptr, 1291718, nullptr, 0, 0, 0, 0, 0, 24, 21, 3, 0 },
+  { "set_bite_of_zuljan_2pc", 317, "set_bonus", nullptr, 0, "MID_BOZ", 2, 0, 0, 0, 0, 45, 0, 3, 0 },
+  { "tier_mid2_enh_2pc", 318, "set_bonus", nullptr, 0, "MID2", 2, 0, 0, 0, 0, 45, 13, 3, 0 },
+  { "tier_mid2_enh_4pc", 319, "set_bonus", nullptr, 0, "MID2", 4, 0, 0, 0, 0, 58, 2, 3, 0 },
+  { "omnium_rune_burning_haste", 320, "special_effect", nullptr, 1279610, nullptr, 0, 0, 0, 0, 1, 60, 2, 3, 0 },
+  { "omnium_core_rune_unleashed_fire", 321, "special_effect", nullptr, 1279599, nullptr, 0, 0, 0, 1, 0, 62, 0, 3, 0 },
+  { "omnium_rune_lingering", 322, "special_effect", nullptr, 1287555, nullptr, 0, 0, 0, 1, 1, 62, 7, 3, 0 },
+  { "trinket_void_execution_mandate", 323, "special_effect", nullptr, 1250557, nullptr, 0, 0, 0, 2, 0, 69, 6, 3, 1 },
+  { "mode_funnel", 324, "funnel_mode", nullptr, 0, nullptr, 0, 0, 0, 2, 0, 75, 0, 4, 0 },
 };
 
 inline constexpr std::size_t RL_CAPABILITY_REQUIRES_COUNT = 2;
