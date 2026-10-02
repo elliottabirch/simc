@@ -46,6 +46,7 @@
 #include "util/xml.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -1692,6 +1693,8 @@ sim_t::sim_t()
     facing_shapes( false ),
     target_select_enabled( false ),  // CR-06 (260902/cr4)
     target_scorer_force_rules( false ),  // 230-02 (SCOR-01, D-02/R-K)
+    solver_funnel_mode( false ),  // 266-09 (R11)
+    solver_random_chosen_enemy( false ),  // 266-09 (R7, R11)
     ignore_invulnerable_targets( false ),
     enable_dps_healing( false ),
     count_overheal_as_heal( false ),
@@ -2128,6 +2131,21 @@ void sim_t::combat_begin()
   // reset() itself) and exactly which four members it clears.
   solver_control::reset_iteration( this );
 
+  // Phase 266 (266-09): the funnel notice, ONCE per process at the first fight start, only when either funnel
+  // option is set (both off print nothing). SimulationCraft ignores an option it does not know with only a
+  // warning, so the launch support probe (scripts/rl/funnel.py check_support_output, es_polish.py
+  // check_funnel_launch_output) looks for exactly this line; an older binary never prints it.
+  if ( solver_funnel_mode || solver_random_chosen_enemy )
+  {
+    static std::atomic<bool> funnel_notice_printed{ false };
+    if ( !funnel_notice_printed.exchange( true ) )
+    {
+      fmt::print( "[RL_FUNNEL] funnel_mode={} random_chosen_enemy={}\n", solver_funnel_mode ? 1 : 0,
+                  solver_random_chosen_enemy ? 1 : 0 );
+      std::fflush( stdout );
+    }
+  }
+
   // Mid-fight per-source RNG re-salt (tstl-sylvanas quick task 260919-frk): schedule ONE event
   // per iteration at per_source_rng_resalt_at (relative to fight start -- current_time() is
   // 0_ms here, before iterate() begins). See sim.hpp's per_source_rng_resalt_at doc comment.
@@ -2340,15 +2358,32 @@ void sim_t::combat_end()
   // the identical quantity. Truncated on iteration 0 (the first fight this process runs),
   // appended thereafter -- safe because rl_iteration_seeds refuses threads > 1 above, so this
   // sim_t is the sole writer to this path.
+  // 266-21 (funnel mode): each line is now FOUR columns, `iteration,seed,dps,chosen_dps` -- the fourth is the
+  // damage per second counting only hits on the chosen enemy (see the computation below). Every reader of
+  // this file must accept four columns; the three-column form no longer exists.
   if ( !rl_iteration_out.empty() )
   {
     double dps = current_time() != timespan_t::zero() ? iteration_dmg / current_time().total_seconds() : 0.0;
+    // Phase 266 (266-21, owner F7, R12): the fourth column, `chosen_dps` -- damage per second on the
+    // chosen enemy (the tag, player_t::rl_chosen_enemy), from the owner-routed running total each
+    // player keeps (pets and guardians credit their owner), summed over the non-pet players with the
+    // same zero-time guard as dps. Always written, in scripted fights too (no opt-in). A player that is
+    // not the RL actor never gets a tag, so its total stays 0 and the column reads exactly 0. It is NOT
+    // priority_iteration_dmg (that counts hits on sim->target, not on the tag).
+    double chosen_dps = 0.0;
+    if ( current_time() != timespan_t::zero() )
+    {
+      double chosen_total = 0.0;
+      for ( const player_t* chosen_player : player_no_pet_list )
+        chosen_total += chosen_player->solver_chosen_damage_so_far;
+      chosen_dps = chosen_total / current_time().total_seconds();
+    }
     io::ofstream out;
     out.open( rl_iteration_out, current_iteration == 0 ? ( std::ios::out | std::ios::trunc )
                                                          : ( std::ios::out | std::ios::app ) );
     if ( out.is_open() )
     {
-      out.printf( "%d,%llu,%.17g\n", current_iteration, static_cast<unsigned long long>( seed ), dps );
+      out.printf( "%d,%llu,%.17g,%.17g\n", current_iteration, static_cast<unsigned long long>( seed ), dps, chosen_dps );
     }
   }
 
@@ -4648,6 +4683,8 @@ void sim_t::create_options()
   add_option( opt_bool( "facing_shapes", facing_shapes ) );
   add_option( opt_bool( "target_select_enabled", target_select_enabled ) );  // CR-06 (260902/cr4)
   add_option( opt_bool( "target_scorer_force_rules", target_scorer_force_rules ) );  // 230-02 (SCOR-01)
+  add_option( opt_bool( "solver_funnel_mode", solver_funnel_mode ) );  // 266-09 (R11)
+  add_option( opt_bool( "solver_random_chosen_enemy", solver_random_chosen_enemy ) );  // 266-09 (R7, R11)
   add_option( opt_bool( "ignore_invulnerable_targets", ignore_invulnerable_targets ) );
   add_option( opt_bool( "enable_dps_healing", enable_dps_healing ) );
   add_option( opt_bool( "count_overheal_as_heal", count_overheal_as_heal ) );

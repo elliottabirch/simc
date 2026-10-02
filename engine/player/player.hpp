@@ -521,6 +521,20 @@ struct player_t : public actor_t
   // record_close(). Deliberately NOT folded into rl_own_real/sum_own_real -- see the .attr
   // FIGHT record's own doc comment for why the identity must be able to catch this.
   double rl_attr_pre_fight_real = 0.0;
+  // tstl-sylvanas phase 266 (plan 266-01, funnel mode, fork commit C1a; owner F9, 2026-10-01): "the chosen
+  // enemy" (the TAG) is held in memory in this one field and written ONLY by rl_target_select::refresh_chosen
+  // (the chooser), never by play. nullptr = no chosen enemy yet this fight. Set only for the RL actor (every
+  // call site is gated by the RL-actor test; a pet, a guardian or another class's profile never reaches the
+  // chooser, so its tag stays nullptr). Cleared at each fight's start in datacollection_begin(). In this
+  // plan nothing in play reads it: it is bookkeeping for the chosen copy below.
+  player_t* rl_chosen_enemy = nullptr;
+  // The chosen-enemy copy of every running total and stream above: the same amounts, added in the same
+  // order, but only for hits whose target was the chosen enemy AT THE MOMENT OF THE HIT (rl_credit_route's
+  // hit_target parameter). Same types as their all-enemy twins; reset beside them.
+  double solver_chosen_damage_so_far = 0.0;
+  double solver_chosen_damage_expected_so_far = 0.0;
+  rl_credit_streams_t rl_credit_chosen;
+  std::vector<double> rl_own_real_chosen, rl_own_exp_chosen, rl_own_exp_marked_chosen;
   double dpr;
   struct incoming_damage_entry_t {
     timespan_t time;

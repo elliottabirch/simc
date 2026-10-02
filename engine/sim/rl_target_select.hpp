@@ -42,6 +42,28 @@ namespace rl_target_select
 // Out of line (rl_target_select.cpp) so this header keeps its forward declarations only.
 bool rl_counts_as_enemy( const player_t* t );
 
+// ---- Phase 266 (plan 266-01, funnel mode, owner F9): the chosen enemy (the TAG) and its chooser ----
+//
+// The tag is the field `player_t::rl_chosen_enemy`, written by exactly ONE function, `refresh_chosen`
+// (the chooser), so a later chooser (a raid marker, a name, a buff, a fight-sheet priority mark) plugs in
+// HERE and nowhere else. In this plan nothing in play reads the tag (it is bookkeeping for the chosen
+// copy in rl_credit_route); the chooser picks at the pull, for the RL actor only.
+
+// The chosen enemy of `p`, resolving a pet or guardian to its owner's tag (so a pet's hit compares
+// against its owner's tag). nullptr when there is none (a non-RL-actor player never gets one).
+player_t* rl_chosen_enemy_of( const player_t* p );
+
+// "Can be hit": `rl_counts_as_enemy( t )`, awake, not invulnerable, not an untargetable enemy
+// (hazard or bystander), and legal under `generic_filter` for p's own Lightning Bolt (harmful). Throws
+// by name when p has no lightning_bolt action. Reuses the two existing helpers; never a third copy.
+bool rl_can_be_hit( const player_t* p, const player_t* t );
+
+// The chooser. Keeps the tag while it can be hit; otherwise, if some enemy can be hit, picks the first
+// in `sim->target_non_sleeping_list` order among those also legal for p's Stormstrike (else the first
+// that can be hit); with nothing hittable the old tag is kept. REFUSES (throws) any player that is not
+// the RL actor: every call site must carry the RL-actor gate itself.
+void refresh_chosen( player_t* p );
+
 // A plain per-enemy fact record -- no engine pointer beyond the candidate itself (D-03: the same
 // shape the repo-side rig and the addon's parity harness will mirror, TGT-07). NOT sent over the
 // wire by this plan; plan 228-04's observation writer builds its own leaves from the same

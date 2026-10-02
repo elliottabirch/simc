@@ -698,6 +698,13 @@ bool rl_capability_own_value( player_t* p, const rl_capability& cap )
     // be visible via the mask's own `!background` check on this same action.
     return !a->background;
   }
+  if ( std::strcmp( cap.sim_kind, "funnel_mode" ) == 0 )
+  {
+    // 266-12 (R16, 2026-10-02): the dedicated detector for the funnel-mode flag (capability
+    // `mode_funnel`, slot 324, group mode). It reads the simulator option itself, the potion_enabled
+    // pattern: a fact about this sim, fixed for the whole fight, governing no column and no action.
+    return p->sim->solver_funnel_mode;
+  }
   throw sc_runtime_error( fmt::format(
       "rl_policy::rl_capability_own_value: capability '{}' has unknown sim_kind '{}'", cap.id,
       cap.sim_kind ) );
@@ -866,6 +873,18 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
     // later lookup_pick() call (solver_control.cpp) distinguish "the pick belongs to this
     // decision" from "stale, refuse by name" without ever recomputing.
     rl_target_select::begin_decision( p );
+
+    // Phase 266 (266-21, owner F9, R2): the boundary call of the chooser -- the tag is kept up to date at
+    // every decision boundary (it is re-picked only when it can no longer be hit while some enemy can).
+    // This branch is NOT restricted to the RL actor (it takes any player, no actor test of its own; the
+    // per-action loop's is_rl_actor test below sits inside the loop, and the caller's in-process filter
+    // is name-only and in-process only), so the call carries the gate itself: the fork's one RL-actor
+    // test, verbatim from solver_control.cpp:144 (exact name match, never a prefix, never a pet; CR-05).
+    // The chooser refuses any other player by name, so a missing or wrong gate aborts instead of tagging.
+    // It runs here, before the per-action loop and its pick-filling, so the dump and the wire see the
+    // tag this decision is made against.
+    if ( std::strcmp( p->name(), RL_ACTOR_NAME ) == 0 && !p->is_pet() )
+      rl_target_select::refresh_chosen( const_cast<player_t*>( p ) );
   }
 
   auto cached = g_action_handle_cache.find( p );
@@ -1522,14 +1541,21 @@ void fill_async_stack_profile( const buff_t* buff, async_stack_profile& out )
 // requires.
 //
 // BIND-TIME REFUSAL (Q17): the four profile leaves are valid ONLY for a member whose
-// `stack_behavior()` is ASYNCHRONOUS on this build -- crash_lightning is asynchronous only with
-// Storm Unleashed 1 (sc_shaman.cpp:13271-13278, talent-gated: DEFAULT without the talent). When
-// `member_buff` exists but is NOT asynchronous and one of the four is requested, this is a
-// registry/build mismatch (the same class of loud refusal build_obs' own bucket/permanent check
-// throws below, never a silent 0) -- fail fatally here, at bind time, naming both the buff and
-// the leaf. A null `member_buff` (this run never created the handle at all -- a different build
-// entirely) is NOT refused here: that is the ordinary runtime-absence case every other buff leaf
-// already handles via `buff==nullptr -> absent` in build_obs' own switch.
+// `stack_behavior()` is ASYNCHRONOUS on this build, or whose buff is a one-stack timed buff
+// (`max_stack() == 1` with a positive duration). crash_lightning is asynchronous only with
+// Storm Unleashed 1; without the talent it is spell 187878, one stack, 12 s, DEFAULT stacking
+// (sc_shaman.cpp:13694-13699). A non-asynchronous buff keeps at most one expiration event
+// (buff.cpp:2660-2671), so its one live stack IS its own soonest-expiring stack and the
+// profile (next_expiry = remains, expiry_2 = expiry_3 = 0, stack_seconds = remains) is exact.
+// 261002 (quick 261001-qpr): the one-stack timed case is accepted here instead of refused.
+// What still refuses: a non-asynchronous buff that can hold more than one stack (one shared
+// timer across several stacks, which the expiration walk would under-count) or that has no
+// duration. Those are a registry/build mismatch (the same class of loud refusal build_obs' own
+// bucket/permanent check throws below, never a silent 0) -- fail fatally here, at bind time,
+// naming both the buff and the leaf. A null `member_buff` (this run never created the handle at
+// all -- a different build entirely) is NOT refused here: that is the ordinary runtime-absence
+// case every other buff leaf already handles via `buff==nullptr -> absent` in build_obs' own
+// switch.
 slot_binding resolve_buff_leaf( buff_t* member_buff, const rl_leaf_desc& leaf )
 {
   slot_binding b;
@@ -1548,12 +1574,15 @@ slot_binding resolve_buff_leaf( buff_t* member_buff, const rl_leaf_desc& leaf )
   else if ( std::strcmp( leaf.leaf, "next_expiry" ) == 0 || std::strcmp( leaf.leaf, "expiry_2" ) == 0 ||
             std::strcmp( leaf.leaf, "expiry_3" ) == 0 || std::strcmp( leaf.leaf, "stack_seconds" ) == 0 )
   {
-    if ( member_buff != nullptr && member_buff->stack_behavior != buff_stack_behavior::ASYNCHRONOUS )
+    const bool one_stack_timed =
+        member_buff != nullptr && member_buff->max_stack() == 1 && member_buff->buff_duration() > timespan_t::zero();
+    if ( member_buff != nullptr && member_buff->stack_behavior != buff_stack_behavior::ASYNCHRONOUS && !one_stack_timed )
     {
       throw sc_runtime_error( fmt::format(
           "rl_policy::resolve_buff_leaf: leaf '{}' requested for buff '{}' whose stack_behavior "
           "is not ASYNCHRONOUS on this build (Q17/DEC-038: next_expiry/expiry_2/expiry_3/"
-          "stack_seconds are valid only for an asynchronous stacking buff) -- this is a "
+          "stack_seconds are valid only for an asynchronous stacking buff or a one-stack buff "
+          "with a duration) -- this is a "
           "registry/build mismatch, not a runtime data problem",
           leaf.leaf, member_buff->name() ) );
     }
@@ -3206,10 +3235,12 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
           else
           {
             // next_expiry / expiry_2 / expiry_3 / stack_seconds (Q17, DEC-038): the ASYNC STACK
-            // PROFILE. resolve_buff_leaf's own bind-time refusal already guarantees this buff's
-            // stack_behavior is ASYNCHRONOUS whenever one of these four is bound to it, so no
-            // runtime re-check is needed here -- only the profile computation, ONE definition
-            // (fill_async_stack_profile) shared by both crash_lightning and crackling_surge.
+            // PROFILE. resolve_buff_leaf's own bind-time refusal already guarantees this buff is
+            // ASYNCHRONOUS or a one-stack timed buff whenever one of these four is bound to it, so
+            // no runtime re-check is needed here -- only the profile computation, ONE definition
+            // (fill_async_stack_profile) shared by both crash_lightning and crackling_surge. It is
+            // exact for the one-stack case because a non-asynchronous buff holds at most one
+            // expiration event (buff.cpp:2660-2671). 261002 (quick 261001-qpr).
             async_stack_profile profile;
             fill_async_stack_profile( buff, profile );
             switch ( b.buff_leaf )

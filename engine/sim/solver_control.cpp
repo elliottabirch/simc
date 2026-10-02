@@ -378,6 +378,16 @@ action_t* resolve_action( player_t* p, const std::string& name )
   return nullptr;
 }
 
+// 266-21 (funnel mode, record format 13): the actor index of the chosen enemy (the tag) a decision row
+// carries, 0xFFFF (rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK) when none is set. Reads the field
+// `rl_target_select::refresh_chosen` wrote (the tag is written nowhere else); a player that is not the RL
+// actor never gets a tag, so it reads as no pick.
+static std::uint16_t chosen_enemy_index_of( const player_t* p )
+{
+  return p->rl_chosen_enemy != nullptr ? static_cast<std::uint16_t>( p->rl_chosen_enemy->actor_index )
+                                       : rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK;
+}
+
 action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
 {
   sim_t* sim = p->sim;
@@ -1350,7 +1360,11 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
                                      // 259-05b (R5): the random-aim dial's own flag (bit 6).
                                      candidate_aim_explored,
                                      // 259-07 (R5): the rules' slot and the observed slot.
-                                     candidate_block_rules_slot, candidate_block_observed_slot );
+                                     candidate_block_rules_slot, candidate_block_observed_slot,
+                                     // 266-21 (funnel mode, record format 13): the chosen enemy (the tag)
+                                     // at this boundary, read from the field the chooser wrote, never
+                                     // recomputed here.
+                                     chosen_enemy_index_of( p ) );
       // 212-CR-FIX WR-06: accept_cast() can refuse a not-ready action via
       // protocol_abort() (a throw), which unwinds past combat_end()'s
       // record_close() hook entirely for this fight -- without this catch,
@@ -1420,7 +1434,11 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
                                    rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
                                    // 260927-d1 (D1 census, Stage 1 Task 2): same as the cast
                                    // branch above.
-                                   sim->solver_record_apl_choice && apl_choice ? apl_choice->name() : nullptr );
+                                   sim->solver_record_apl_choice && apl_choice ? apl_choice->name() : nullptr,
+                                   false, rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
+                                   rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
+                                   // 266-21: the tag at this boundary, same as the cast branch above.
+                                   chosen_enemy_index_of( p ) );
     // 212-CR-FIX WR-06: same reasoning as the cast branch above -- flush on
     // an abort out of accept_wait() so the decision row already appended
     // survives it.
@@ -1459,6 +1477,12 @@ void finish( sim_t* sim )
 // for the full justification; this body is deliberately just the clear.
 void reset_iteration( sim_t* sim )
 {
+  // Phase 266 (266-09, R7): re-seed the chooser's own dice once per fight, in scripted fights too (the
+  // chooser runs there as well, R13), BEFORE the early return below. The seed is derived from the sim seed,
+  // the thread, the fight index and a source name of its own; seeding takes nothing from any other stream.
+  sim->solver_target_rng.seed(
+      rng::per_source_seed( sim->seed, sim->thread_index, sim->rng_iteration_index(), "sim|solver_target" ) );
+
   if ( sim->solver_control_str.empty() && sim->solver_policy_str.empty() )
     return;
 

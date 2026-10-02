@@ -125,12 +125,12 @@ struct rl_capability
 inline constexpr const char* RL_REGISTRY_ID = "enhancement";
 inline constexpr const char* RL_ACTOR_NAME = "MID2_Shaman_Enhancement_Stormbringer";
 inline constexpr int RL_ENCODER_VERSION = 6;
-inline constexpr std::size_t RL_OBS_DIM = 324;
+inline constexpr std::size_t RL_OBS_DIM = 325;
 inline constexpr std::size_t RL_ACTION_DIM = 17;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
-inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:397b4e54b173ce401607d5ae643bc0f332c8c2a250f166f8328f03c1dde46167";
+inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:403673428af3bec7d7e73319b446387cd362e890033a33f13b7862ba3dc2bb82";
 inline constexpr const char* RL_MASK_RULES_SHA = "3f930294d36b217dca01fc51600c0da9d0568e20152fb53c588b6e8ddccf7662";
 inline constexpr const char* RL_ACTION_SPACE_SHA = "bdf7adc4cc139aca5a628d911446b4ca9fa1e2f41dd63d855984428b48cde01d";
 
@@ -461,6 +461,7 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "capability.omnium_core_rune_unleashed_fire",
   "capability.omnium_rune_lingering",
   "capability.trinket_void_execution_mandate",
+  "capability.mode_funnel",
 };
 
 // ---- Per-family observation tables ----
@@ -1179,9 +1180,10 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "capability.omnium_core_rune_unleashed_fire", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "capability.omnium_rune_lingering", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "capability.trinket_void_execution_mandate", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "capability.mode_funnel", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_obs_member RL_OBS_FAMILY_SCALARS_MEMBERS[] = {
-  { "", "", RL_OBS_FAMILY_SCALARS_LEAVES_0, 79 },
+  { "", "", RL_OBS_FAMILY_SCALARS_LEAVES_0, 80 },
 };
 
 inline constexpr std::size_t RL_OBS_FAMILY_COUNT = 12;
@@ -1198,7 +1200,7 @@ inline constexpr rl_obs_family RL_OBS_FAMILIES[RL_OBS_FAMILY_COUNT] = {
   { rl_family::raid_events, "raid_events", rl_family_kind::expression, false, RL_OBS_FAMILY_RAID_EVENTS_MEMBERS, 2, 216, 10 },
   { rl_family::legality, "legality", rl_family_kind::legality, false, RL_OBS_FAMILY_LEGALITY_MEMBERS, 17, 226, 17 },
   { rl_family::proc_chances, "proc_chances", rl_family_kind::proc_chance, false, RL_OBS_FAMILY_PROC_CHANCES_MEMBERS, 2, 243, 2 },
-  { rl_family::scalars, "scalars", rl_family_kind::scalar, true, RL_OBS_FAMILY_SCALARS_MEMBERS, 1, 245, 79 },
+  { rl_family::scalars, "scalars", rl_family_kind::scalar, true, RL_OBS_FAMILY_SCALARS_MEMBERS, 1, 245, 80 },
 };
 
 // ---- Action descriptors ----
@@ -1245,7 +1247,7 @@ inline constexpr std::size_t RL_TALENT_GATE_COUNT = 4;
 
 // ---- Capability table (246.1-02, CAP-01/CAP-02) ----
 
-inline constexpr std::size_t RL_CAPABILITY_COUNT = 17;
+inline constexpr std::size_t RL_CAPABILITY_COUNT = 18;
 inline constexpr rl_capability RL_CAPABILITIES[RL_CAPABILITY_COUNT] = {
   { "racial_berserking", 307, "racial_spell", "Berserking", 0, nullptr, 0, 0, 0, 0, 4, 0, 1 },
   { "trinket_voracious_heart_of_ulatek", 308, "special_effect", nullptr, 1297761, nullptr, 0, 0, 0, 4, 5, 1, 1 },
@@ -1264,6 +1266,7 @@ inline constexpr rl_capability RL_CAPABILITIES[RL_CAPABILITY_COUNT] = {
   { "omnium_core_rune_unleashed_fire", 321, "special_effect", nullptr, 1279599, nullptr, 0, 1, 0, 62, 0, 3, 0 },
   { "omnium_rune_lingering", 322, "special_effect", nullptr, 1287555, nullptr, 0, 1, 1, 62, 7, 3, 0 },
   { "trinket_void_execution_mandate", 323, "special_effect", nullptr, 1250557, nullptr, 0, 2, 0, 69, 6, 3, 1 },
+  { "mode_funnel", 324, "funnel_mode", nullptr, 0, nullptr, 0, 2, 0, 75, 0, 4, 0 },
 };
 
 inline constexpr std::size_t RL_CAPABILITY_REQUIRES_COUNT = 2;
@@ -1360,7 +1363,7 @@ inline constexpr const char* RL_CAPABILITY_GOVERNED_ACTIONS[RL_CAPABILITY_GOVERN
 };
 
 inline constexpr double RL_CAPABILITY_FIXED_VALUE = 0.0;
-inline constexpr const char* RL_NET_LAYOUT_SHA = "rl-layout-v1:b140a5de9f55d5effa7c20c850e2c389bf66be8bafd8fc85de0f2f2f6cb07777";
+inline constexpr const char* RL_NET_LAYOUT_SHA = "rl-layout-v1:6b28025b66a2bafb7e46f0369c57f7a08ae6176635a4f7b55d22f5a938771478";
 
 // ---- Target scorer feature list (Phase 230-02, SCOR-01) ----
 
@@ -1458,8 +1461,8 @@ inline constexpr rl_aim_fact_desc RL_AIM_FACT_DESCS[RL_TARGET_FEATURES] = {
   { "lava_lash_spread_within_12yd", rl_kind::k_seconds, false, 1.0, true, 5.0, -1 },
 };
 
-inline constexpr std::size_t RL_AIM_CONTEXT_COUNT = 6;
-inline constexpr std::size_t RL_AIM_CONTEXT_OBS_SLOTS[RL_AIM_CONTEXT_COUNT] = { 316, 318, 322, 34, 23, 52 };
+inline constexpr std::size_t RL_AIM_CONTEXT_COUNT = 7;
+inline constexpr std::size_t RL_AIM_CONTEXT_OBS_SLOTS[RL_AIM_CONTEXT_COUNT] = { 316, 318, 322, 34, 23, 52, 324 };
 inline constexpr const char* RL_AIM_CONTEXT_NAMES[RL_AIM_CONTEXT_COUNT] = {
   "capability.weapon_venomfang",
   "capability.tier_mid2_enh_2pc",
@@ -1467,6 +1470,7 @@ inline constexpr const char* RL_AIM_CONTEXT_NAMES[RL_AIM_CONTEXT_COUNT] = {
   "player_buffs.maelstrom_weapon.stacks",
   "player_buffs.doom_winds.remains",
   "player_buffs.tempest.remains",
+  "capability.mode_funnel",
 };
 
 inline constexpr std::size_t RL_AIM_SPELL_COUNT = 7;
@@ -1480,6 +1484,6 @@ inline constexpr const char* RL_AIM_SPELLS[RL_AIM_SPELL_COUNT] = {
   "voltaic_blaze",
 };
 
-inline constexpr std::size_t RL_AIM_INPUT_COUNT = 29;
-inline constexpr const char* RL_AIM_SHA = "aim-v1:d42f83a8d4f67e359264091e5b6a4b7275a70f19b03a8f86bd293069bc26c3cd";
+inline constexpr std::size_t RL_AIM_INPUT_COUNT = 30;
+inline constexpr const char* RL_AIM_SHA = "aim-v1:dd864b4b84bb187f221e72fbab7dafa3f219ba986cf0feb4e8c90268e52ecbc9";
 

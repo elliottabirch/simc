@@ -10,6 +10,7 @@
 #include "action/dot.hpp"
 #include "buff/buff.hpp"
 #include "fmt/format.h"
+#include "player/pet.hpp"
 #include "player/player.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_translog.hpp"
@@ -378,6 +379,123 @@ bool generic_filter( const action_t* a, player_t* candidate, bool harmful )
   return true;
 }
 
+// ---- Phase 266 (plan 266-01, funnel mode, owner F9): the chosen enemy (the tag) and its chooser ----
+
+player_t* rl_chosen_enemy_of( const player_t* p )
+{
+  if ( p == nullptr )
+    return nullptr;
+  // A pet or guardian (an ancestor totem, a Feral Spirit wolf) answers with its owner's tag. Walk up so a
+  // pet of a pet still resolves; the RL actor itself is not a pet.
+  while ( p->is_pet() )
+  {
+    const player_t* owner = p->cast_pet()->owner;
+    if ( owner == nullptr )
+      return nullptr;
+    p = owner;
+  }
+  return p->rl_chosen_enemy;
+}
+
+bool rl_can_be_hit( const player_t* p, const player_t* t )
+{
+  if ( t == nullptr || !rl_counts_as_enemy( t ) )
+    return false;
+  if ( t->is_sleeping() )
+    return false;
+  if ( t->debuffs.invulnerable && t->debuffs.invulnerable->check() )
+    return false;
+  if ( t->sim->is_untargetable_enemy( t ) )
+    return false;
+
+  const action_t* bolt = p->find_action( "lightning_bolt" );
+  if ( bolt == nullptr )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_target_select::rl_can_be_hit: player '{}' has no lightning_bolt action -- refusing rather than "
+        "guessing whether '{}' can be hit (the chosen enemy is judged by the legality of Lightning Bolt)",
+        p->name(), t->name() ) );
+  }
+  // generic_filter takes a non-const candidate (it is the same function the per-spell selector calls);
+  // it only reads from it.
+  return generic_filter( bolt, const_cast<player_t*>( t ), /*harmful=*/true );
+}
+
+// 2026-10-02, 266-09 (research R5, owner F9): in a funnel-mode fight the RL actor's own target and both weapon
+// swings sit on the tag. Writes exactly what retarget() writes (the player's target and the two swings, never
+// any other action), so the 261-09 dead-swing guard's invariant (swings stay on the player's target) holds.
+// With the flag off this does nothing at all (R8).
+static void pin_to_tag( player_t* p )
+{
+  if ( !p->sim->solver_funnel_mode )
+    return;
+  player_t* tag = p->rl_chosen_enemy;
+  if ( tag == nullptr )
+    return;
+  if ( p->target != tag )
+    p->target = tag;
+  if ( p->main_hand_attack && p->main_hand_attack->target != tag )
+    p->main_hand_attack->set_target( tag );
+  if ( p->off_hand_attack && p->off_hand_attack->target != tag )
+    p->off_hand_attack->set_target( tag );
+}
+
+void refresh_chosen( player_t* p )
+{
+  // The chooser is entered only by the RL actor. Refuse by name any other player, in
+  // decision_dump.cpp:1408's own refusing form, so a call site whose RL-actor gate is missing or wrong
+  // aborts the fight (the identity fight has pets) instead of silently tagging for a pet or another
+  // class's player. The test is the fork's one RL-actor test (solver_control.cpp:144): exact name, never
+  // a prefix, never a pet (CR-05: rl_target_select.hpp:360-372).
+  if ( std::strcmp( p->name(), RL_ACTOR_NAME ) != 0 || p->is_pet() )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_target_select::refresh_chosen: player '{}' is not the RL actor ('{}') -- the chosen enemy is "
+        "picked for the RL actor only, and every call site must carry the RL-actor gate itself",
+        p->name(), RL_ACTOR_NAME ) );
+  }
+
+  // Keep the tag while it can still be hit.
+  if ( p->rl_chosen_enemy != nullptr && rl_can_be_hit( p, p->rl_chosen_enemy ) )
+  {
+    pin_to_tag( p );  // 266-09 (R5): flag on only; keeps target and swings on a tag that can still be hit
+    return;
+  }
+
+  // Otherwise pick among the enemies that can be hit AND are legal for this player's Stormstrike; failing
+  // that, among those that can be hit at all (R3). With the random option off the pick is the first in the
+  // list order. With it on (266-09, R7) and two or more eligible, the pick is uniform at random, one draw
+  // from the chooser's own per-fight stream (solver_target_rng): never the exploration stream, never the
+  // engine's. With fewer than two eligible there is no draw. It acts whatever the funnel flag is.
+  const action_t*        stormstrike = p->find_action( "stormstrike" );
+  std::vector<player_t*> hittable;
+  std::vector<player_t*> melee_legal;
+  for ( player_t* t : p->sim->target_non_sleeping_list )
+  {
+    if ( !t->is_enemy() || !rl_can_be_hit( p, t ) )
+      continue;
+    hittable.push_back( t );
+    if ( stormstrike != nullptr && generic_filter( stormstrike, t, /*harmful=*/true ) )
+      melee_legal.push_back( t );
+  }
+  const std::vector<player_t*>& eligible = melee_legal.empty() ? hittable : melee_legal;
+  player_t*                     pick     = eligible.empty() ? nullptr : eligible.front();
+  if ( p->sim->solver_random_chosen_enemy && eligible.size() >= 2 )
+  {
+    size_t k = static_cast<size_t>( p->sim->solver_target_rng.range( 0.0, static_cast<double>( eligible.size() ) ) );
+    if ( k >= eligible.size() )
+      k = eligible.size() - 1;
+    pick = eligible[ k ];
+  }
+
+  // With nothing hittable the old tag is kept (R2).
+  if ( pick != nullptr )
+  {
+    p->rl_chosen_enemy = pick;
+    pin_to_tag( p );  // 266-09 (R5): after a re-pick the target and swings follow the tag (flag on only)
+  }
+}
+
 // tstl-sylvanas 260928-tb8: observation-only non-boss mask for trash pulls. Engine mechanics keep
 // player_t::is_boss() untouched (the shaman APL never reads it; the only mechanical use is dungeon-style
 // priority damage), so only what the net and the decision dump see changes.
@@ -528,6 +646,11 @@ namespace
 // Refuses (throws, never silently falls back to the caller's own zero geometry) when the resolved
 // source is null or its radius is <= 0.0 -- a structural invariant: a Thorim's-primed decision with
 // no Tempest/Chain-Lightning action registered on this player is a configuration error.
+// 261001 (MEASURED, decision-path fights): this refusal does NOT fire for a character that lacks the
+// Tempest talent. A Totemic character's `tempest` action is still constructed from its priority
+// list, is not a background action, and carries Tempest's own 8-yd radius, so the refusal stays
+// reserved for a genuinely missing action (a priority list that names no `tempest`/`chain_lightning`
+// while the Thorim's branch is primed) -- never loosen it for an untalented character.
 struct chain_geometry
 {
   double radius = 0.0;
@@ -563,17 +686,16 @@ chain_geometry resolve_thorims_branch_geometry( const action_t* resolved, prefer
     // any generic effect-merge in `sc_shaman.cpp` (which references Chaining Storms, id 334308,
     // in exactly two places -- neither an `apply_affecting_effects`-style call -- so the +2 must
     // be applied by some OTHER, more generic DBC-level mechanism this session did not trace).
-    // Attempts to reproduce a WITHOUT-Chaining-Storms baseline by re-asserting a stripped
-    // `spec_talents=` line LATER in the same profile (including an entirely EMPTY one) did NOT
-    // change either this cap or the unrelated, independently-observable
-    // `has_talent_thorims_invocation` dump field -- i.e. that override methodology itself does
-    // not take effect for an `input=`-included profile in this build, so this session could NOT
-    // conclusively measure the WITHOUT-talent case. Given that, this refuses on anything OTHER
-    // than the two values either side of the addon's own ternary ({3, 5}) rather than asserting
-    // a single unconfirmed number -- protects against a genuinely wrong cap (e.g. a future
-    // spell-data change moving it to some third value) without overclaiming a with/without-talent
-    // causal link this session did not establish. See the addon-parity todo for the open
-    // question and how to close it properly (a real in-game or clean-profile measurement).
+    // 261001 (MEASURED, decision-path fights, threads=1, `target_select_enabled=1`): the
+    // WITHOUT-Chaining-Storms case the paragraph above could not measure resolves to 3, exactly the
+    // addon's own untalented value, and does NOT refuse here. Receipts: the standard Stormbringer
+    // profile (Chaining Storms talented) logs aoe=5; the same profile with the by-name per-fight
+    // override `spec_talents+=/chaining_storms:0` after `input=` logs aoe=3 and its `save=` profile's
+    // encoded `talents=` string changes -- that override DOES take effect (the earlier "did not
+    // take effect" reading was wrong; 261001's own Voltaic Blaze proof relied on the same override
+    // form); the Totemic profile (neither Chaining Storms nor Tempest) also logs aoe=3, radius 10.
+    // Neither untalented build refused over 5 seeds x {1, 5} targets x 300 s. So {3, 5} stays the
+    // full legal set and the check below still catches a genuinely wrong third value.
     if ( geo.cap != 3 && geo.cap != 5 )
     {
       throw sc_runtime_error( fmt::format(
@@ -1678,11 +1800,18 @@ void retarget( action_t* a, player_t* p, player_t* pick )
   // WR-07 (260902/cr4): action_t::set_target -- NEVER a raw `a->target = pick` write (it skips the
   // AoE target-cache invalidation, leaving a stale cache and a silently wrong hit set).
   a->set_target( pick );
-  p->target = pick;
-  if ( p->main_hand_attack )
-    p->main_hand_attack->set_target( pick );
-  if ( p->off_hand_attack )
-    p->off_hand_attack->set_target( pick );
+  // 2026-10-02, 266-09 (research R5, owner F9): in a funnel-mode fight an aimed cast goes where it was aimed
+  // (the action's own target above) but does NOT move the player's own target or either weapon swing: they stay
+  // on the chosen enemy (the tag), the way the live game keeps them. Flag off: today's writes, unchanged (R8).
+  // The mid-cast fallback in action.cpp calls this with the player's own target, so it needs no gate of its own.
+  if ( !p->sim->solver_funnel_mode )
+  {
+    p->target = pick;
+    if ( p->main_hand_attack )
+      p->main_hand_attack->set_target( pick );
+    if ( p->off_hand_attack )
+      p->off_hand_attack->set_target( pick );
+  }
   // The turn (T2) formerly here -- both callers (accept_cast, the mid-cast re-resolution
   // ladder's fallback arm) turning the player toward `pick` -- is DELETED (R6-8, owner,
   // 2026-09-07). `pick` never reaches this function unless it already passed

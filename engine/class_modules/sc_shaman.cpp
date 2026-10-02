@@ -10589,8 +10589,21 @@ struct voltaic_blaze_t : public shaman_spell_t
       // engine-side prune fix this attribute requires. Changes the sim's OWN mechanics (the bars
       // are re-cut on this binary later, per this batch's own sequencing -- expected, not a
       // regression).
-      radius = player->talent.voltaic_blaze->effectN( 1 ).radius_max();
-      assert( radius == 10.0 && "voltaic_blaze effect #1 radius_max() expected 10.0 yards (470057)" );
+      //
+      // 261001: guarded on the talent. A character that has not taken Voltaic Blaze still builds this
+      // action (create_action constructs it whenever the APL names voltaic_blaze), but talent.voltaic_blaze
+      // is then the not-found placeholder spell, so effect #1's radius_max() reads 0 and the assert below
+      // aborted init (exit 134). An untalented build never presses the button: voltaic_blaze_t is
+      // constructed on the talent spell data, so action_t::action_t sets `background` on it (action.cpp,
+      // `s_data == spell_data_t::not_found()`), which keeps it out of every APL foreground list and
+      // marks it unresolvable for the policy mask (rl_policy_obs.cpp, `!a->background`). The radius, and
+      // check_distance_targeting that reads it, are therefore never reached untalented. For a talented
+      // character the resolve and the 10.0 assert are unchanged.
+      if ( player->talent.voltaic_blaze.ok() )
+      {
+        radius = player->talent.voltaic_blaze->effectN( 1 ).radius_max();
+        assert( radius == 10.0 && "voltaic_blaze effect #1 radius_max() expected 10.0 yards (470057)" );
+      }
     }
 
     // 260914-rbp Task 2c (HI-2): base action_t::check_distance_targeting's target-radiate branch
@@ -12747,7 +12760,7 @@ void shaman_t::trigger_windfury_weapon( const action_state_t* state, double over
     // into the expected total (see this hook's own top-of-file comment) -- route it under the
     // impacting melee's own cause, `state` still being in scope here.
     rl_credit_route( this, rl_cause_t{ state->rl_cause_seq, state->rl_cause_class }, sim->solver_control_seq,
-                      wf_expected_amount, /*expected=*/true );
+                      wf_expected_amount, /*expected=*/true, state->target );
 
     const bool ok = rng().roll( wf_chance );
     rl_count_proc( this, rl_proc::id::windfury, wf_chance, ok );

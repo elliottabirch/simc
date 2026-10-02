@@ -1125,6 +1125,12 @@ struct sim_t : private sc_thread_t
   // explicit seed option would buy that diagnostic back; adding it later
   // is purely additive (D-08's rejected alternative).
   rng::rng_t solver_explore_rng;
+  // Phase 266 (266-09, R7): the chooser's own dice, a DEDICATED stream seeded once per fight in
+  // solver_control::reset_iteration() from the sim's seed, thread index, fight index and the source name
+  // "sim|solver_target" (rng::per_source_seed). Drawn only when solver_random_chosen_enemy is on AND two or more
+  // enemies are eligible. It is never solver_explore_rng (the button and aim dials draw from that one, so they
+  // keep their sequence) and never the engine's own stream (every crit and proc would move: see above).
+  rng::rng_t solver_target_rng;
   // Soft-fail fork hook (simc-offline-evaluation-pipeline phase 116, 116-05) -
   // sequence_soft_fail=<bool> makes sequence_t::schedule_execute() (see
   // action/sequence.cpp) re-validate the current sub-action's readiness
@@ -1361,6 +1367,18 @@ struct sim_t : private sc_thread_t
   // and is still validated, but `select()` never dispatches to it. Registering a new option moves
   // the simulator-options fingerprint the rig computes -- recorded in that same receipt.
   bool target_scorer_force_rules;
+  // Phase 266 (plan 266-09, owner F9, research R5/R11): funnel mode. With it on, the RL actor's own target and
+  // both weapon swings stay on the chosen enemy (the tag, player_t::rl_chosen_enemy): an aimed cast no longer
+  // moves them (rl_target_select::retarget skips the writes), player_t::acquire_target keeps the tag while it
+  // can be hit, and after the chooser re-picks the target and swings follow it. Default off; off changes no line
+  // of play (R8). There is NO funnel aiming rule: select(), preference_for, the legality filter and
+  // target_scorer_force_rules are the same code with the flag on and off (R6).
+  bool solver_funnel_mode;
+  // Phase 266 (plan 266-09, research R7/R11): the random chosen enemy. With it on, the chooser picks the tag
+  // uniformly at random among the eligible enemies instead of the first in the list, drawing from its OWN
+  // per-fight stream (solver_target_rng below) and only when two or more enemies are eligible. It acts on the
+  // chooser whatever the funnel flag is. Default off; off draws nothing.
+  bool solver_random_chosen_enemy;
   bool ignore_invulnerable_targets;
   bool enable_dps_healing;
   bool count_overheal_as_heal;
