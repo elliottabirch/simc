@@ -37,6 +37,7 @@ struct action_state_t;
 struct buff_t;
 struct dot_t;
 struct dbc_proc_callback_t;
+struct cooldown_t;
 
 namespace rl_buff_ledger
 {
@@ -243,8 +244,6 @@ void note_dot_read( const dot_t* d, bool non_zero );
 //
 // All of it reads cooldown fields and writes ledger records after the engine's own logic, behind one `sim->rl_bl_on`
 // test at the call site; nothing here changes a cooldown, an event or a random number.
-
-struct cooldown_t;
 
 // What the ledger needs to see of a cooldown before a mutator runs (milliseconds, integers as the engine keeps them).
 struct cd_snap_t
