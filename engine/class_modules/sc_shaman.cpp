@@ -12747,7 +12747,7 @@ void shaman_t::trigger_windfury_weapon( const action_state_t* state, double over
     // into the expected total (see this hook's own top-of-file comment) -- route it under the
     // impacting melee's own cause, `state` still being in scope here.
     rl_credit_route( this, rl_cause_t{ state->rl_cause_seq, state->rl_cause_class }, sim->solver_control_seq,
-                      wf_expected_amount, /*expected=*/true );
+                      wf_expected_amount, /*expected=*/true, state->target );
 
     const bool ok = rng().roll( wf_chance );
     rl_count_proc( this, rl_proc::id::windfury, wf_chance, ok );

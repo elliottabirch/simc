@@ -15,6 +15,7 @@
 #include "player/player.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_rng_record.hpp"
+#include "sim/rl_target_select.hpp"
 #include "sim/sim.hpp"
 #include "util/io.hpp"
 #include "util/util.hpp"
@@ -80,7 +81,7 @@ rl_cause_scope_t::~rl_cause_scope_t()
 // pet->owner rules). Defined here because it needs player_t complete,
 // mirroring rl_count_proc's own placement immediately above.
 void rl_credit_route( player_t* p, rl_cause_t cause, std::uint64_t now_seq, double amount, bool expected,
-                       const char* action_name )
+                       const player_t* hit_target, const char* action_name )
 {
   if ( p == nullptr ) return;
 
@@ -112,6 +113,20 @@ void rl_credit_route( player_t* p, rl_cause_t cause, std::uint64_t now_seq, doub
 
   ( expected ? p->rl_credit.exp : p->rl_credit.real )[ index ] += amount;
 
+  // Phase 266 (266-01, owner F9, R4/R9): did this increment strike the chosen enemy (the tag) AT THE
+  // MOMENT OF THE HIT? The tag of a pet is its owner's. nullptr (no target in scope, e.g. a heal or an
+  // absorb on a friendly never reaches here as an enemy) is never the chosen enemy. The chosen copy below
+  // adds the SAME amount in the SAME order as the all-enemy copy, in both modes (with the flag off it is
+  // bookkeeping only and no play reads it, R8).
+  const bool on_chosen = hit_target != nullptr && hit_target == rl_target_select::rl_chosen_enemy_of( p );
+  if ( on_chosen )
+  {
+    ( expected ? p->rl_credit_chosen.exp : p->rl_credit_chosen.real )[ index ] += amount;
+    // The chosen running totals: the twins of solver_damage_so_far / solver_damage_expected_so_far
+    // (whose own additions stay at their own sites, every one of them paired with a route call).
+    ( expected ? p->solver_chosen_damage_expected_so_far : p->solver_chosen_damage_so_far ) += amount;
+  }
+
   // Orphan census: realized-only, keyed by the contributing stats_t's own name (the only
   // identity a realized sink has -- stats_t::add_result carries no action_state_t/action_t).
   if ( index == 5u && !expected && action_name != nullptr )
@@ -135,6 +150,15 @@ void rl_credit_route( player_t* p, rl_cause_t cause, std::uint64_t now_seq, doub
         vec.resize( idx + 1, 0.0 );
       vec[ idx ] += amount;
 
+      // Phase 266 (266-01): the chosen-enemy twin of the per-press own credit, same index, same order.
+      if ( on_chosen )
+      {
+        auto& vec_chosen = expected ? p->rl_own_exp_chosen : p->rl_own_real_chosen;
+        if ( vec_chosen.size() <= idx )
+          vec_chosen.resize( idx + 1, 0.0 );
+        vec_chosen[ idx ] += amount;
+      }
+
       // Phase 259 (plan 259-11, owner Q15/Q16, fork option P): the expected own credit that travels
       // under a deck-hit mark is ALSO kept apart, per decision. `rl_own_exp` above still receives it
       // (every total and the translog rows are exactly as before); the per-fight pass in
@@ -146,6 +170,15 @@ void rl_credit_route( player_t* p, rl_cause_t cause, std::uint64_t now_seq, doub
         if ( marked.size() <= idx )
           marked.resize( idx + 1, 0.0 );
         marked[ idx ] += amount;
+
+        // Phase 266 (266-01): the chosen-enemy twin of the deck-marked part.
+        if ( on_chosen )
+        {
+          auto& marked_chosen = p->rl_own_exp_marked_chosen;
+          if ( marked_chosen.size() <= idx )
+            marked_chosen.resize( idx + 1, 0.0 );
+          marked_chosen[ idx ] += amount;
+        }
       }
     }
     else if ( !expected )
@@ -175,8 +208,8 @@ sim_t* root_of( sim_t* sim )
   return root;
 }
 
-// Appends one RECORD_SIZE-byte row (RECORD_SIZE bytes; 3080 as of version 12, width 324:
-// roundup8(45 + 4*324 + 4*16*23 + 5) + 160 + 96) onto the
+// Appends one RECORD_SIZE-byte row (RECORD_SIZE bytes; 3192 as of version 13, width 324:
+// roundup8(45 + 4*324 + 4*16*23 + 5) + 160 + 96 + 112) onto the
 // root's in-memory buffer. Does not
 // flush -- callers decide the flush cadence (D-13: once per fight end, not
 // once per row).
@@ -438,6 +471,10 @@ void open_and_write_header( sim_t* sim )
   }
   if ( root->target_scorer_force_rules )
     h.aim_state |= AIM_STATE_FORCE_RULES;
+  // Version 13 (266-01): the funnel mode and chooser state words are written 0 until plan 266-09 adds
+  // the options that set them. (h is value-initialised above; stated here so the zero is on purpose.)
+  h.funnel_mode = 0;
+  h.chooser_state = 0;
   // tstl-sylvanas phase 218, plan 218-02 (RIG-01): source the header's
   // fight-shape word from the sim option instead of hardcoding zero. 0
   // stays reachable -- it is sim_t::rl_fight_shape_index's own default,
@@ -497,6 +534,7 @@ void open_and_write_header( sim_t* sim )
     }
     sidecar << "{\"format_version\": " << FORMAT_VERSION
             << ", \"credit_block_offset\": " << CREDIT_BLOCK_OFFSET
+            << ", \"chosen_block_offset\": " << CHOSEN_BLOCK_OFFSET
             << ", \"credit_streams\": " << ( 2u * rl_credit::STREAM_COUNT )
             << ", \"record_size\": " << RECORD_SIZE << ", \"names\": [";
     for ( std::uint32_t i = 0; i < rl_credit::STREAM_COUNT; ++i )
@@ -672,6 +710,12 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float ob
   // boundary -- see rl_credit.hpp and rl_translog.hpp's top-of-file comment.
   std::memcpy( r.credit_real, p->rl_credit.real, sizeof( r.credit_real ) );
   std::memcpy( r.credit_exp, p->rl_credit.exp, sizeof( r.credit_exp ) );
+  // Version 13 (266-01): the chosen-enemy copy of the running totals and the credit streams at this
+  // decision boundary (zero for a player that never gets a tag).
+  r.damage_chosen = p->solver_chosen_damage_so_far;
+  r.damage_expected_chosen = p->solver_chosen_damage_expected_so_far;
+  std::memcpy( r.credit_real_chosen, p->rl_credit_chosen.real, sizeof( r.credit_real_chosen ) );
+  std::memcpy( r.credit_exp_chosen, p->rl_credit_chosen.exp, sizeof( r.credit_exp_chosen ) );
 
   // Stage F1 (260918-atr): the first decision row THIS FIGHT writes stamps
   // p->rl_fight_first_seq -- see player.hpp's own doc comment for why this is the one site that
@@ -771,6 +815,12 @@ void record_close( sim_t* sim )
   // actor `p` (not root) -- see rl_translog.hpp's top-of-file comment.
   std::memcpy( r.credit_real, p->rl_credit.real, sizeof( r.credit_real ) );
   std::memcpy( r.credit_exp, p->rl_credit.exp, sizeof( r.credit_exp ) );
+  // Version 13 (266-01): the fight's own FINAL chosen-enemy totals and streams, from the same solo
+  // actor `p` (not root).
+  r.final_damage_total_chosen = p->solver_chosen_damage_so_far;
+  r.final_damage_expected_total_chosen = p->solver_chosen_damage_expected_so_far;
+  std::memcpy( r.credit_real_chosen, p->rl_credit_chosen.real, sizeof( r.credit_real_chosen ) );
+  std::memcpy( r.credit_exp_chosen, p->rl_credit_chosen.exp, sizeof( r.credit_exp_chosen ) );
 
   // Diagnostic-only orphan census (260918-cbc): names exactly which actions are landing with
   // no cause context, rather than a bare aggregate percentage. Gated on sim->debug (already the
@@ -1020,6 +1070,8 @@ void write_footer( sim_t* sim )
   std::memset( r.zero_proc_block, 0, sizeof( r.zero_proc_block ) );
   // Version 10 (260918-cbc): no fight owns the footer -- written zero.
   std::memset( r.zero_credit_block, 0, sizeof( r.zero_credit_block ) );
+  // Version 13 (266-01): no fight owns the footer -- the chosen block is written zero too.
+  std::memset( r.zero_chosen_block, 0, sizeof( r.zero_chosen_block ) );
 
   append_row( root, &r );
   // 260924-tlz: rows go through the zstd stream, never a raw write -- see

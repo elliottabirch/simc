@@ -10,6 +10,7 @@
 #include "action/dot.hpp"
 #include "buff/buff.hpp"
 #include "fmt/format.h"
+#include "player/pet.hpp"
 #include "player/player.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_translog.hpp"
@@ -376,6 +377,93 @@ bool generic_filter( const action_t* a, player_t* candidate, bool harmful )
     return false;
 
   return true;
+}
+
+// ---- Phase 266 (plan 266-01, funnel mode, owner F9): the chosen enemy (the tag) and its chooser ----
+
+player_t* rl_chosen_enemy_of( const player_t* p )
+{
+  if ( p == nullptr )
+    return nullptr;
+  // A pet or guardian (an ancestor totem, a Feral Spirit wolf) answers with its owner's tag. Walk up so a
+  // pet of a pet still resolves; the RL actor itself is not a pet.
+  while ( p->is_pet() )
+  {
+    const player_t* owner = p->cast_pet()->owner;
+    if ( owner == nullptr )
+      return nullptr;
+    p = owner;
+  }
+  return p->rl_chosen_enemy;
+}
+
+bool rl_can_be_hit( const player_t* p, const player_t* t )
+{
+  if ( t == nullptr || !rl_counts_as_enemy( t ) )
+    return false;
+  if ( t->is_sleeping() )
+    return false;
+  if ( t->debuffs.invulnerable && t->debuffs.invulnerable->check() )
+    return false;
+  if ( t->sim->is_untargetable_enemy( t ) )
+    return false;
+
+  const action_t* bolt = p->find_action( "lightning_bolt" );
+  if ( bolt == nullptr )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_target_select::rl_can_be_hit: player '{}' has no lightning_bolt action -- refusing rather than "
+        "guessing whether '{}' can be hit (the chosen enemy is judged by the legality of Lightning Bolt)",
+        p->name(), t->name() ) );
+  }
+  // generic_filter takes a non-const candidate (it is the same function the per-spell selector calls);
+  // it only reads from it.
+  return generic_filter( bolt, const_cast<player_t*>( t ), /*harmful=*/true );
+}
+
+void refresh_chosen( player_t* p )
+{
+  // The chooser is entered only by the RL actor. Refuse by name any other player, in
+  // decision_dump.cpp:1408's own refusing form, so a call site whose RL-actor gate is missing or wrong
+  // aborts the fight (the identity fight has pets) instead of silently tagging for a pet or another
+  // class's player. The test is the fork's one RL-actor test (solver_control.cpp:144): exact name, never
+  // a prefix, never a pet (CR-05: rl_target_select.hpp:360-372).
+  if ( std::strcmp( p->name(), RL_ACTOR_NAME ) != 0 || p->is_pet() )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_target_select::refresh_chosen: player '{}' is not the RL actor ('{}') -- the chosen enemy is "
+        "picked for the RL actor only, and every call site must carry the RL-actor gate itself",
+        p->name(), RL_ACTOR_NAME ) );
+  }
+
+  // Keep the tag while it can still be hit.
+  if ( p->rl_chosen_enemy != nullptr && rl_can_be_hit( p, p->rl_chosen_enemy ) )
+    return;
+
+  // Otherwise pick the first enemy, in the list order, that can be hit AND is legal for this player's
+  // Stormstrike; failing that, the first that can be hit at all (R3). This plan builds only the
+  // first-in-order branch (the random branch is plan 266-09, R7).
+  const action_t* stormstrike = p->find_action( "stormstrike" );
+  player_t* first_hittable = nullptr;
+  player_t* pick          = nullptr;
+  for ( player_t* t : p->sim->target_non_sleeping_list )
+  {
+    if ( !t->is_enemy() || !rl_can_be_hit( p, t ) )
+      continue;
+    if ( first_hittable == nullptr )
+      first_hittable = t;
+    if ( stormstrike != nullptr && generic_filter( stormstrike, t, /*harmful=*/true ) )
+    {
+      pick = t;
+      break;
+    }
+  }
+  if ( pick == nullptr )
+    pick = first_hittable;
+
+  // With nothing hittable the old tag is kept (R2).
+  if ( pick != nullptr )
+    p->rl_chosen_enemy = pick;
 }
 
 // tstl-sylvanas 260928-tb8: observation-only non-boss mask for trash pulls. Engine mechanics keep

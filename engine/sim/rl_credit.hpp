@@ -216,7 +216,14 @@ struct rl_credit_streams_t
 // a diagnostic print name exactly which actions are landing with no
 // cause context, rather than a bare aggregate percentage.
 //
+// `hit_target` (phase 266, plan 266-01, fork commit C1a) is the enemy this increment struck: REQUIRED,
+// no default, so the compiler refuses any call site that was missed. When it equals the chosen enemy
+// (the tag, `p->rl_chosen_enemy`, resolved to the owner's for a pet) AT THE MOMENT OF THE HIT, the same
+// amount, in the same order of additions, is also added to the chosen-enemy copy (`p->rl_credit_chosen`,
+// the chosen running totals and the per-press chosen vectors). It is placed before `action_name` so that
+// parameter can keep its default. nullptr (no target in scope) never counts as the chosen enemy.
+//
 // Defined in rl_translog.cpp (needs player_t complete, mirroring
 // rl_count_proc's own placement in rl_proc_counters.hpp).
 void rl_credit_route( player_t* p, rl_cause_t cause, std::uint64_t now_seq, double amount, bool expected,
-                       const char* action_name = nullptr );
+                       const player_t* hit_target, const char* action_name = nullptr );

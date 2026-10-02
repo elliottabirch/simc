@@ -2504,17 +2504,17 @@ void action_t::accrue_expected_damage( action_state_t* state )
   if ( !player->is_pet() )
   {
     player->solver_damage_expected_so_far += expected_amount;
-    rl_credit_route( player, cause, sim->solver_control_seq, expected_amount, /*expected=*/true );
+    rl_credit_route( player, cause, sim->solver_control_seq, expected_amount, /*expected=*/true, state->target );
   }
   else
   {
     player_t* owner = player->cast_pet()->owner;
     owner->solver_damage_expected_so_far += expected_amount;
-    rl_credit_route( owner, cause, sim->solver_control_seq, expected_amount, /*expected=*/true );
+    rl_credit_route( owner, cause, sim->solver_control_seq, expected_amount, /*expected=*/true, state->target );
     if ( sim->report_pets_separately )
     {
       player->solver_damage_expected_so_far += expected_amount;
-      rl_credit_route( player, cause, sim->solver_control_seq, expected_amount, /*expected=*/true );
+      rl_credit_route( player, cause, sim->solver_control_seq, expected_amount, /*expected=*/true, state->target );
     }
   }
 }

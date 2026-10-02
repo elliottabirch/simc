@@ -62,7 +62,9 @@
 #include "sim/proc_rng.hpp"
 #include "sim/scale_factor_control.hpp"
 #include "sim/sim.hpp"
+#include "sim/rl_policy_constants.h"
 #include "sim/rl_rng_record.hpp"
+#include "sim/rl_target_select.hpp"
 #include "util/io.hpp"
 #include "util/plot_data.hpp"
 #include "util/util.hpp"
@@ -71,6 +73,7 @@
 #include <cmath>
 #include <cctype>
 #include <cerrno>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <sstream>
@@ -6408,6 +6411,11 @@ void player_t::combat_end()
  */
 void player_t::datacollection_begin()
 {
+  // Phase 266 (266-01): the tag is cleared at each fight's start, BEFORE the early return below, so a
+  // stale tag from the previous fight can never survive into a fight whose chooser call would then
+  // "keep" it. Enemies are the same actor objects every iteration, so a stale pointer is a live one.
+  rl_chosen_enemy = nullptr;
+
   // Check whether the actor was arisen at least once during the _previous_ iteration
   // Note that this check is dependant on sim_t::combat_begin() having
   // sim_t::datacollection_begin() call before the player_t::combat_begin() calls.
@@ -6440,6 +6448,14 @@ void player_t::datacollection_begin()
   rl_own_real.clear();
   rl_own_exp.clear();
   rl_own_exp_marked.clear();  // Phase 259 (259-11): reset beside rl_own_exp
+  // Phase 266 (266-01): the chosen-enemy copy, reset beside its all-enemy twins. The tag itself
+  // (rl_chosen_enemy) is cleared at the top of this function, before the early return.
+  solver_chosen_damage_so_far          = 0;
+  solver_chosen_damage_expected_so_far = 0;
+  rl_credit_chosen.reset();
+  rl_own_real_chosen.clear();
+  rl_own_exp_chosen.clear();
+  rl_own_exp_marked_chosen.clear();
   rl_deck_p.clear();
   rl_fight_first_seq = 0;
   rl_fight_first_seq_set = false;
@@ -7301,6 +7317,14 @@ void player_t::arise()
     // pets) can cope with a situation, where the primary target for example is invulnerable, so
     // they need to figure out a (more valid) target to shoot spells on.
     acquire_target( retarget_source::SELF_ARISE );
+
+    // Phase 266 (266-01, owner F9): the pull call of the chooser. This branch runs for EVERY non-enemy
+    // player, pets and guardians included (the Feral Spirit wolves arise here), so the call is gated by
+    // the fork's one RL-actor test, the member-function spelling of solver_control.cpp:144 (exact name
+    // match, never a prefix, and never a pet: the CR-05 bug at rl_target_select.hpp:360-372). The chooser
+    // itself refuses any other player by name, so a missing or wrong gate aborts instead of tagging.
+    if ( std::strcmp( name(), RL_ACTOR_NAME ) == 0 && !is_pet() )
+      rl_target_select::refresh_chosen( this );
   }
 
   // ready_type READY_TRIGGER may already have scheduled a ready event, so we need to check if we are already

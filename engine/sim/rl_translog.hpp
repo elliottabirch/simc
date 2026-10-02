@@ -311,7 +311,14 @@ namespace rl_translog
 // trailing NUL is part of the magic itself.
 inline constexpr char MAGIC[ 4 ] = { 'R', 'L', 'T', 'L' };
 inline constexpr std::uint32_t ENDIAN_CANARY = 0x01020304u;
-inline constexpr std::uint32_t FORMAT_VERSION = 12u;  // 262-10 (2026-10-01): width 324 on Phase 259's
+inline constexpr std::uint32_t FORMAT_VERSION = 13u;  // 266-01 (2026-10-01, funnel mode, fork commit C1a):
+                                                        // the 112-byte chosen-enemy block after the credit
+                                                        // block (damage_chosen, damage_expected_chosen and the
+                                                        // two six-stream copies) and a header grown 264 -> 272
+                                                        // (funnel_mode, chooser_state, both 0 until plan
+                                                        // 266-09); format 12 and earlier are refused by name
+                                                        // on the Python side (plan 266-12).
+                                                        // 12 was 262-10 (2026-10-01): width 324 on Phase 259's
                                                         // 16 target slots -- the seven fight inputs are
                                                         // added and two reserved scalars retired, so the
                                                         // observation row is 5 floats wider; formats 10
@@ -330,7 +337,15 @@ inline constexpr std::uint32_t FORMAT_VERSION = 12u;  // 262-10 (2026-10-01): wi
 // compile (tstl 220-03, OBS-06; formula updated 260901-pb1 Task 3 for version 5, updated again
 // 228-09 for version 6, updated again 230-04 for version 7, updated again 260917-pcn for
 // version 9 -- see top-of-file comment).
-inline constexpr std::uint32_t RECORD_SIZE = 3080u;  // 262-10 (format 12): 3056 -> 3080 -- RL_OBS_DIM moves
+inline constexpr std::uint32_t RECORD_SIZE = 3192u;  // 266-01 (format 13, 2026-10-01): 3080 -> 3192 -- the
+                                                       // 112-byte chosen-enemy block (CHOSEN_BLOCK_SIZE)
+                                                       // appended after the credit block. roundup8(45 + 4*324
+                                                       // + 4*16*23 + 7) = 2824, + 160 proc + 96 credit
+                                                       // + 112 chosen = 3192; identical at width 325 (the
+                                                       // 7-byte round-up pad absorbs the extra 4 bytes:
+                                                       // PROC_BLOCK_OFFSET stays 2824). Confirmed by the
+                                                       // static_assert below, not hand-verified.
+                                                       // 262-10 (format 12): 3056 -> 3080 -- RL_OBS_DIM moves
                                                        // 319 -> 324 (seven fight inputs added, two reserved
                                                        // scalars retired); RL_TARGET_SLOTS stays 16.
                                                        // roundup8(45 + 4*324 + 4*16*23 + 5) = 2824,
@@ -456,11 +471,21 @@ static_assert( PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE == 2984u,
 // declared above it).
 inline constexpr std::uint32_t CREDIT_BLOCK_OFFSET = PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE;
 inline constexpr std::uint32_t CREDIT_BLOCK_SIZE = 8u * 2u * rl_credit::STREAM_COUNT;
-static_assert( RECORD_SIZE == CREDIT_BLOCK_OFFSET + CREDIT_BLOCK_SIZE,
+// 266-01 (version 13): the chosen-enemy block starts where the credit block ends. Its own byte count is
+// two doubles (damage_chosen, damage_expected_chosen) plus the two six-stream double arrays (the
+// chosen copies of credit_real and credit_exp): 16 + 8*2*STREAM_COUNT = 112. Declared after
+// CREDIT_BLOCK_SIZE so the RECORD_SIZE static_assert below can reference them.
+inline constexpr std::uint32_t CHOSEN_BLOCK_OFFSET = CREDIT_BLOCK_OFFSET + CREDIT_BLOCK_SIZE;
+inline constexpr std::uint32_t CHOSEN_BLOCK_SIZE = 16u + 8u * 2u * rl_credit::STREAM_COUNT;
+static_assert( RECORD_SIZE == CHOSEN_BLOCK_OFFSET + CHOSEN_BLOCK_SIZE,
                "RECORD_SIZE must be roundup8(45 + 4*RL_OBS_DIM + 4*RL_TARGET_SLOTS*RL_TARGET_FEATURES + 5) + "
-               "8*rl_proc::COUNT + 16*rl_credit::STREAM_COUNT" );
+               "8*rl_proc::COUNT + 16*rl_credit::STREAM_COUNT + 16 + 16*rl_credit::STREAM_COUNT" );
+static_assert( RECORD_SIZE == 3192u && CHOSEN_BLOCK_OFFSET == 3080u && CHOSEN_BLOCK_SIZE == 112u,
+               "version 13 at the 262-10 width (324) and 16 target slots: RECORD_SIZE 3192 = 3080 + a "
+               "112-byte chosen block at offset 3080 (266-01)" );
 static_assert( RL_OBS_DIM >= 2, "footer_record's zero40[RL_OBS_DIM-1] needs at least one element" );
-inline constexpr std::uint32_t HEADER_SIZE = 264u;  // 259-05: 256 -> 264 (aim_exploration @256, aim_state @260)
+inline constexpr std::uint32_t HEADER_SIZE = 272u;  // 266-01: 264 -> 272 (funnel_mode @264, chooser_state @268)
+                                                      // 259-05: 256 -> 264 (aim_exploration @256, aim_state @260)
 
 // 228-09 (D-23/TGT-08): the chosen-target sentinel meaning "no pick" --
 // a wait decision, an untargeted cast, or a targeted cast whose pick was
@@ -630,6 +655,13 @@ struct decision_record
   // every version-9 field keeps its version-9 offset.
   alignas( 8 ) double credit_real[ rl_credit::STREAM_COUNT ];  // @CREDIT_BLOCK_OFFSET
   double credit_exp[ rl_credit::STREAM_COUNT ];                 // @CREDIT_BLOCK_OFFSET + 8*STREAM_COUNT
+  // Version 13 (266-01, funnel mode): the chosen-enemy copy of the running totals and the credit
+  // streams -- the same numbers counting ONLY hits whose target was the chosen enemy (the tag) at the
+  // moment of the hit. Sits AFTER the credit block so every version-12 field keeps its offset.
+  alignas( 8 ) double damage_chosen;                 // @CHOSEN_BLOCK_OFFSET -- p->solver_chosen_damage_so_far
+  double damage_expected_chosen;                      // @CHOSEN_BLOCK_OFFSET + 8 -- p->solver_chosen_damage_expected_so_far
+  double credit_real_chosen[ rl_credit::STREAM_COUNT ];  // @CHOSEN_BLOCK_OFFSET + 16
+  double credit_exp_chosen[ rl_credit::STREAM_COUNT ];   // @CHOSEN_BLOCK_OFFSET + 16 + 8*STREAM_COUNT
 };
 
 struct close_record
@@ -685,6 +717,12 @@ struct close_record
   // numbers, exactly like the proc block's own precedent immediately above.
   alignas( 8 ) double credit_real[ rl_credit::STREAM_COUNT ];  // @CREDIT_BLOCK_OFFSET
   double credit_exp[ rl_credit::STREAM_COUNT ];                 // @CREDIT_BLOCK_OFFSET + 8*STREAM_COUNT
+  // Version 13 (266-01): the fight's FINAL chosen-enemy totals and streams, at the same offsets as
+  // decision_record's own chosen block (named final_* where the decision row names running totals).
+  alignas( 8 ) double final_damage_total_chosen;           // @CHOSEN_BLOCK_OFFSET
+  double final_damage_expected_total_chosen;               // @CHOSEN_BLOCK_OFFSET + 8
+  double credit_real_chosen[ rl_credit::STREAM_COUNT ];     // @CHOSEN_BLOCK_OFFSET + 16
+  double credit_exp_chosen[ rl_credit::STREAM_COUNT ];      // @CHOSEN_BLOCK_OFFSET + 16 + 8*STREAM_COUNT
 };
 
 // 212-CR-FIX BL-01: this footer carries two DIFFERENT populations of fight,
@@ -745,6 +783,8 @@ struct footer_record
   // Version 10 (260918-cbc): written zero -- no fight owns the footer, matching the proc
   // block's own precedent immediately above.
   alignas( 8 ) std::uint8_t zero_credit_block[ CREDIT_BLOCK_SIZE ];  // @CREDIT_BLOCK_OFFSET
+  // Version 13 (266-01): written zero -- no fight owns the footer.
+  alignas( 8 ) std::uint8_t zero_chosen_block[ CHOSEN_BLOCK_SIZE ];  // @CHOSEN_BLOCK_OFFSET
 };
 
 // The header. The two fields at @20/@24 used to be pure alignment padding
@@ -797,6 +837,10 @@ struct alignas( 8 ) file_header
                                         //         no file. Written 0.0 in plan 259-05 (plan 259-05b
                                         //         stamps it from the loaded aim section)
   std::uint32_t aim_state;            // @260 -- version 11: AIM_STATE_* bits; written 0 in plan 259-05
+  std::uint32_t funnel_mode;          // @264 -- version 13 (266-01): the funnel option's value; written 0
+                                        //         until plan 266-09 adds the option
+  std::uint32_t chooser_state;        // @268 -- version 13: chooser bits (bit 0 = random current target
+                                        //         on); written 0 until plan 266-09 adds the option
 };
 
 // ---- Compile-time proof (D-20): the build itself is the proof ----
@@ -908,6 +952,8 @@ static_assert( offsetof( file_header, mask_rules_sha ) == 112 );
 static_assert( offsetof( file_header, action_space_sha ) == 184 );
 static_assert( offsetof( file_header, aim_exploration ) == 256 );
 static_assert( offsetof( file_header, aim_state ) == 260 );
+static_assert( offsetof( file_header, funnel_mode ) == 264 );
+static_assert( offsetof( file_header, chooser_state ) == 268 );
 
 // Cross-kind assertions (D-02's entire premise: a reader can classify a
 // row before it interprets it, because `kind` and `reserved` sit at the
@@ -957,6 +1003,23 @@ static_assert( offsetof( close_record, credit_exp ) == CREDIT_BLOCK_OFFSET + 8u 
 static_assert( offsetof( footer_record, zero_credit_block ) == CREDIT_BLOCK_OFFSET );
 static_assert( offsetof( decision_record, credit_real ) == offsetof( close_record, credit_real ) );
 static_assert( offsetof( close_record, credit_real ) == offsetof( footer_record, zero_credit_block ) );
+
+// 266-01 (version 13): the chosen-enemy block lands at CHOSEN_BLOCK_OFFSET (the version-12 row size) in
+// every row shape -- decision_record and close_record's own NAMED fields, footer_record's zero-written
+// twin. The decision row's running totals and the close row's final totals share offsets 0 and 8 of it.
+static_assert( offsetof( decision_record, damage_chosen ) == CHOSEN_BLOCK_OFFSET );
+static_assert( offsetof( decision_record, damage_expected_chosen ) == CHOSEN_BLOCK_OFFSET + 8u );
+static_assert( offsetof( decision_record, credit_real_chosen ) == CHOSEN_BLOCK_OFFSET + 16u );
+static_assert( offsetof( decision_record, credit_exp_chosen ) == CHOSEN_BLOCK_OFFSET + 16u + 8u * rl_credit::STREAM_COUNT );
+static_assert( offsetof( close_record, final_damage_total_chosen ) == CHOSEN_BLOCK_OFFSET );
+static_assert( offsetof( close_record, final_damage_expected_total_chosen ) == CHOSEN_BLOCK_OFFSET + 8u );
+static_assert( offsetof( close_record, credit_real_chosen ) == CHOSEN_BLOCK_OFFSET + 16u );
+static_assert( offsetof( close_record, credit_exp_chosen ) == CHOSEN_BLOCK_OFFSET + 16u + 8u * rl_credit::STREAM_COUNT );
+static_assert( offsetof( footer_record, zero_chosen_block ) == CHOSEN_BLOCK_OFFSET );
+static_assert( offsetof( decision_record, damage_chosen ) == offsetof( close_record, final_damage_total_chosen ) );
+static_assert( offsetof( close_record, final_damage_total_chosen ) == offsetof( footer_record, zero_chosen_block ) );
+static_assert( offsetof( decision_record, credit_real_chosen ) == offsetof( close_record, credit_real_chosen ) );
+static_assert( offsetof( decision_record, credit_exp_chosen ) == offsetof( close_record, credit_exp_chosen ) );
 
 // Dimension guards.
 static_assert( RL_ACTION_DIM <= 32,

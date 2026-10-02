@@ -138,8 +138,10 @@ void stats_t::add_result( double act_amount,
                           result_amount_type dmg_type,
                           result_e result,
                           block_result_e block_result,
-                          player_t* /* target */ )
+                          player_t* hit_target )
 {
+  // Phase 266 (266-01): the sixth parameter (the struck enemy; record_data fills it with data->target) is
+  // now named: the chosen-enemy copy in rl_credit_route compares it with the tag at the moment of the hit.
   stats_results_t* r = nullptr;
   if ( dmg_type == result_amount_type::DMG_DIRECT || dmg_type == result_amount_type::HEAL_DIRECT || dmg_type == result_amount_type::ABSORB )
   {
@@ -202,19 +204,19 @@ void stats_t::add_result( double act_amount,
   {
     player -> solver_damage_so_far += act_amount;
     rl_credit_route( player, player->rl_sink_cause, sim.solver_control_seq, act_amount, /*expected=*/false,
-                      name_str.c_str() );
+                      hit_target, name_str.c_str() );
   }
   else
   {
     player_t* owner = player -> cast_pet() -> owner;
     owner -> solver_damage_so_far += act_amount;
     rl_credit_route( owner, owner->rl_sink_cause, sim.solver_control_seq, act_amount, /*expected=*/false,
-                      name_str.c_str() );
+                      hit_target, name_str.c_str() );
     if ( sim.report_pets_separately )
     {
       player -> solver_damage_so_far += act_amount;
       rl_credit_route( player, player->rl_sink_cause, sim.solver_control_seq, act_amount, /*expected=*/false,
-                        name_str.c_str() );
+                        hit_target, name_str.c_str() );
     }
   }
 }
