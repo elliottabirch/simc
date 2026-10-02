@@ -900,7 +900,9 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     }
 
     // S1 (260927-s1-spend-timing, todo 2026-09-27-s1-maelstrom-spend-timing-override-probe.md):
-    // engine-side spend-threshold override -- forbids lightning_bolt and tempest ONLY; the third
+    // engine-side spend-threshold override -- forbids lightning_bolt and tempest (and, 261002-8rs,
+    // primordial_storm when the build's action table offers that button -- it is also a Maelstrom
+    // Weapon spender) ONLY; the third
     // Lightning-family action is NEVER touched anywhere in this block, the owner's standing rule
     // "never mask Chain Lightning at one target" holds by construction, not by threshold. Fires
     // whenever the player's current Maelstrom Weapon stack count is below solver_min_maelstrom_spend.
@@ -923,6 +925,8 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       {
         mask[ sim->solver_min_maelstrom_spend_lightning_bolt_idx ] = 0;
         mask[ sim->solver_min_maelstrom_spend_tempest_idx ] = 0;
+        if ( sim->solver_min_maelstrom_spend_primordial_storm_idx >= 0 )
+          mask[ sim->solver_min_maelstrom_spend_primordial_storm_idx ] = 0;
       }
     }
 

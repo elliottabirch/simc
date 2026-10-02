@@ -311,7 +311,11 @@ namespace rl_translog
 // trailing NUL is part of the magic itself.
 inline constexpr char MAGIC[ 4 ] = { 'R', 'L', 'T', 'L' };
 inline constexpr std::uint32_t ENDIAN_CANARY = 0x01020304u;
-inline constexpr std::uint32_t FORMAT_VERSION = 13u;  // 266-01 (2026-10-01, funnel mode, fork commit C1a):
+inline constexpr std::uint32_t FORMAT_VERSION = 14u;  // 261002-8rv (format 14, 2026-10-02): width 419, 22 buttons
+                                                        // (talent layout, item 261002-8rt); nothing in the row or
+                                                        // header changes shape, the number moves so a reader
+                                                        // refuses a format-13 record by name.
+                                                        // 13 was 266-01 (2026-10-01, funnel mode, fork commit C1a):
                                                         // the 112-byte chosen-enemy block after the credit
                                                         // block (damage_chosen, damage_expected_chosen and the
                                                         // two six-stream copies) and a header grown 264 -> 272
@@ -341,7 +345,11 @@ inline constexpr std::uint32_t FORMAT_VERSION = 13u;  // 266-01 (2026-10-01, fun
 // compile (tstl 220-03, OBS-06; formula updated 260901-pb1 Task 3 for version 5, updated again
 // 228-09 for version 6, updated again 230-04 for version 7, updated again 260917-pcn for
 // version 9 -- see top-of-file comment).
-inline constexpr std::uint32_t RECORD_SIZE = 3192u;  // 266-01 (format 13, 2026-10-01): 3080 -> 3192 -- the
+inline constexpr std::uint32_t RECORD_SIZE = 3568u;  // 261002-8rv (format 14, 2026-10-02): 3192 -> 3568 at width
+                                                       // 419: roundup8(45 + 4*419 + 4*16*23 + 7 + 7) = 3200,
+                                                       // + 160 proc + 96 credit = 3456, + 112 chosen = 3568.
+                                                       // (3192 was width 324/325, formats 12 and 13.)
+                                                       // 266-01 (format 13, 2026-10-01): 3080 -> 3192 -- the
                                                        // 112-byte chosen-enemy block (CHOSEN_BLOCK_SIZE)
                                                        // appended after the credit block. roundup8(45 + 4*324
                                                        // + 4*16*23 + 7) = 2824, + 160 proc + 96 credit
@@ -468,11 +476,11 @@ inline constexpr std::uint32_t PROC_BLOCK_OFFSET =
         7u + 7u ) / 8u ) * 8u;  // 266-21: +7 (was +5) -- chosen_enemy_actor_index takes two more bytes
                                 // (259-05: +5 was +4 -- observed_candidate_slot took one more byte)
 inline constexpr std::uint32_t PROC_BLOCK_SIZE = 8u * rl_proc::COUNT;
-static_assert( PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE == 2984u,
-               "PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE must equal the version-12 pre-credit row size at "
-               "the 262-10 obs width (RL_OBS_DIM=324) and 16 target slots (2984; was 2960 at width 319, "
-               "version 11, and 2224 at 8 slots and 260928-tb9's width, version 10) -- "
-               "CREDIT_BLOCK_OFFSET below is pinned to that exact value" );
+static_assert( PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE == 3360u,
+               "PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE must equal the version-14 pre-credit row size at "
+               "width 419 (RL_OBS_DIM=419) and 16 target slots (3360; was 2984 at width 324/325, "
+               "version 12/13, 2960 at width 319, version 11, and 2224 at 8 slots and 260928-tb9's "
+               "width, version 10) -- CREDIT_BLOCK_OFFSET below is pinned to that exact value" );
 // 260918-cbc: the version-9 row size (unchanged formula) is where the new credit-by-cause
 // block starts; CREDIT_BLOCK_SIZE is the block's own byte count (two double[STREAM_COUNT]
 // arrays -- see rl_credit.hpp's rl_credit_streams_t). Declared after PROC_BLOCK_SIZE so the
@@ -489,9 +497,9 @@ inline constexpr std::uint32_t CHOSEN_BLOCK_SIZE = 16u + 8u * 2u * rl_credit::ST
 static_assert( RECORD_SIZE == CHOSEN_BLOCK_OFFSET + CHOSEN_BLOCK_SIZE,
                "RECORD_SIZE must be roundup8(45 + 4*RL_OBS_DIM + 4*RL_TARGET_SLOTS*RL_TARGET_FEATURES + 7) + "
                "8*rl_proc::COUNT + 16*rl_credit::STREAM_COUNT + 16 + 16*rl_credit::STREAM_COUNT" );
-static_assert( RECORD_SIZE == 3192u && CHOSEN_BLOCK_OFFSET == 3080u && CHOSEN_BLOCK_SIZE == 112u,
-               "version 13 at the 262-10 width (324) and 16 target slots: RECORD_SIZE 3192 = 3080 + a "
-               "112-byte chosen block at offset 3080 (266-01)" );
+static_assert( RECORD_SIZE == 3568u && CHOSEN_BLOCK_OFFSET == 3456u && CHOSEN_BLOCK_SIZE == 112u,
+               "version 14 at width 419 and 16 target slots: RECORD_SIZE 3568 = 3456 + a 112-byte "
+               "chosen block at offset 3456 (261002-8rv)" );
 static_assert( RL_OBS_DIM >= 2, "footer_record's zero40[RL_OBS_DIM-1] needs at least one element" );
 inline constexpr std::uint32_t HEADER_SIZE = 272u;  // 266-01: 264 -> 272 (funnel_mode @264, chooser_state @268)
                                                       // 259-05: 256 -> 264 (aim_exploration @256, aim_state @260)

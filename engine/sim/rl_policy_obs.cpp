@@ -24,6 +24,8 @@
 #include "action/attack.hpp"
 #include "action/dot.hpp"
 #include "buff/buff.hpp"
+#include "dbc/dbc.hpp"
+#include "dbc/trait_data.hpp"
 #include "player/consumable.hpp"
 #include "player/player.hpp"
 #include "player/set_bonus.hpp"
@@ -241,6 +243,13 @@ fight_wide_aggregates_t compute_fight_wide_aggregates( player_t* p )
     buff_t* lr = buff_t::find( t, "lightning_rod", p );
     if ( lr && lr->check() > 0 )
       ++agg.lightning_rod_carrier_count;
+
+    // 261002-8rs: the Lashing Flames carrier count, the lightning_rod idiom above -- enemies on the
+    // non-sleeping list carrying THIS player's lashing_flames debuff (buff_t::find is the non-creating
+    // scan, check() > 0, never up()).
+    buff_t* lf = buff_t::find( t, "lashing_flames", p );
+    if ( lf && lf->check() > 0 )
+      ++agg.lashing_flames_carrier_count;
 
     const double ttd = std::min( t->time_to_percent( 0 ).total_seconds(), 600.0 );
     if ( !agg.has_soonest_time_to_die || ttd < agg.soonest_time_to_die )
@@ -705,6 +714,42 @@ bool rl_capability_own_value( player_t* p, const rl_capability& cap )
     // pattern: a fact about this sim, fixed for the whole fight, governing no column and no action.
     return p->sim->solver_funnel_mode;
   }
+  if ( std::strcmp( cap.sim_kind, "talent" ) == 0 )
+  {
+    // 261002-8rs (batch 261002-8rq, item 2): the talent detector, "this character holds trait node
+    // entry `sim_trait_entry_id` at rank `sim_min_rank` or more" (a yes/no input per talent rank;
+    // rank k+1 `requires` rank k in the registry, so ranks are cumulative). It reads the same truth
+    // `talent.X.ok()` reads: `find_talent_spell( entry ).rank()` is 0 for a talent the character does
+    // not hold AND for a hero-tree talent whose hero tree is not the active one (player.cpp:11636-11657,
+    // `create_talent_obj`), so an inactive hero tree reads 0 with no special case here.
+    // Bad table data is a generator/engine drift, thrown by name, never a silent false.
+    if ( cap.sim_trait_entry_id <= 0 )
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::rl_capability_own_value: talent capability '{}' has no positive sim_trait_entry_id ({})",
+          cap.id, cap.sim_trait_entry_id ) );
+    const unsigned entry = static_cast<unsigned>( cap.sim_trait_entry_id );
+    const trait_data_t* trait = trait_data_t::find( entry, p->dbc->ptr );
+    if ( trait == &trait_data_t::nil() )
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::rl_capability_own_value: talent capability '{}' names trait node entry {} which is "
+          "not in the trait table",
+          cap.id, entry ) );
+    if ( cap.sim_min_rank < 1 || static_cast<unsigned>( cap.sim_min_rank ) > trait->max_ranks )
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::rl_capability_own_value: talent capability '{}' has sim_min_rank {} outside 1..{} "
+          "(trait node entry {})",
+          cap.id, cap.sim_min_rank, trait->max_ranks, entry ) );
+    // Pets, guardians and enemy actors hold no talents (the set_bonus branch's own note above: they
+    // reach the capability code on the FIFO transport, e.g. the RL actor's lightning wolves): false.
+    if ( p->is_pet() || p->is_enemy() )
+      return false;
+    if ( static_cast<int>( trait->id_class ) != util::class_id( p->type ) )
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::rl_capability_own_value: talent capability '{}' names trait node entry {} of class {} "
+          "but actor '{}' is class {}",
+          cap.id, entry, trait->id_class, p->name(), util::class_id( p->type ) ) );
+    return p->find_talent_spell( entry ).rank() >= static_cast<unsigned>( cap.sim_min_rank );
+  }
   throw sc_runtime_error( fmt::format(
       "rl_policy::rl_capability_own_value: capability '{}' has unknown sim_kind '{}'", cap.id,
       cap.sim_kind ) );
@@ -790,6 +835,16 @@ void rl_capability_assert_no_governed_action_legal( const player_t* p,
   player_t* mutable_p = const_cast<player_t*>( p );
   for ( std::size_t ci = 0; ci < RL_CAPABILITY_COUNT; ++ci )
   {
+    // 261002-8rs: a capability that governs no action has nothing to assert; every detector is a pure
+    // read, so skipping it before its value is computed changes no result. This keeps the per-decision
+    // cost of the talent inputs at zero: most of them govern columns only and are skipped here, so
+    // the check pays for nothing it does not need -- without the skip each of about 55 talent inputs
+    // would run two linear scans of the trait table (trait_data.cpp:49-60) at every decision
+    // boundary. The seven talent / hero inputs that DO govern a button (261002-8rt/8ru: a talent input
+    // may govern a button only where that one talent is exactly the button's condition) are checked
+    // here at every decision like the gear and racial ones.
+    if ( RL_CAPABILITIES[ ci ].governed_actions_count == 0 )
+      continue;
     if ( rl_capability_effective_value( mutable_p, ci, memo ) )
       continue;
     const rl_capability& cap = RL_CAPABILITIES[ ci ];
@@ -1255,7 +1310,9 @@ enum class direct_id
   // function's own bare-name detection; this is Task 2's decision to make, not pre-empted here).
   hits_chain_lightning, hits_tempest, hits_crash_lightning,
   hits_lava_lash_flame_shock_spread, hits_voltaic_blaze_cleave, hits_voltaic_blaze_new_flame_shocks,
-  hits_fire_nova
+  hits_fire_nova,
+  // 261002-8rs: the Lashing Flames carrier count, appended LAST so no existing enumerator value shifts.
+  fw_lashing_flames_carrier_count
   // 260914-rbp Task 1's R14 (crash_lightning_next_expiry/crash_lightning_stack_seconds, two
   // ad-hoc scalar direct_ids) is MIGRATED and REMOVED here (Task 2b, Q17): the ASYNC STACK
   // PROFILE is now a generic `player_buffs.<b>.*` buff-family leaf (buff_leaf_kind::next_expiry/
@@ -1831,6 +1888,7 @@ slot_binding resolve_scalar_leaf( const rl_leaf_desc& leaf )
   else if ( std::strcmp( leaf.leaf, "immunity_in" ) == 0 )                 fw_id = direct_id::fw_immunity_in;
   else if ( std::strcmp( leaf.leaf, "immunity_remaining" ) == 0 )          fw_id = direct_id::fw_immunity_remaining;
   else if ( std::strcmp( leaf.leaf, "lightning_rod_carrier_count" ) == 0 ) fw_id = direct_id::fw_lightning_rod_carrier_count;
+  else if ( std::strcmp( leaf.leaf, "lashing_flames_carrier_count" ) == 0 ) fw_id = direct_id::fw_lashing_flames_carrier_count;
   else                                                                     fw_matched = false;
   if ( fw_matched )
   {
@@ -3606,6 +3664,12 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
               // lightning_rod_carrier_count field, cached once above (get_fw_agg(), same D-12
               // "read once, use twice" discipline every other fw_* case here follows).
               raw = static_cast<double>( get_fw_agg().lightning_rod_carrier_count );
+              status = lookup_status::present;
+              break;
+            case direct_id::fw_lashing_flames_carrier_count:
+              // 261002-8rs: compute_fight_wide_aggregates()'s lashing_flames_carrier_count, the same
+              // cached read as the lightning_rod case above.
+              raw = static_cast<double>( get_fw_agg().lashing_flames_carrier_count );
               status = lookup_status::present;
               break;
 

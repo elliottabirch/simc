@@ -1007,7 +1007,9 @@ struct sim_t : private sc_thread_t
   // (k, action_index) pairs, same reasoning as solver_hold_windows's own flat-vector choice.
   std::vector<std::pair<std::int64_t, int>> solver_force_decisions;
   // S1 (260927-s1-spend-timing, todo 2026-09-27-s1-maelstrom-spend-timing-override-probe.md):
-  // forbids the two named Maelstrom Weapon spenders -- lightning_bolt and tempest ONLY; the
+  // forbids the two named Maelstrom Weapon spenders -- lightning_bolt and tempest (both REQUIRED in
+  // the action table) -- and, since 261002-8rs, primordial_storm too (also a Maelstrom Weapon
+  // spender; forbidden only when the build's action table offers it, never required) ONLY; the
   // third Lightning-family spender is NEVER touched by this option, the owner's standing rule
   // "never mask Chain Lightning at one target" holds by construction -- from the natural mask
   // (solver_control.cpp, in the same in-process choose() block as solver_hold_windows/
@@ -1025,6 +1027,10 @@ struct sim_t : private sc_thread_t
   // leaving these at -1). solver_control.cpp reads these read-only, once per decision.
   int solver_min_maelstrom_spend_lightning_bolt_idx = -1;
   int solver_min_maelstrom_spend_tempest_idx = -1;
+  // 261002-8rs: resolved by name the same way but OPTIONAL -- stays -1 when the action table has no
+  // primordial_storm button (the width-325 table has none), and the option then masks exactly the two
+  // required spenders as before.
+  int solver_min_maelstrom_spend_primordial_storm_idx = -1;
   // 260927-d1 (D1 patchwerk disagreement census, Stage 1 Task 2): records the engine's own APL
   // pick (the `apl_choice` parameter solver_control::choose() already receives) to a SIDECAR file
   // beside the main translog -- `<rl_translog_file_str>.apl`, format 1, see rl_translog.hpp's APL

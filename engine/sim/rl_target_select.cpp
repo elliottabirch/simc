@@ -33,9 +33,11 @@ namespace rl_target_select
 namespace
 {
 
-// The eight targeted registry tokens this plan governs (228-02-PLAN.md's TARGETED constant,
+// The nine targeted registry tokens this plan governs (228-02-PLAN.md's TARGETED constant,
 // re-derived from scripts/rl/specs/enhancement.json's specs.enhancement.actions[] at planning
 // time). SHAPED (crash_lightning, sundering) is plan 228-03's, deliberately absent here.
+// 261002-8rv adds flame_shock (a button from width 419), aimed by preference_voltaic_blaze (item
+// 261002-8rs, see preference_for); the aiming head's own spell list (RL_AIM_SPELLS) is unchanged.
 //
 // 230-02 (CK1-1, owner ruling Q1): this is also the target head's own one-hot registry (240-05
 // Task 2) -- run_target_head (below) walks this SAME array for its aiming-spell one-hot, so the
@@ -45,6 +47,7 @@ namespace
 constexpr const char* TARGETED_TOKENS[] = {
   "stormstrike", "lightning_bolt", "chain_lightning", "tempest",
   "windstrike",  "lava_lash",      "voltaic_blaze",   "primordial_storm",
+  "flame_shock",
 };
 
 // 259-05b (fork open question 3): every spell the aim head's one-hot names (RL_AIM_SPELLS, the
@@ -1631,9 +1634,14 @@ preference_fn preference_for_thorims_aware_strike( const action_t* resolved, boo
     return preference_shortest_time_to_die;
 
   // Windstrike takes the Thorim's branch whenever the gates above pass; Stormstrike ADDITIONALLY
-  // requires Doom Winds -- it is triggered from Ascendance's own execute path and Ascendance IS an
-  // agent action (232-RESEARCH.md Addendum C4), so this branch is reachable in production, not
-  // dead code.
+  // requires Doom Winds. 261002-8rs corrected this comment against the engine (sc_shaman.cpp, each
+  // line re-read): Stormstrike's impact fires Thorim's Invocation only while the Doom Winds buff is
+  // up (:5884-5888), Windstrike's impact unconditionally (:5926-5931). The Doom Winds buff has three
+  // sources, one per variant in `doom_winds_t::execute` (:9298-9322): the Doom Winds BUTTON (pressable
+  // only with neither Ascendance nor Deeply Rooted Elements, `ready()` :9338-9346), Ascendance's own
+  // execute (the Ascendance variant is built at :11302) and a Deeply Rooted Elements proc (built at
+  // :11296). So this branch is reachable on every hero tree, not dead code. (The earlier wording,
+  // "triggered from Ascendance's own execute path", named one of the three sources only.)
   if ( is_stormstrike )
   {
     buff_t* doom_winds = buff_t::find( p, "doom_winds" );
@@ -1667,6 +1675,32 @@ preference_fn preference_for( const action_t* resolved )
     rule = preference_chain_lightning;
   else if ( n == "tempest" )
     rule = preference_tempest;
+  else if ( n == "flame_shock" )
+  {
+    // 261002-8rs (batch 261002-8rq, item 2): the aim rule for the Flame Shock button. It was written
+    // while the token was NOT in TARGETED_TOKENS (width 325: joining it adds a `flame_shock` block to
+    // every decision-dump row and decision-channel request and turns `chosen_pick` into an object for
+    // any chosen flame_shock, decision_dump.cpp:915-1088 -- not dormant). The token joined the list in
+    // 261002-8rv, in the same fork commit as the header that offers the flame_shock button, so this
+    // branch is reached from width 419 on.
+    //
+    // Why preference_voltaic_blaze. Its score is (new Flame Shocks inside Voltaic Blaze's cleave) x
+    // 1e12 + (1e9 if the candidate lacks THIS caster's Flame Shock) + time to die. For flame_shock the
+    // first term is always 0: flame_shock_t::ready() is false whenever Voltaic Blaze is taken
+    // (sc_shaman.cpp:8940-8947), and without the talent the cleave radius stays 0
+    // (rl_target_select.hpp:148, sc_shaman.cpp:10602 guard), so count_new_flame_shock_neighbours
+    // returns 0 on its radius <= 0 early exit (above). What remains is "an enemy without this
+    // caster's Flame Shock first, the longest-lived first within each group": put the
+    // damage-over-time effect where it is missing, on the enemy that lives to take every tick.
+    // build_enemy_fact_for_scoring already reads flame_shock_remaining for this rule.
+    //
+    // Rejected: preference_shortest_time_to_die parks on the SHORTEST-lived enemy and never reads
+    // Flame Shock state, so it re-applies on a target that already carries it and puts the effect on
+    // the enemy that dies first; preference_lava_lash prefers enemies that ALREADY carry Flame Shock
+    // (it spreads from a carrier); preference_chain_lightning / preference_tempest score neighbour and
+    // hop counts and read no Flame Shock state; the Thorim's routing above is for the two strikes only.
+    rule = preference_voltaic_blaze;
+  }
   else
     return nullptr;
 

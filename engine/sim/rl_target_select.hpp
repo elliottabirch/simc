@@ -372,9 +372,9 @@ void run_target_head( const action_t* resolved, const float* context, bool obser
 // below, same one-fight-totals lifetime as every other counter in this file.
 std::uint64_t get_target_head_no_block_count();
 
-// True for exactly the eight targeted registry tokens this plan governs (stormstrike,
+// True for exactly the nine targeted registry tokens this plan governs (stormstrike,
 // lightning_bolt, chain_lightning, tempest, windstrike, lava_lash, voltaic_blaze,
-// primordial_storm) -- matched against `resolved->name_str`, the SAME string
+// primordial_storm, flame_shock -- the ninth joined in 261002-8rv) -- matched against `resolved->name_str`, the SAME string
 // `solver_control::resolve_action` matched to build `resolved` in the first place, so this can
 // never drift from the registry's own token list. False for every self/ground/item action and for
 // the two SHAPED actions (crash_lightning, sundering -- plan 228-03's, not this plan's, per the
@@ -394,13 +394,13 @@ std::uint64_t get_target_head_no_block_count();
 // is enforced.
 bool is_targeted_action( const action_t* resolved );
 
-// 228-09 (D-23/TGT-08, dump half): read-only access to the SAME eight-token list
+// 228-09 (D-23/TGT-08, dump half): read-only access to the SAME nine-token list
 // `is_targeted_action` matches against (TARGETED_TOKENS, rl_target_select.cpp, anonymous
 // namespace -- not otherwise reachable outside this translation unit). Exists so a caller in a
 // DIFFERENT translation unit (decision_dump.cpp's per-decision pick dump) can walk the exact
 // registry this module governs without hand-duplicating the token list and risking drift from
 // is_targeted_action's own definition. `targeted_action_token_count()` is the array's length
-// (8 today); `targeted_action_tokens()` returns the array's base pointer, tokens in the SAME
+// (9 today: flame_shock joined in 261002-8rv); `targeted_action_tokens()` returns the array's base pointer, tokens in the SAME
 // order TARGETED_TOKENS declares them.
 std::size_t targeted_action_token_count();
 const char* const* targeted_action_tokens();
