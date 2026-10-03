@@ -73,8 +73,24 @@ rl_cause_scope_t::rl_cause_scope_t( player_t* p_, rl_cause_t cause, const action
   // cast (action_t::rl_resolve_cause()'s only CAST producer) -- the ledger numbers it here, once.
   // Every re-push of an existing cast's cause (travel, impact, ticks) carries its press from the
   // state and skips this. One bool test when rl_buff_ledger= is off.
-  if ( p->sim->rl_bl_on && cause.cls == RL_CAUSE_CAST && cause.press < 0 )
+  // 261003-s1c plan 01 Task 2: "fresh" means an UNMARKED cast. A cause carrying RL_CAUSE_DECK_MARK is a derived scope (a Doom Winds deck
+  // hit's payout, sc_shaman.cpp consume_maelstrom_weapon), never a new foreground cast, so it must not open a press of its own; it
+  // inherits the ledger numbers of the frame it was opened inside instead (below). The mark is tested explicitly; the raw class byte is
+  // never compared.
+  const bool marked = ( cause.cls & RL_CAUSE_DECK_MARK ) != 0;
+  if ( p->sim->rl_bl_on && !marked && rl_cause_base( cause.cls ) == RL_CAUSE_CAST && cause.press < 0 )
     cause.press = rl_buff_ledger::open_press( p, cause );
+  // The class code builds a marked scope as `rl_cause_t{ seq, cls | RL_CAUSE_DECK_MARK }`, which drops the ledger's press and launch
+  // numbers (they default to -1). Left alone, every hit under a deck-hit scope would be an own-class hit with no press (a LOST press) and
+  // every buff the deck hit applied would carry no applier press. Generic and mark-based, no per-spell rule: a marked scope with no press
+  // of its own, opened on the same decision seq as the frame on top of the same player's stack, takes that frame's press and launch.
+  // Ledger numbers are never read by any roll, routing or scheduling decision, so with the ledger off nothing changes.
+  else if ( p->sim->rl_bl_on && marked && cause.press < 0 && cause.launch < 0 && !p->rl_cause_stack.empty() &&
+            p->rl_cause_stack.back().cause.seq == cause.seq )
+  {
+    cause.press  = p->rl_cause_stack.back().cause.press;
+    cause.launch = p->rl_cause_stack.back().cause.launch;
+  }
   p->rl_cause_stack.push_back( rl_cause_frame_t{ cause, owner } );
   // 261001-bac plan 06: the ledger's own frame (a `frm` record, and the stack the buff reads, draws, consumes and
   // launches of the gate check are attached to). One bool test when rl_buff_ledger= is off.
@@ -98,6 +114,11 @@ rl_cause_scope_t::~rl_cause_scope_t()
 // before calling this, mirroring stats.cpp's/accrue_expected_damage's own
 // pet->owner rules). Defined here because it needs player_t complete,
 // mirroring rl_count_proc's own placement immediately above.
+bool rl_credit_hit_is_chosen( const player_t* p, const player_t* hit_target )
+{
+  return hit_target != nullptr && hit_target == rl_target_select::rl_chosen_enemy_of( p );
+}
+
 void rl_credit_route( player_t* p, rl_cause_t cause, std::uint64_t now_seq, double amount, bool expected,
                        const player_t* hit_target, const char* action_name )
 {
@@ -136,7 +157,7 @@ void rl_credit_route( player_t* p, rl_cause_t cause, std::uint64_t now_seq, doub
   // absorb on a friendly never reaches here as an enemy) is never the chosen enemy. The chosen copy below
   // adds the SAME amount in the SAME order as the all-enemy copy, in both modes (with the flag off it is
   // bookkeeping only and no play reads it, R8).
-  const bool on_chosen = hit_target != nullptr && hit_target == rl_target_select::rl_chosen_enemy_of( p );
+  const bool on_chosen = rl_credit_hit_is_chosen( p, hit_target );
   if ( on_chosen )
   {
     ( expected ? p->rl_credit_chosen.exp : p->rl_credit_chosen.real )[ index ] += amount;
@@ -148,7 +169,7 @@ void rl_credit_route( player_t* p, rl_cause_t cause, std::uint64_t now_seq, doub
   // 261001-bac stage 0: expected-side routings made outside accrue_expected_damage (the Windfury
   // occurrence price) are written as `xp` records; accrue's own are `hit` records already.
   if ( expected && p->sim->rl_bl_on )
-    rl_buff_ledger::xp_record( p, cause, amount, action_name );
+    rl_buff_ledger::xp_record( p, cause, amount, action_name, on_chosen );
 
   // Orphan census: realized-only, keyed by the contributing stats_t's own name (the only
   // identity a realized sink has -- stats_t::add_result carries no action_state_t/action_t).

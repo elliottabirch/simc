@@ -252,5 +252,11 @@ struct rl_credit_streams_t
 //
 // Defined in rl_translog.cpp (needs player_t complete, mirroring
 // rl_count_proc's own placement in rl_proc_counters.hpp).
+//
+// 261003-s1c plan 01 Task 2: the ONE definition of "this increment struck the chosen enemy (the tag) at the moment of the hit":
+// `hit_target` is non-null and equals the chosen enemy of `p` (a pet answers with its owner's tag). rl_credit_route uses it for the chosen
+// copy of the credit; the buff ledger writes the same answer as `ch` on its `hit` and `xp` records. Defined in rl_translog.cpp.
+bool rl_credit_hit_is_chosen( const player_t* p, const player_t* hit_target );
+
 void rl_credit_route( player_t* p, rl_cause_t cause, std::uint64_t now_seq, double amount, bool expected,
                        const player_t* hit_target, const char* action_name = nullptr );

@@ -46,6 +46,8 @@ namespace
 {
 constexpr int FORMAT_VERSION = 1;
 constexpr std::size_t PASS_HIST_SIZE = 64;
+// LEDGER-FORMAT-S1.md (261003-s1c plan 01 Task 2): the dated amendment this build announces in `hdr.amendments`.
+#define S1_AMENDMENT "2026-10-03-s1-dk-ch"
 
 // The record kinds this build writes (the `hdr` record's `emits` list). stage0_checks.py reads
 // it to decide which identities it can assert.
@@ -396,10 +398,31 @@ void put_count_object( std::string& b, const char* key, const std::map<std::stri
   b += '}';
 }
 
+// 261003-s1c plan 01 Task 2 (production f549d4f346, Phase 259): the class byte of a stamp may carry RL_CAUSE_DECK_MARK (0x80), which is
+// not equal to any rl_cause_class enumerator. EVERY class this file reads or compares goes through rl_cause_base(); the raw byte is never
+// compared, never written. The ledger writes the BASE class in `cls` and the mark as a separate bool `dk` (LEDGER-FORMAT-S1.md).
+inline int cls_out( std::uint8_t cls )
+{
+  return static_cast<int>( rl_cause_base( cls ) );
+}
+
+inline const char* dk_out( std::uint8_t cls )
+{
+  return ( cls & RL_CAUSE_DECK_MARK ) != 0 ? "true" : "false";
+}
+
+// The same cause for the ledger's purposes: seq, base class, press and launch (the mark does not make another cause: an applier entry is
+// written as [press, base class, stacks], so a marked and an unmarked stamp of one press are one entry).
+inline bool same_cause( const rl_cause_t& a, const rl_cause_t& b )
+{
+  return a.seq == b.seq && rl_cause_base( a.cls ) == rl_cause_base( b.cls ) && press_key( a.press ) == press_key( b.press ) &&
+         a.launch == b.launch;
+}
+
 bool is_own_class( std::uint8_t cls )
 {
-  return cls == RL_CAUSE_CAST || cls == RL_CAUSE_PROC_OF_CAST || cls == RL_CAUSE_DOT_TICK ||
-         cls == RL_CAUSE_PROC_OF_DOT;
+  const std::uint8_t base = rl_cause_base( cls );
+  return base == RL_CAUSE_CAST || base == RL_CAUSE_PROC_OF_CAST || base == RL_CAUSE_DOT_TICK || base == RL_CAUSE_PROC_OF_DOT;
 }
 
 // True for the RL actor and its pets.
@@ -490,6 +513,9 @@ void open_and_write_header( sim_t* sim )
   put_string( b, root->rl_buff_ledger_refund_probe_str );
   b += "},\"emits\":";
   b += EMITS_JSON;
+  // 261003-s1c plan 01 Task 2: announces LEDGER-FORMAT-S1.md (base classes in `cls`, the deck mark as `dk`, the chosen-enemy flag `ch`);
+  // ledger_read.py then requires those fields.
+  b += ",\"amendments\":[\"" S1_AMENDMENT "\"]";
   b += "}\n";
   st->out << b;
   st->out.flush();
@@ -977,7 +1003,7 @@ std::int16_t open_press( player_t* p, const rl_cause_t& cause )
   put_string( b, p->name() );
   b += ",\"action\":";
   put_string( b, p->last_foreground_action ? p->last_foreground_action->name() : std::string() );
-  fmt::format_to( out_it( b ), ",\"cls\":{}}}\n", static_cast<int>( cause.cls ) );
+  fmt::format_to( out_it( b ), ",\"cls\":{},\"dk\":{}}}\n", cls_out( cause.cls ), dk_out( cause.cls ) );
   return press;
 }
 
@@ -1011,6 +1037,10 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
   const bool pet = a->player->is_pet();
   const std::uint64_t h = s->next_hit++;
   ++s->fight_hits;
+  // 261003-s1c plan 01 Task 2: did this hit strike the chosen enemy (the funnel's tag) AT THE MOMENT OF THE HIT? The predicate is the one
+  // rl_credit_route evaluates for the chosen copy of the credit (rl_credit_hit_is_chosen, rl_translog.cpp): a pet answers with its owner's
+  // tag, nullptr is never chosen. Written as `ch`; nothing in the engine reads it.
+  const bool hit_chosen = rl_credit_hit_is_chosen( a->player, state->target );
 
   if ( is_own_class( state->rl_cause_class ) && state->rl_cause_press == PRESS_NONE )
     ++s->lost_press;
@@ -1120,10 +1150,11 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
   b += ",\"exp\":";
   put_double( b, expected_amount );
   fmt::format_to( out_it( b ),
-                  ",\"exp_excl\":{},\"seq\":{},\"cls\":{},\"press\":{},\"launch\":{},\"n_targets\":{},"
+                  ",\"exp_excl\":{},\"seq\":{},\"cls\":{},\"dk\":{},\"ch\":{},\"press\":{},\"launch\":{},\"n_targets\":{},"
                   "\"status\":{},\"cand\":[",
-                  exp_excl ? "true" : "false", state->rl_cause_seq, static_cast<int>( state->rl_cause_class ),
-                  state->rl_cause_press, state->rl_cause_launch, state->n_targets, status );
+                  exp_excl ? "true" : "false", state->rl_cause_seq, cls_out( state->rl_cause_class ),
+                  dk_out( state->rl_cause_class ), hit_chosen ? "true" : "false", state->rl_cause_press, state->rl_cause_launch,
+                  state->n_targets, status );
   b += cand_json;
   b += "],\"pass\":[";
   b += pass_json;
@@ -1161,7 +1192,7 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
   b += "}\n";
 }
 
-void xp_record( player_t* p, const rl_cause_t& cause, double amount, const char* action_name )
+void xp_record( player_t* p, const rl_cause_t& cause, double amount, const char* action_name, bool on_chosen )
 {
   sim_t* sim = p->sim;
   state_t* s = state_of( sim );
@@ -1172,8 +1203,8 @@ void xp_record( player_t* p, const rl_cause_t& cause, double amount, const char*
   std::string& b = s->fight_buf;
   fmt::format_to( out_it( b ), "{{\"k\":\"xp\",\"it\":{},\"t\":", sim->current_iteration );
   put_double( b, sim->current_time().total_seconds() );
-  fmt::format_to( out_it( b ), ",\"seq\":{},\"cls\":{},\"press\":{},\"launch\":{},\"amount\":", cause.seq,
-                  static_cast<int>( cause.cls ), cause.press, cause.launch );
+  fmt::format_to( out_it( b ), ",\"seq\":{},\"cls\":{},\"dk\":{},\"ch\":{},\"press\":{},\"launch\":{},\"amount\":", cause.seq,
+                  cls_out( cause.cls ), dk_out( cause.cls ), on_chosen ? "true" : "false", cause.press, cause.launch );
   put_double( b, amount );
   b += ",\"action\":";
   put_string( b, action_name != nullptr ? action_name : "" );
@@ -1292,7 +1323,8 @@ void reconcile_appliers( state_t* st, buff_t* b )
 
 bool is_press_class( const rl_cause_t& c )
 {
-  return ( c.cls == RL_CAUSE_PROC_OF_CAST || c.cls == RL_CAUSE_PROC_OF_DOT ) && c.press >= 0;
+  const std::uint8_t base = rl_cause_base( c.cls );
+  return ( base == RL_CAUSE_PROC_OF_CAST || base == RL_CAUSE_PROC_OF_DOT ) && c.press >= 0;
 }
 
 // Plan 12: whose the stacks of an entry are at `now`: the most recently added extension whose time window (old end to
@@ -1321,7 +1353,7 @@ bool write_appliers( std::string& b, state_t* st, buff_t* c )
     {
       if ( e.cause.press >= 0 )
       {
-        const std::pair<int, int> key{ e.cause.press, e.cause.cls };
+        const std::pair<int, int> key{ e.cause.press, cls_out( e.cause.cls ) };
         if ( std::find( seen.begin(), seen.end(), key ) != seen.end() )
           continue;
         seen.push_back( key );
@@ -1329,7 +1361,7 @@ bool write_appliers( std::string& b, state_t* st, buff_t* c )
       if ( !first )
         b += ',';
       first = false;
-      fmt::format_to( out_it( b ), "[{},{},1,true]", e.cause.press, static_cast<int>( e.cause.cls ) );
+      fmt::format_to( out_it( b ), "[{},{},1,true]", e.cause.press, cls_out( e.cause.cls ) );
     }
   }
   else
@@ -1341,14 +1373,14 @@ bool write_appliers( std::string& b, state_t* st, buff_t* c )
       const rl_cause_t& who = effective_cause( e, now );
       bool found            = false;
       for ( std::array<int, 3>& m : merged )
-        if ( press_key( static_cast<std::int16_t>( m[ 0 ] ) ) == press_key( who.press ) && m[ 1 ] == static_cast<int>( who.cls ) )
+        if ( press_key( static_cast<std::int16_t>( m[ 0 ] ) ) == press_key( who.press ) && m[ 1 ] == cls_out( who.cls ) )
         {
           m[ 2 ] += e.stacks;
           found = true;
           break;
         }
       if ( !found )
-        merged.push_back( { static_cast<int>( who.press ), static_cast<int>( who.cls ), e.stacks } );
+        merged.push_back( { static_cast<int>( who.press ), cls_out( who.cls ), e.stacks } );
     }
     for ( const std::array<int, 3>& m : merged )
     {
@@ -1453,8 +1485,7 @@ void note_own_read( const buff_t* b )
 // (the merged stacks are attributed to it). Counted when the merging trigger's cause is another one (no replay: see the deferred items).
 void note_delay_merge( buff_t* b, const rl_cause_t& first, const rl_cause_t& merging )
 {
-  if ( first.seq == merging.seq && first.cls == merging.cls && press_key( first.press ) == press_key( merging.press ) &&
-       first.launch == merging.launch )
+  if ( same_cause( first, merging ) )
     return;
   state_t* s = state_of( b->sim );
   if ( !buff_of_actor( s, b ) )
@@ -1491,8 +1522,8 @@ std::int32_t frame_push( player_t* p, const rl_cause_t& cause, const action_t* o
   put_double( o, sim->current_time().total_seconds() );
   fmt::format_to( out_it( o ), ",\"f\":{},\"pf\":{},\"kind\":", f.id, parent );
   put_string( o, kind != nullptr ? std::string_view( kind ) : ( owner != nullptr ? "dispatch" : "scope" ) );
-  fmt::format_to( out_it( o ), ",\"seq\":{},\"cls\":{},\"press\":{},\"launch\":{},\"action\":", cause.seq,
-                  static_cast<int>( cause.cls ), cause.press, cause.launch );
+  fmt::format_to( out_it( o ), ",\"seq\":{},\"cls\":{},\"dk\":{},\"press\":{},\"launch\":{},\"action\":", cause.seq,
+                  cls_out( cause.cls ), dk_out( cause.cls ), cause.press, cause.launch );
   put_string( o, f.act != nullptr ? std::string( f.act->name() ) : std::string() );
   o += "}\n";
 
@@ -1552,8 +1583,7 @@ static void add_covering( buff_t* b, const rl_cause_t& cause, timespan_t expiry 
            v.end() );
   for ( buff_t::rl_bl_applier_t& e : v )
   {
-    if ( e.cause.seq == cause.seq && e.cause.cls == cause.cls && press_key( e.cause.press ) == press_key( cause.press ) &&
-         e.cause.launch == cause.launch )
+    if ( same_cause( e.cause, cause ) )
     {
       if ( expiry > e.expiry )
         e.expiry = expiry;
@@ -1848,9 +1878,9 @@ void applier_extend( buff_t* b, const rl_cause_t& cause, player_t* source, times
   put_double( o, old_ends[ 0 ].total_seconds() );
   o += ",\"end\":";
   put_double( o, new_ends[ 0 ].total_seconds() );
-  fmt::format_to( out_it( o ), ",\"n_exp\":{},\"stacks\":{},\"cov\":{},\"press\":{},\"cls\":{},\"seq\":{},\"launch\":{},\"fn\":",
-                  n_exp, b->current_stack, covering_mode( b ) ? "true" : "false", cause.press, static_cast<int>( cause.cls ),
-                  cause.seq, cause.launch );
+  fmt::format_to( out_it( o ), ",\"n_exp\":{},\"stacks\":{},\"cov\":{},\"press\":{},\"cls\":{},\"dk\":{},\"seq\":{},\"launch\":{},\"fn\":",
+                  n_exp, b->current_stack, covering_mode( b ) ? "true" : "false", cause.press, cls_out( cause.cls ),
+                  dk_out( cause.cls ), cause.seq, cause.launch );
   put_string( o, fn );
   if ( g_ext_probing )
     o += ",\"probe\":true";
@@ -1868,7 +1898,7 @@ void run_ext_probe( state_t* s, player_t* p, const rl_cause_t& cause )
 {
   if ( s->ext_probe_single_done && s->ext_probe_multi_done && s->ext_probe_sync_stage == 3 )
     return;
-  if ( !s->in_fight || !s->cd_live || p != s->actor || cause.cls != RL_CAUSE_CAST || cause.press < 0 ||
+  if ( !s->in_fight || !s->cd_live || p != s->actor || rl_cause_base( cause.cls ) != RL_CAUSE_CAST || cause.press < 0 ||
        p->sim->rl_bl_shadow )
     return;
   busy_scope_t busy;  // the probe's own reads are no reads of the fight
@@ -1900,8 +1930,8 @@ void run_ext_probe( state_t* s, player_t* p, const rl_cause_t& cause )
       put_double( o, end_before.total_seconds() );
       o += ",\"end\":";
       put_double( o, ( sb->expiration.empty() ? timespan_t::max() : sb->expiration.front()->occurs() ).total_seconds() );
-      fmt::format_to( out_it( o ), ",\"stacks\":{},\"press\":{},\"cls\":{},\"seq\":{},\"launch\":{}}}\n", sb->current_stack, cause.press,
-                      static_cast<int>( cause.cls ), cause.seq, cause.launch );
+      fmt::format_to( out_it( o ), ",\"stacks\":{},\"press\":{},\"cls\":{},\"dk\":{},\"seq\":{},\"launch\":{}}}\n", sb->current_stack,
+                      cause.press, cls_out( cause.cls ), dk_out( cause.cls ), cause.seq, cause.launch );
       ++s->ext_probe_refreshed;
     }
   }
@@ -2615,7 +2645,7 @@ void collect_candidates( state_t* st, player_t* dealer, player_t* owner, player_
     }
     if ( !press_applied( st, b ) )
     {
-      ++st->noncandidate_reads[ fmt::format( "{}|cls{}|press{}", b->name_str, static_cast<int>( b->rl_bl_applied.cls ),
+      ++st->noncandidate_reads[ fmt::format( "{}|cls{}|press{}", b->name_str, cls_out( b->rl_bl_applied.cls ),
                                              b->rl_bl_applied.press >= 0 ? "pos" : "neg" ) ];
       continue;
     }
@@ -3145,11 +3175,11 @@ std::uint64_t write_app_record( state_t* st, action_t* a, action_state_t* s, con
   // A tick action's application snapshot is not stamped (the stamp is written on the states of the hits);
   // the caller hands in the cause of the cast that is executing.
   const std::int64_t r_seq   = cause != nullptr ? cause->seq : s->rl_cause_seq;
-  const int r_cls            = static_cast<int>( cause != nullptr ? cause->cls : s->rl_cause_class );
+  const std::uint8_t r_cls_raw = cause != nullptr ? cause->cls : s->rl_cause_class;
   const std::int16_t r_press = cause != nullptr ? cause->press : s->rl_cause_press;
   const std::int32_t r_launch = cause != nullptr ? cause->launch : s->rl_cause_launch;
-  fmt::format_to( out_it( b ), ",\"seq\":{},\"cls\":{},\"press\":{},\"launch\":{},\"n_targets\":{},\"status\":{},\"cand\":[",
-                  r_seq, r_cls, r_press, r_launch, s->n_targets, sp.status );
+  fmt::format_to( out_it( b ), ",\"seq\":{},\"cls\":{},\"dk\":{},\"press\":{},\"launch\":{},\"n_targets\":{},\"status\":{},\"cand\":[",
+                  r_seq, cls_out( r_cls_raw ), dk_out( r_cls_raw ), r_press, r_launch, s->n_targets, sp.status );
   std::string cand_json;
   write_candidates( cand_json, st, sp, s->target );
   b += cand_json;
@@ -3879,8 +3909,8 @@ void cd_write_ref( state_t* st, const cooldown_t* cd, std::int32_t c, std::int64
   cd_begin_record( o, "ref", cd );
   fmt::format_to( out_it( o ), ",\"c\":{},\"sec\":", c );
   put_double( o, ms_to_seconds( ms ) );
-  fmt::format_to( out_it( o ), ",\"press\":{},\"cls\":{},\"src\":\"{}\",\"seq\":{},\"launch\":{}}}\n", cause.press,
-                  static_cast<int>( cause.cls ), src, cause.seq, cause.launch );
+  fmt::format_to( out_it( o ), ",\"press\":{},\"cls\":{},\"dk\":{},\"src\":\"{}\",\"seq\":{},\"launch\":{}}}\n", cause.press,
+                  cls_out( cause.cls ), dk_out( cause.cls ), src, cause.seq, cause.launch );
 }
 
 void cd_write_use( state_t* st, const cooldown_t* cd, std::int32_t c )
@@ -3889,8 +3919,8 @@ void cd_write_use( state_t* st, const cooldown_t* cd, std::int32_t c )
   ++st->uses_written;
   std::string& o = st->fight_buf;
   cd_begin_record( o, "use", cd );
-  fmt::format_to( out_it( o ), ",\"c\":{},\"press\":{},\"cls\":{},\"seq\":{}}}\n", c, cause.press,
-                  static_cast<int>( cause.cls ), cause.seq );
+  fmt::format_to( out_it( o ), ",\"c\":{},\"press\":{},\"cls\":{},\"dk\":{},\"seq\":{}}}\n", c, cause.press,
+                  cls_out( cause.cls ), dk_out( cause.cls ), cause.seq );
 }
 
 void cd_write_cdn( state_t* st, const cooldown_t* cd, const action_t* a, bool ignored = false )
@@ -3903,8 +3933,8 @@ void cd_write_cdn( state_t* st, const cooldown_t* cd, const action_t* a, bool ig
   put_string( o, cd->name_str );
   o += ",\"action\":";
   put_string( o, a != nullptr ? std::string( a->name() ) : std::string() );
-  fmt::format_to( out_it( o ), ",\"press\":{},\"cls\":{},\"seq\":{}", cause.press, static_cast<int>( cause.cls ),
-                  cause.seq );
+  fmt::format_to( out_it( o ), ",\"press\":{},\"cls\":{},\"dk\":{},\"seq\":{}", cause.press, cls_out( cause.cls ),
+                  dk_out( cause.cls ), cause.seq );
   if ( ignored )
     o += ",\"ign\":true";
   o += "}\n";
@@ -4027,7 +4057,8 @@ bool cd_probe_skip( cooldown_t* cd, const char* src, std::int64_t would_save_ms 
   put_string( o, cd->player->name() );
   o += ",\"sec\":";
   put_double( o, sec );
-  fmt::format_to( out_it( o ), ",\"press\":{},\"cls\":{},\"src\":\"{}\"}}\n", cause.press, static_cast<int>( cause.cls ), src );
+  fmt::format_to( out_it( o ), ",\"press\":{},\"cls\":{},\"dk\":{},\"src\":\"{}\"}}\n", cause.press, cls_out( cause.cls ),
+                  dk_out( cause.cls ), src );
   return true;
 }
 

@@ -160,7 +160,8 @@ void set_in_hit_sink( sim_t* sim, bool on );
 
 // Expected-only pricing outside hits (the Windfury occurrence price), called from
 // rl_credit_route on every expected-side route not made by accrue_expected_damage.
-void xp_record( player_t* p, const rl_cause_t& cause, double amount, const char* action_name );
+// `on_chosen` (261003-s1c plan 01 Task 2): rl_credit_route's own chosen-enemy test for this increment, written as `ch`.
+void xp_record( player_t* p, const rl_cause_t& cause, double amount, const char* action_name, bool on_chosen );
 
 // 261001-bac plan 03: hide-and-recompute for a direct hit whose state the engine snapshotted
 // inside action_t::execute. Called from execute()'s per-target work after the real amount
