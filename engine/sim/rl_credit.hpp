@@ -84,7 +84,23 @@ struct rl_cause_t
 {
   std::int64_t seq = -1;
   std::uint8_t cls = RL_CAUSE_ORPHAN;
+  // 261001-bac stage 0 (appended AFTER seq and cls so every existing `rl_cause_t{ seq, cls }`
+  // aggregate initialisation stays valid and means the same thing): the per-hit buff ledger's own
+  // numbers. `press` numbers each foreground cast of the RL actor (the decision seq alone cannot:
+  // in a stock-rotation fight every cast carries seq 0); `launch` numbers the child-action launch
+  // that started a chain (assigned from plan 05 on). Both are -1 whenever rl_buff_ledger= is off,
+  // and are never read by any roll, routing or scheduling decision -- only by the ledger.
+  //
+  // WIDTHS ARE LOAD-BEARING: sizeof( rl_cause_t ) must stay 16. sc_shaman.cpp captures an
+  // rl_cause_t by value in a repeating-event lambda (Storm Unleashed 3), and make_event's
+  // static_assert caps an event at util::next_power_of_two( 2 * sizeof( event_t ) ) = 128 bytes --
+  // that event is exactly 128 today. Two int64 members here made it 144 and the build fail ("Event
+  // type is too big"). cls (1 byte) + press (int16) + launch (int32) fill the 8 bytes after seq.
+  // The ledger refuses a fight with more than 32767 presses (rl_buff_ledger::open_press).
+  std::int16_t press = -1;
+  std::int32_t launch = -1;
 };
+static_assert( sizeof( rl_cause_t ) == 16, "rl_cause_t must stay 16 bytes (see the comment above)" );
 
 // One frame of player_t::rl_cause_stack. tstl-sylvanas quick task 260918-cbc (Stage A5):
 // `owner` names the action_t whose dispatch pushed this frame -- nullptr for a frame pushed
@@ -131,7 +147,15 @@ struct rl_cause_frame_t
 struct rl_cause_scope_t
 {
   player_t* p;
-  rl_cause_scope_t( player_t* p_, rl_cause_t cause, const action_t* owner = nullptr );
+  // 261001-bac plan 06 (research clone only): the id of the ledger frame this scope pushed (-1 when the
+  // ledger is off, the player is not the RL actor's, or the scope was opened inside a ledger pass). The
+  // destructor pops exactly what the constructor pushed, so the ledger's frame stack is LIFO by construction.
+  std::int32_t rl_bl_frame = -1;
+  // `kind` and `ctx` are read ONLY by the ledger (frame record: a short name for the scope's push site, and the
+  // action whose code runs inside a scope that has no `owner`, so a frame always names its action when one is
+  // known). Neither is read by any routing, roll or scheduling decision.
+  rl_cause_scope_t( player_t* p_, rl_cause_t cause, const action_t* owner = nullptr, const char* kind = nullptr,
+                    const action_t* ctx = nullptr );
   ~rl_cause_scope_t();
 };
 
@@ -151,6 +175,9 @@ inline rl_cause_t promote( const rl_cause_t& cause )
 {
   rl_cause_t out;
   out.seq = cause.seq;
+  // 261001-bac stage 0: the ledger's own numbers ride every promotion unchanged.
+  out.press  = cause.press;
+  out.launch = cause.launch;
   switch ( rl_cause_base( cause.cls ) )
   {
     case RL_CAUSE_CAST:

@@ -35,6 +35,29 @@ struct action_state_t : private noncopyable
   // copy_state() below. Pure bookkeeping: never read by any RNG or scheduling decision.
   std::int64_t    rl_cause_seq = -1;
   std::uint8_t    rl_cause_class = RL_CAUSE_ORPHAN;
+  // 261001-bac stage 0: the per-hit buff ledger's own numbers, stamped beside the cause above at
+  // every site that sets it (see rl_cause_t::press / ::launch). -1 whenever rl_buff_ledger= is
+  // off; never read by anything but the ledger. `rl_bl_hit` is the ledger's per-hit entry id
+  // (0 = none); declared now, first written by plan 03.
+  std::int16_t    rl_cause_press = -1;    // widths match rl_cause_t's (see its comment)
+  std::int32_t    rl_cause_launch = -1;
+  std::uint64_t   rl_bl_hit = 0;
+  // 261001-bac plan 04: the id (`h`) of the `app` record written for the application this state was
+  // snapshotted in (a hit that applies a damage-over-time effect). The DoT's own state carries it to every
+  // later tick, which names it as its parent. Plan 12 (MJ-03): copy_state does NOT copy it (a child state copied
+  // from a hit that applied a DoT would hand its parent's application to the child's own DoT); it is carried
+  // explicitly where a DoT's state is copied from the applying hit's (action_t::trigger_dot, dot_t::copy). 0 = none.
+  std::uint64_t   rl_bl_app = 0;
+  // 261001-bac plan 05 (research clone only; neither field is copied by copy_state, both are reset by
+  // initialize): `rl_bl_snap` is the sim time (ms) of the last FULL snapshot_internal of this very state
+  // (flags equal to the action's snapshot_flags, outside a ledger pass), -1 = none; action_t::
+  // schedule_execute uses it to recognise a state class code snapshotted itself and hands over at once.
+  // `rl_bl_pm` is the id (`h`) of the `app` record (src "premade" or "tick_action") that holds the
+  // schedule-time (or application-time) passes of the snapshot this state's amount rests on, 0 = none.
+  // It is set explicitly at three sites (the hand-over, the tick-action tick, execute()) so that a DoT
+  // state or a child state copied from a premade state never inherits it.
+  std::int64_t    rl_bl_snap = -1;
+  std::uint64_t   rl_bl_pm = 0;
   // tstl-sylvanas phase 250, plan 250-03 (REC-04): the press active when this state was stamped
   // (rl_rng_record::stamp_state(), called beside the rl_cause_seq stamp above at every site that
   // sets it) -- outer is the outermost active press (the button that was pressed), inner is the

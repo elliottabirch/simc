@@ -13,6 +13,7 @@
 
 #include "player/pet.hpp"
 #include "player/player.hpp"
+#include "sim/rl_buff_ledger.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_rng_record.hpp"
 #include "sim/rl_target_select.hpp"
@@ -38,6 +39,9 @@
 // because it needs player_t/pet_t complete.
 void rl_count_proc( player_t* p, rl_proc::id which, double chance, bool success )
 {
+  // 261001-bac plan 12 (MJ-04): inside a ledger pass a counted no-op (it would count a real proc and relabel the last real roll).
+  if ( p != nullptr && p->sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( p->sim, "translog.count_proc" );
   // 250-03 (REC-04, R-09): labels the last ROLL entry this call's own draw produced, BEFORE the
   // null/pet/enemy returns below -- a null player, a pet (routed to its owner below) or an enemy
   // still drew the roll being counted, and label_last_roll()'s own chance/outcome match (not this
@@ -61,13 +65,27 @@ void rl_count_proc( player_t* p, rl_proc::id which, double chance, bool success 
 // rl_credit_route's own placement below). Pure bookkeeping: push/pop of the player-scoped
 // cause stack, nothing else. Stage A5: takes the owning action_t* (nullptr default) and pushes
 // an rl_cause_frame_t rather than a bare rl_cause_t.
-rl_cause_scope_t::rl_cause_scope_t( player_t* p_, rl_cause_t cause, const action_t* owner ) : p( p_ )
+rl_cause_scope_t::rl_cause_scope_t( player_t* p_, rl_cause_t cause, const action_t* owner, const char* kind,
+                                    const action_t* ctx )
+  : p( p_ )
 {
+  // 261001-bac stage 0: a CAST-class cause with no press yet is a freshly resolved foreground
+  // cast (action_t::rl_resolve_cause()'s only CAST producer) -- the ledger numbers it here, once.
+  // Every re-push of an existing cast's cause (travel, impact, ticks) carries its press from the
+  // state and skips this. One bool test when rl_buff_ledger= is off.
+  if ( p->sim->rl_bl_on && cause.cls == RL_CAUSE_CAST && cause.press < 0 )
+    cause.press = rl_buff_ledger::open_press( p, cause );
   p->rl_cause_stack.push_back( rl_cause_frame_t{ cause, owner } );
+  // 261001-bac plan 06: the ledger's own frame (a `frm` record, and the stack the buff reads, draws, consumes and
+  // launches of the gate check are attached to). One bool test when rl_buff_ledger= is off.
+  if ( p->sim->rl_bl_on )
+    rl_bl_frame = rl_buff_ledger::frame_push( p, cause, owner, ctx, kind );
 }
 
 rl_cause_scope_t::~rl_cause_scope_t()
 {
+  if ( rl_bl_frame >= 0 )
+    rl_buff_ledger::frame_pop( p, rl_bl_frame );
   p->rl_cause_stack.pop_back();
 }
 
@@ -126,6 +144,11 @@ void rl_credit_route( player_t* p, rl_cause_t cause, std::uint64_t now_seq, doub
     // (whose own additions stay at their own sites, every one of them paired with a route call).
     ( expected ? p->solver_chosen_damage_expected_so_far : p->solver_chosen_damage_so_far ) += amount;
   }
+
+  // 261001-bac stage 0: expected-side routings made outside accrue_expected_damage (the Windfury
+  // occurrence price) are written as `xp` records; accrue's own are `hit` records already.
+  if ( expected && p->sim->rl_bl_on )
+    rl_buff_ledger::xp_record( p, cause, amount, action_name );
 
   // Orphan census: realized-only, keyed by the contributing stats_t's own name (the only
   // identity a realized sink has -- stats_t::add_result carries no action_state_t/action_t).

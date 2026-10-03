@@ -8,7 +8,10 @@
 #include "player/player.hpp"
 #include "sim/event.hpp"
 #include "sim/expressions.hpp"
+#include "sim/rl_buff_ledger.hpp"
 #include "sim/sim.hpp"
+
+#include <limits>
 
 namespace { // UNNAMED NAMESPACE
 
@@ -44,6 +47,10 @@ struct recharge_event_t : event_t
       cooldown_->recharge_event = nullptr;
       cooldown_->last_charged = sim().current_time();
     }
+
+    // 261001-bac plan 07: the ledger sees a charge come back on its own (a ledger record only).
+    if ( sim().rl_bl_on )
+      rl_buff_ledger::cd_recharged( cooldown_ );
 
     if ( sim().debug )
     {
@@ -142,6 +149,9 @@ cooldown_t::cooldown_t( util::string_view n, sim_t& s ) :
  */
 void cooldown_t::adjust_recharge_multiplier()
 {
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "cooldown.adjust_recharge_multiplier" );
+
   if ( !ongoing() || charges == 0 )
   {
     return;
@@ -182,6 +192,10 @@ void cooldown_t::adjust_recharge_multiplier()
  */
 void cooldown_t::adjust_base_duration()
 {
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "cooldown.adjust_base_duration" );
+  rl_buff_ledger::cd_scope_t rl_scope( this, "adjust_base_duration", sim.rl_bl_on );
+
   if ( !ongoing() )
   {
     return;
@@ -208,6 +222,18 @@ void cooldown_t::adjust_base_duration()
 
 void cooldown_t::adjust_remaining_duration( double delta )
 {
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "cooldown.adjust_remaining_duration" );
+  // 261001-bac plan 13 (refund probe, research only): a shortening caused by a press of the named action is skipped at ENTRY, before
+  // any state change. One bool test with the option absent.
+  if ( sim.rl_bl_probe && delta < 1.0 && ongoing() && ( charges == 1 || recharge_event != nullptr ) )
+  {
+    const timespan_t rl_remains = charges == 1 ? ready - sim.current_time() : recharge_event->remains();
+    if ( rl_buff_ledger::cd_probe_skip( this, "adjust_remaining_duration", ( rl_remains - rl_remains * delta ).total_millis() ) )
+      return;
+  }
+  rl_buff_ledger::cd_scope_t rl_scope( this, "adjust_remaining_duration", sim.rl_bl_on );
+
   assert( ongoing() && delta > 0.0 );
   assert( charges > 0 && "Cooldown charges must be positive");
 
@@ -253,6 +279,18 @@ void cooldown_t::adjust_remaining_duration( double delta )
 
 void cooldown_t::adjust( timespan_t amount, bool requires_reaction, bool apply_recharge_rate )
 {
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "cooldown.adjust" );
+  // 261001-bac plan 13 (refund probe, research only): a shortening caused by a press of the named action is skipped at ENTRY, before
+  // any state change; the amount is the one the body below computes (it only multiplies the local copy).
+  if ( sim.rl_bl_probe && amount < 0_ms )
+  {
+    const timespan_t rl_amount = ( action && apply_recharge_rate ) ? amount * action->recharge_rate_multiplier( *this ) : amount;
+    if ( rl_amount < 0_ms && rl_buff_ledger::cd_probe_skip( this, "adjust", ( -rl_amount ).total_millis() ) )
+      return;
+  }
+  rl_buff_ledger::cd_scope_t rl_scope( this, "adjust", sim.rl_bl_on );
+
   if ( amount == 0_ms )
     return;
 
@@ -369,6 +407,14 @@ void cooldown_t::reset_init()
 
 void cooldown_t::reset( bool require_reaction, int charges_ )
 {
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "cooldown.reset" );
+  // 261001-bac plan 13 (refund probe, research only): a reset caused by a press of the named action, while a recharge runs, is skipped
+  // at ENTRY (the seconds it would take off are the whole remaining time of the running recharge).
+  if ( sim.rl_bl_probe && charges_ != 0 && rl_buff_ledger::cd_probe_skip( this, "reset", std::numeric_limits<std::int64_t>::max() ) )
+    return;
+  rl_buff_ledger::cd_scope_t rl_scope( this, "reset", sim.rl_bl_on );
+
   if ( charges_ == 0 )
     return;
   if ( charges_ < 0 )
@@ -427,9 +473,20 @@ timespan_t cooldown_t::queue_delay() const
 
 void cooldown_t::start( action_t* a, timespan_t _override, timespan_t delay )
 {
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "cooldown.start" );
+
+  // 261001-bac plan 07: what the ledger needs to see of the cooldown before it changes (a read, nothing else).
+  rl_buff_ledger::cd_snap_t rl_before;
+  if ( sim.rl_bl_on )
+    rl_before = rl_buff_ledger::cd_capture( this );
+
   // Zero duration cooldowns are nonsense
   if ( _override == 0_ms || ( _override < 0_ms && duration <= 0_ms ) )
   {
+    // 261001-bac plan 07: the ledger notes the attempt (Storm Unleashed swaps Crash Lightning onto such a cooldown).
+    if ( sim.rl_bl_on )
+      rl_buff_ledger::cd_start_ignored( this, a );
     return;
   }
 
@@ -471,6 +528,8 @@ void cooldown_t::start( action_t* a, timespan_t _override, timespan_t delay )
     {
       ready = recharge_event->occurs() + 1_ms;
     }
+    if ( sim.rl_bl_on )
+      rl_buff_ledger::cd_started( this, rl_before, a );
     return;
   }
 
@@ -545,10 +604,16 @@ void cooldown_t::start( action_t* a, timespan_t _override, timespan_t delay )
   {
     ready_trigger_event = make_event<ready_trigger_event_t>( sim, *player, this );
   }
+
+  if ( sim.rl_bl_on )
+    rl_buff_ledger::cd_started( this, rl_before, a );
 }
 
 void cooldown_t::start( timespan_t _override, timespan_t delay )
 {
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "cooldown.start" );
+
   start( nullptr, _override, delay );
 }
 
@@ -742,6 +807,9 @@ bool cooldown_t::is_ready() const
 
 void cooldown_t::set_max_charges( int new_max_charges )
 {
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "cooldown.set_max_charges" );
+
   assert( new_max_charges > 0 && "Cooldown charges must be greater than 0" );
 
   int charges_max = charges;
@@ -749,6 +817,10 @@ void cooldown_t::set_max_charges( int new_max_charges )
   // Charges are not being changed, just end.
   if ( charges_max == new_max_charges )
     return;
+
+  // 261001-bac plan 12 (MJ-05): the ledger writes nothing for the restarts and adjustments below; the scope brings its bookkeeping of
+  // this cooldown to the new state when the function ends.
+  rl_buff_ledger::cd_scope_t rl_scope( this, "set_max_charges", sim.rl_bl_on );
 
   sim.print_debug( "{} adjusts {} max charges from {} to {}", *player, *this, charges_max,
                              new_max_charges );
@@ -823,6 +895,9 @@ void cooldown_t::set_max_charges( int new_max_charges )
 
 void cooldown_t::adjust_max_charges( int charge_change )
 {
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &sim, "cooldown.adjust_max_charges" );
+
   auto new_charges = charges + charge_change;
   assert( new_charges > 0 && "Adjusting cooldown charges results in 0 new charges." );
   set_max_charges( new_charges );

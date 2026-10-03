@@ -24,6 +24,7 @@
 #include "sim/event.hpp"
 #include "sim/expressions.hpp"
 #include "sim/proc.hpp"
+#include "sim/rl_buff_ledger.hpp"
 #include "sim/rl_credit.hpp"
 #include "sim/rl_target_select.hpp"
 #include "sim/sim.hpp"
@@ -1594,6 +1595,17 @@ double action_t::calculate_tick_amount( action_state_t* state, double dot_multip
   return amount;
 }
 
+bool action_t::rl_bl_direct_structurally_zero( action_state_t* state ) const
+{
+  double amount = sim->averaged_range( base_da_min( state ), base_da_max( state ) );
+
+  if ( round_base_dmg )
+    amount = floor( amount + 0.5 );
+
+  return amount == 0 && weapon_multiplier == 0 && attack_direct_power_coefficient( state ) == 0 &&
+         spell_direct_power_coefficient( state ) == 0;
+}
+
 double action_t::calculate_direct_amount( action_state_t* state ) const
 {
   double amount = sim->averaged_range( base_da_min( state ), base_da_max( state ) );
@@ -1952,8 +1964,9 @@ rl_cause_t action_t::rl_resolve_cause()
   {
     // Already stamped at schedule_execute() time (or copied down from a parent state via
     // copy_state()) -- promote() is idempotent, so re-applying it here is harmless.
-    return rl_credit::promote(
-        rl_cause_t{ pre_execute_state->rl_cause_seq, pre_execute_state->rl_cause_class } );
+    // 261001-bac stage 0: the ledger's press and launch numbers ride the carried stamp.
+    return rl_credit::promote( rl_cause_t{ pre_execute_state->rl_cause_seq, pre_execute_state->rl_cause_class,
+                                           pre_execute_state->rl_cause_press, pre_execute_state->rl_cause_launch } );
   }
   if ( rl_pending_cause.seq >= 0 )
   {
@@ -1969,17 +1982,34 @@ rl_cause_t action_t::rl_resolve_cause()
   {
     return rl_cause_t{ static_cast<std::int64_t>( sim->solver_control_seq ), RL_CAUSE_CAST };
   }
+  // 261001-bac stage 0: with the ledger on, a chain that starts here carries a press sentinel
+  // naming its origin (rl_buff_ledger.hpp), so "lost press" stays an exact check -- see there.
   if ( repeating && !special )
   {
-    return rl_cause_t{ static_cast<std::int64_t>( sim->solver_control_seq ), RL_CAUSE_AUTO };
+    rl_cause_t out{ static_cast<std::int64_t>( sim->solver_control_seq ), RL_CAUSE_AUTO };
+    if ( sim->rl_bl_on )
+    {
+      out.press = rl_buff_ledger::PRESS_AUTO;
+      // Plan 05: the launch (swing) the schedule-time passes recorded for this swing.
+      out.launch = rl_buff_ledger::take_swing_launch( this );
+    }
+    return out;
   }
-  return rl_cause_t{ static_cast<std::int64_t>( sim->solver_control_seq ), RL_CAUSE_ORPHAN };
+  rl_cause_t out{ static_cast<std::int64_t>( sim->solver_control_seq ), RL_CAUSE_ORPHAN };
+  if ( sim->rl_bl_on )
+    // Plan 13 (ruling R1): PRESS_ORPHAN, or the press a class module handed back around a delayed event (an encoded negative
+    // value the engine reads as "no press"; the decision number and the cause class stay exactly as they were).
+    out.press = rl_buff_ledger::orphan_press( sim );
+  return out;
 }
 
 // action_t::execute ========================================================
 
 void action_t::execute()
 {
+  // 261001-bac plan 12 (MJ-04): inside a ledger pass a counted no-op (class overrides run before this base guard).
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "action.execute" );
 #ifndef NDEBUG
   if ( !initialized )
   {
@@ -2059,7 +2089,19 @@ void action_t::execute()
   // push a scope of our own around the per-target work, exactly Stage A4's behaviour.
   const bool have_owner_frame =
       !player->rl_cause_stack.empty() && player->rl_cause_stack.back().owner == this;
-  const rl_cause_t rl_cause = have_owner_frame ? player->rl_cause_stack.back().cause : rl_resolve_cause();
+  // 261001-bac stage 0: no longer const -- in the no-owner-frame case below, the pushed scope's
+  // constructor may assign the ledger's press number to a fresh CAST cause, and the stamps written
+  // by do_per_target_work (captured by reference) must carry it.
+  // 261001-bac plan 06: as in execute_on_target -- a direct execute() called from another action's frame is a launch.
+  const bool rl_launch_ok = sim->rl_bl_on && !have_owner_frame && !( pre_execute_state && pre_execute_state->rl_cause_seq >= 0 ) &&
+                            rl_pending_cause.seq < 0 && !player->rl_cause_stack.empty();
+  rl_cause_t rl_cause = have_owner_frame ? player->rl_cause_stack.back().cause : rl_resolve_cause();
+  if ( rl_launch_ok )
+  {
+    const std::int32_t rl_l = rl_buff_ledger::note_launch( this, target, "execute" );
+    if ( rl_l >= 0 )
+      rl_cause.launch = rl_l;
+  }
 
   // The per-target work (tick_action snapshotting included) that stamps every action_state_t
   // this execute() produces with `rl_cause`. Extracted to a lambda so it can run either bare
@@ -2076,6 +2118,11 @@ void action_t::execute()
         tick_action->execute_state->initialize();
 
       tick_action->snapshot_state( tick_action->execute_state, amount_type( tick_action->execute_state, tick_action->direct_tick ) );
+
+      // 261001-bac plan 05: the tick action's application snapshot gets its hidden passes now; the entry's
+      // id rides the state and is copied to every tick's state (action_t::tick). One bool test when off.
+      if ( sim->rl_bl_on )
+        rl_buff_ledger::tick_action_snapshot( tick_action, tick_action->execute_state, rl_cause );
     }
 
     if ( num_targets == -1 || num_targets > 0 )  // aoe
@@ -2102,6 +2149,8 @@ void action_t::execute()
         }
         s->rl_cause_seq   = rl_cause.seq;
         s->rl_cause_class = rl_cause.cls;
+        s->rl_cause_press  = rl_cause.press;
+        s->rl_cause_launch = rl_cause.launch;
         // 250-03 (REC-04): stamp this state's press alongside its cause -- a later restore (a
         // travel/proc/tick boundary) recovers the press active right now.
         rl_rng_record::stamp_state( sim, s );
@@ -2112,6 +2161,13 @@ void action_t::execute()
 
         if ( sim->debug )
           s->debug();
+
+        // 261001-bac plan 03: as in the single-target branch below. The scratch copies carry this
+        // state's n_targets and chain_target; target_list() is never called by the ledger.
+        // Plan 05: a pre-made state re-snapshotted per target gets target-only passes whose entry names
+        // the hand-over entry as its parent.
+        if ( sim->rl_bl_on )
+          rl_buff_ledger::run_passes( this, s, pre_execute_state );
 
         schedule_travel( s );
       }
@@ -2128,6 +2184,8 @@ void action_t::execute()
         snapshot_state( s, amount_type( s ) );
       s->rl_cause_seq   = rl_cause.seq;
       s->rl_cause_class = rl_cause.cls;
+      s->rl_cause_press  = rl_cause.press;
+      s->rl_cause_launch = rl_cause.launch;
       // 250-03 (REC-04): stamp this state's press alongside its cause -- a later restore (a
       // travel/proc/tick boundary) recovers the press active right now.
       rl_rng_record::stamp_state( sim, s );
@@ -2138,6 +2196,18 @@ void action_t::execute()
 
       if ( sim->debug )
         s->debug();
+
+      // 261001-bac plan 03: hide-and-recompute passes for a state snapshotted right here. Plan 05: a
+      // pre-made state (class code snapshotted it) has no snapshot here; its entry was written at
+      // hand-over, the real amount is only checked against that entry's reference. One bool test when
+      // the ledger is off.
+      if ( sim->rl_bl_on )
+      {
+        if ( !pre_execute_state )
+          rl_buff_ledger::run_passes( this, s );
+        else
+          rl_buff_ledger::premade_hit( this, s, pre_execute_state );
+      }
 
       schedule_travel( s );
     }
@@ -2152,7 +2222,11 @@ void action_t::execute()
     // Pushed for the duration of the per-target work below so a proc fired synchronously
     // inside it -- a callback, a resource-gain trigger, a nested execute() -- inherits
     // `rl_cause` promoted to its PROC_OF_* sibling, by construction.
-    rl_cause_scope_t rl_cause_guard( player, rl_cause );
+    rl_cause_scope_t rl_cause_guard( player, rl_cause, /*owner=*/nullptr, "execute", this );
+    // 261001-bac stage 0: the scope's constructor may just have numbered a fresh CAST cause;
+    // re-read it so the states stamped below carry the press (one bool test when off).
+    if ( sim->rl_bl_on )
+      rl_cause = player->rl_cause_stack.back().cause;
     do_per_target_work();
   }
 
@@ -2326,11 +2400,20 @@ void action_t::tick( dot_t* d )
     tick_state->rl_cause_seq   = d->state->rl_cause_seq;
     // Phase 259 (259-11): keep the RL_CAUSE_DECK_MARK bit the dot's own stamp carries (rl_credit::dot_tick_class).
     tick_state->rl_cause_class = rl_credit::dot_tick_class( d->state->rl_cause_class );
+    // 261001-bac stage 0: the class changes, the ledger's press and launch stay (the chain is the
+    // applying cast's).
+    tick_state->rl_cause_press  = d->state->rl_cause_press;
+    tick_state->rl_cause_launch = d->state->rl_cause_launch;
     // 250-03 (REC-04): stamp tick_state with the CURRENT press (this dot tick's own tick press,
     // opened around this call by dot.cpp's dot_tick_event_t::execute()/check_tick_zero()) so the
     // tick action's later (deferred) execute() restores the tick press as ITS outer press --
     // exactly the rl_cause_seq inheritance just above, for the press instead of the cause.
     rl_rng_record::stamp_state( sim, tick_state );
+
+    // 261001-bac plan 05: the application entry of this tick action's snapshot (the hits of the tick name
+    // it as parent; copy_state does not carry it).
+    if ( sim->rl_bl_on && tick_action->execute_state )
+      tick_state->rl_bl_pm = tick_action->execute_state->rl_bl_pm;
 
     tick_action->schedule_execute( tick_state );
 
@@ -2352,6 +2435,11 @@ void action_t::tick( dot_t* d )
     auto stack = dot_ignore_stack ? 1 : d->current_stack();
 
     d->state->result_amount = calculate_tick_amount( d->state, d->get_tick_factor() * stack );
+
+    // 261001-bac plan 04: hide-and-recompute passes for this direct tick (no tick_action), between the
+    // amount and assess_damage. One bool test when the ledger is off.
+    if ( sim->rl_bl_on )
+      rl_buff_ledger::run_tick_passes( this, d->state, d->get_tick_factor() * stack );
 
     // tstl-sylvanas quick task 260918-cbc (Stage A1): a DoT tick assessed directly here (no
     // tick_action) is always a DOT_TICK event, whichever class the applying/refreshing
@@ -2440,7 +2528,8 @@ void action_t::assess_damage( result_amount_type rt, action_state_t* state )
     // `state` is still in scope -- for the routing done at the realized sink in stats.cpp. A
     // pet action routes its realized damage to the OWNER's accumulator (stats.cpp's own
     // pet->owner rule), so the owner's own rl_sink_cause must carry it too.
-    player->rl_sink_cause = rl_cause_t{ state->rl_cause_seq, state->rl_cause_class };
+    player->rl_sink_cause = rl_cause_t{ state->rl_cause_seq, state->rl_cause_class, state->rl_cause_press,
+                                        state->rl_cause_launch };
     if ( player->is_pet() )
       player->cast_pet()->owner->rl_sink_cause = player->rl_sink_cause;
 
@@ -2482,10 +2571,22 @@ void action_t::record_data( action_state_t* data )
 void action_t::accrue_expected_damage( action_state_t* state )
 {
   if ( !stats )
+  {
+    // 261001-bac stage 0: such an action routes neither realised nor expected credit; the ledger
+    // only counts it (footer `no_stats_hits`).
+    if ( sim->rl_bl_on )
+      rl_buff_ledger::note_no_stats_hit( this );
     return;
+  }
 
   if ( is_windfury_occurrence )
+  {
+    // 261001-bac stage 0: a Windfury-occurrence hit is realised damage with no expected pricing
+    // of its own (priced once, at the roll site) -- a `hit` with exp 0 and exp_excl set.
+    if ( sim->rl_bl_on )
+      rl_buff_ledger::hit_sink( this, state, 0.0, /*exp_excl=*/true );
     return;
+  }
 
   double crit_bonus = total_crit_bonus( state );
 
@@ -2500,7 +2601,16 @@ void action_t::accrue_expected_damage( action_state_t* state )
   // already adds to solver_damage_expected_so_far into the matching credit stream, so
   // sum(streams) stays an identity against it rather than a tolerance. `state` is still in
   // scope here (unlike stats_t::add_result's realized sink), so no rl_sink_cause detour needed.
-  const rl_cause_t cause{ state->rl_cause_seq, state->rl_cause_class };
+  const rl_cause_t cause{ state->rl_cause_seq, state->rl_cause_class, state->rl_cause_press,
+                          state->rl_cause_launch };
+  // 261001-bac stage 0: one `hit` record per damage state, written here where realised
+  // (state->result_amount, what stats_t::add_result routes) and expected are both in hand. The
+  // flag stops rl_credit_route from also writing accrue's own expected-side routes as `xp`.
+  if ( sim->rl_bl_on )
+  {
+    rl_buff_ledger::hit_sink( this, state, expected_amount, /*exp_excl=*/false );
+    rl_buff_ledger::set_in_hit_sink( sim, true );
+  }
   if ( !player->is_pet() )
   {
     player->solver_damage_expected_so_far += expected_amount;
@@ -2517,6 +2627,8 @@ void action_t::accrue_expected_damage( action_state_t* state )
       rl_credit_route( player, cause, sim->solver_control_seq, expected_amount, /*expected=*/true, state->target );
     }
   }
+  if ( sim->rl_bl_on )
+    rl_buff_ledger::set_in_hit_sink( sim, false );
 }
 
 // Should be called only by foreground action executions (i.e., Player-Ready event calls
@@ -2598,6 +2710,9 @@ void action_t::start_gcd()
 
 void action_t::schedule_execute( action_state_t* state )
 {
+  // 261001-bac plan 12 (MJ-04): inside a ledger pass a counted no-op.
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "action.schedule_execute" );
   if ( target->is_sleeping() )
   {
     sim->print_debug( "{} action={} attempted to schedule on a dead target {}",
@@ -2655,15 +2770,26 @@ void action_t::schedule_execute( action_state_t* state )
     // report for the trace evidence and recommended follow-up).
     const bool self_owns_top = !player->rl_cause_stack.empty() && player->rl_cause_stack.back().owner == this;
     const bool skip_parking  = self_owns_top || repeating;
-    const rl_cause_t rl_pending = ( player->rl_cause_stack.empty() || skip_parking )
-                                       ? rl_cause_t{}
-                                       : rl_credit::promote( player->rl_cause_stack.back().cause );
+    rl_cause_t rl_pending = ( player->rl_cause_stack.empty() || skip_parking )
+                                ? rl_cause_t{}
+                                : rl_credit::promote( player->rl_cause_stack.back().cause );
+    // 261001-bac plan 06: a cause that is being newly attached (to an unstamped state, or parked for the next
+    // execute) is a LAUNCH of this action from the frame the stack top belongs to.
+    if ( sim->rl_bl_on && rl_pending.seq >= 0 && ( state ? state->rl_cause_seq < 0 : true ) )
+    {
+      const std::int32_t rl_l = rl_buff_ledger::note_launch( this, state ? state->target : target, "schedule" );
+      if ( rl_l >= 0 )
+        rl_pending.launch = rl_l;
+    }
     if ( state )
     {
       if ( state->rl_cause_seq < 0 && rl_pending.seq >= 0 )
       {
         state->rl_cause_seq   = rl_pending.seq;
         state->rl_cause_class = rl_pending.cls;
+        // 261001-bac stage 0: the ledger's numbers ride the parked cause too.
+        state->rl_cause_press  = rl_pending.press;
+        state->rl_cause_launch = rl_pending.launch;
       }
     }
     else if ( rl_pending.seq >= 0 )
@@ -2677,9 +2803,21 @@ void action_t::schedule_execute( action_state_t* state )
   // whose target is behind the player never reaches this point: the picker refuses it upstream
   // (generic_filter's G4 for the RL arm, this file's own target-ready check's restored fourth
   // clause for the scripted arm).
+  // 261001-bac plan 05: a state class code snapshotted itself, at this very sim time, and handed to
+  // schedule_execute: the hidden passes run now, before anything can change the buffs (the state's amount
+  // rests on this snapshot). The stamp above has already given the state its press.
+  if ( sim->rl_bl_on && !sim->rl_bl_shadow && state && state->rl_bl_pm == 0 &&
+       state->rl_bl_snap == sim->current_time().total_millis() )
+    rl_buff_ledger::premade_snapshot( this, state );
+
   sim->print_log( "{} schedules execute for {}", *player, *this );
 
   time_to_execute = execute_time();
+
+  // 261001-bac plan 05: the swing-speed channel -- hidden passes over the swing time of an auto-attack, at
+  // the moment the swing is scheduled. One bool test when the ledger is off.
+  if ( sim->rl_bl_on && !sim->rl_bl_shadow && repeating && !special )
+    rl_buff_ledger::run_swing_passes( this );
 
   // Study-only swing trace/pin (tstl-sylvanas phase 257, plan 257-09, D-18): the booking
   // override (and the trace's own book/rebook/restart row) now lives in
@@ -4817,6 +4955,13 @@ void action_t::snapshot_internal( action_state_t* state, unsigned flags, result_
 
   state->result_type = rt;
 
+  // 261001-bac plan 05: a FULL snapshot (the action's own snapshot_flags) made outside a ledger pass is
+  // noted on the state with the sim time; action_t::schedule_execute( state ) then recognises a state class
+  // code snapshotted itself and runs the hidden passes at hand-over. A partial re-snapshot (target part,
+  // update flags) leaves the note as it was.
+  if ( sim->rl_bl_on && !sim->rl_bl_shadow && flags == snapshot_flags )
+    state->rl_bl_snap = sim->current_time().total_millis();
+
   if ( flags & STATE_CRIT )
     state->crit_chance = composite_crit_chance() * composite_crit_chance_multiplier();
 
@@ -4947,7 +5092,9 @@ void action_t::do_schedule_travel( action_state_t* state, timespan_t time_ )
     // tstl-sylvanas quick task 260918-cbc (Stage A4): see rl_credit.hpp's rl_cause_scope_t doc
     // comment -- this wraps impact()'s full virtual dispatch (base body + any override's
     // post-Base::impact() tail), not just action_t::impact()'s own body.
-    rl_cause_scope_t rl_cause_guard( player, rl_cause_t{ state->rl_cause_seq, state->rl_cause_class } );
+    rl_cause_scope_t rl_cause_guard(
+        player, rl_cause_t{ state->rl_cause_seq, state->rl_cause_class, state->rl_cause_press, state->rl_cause_launch },
+        /*owner=*/nullptr, "impact", this );
     // 250-03 (REC-04): restores the press that was active when `state` was stamped (the casting
     // action's own execute press) across this zero-travel-time boundary -- same span as the
     // cause guard just above. A never-stamped state (recorder was off) leaves the current frames
@@ -5021,6 +5168,9 @@ void action_t::impact( action_state_t* s )
 
 void action_t::trigger_dot( action_state_t* s )
 {
+  // 261001-bac plan 12 (MJ-04): inside a ledger pass a counted no-op.
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "action.trigger_dot" );
   timespan_t duration = composite_dot_duration( s );
   if ( duration <= timespan_t::zero() )
     return;
@@ -5040,6 +5190,9 @@ void action_t::trigger_dot( action_state_t* s )
   if ( !dot->state )
     dot->state = get_state();
   dot->state->copy_state( s );
+  // 261001-bac plan 12 (MJ-03): the DoT's state is a copy of the applying hit's: it keeps that hit's application id.
+  if ( sim->rl_bl_on )
+    dot->state->rl_bl_app = s->rl_bl_app;
 
   if ( !dot->is_ticking() )
   {
@@ -5612,6 +5765,9 @@ void action_t::reschedule_queue_event()
 }
 rng::rng_t& action_t::rng()
 {
+  if ( sim->rl_bl_on )
+    if ( auto* r = rl_buff_ledger::rng_access( sim, "action" ) )
+      return *r;
   if ( sim->per_source_rng )
     return source_rng_;
   return sim->rng();
@@ -5619,6 +5775,9 @@ rng::rng_t& action_t::rng()
 
 rng::rng_t& action_t::rng() const
 {
+  if ( sim->rl_bl_on )
+    if ( auto* r = rl_buff_ledger::rng_access( sim, "action" ) )
+      return *r;
   if ( sim->per_source_rng )
     return const_cast<action_t*>( this )->source_rng_;
   return sim -> rng();
@@ -5995,7 +6154,20 @@ void action_t::execute_on_target( player_t* t, double amount )
   // falls through to the same CAST/AUTO/ORPHAN branches any other un-wrapped direct call would).
   // Either way this action's own execute() then sees ITS OWN frame on top (owner == this) and
   // reuses the cause resolved here rather than re-resolving or double-pushing.
-  rl_cause_scope_t rl_cause_guard( player, rl_resolve_cause(), /*owner=*/this );
+  //
+  // 261001-bac plan 06: when the cause is read off the player's own stack (the carried-state and pending-cause
+  // branches of rl_resolve_cause() already belong to a launch made earlier), this is a LAUNCH of a child action
+  // from the frame the stack top belongs to: the ledger writes an `ln` record and the child's cause carries its id.
+  const bool rl_launch_ok = sim->rl_bl_on && !( pre_execute_state && pre_execute_state->rl_cause_seq >= 0 ) &&
+                            rl_pending_cause.seq < 0 && !player->rl_cause_stack.empty();
+  rl_cause_t rl_c = rl_resolve_cause();
+  if ( rl_launch_ok )
+  {
+    const std::int32_t rl_l = rl_buff_ledger::note_launch( this, t, "execute_on_target" );
+    if ( rl_l >= 0 )
+      rl_c.launch = rl_l;
+  }
+  rl_cause_scope_t rl_cause_guard( player, rl_c, /*owner=*/this );
   // 250-03 (REC-04): opens this action's own execute press, spanning the same whole virtual
   // execute() call the cause guard above spans. No carried state -- execute_on_target() has no
   // deferred-dispatch carried state concept.

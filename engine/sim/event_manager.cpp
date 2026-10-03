@@ -6,6 +6,7 @@
 #include "event_manager.hpp"
 #include "event.hpp"
 #include "util/util.hpp"
+#include "sim/rl_buff_ledger.hpp"
 #include "sim/sim.hpp"
 #include "player/player.hpp"
 
@@ -301,6 +302,14 @@ void event_t::schedule( timespan_t delta_time )
 {
   assert( !scheduled && "Cannot schedule a event twice." );
   scheduled = true;
+  // 261001-bac plan 12 (MJ-04): inside a ledger pass the event is counted and never queued: it is marked canceled, and gets an
+  // id the event manager never issues (make_event asserts id != 0).
+  if ( _sim.rl_bl_shadow )
+  {
+    canceled = true;
+    id       = 0xFFFFFFFFu;
+    return rl_buff_ledger::blocked( &_sim, "event.create" );
+  }
   _sim.event_mgr.add_event( this, delta_time );
 }
 // event_manager_t::cancel ==================================================

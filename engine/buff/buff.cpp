@@ -19,6 +19,7 @@
 #include "sim/proc_rng.hpp"
 #include "sim/sim.hpp"
 #include "sim/rl_rng_record.hpp"
+#include "sim/rl_buff_ledger.hpp"
 #include "util/rng.hpp"
 
 #include <optional>
@@ -178,6 +179,17 @@ player_t* rl_buff_source_player( buff_t* b )
   return b->player;
 }
 
+// 261001-bac plan 06 (research clone only): who is applying this buff right now -- the top cause of the source
+// player's stack, promoted exactly as rl_applied_cause is, or, for a trigger the engine deferred by the aura
+// delay, the cause the delay event captured (plan 05), or "unknown" (rl_cause_t{}). Read only by the ledger.
+static rl_cause_t rl_bl_current_cause( buff_t* b )
+{
+  player_t* src = rl_buff_source_player( b );
+  if ( src && !src->rl_cause_stack.empty() )
+    return rl_credit::promote( src->rl_cause_stack.back().cause );
+  return b->rl_bl_delay_cause;
+}
+
 struct tick_t : public buff_event_t
 {
   double current_value;
@@ -225,7 +237,10 @@ struct tick_t : public buff_event_t
         {
           player_t* rl_source = rl_buff_source_player( buff );
           if ( rl_source )
-            rl_scope.emplace( rl_source, rl_cause_t{ buff->rl_applied_cause.seq, rl_credit::dot_tick_class( buff->rl_applied_cause.cls ) } );  // Phase 259: keeps RL_CAUSE_DECK_MARK
+            rl_scope.emplace( rl_source,
+                              rl_cause_t{ buff->rl_applied_cause.seq, rl_credit::dot_tick_class( buff->rl_applied_cause.cls ),  // Phase 259: keeps RL_CAUSE_DECK_MARK
+                                          buff->rl_applied_cause.press, buff->rl_applied_cause.launch },
+                              /*owner=*/nullptr, "buff_tick" );
         }
         buff->tick_callback( buff, total_ticks, tick_time );
       }
@@ -306,7 +321,10 @@ struct expiration_t : public buff_event_t
         {
           player_t* rl_source = rl_buff_source_player( buff );
           if ( rl_source )
-            rl_scope.emplace( rl_source, rl_cause_t{ buff->rl_applied_cause.seq, rl_credit::dot_tick_class( buff->rl_applied_cause.cls ) } );  // Phase 259: keeps RL_CAUSE_DECK_MARK
+            rl_scope.emplace( rl_source,
+                              rl_cause_t{ buff->rl_applied_cause.seq, rl_credit::dot_tick_class( buff->rl_applied_cause.cls ),  // Phase 259: keeps RL_CAUSE_DECK_MARK
+                                          buff->rl_applied_cause.press, buff->rl_applied_cause.launch },
+                              /*owner=*/nullptr, "buff_tick" );
         }
         buff->tick_callback( buff, buff->current_tick, actual_tick_time );
       }
@@ -330,6 +348,10 @@ struct expiration_t : public buff_event_t
 
     if ( buff->stack_behavior == buff_stack_behavior::ASYNCHRONOUS )
     {
+      // 261001-bac plan 06: an independent stack leaves with its own applier (the entry with the earliest
+      // own expiry), not with the oldest.
+      if ( buff->sim->rl_bl_on )
+        rl_buff_ledger::applier_expire_own( buff, static_cast<int>( stack ) );
       buff->decrement( stack );
     }
     else
@@ -345,12 +367,24 @@ struct buff_delay_t : public buff_event_t
   timespan_t duration;
   int stacks;
 
+  // 261001-bac plan 05: the cause on the source player's stack at the moment of the trigger (promoted as
+  // rl_applied_cause is), kept so the delayed application can be stamped for the ledger. Plan 12 (NT-02): only constructed when
+  // the ledger is on (empty, one flag store, otherwise).
+  std::optional<rl_cause_t> rl_bl_cause;
+
   buff_delay_t( buff_t* b, int stacks, double value, timespan_t d )
     : buff_event_t( b, b->rng().gauss( b->sim->default_aura_delay ) ),
       value( value ),
       duration( d ),
       stacks( stacks )
   {
+    if ( b->sim->rl_bl_on )
+    {
+      player_t* rl_source = rl_buff_source_player( b );
+      rl_bl_cause.emplace();
+      if ( rl_source && !rl_source->rl_cause_stack.empty() )
+        *rl_bl_cause = rl_credit::promote( rl_source->rl_cause_stack.back().cause );
+    }
   }
 
   const char* name() const override
@@ -362,7 +396,13 @@ struct buff_delay_t : public buff_event_t
   {
     // Add a Cooldown check here to avoid extra processing due to delays
     if ( buff->cooldown->remains() == timespan_t::zero() )
+    {
+      if ( buff->sim->rl_bl_on )
+        buff->rl_bl_delay_cause = rl_bl_cause.value_or( rl_cause_t{} );
       buff->execute( stacks, value, duration );
+      if ( buff->sim->rl_bl_on )
+        buff->rl_bl_delay_cause = rl_cause_t{};
+    }
 
     auto it = range::find_if( buff->delay, [ this ]( const event_t* e ) {
       return e == this;
@@ -1962,7 +2002,7 @@ timespan_t buff_t::refresh_duration( timespan_t new_duration ) const
     case buff_refresh_behavior::TICK:
     {
       assert( tick_event );
-      timespan_t residual = remains() % static_cast<tick_t*>( tick_event )->tick_time;
+      timespan_t residual = remains_own() % static_cast<tick_t*>( tick_event )->tick_time;
       if ( sim->debug )
       {
         sim->print_debug( "{} {} carryover duration from ongoing tick: {}, refresh_duration={} new_duration={}",
@@ -1973,7 +2013,7 @@ timespan_t buff_t::refresh_duration( timespan_t new_duration ) const
     }
     case buff_refresh_behavior::PANDEMIC:
     {
-      timespan_t residual = std::min( new_duration * 0.3, remains() );
+      timespan_t residual = std::min( new_duration * 0.3, remains_own() );
       if ( sim->debug )
       {
         sim->print_debug( "{} {} carryover from ongoing buff: {}, refresh_duration={} new_duration={}",
@@ -1983,9 +2023,9 @@ timespan_t buff_t::refresh_duration( timespan_t new_duration ) const
       return new_duration + residual;
     }
     case buff_refresh_behavior::EXTEND:
-      return remains() + new_duration;
+      return remains_own() + new_duration;
     case buff_refresh_behavior::MAX:
-      return std::max( remains(), new_duration );
+      return std::max( remains_own(), new_duration );
     case buff_refresh_behavior::CUSTOM:
       return refresh_duration_callback( this, new_duration );
     default:
@@ -2014,7 +2054,11 @@ timespan_t buff_t::tick_time() const
 int buff_t::stack()
 {
   int cs = current_stack;
-  if ( last_benefite_update != sim->current_time() )
+  if ( rl_buff_ledger::g_reads_on )
+    rl_buff_ledger::note_read( this, cs, current_value );
+  // 261001-bac plan 03: the ledger's hidden / reference / restoring passes must leave the report's
+  // benefit counters as the real pass left them (sim->rl_bl_shadow is false in every other case).
+  if ( !sim->rl_bl_shadow && last_benefite_update != sim->current_time() )
   {
     // make sure we only record a benfit once per sim event
     last_benefite_update = sim->current_time();
@@ -2029,6 +2073,8 @@ int buff_t::stack()
 int buff_t::total_stack()
 {
   int s = current_stack;
+  if ( rl_buff_ledger::g_reads_on )
+    rl_buff_ledger::note_read( this, s, current_value );
 
   for ( const auto e : delay )
   {
@@ -2040,6 +2086,8 @@ int buff_t::total_stack()
 
 bool buff_t::may_react( int stack )
 {
+  if ( rl_buff_ledger::g_reads_on )
+    rl_buff_ledger::note_read( this, current_stack, current_value );
   if ( current_stack == 0 )
     return false;
   if ( stack > current_stack )
@@ -2058,6 +2106,8 @@ bool buff_t::may_react( int stack )
 int buff_t::stack_react()
 {
   int stack = current_stack;
+  if ( rl_buff_ledger::g_reads_on )
+    rl_buff_ledger::note_read( this, stack, current_value );
 
   for ( int i = current_stack; i >= 1; i-- )
   {
@@ -2070,6 +2120,13 @@ int buff_t::stack_react()
 }
 
 timespan_t buff_t::remains() const
+{
+  if ( rl_buff_ledger::g_reads_on )
+    rl_buff_ledger::note_read( this, current_stack, current_value );
+  return remains_unnoted();
+}
+
+timespan_t buff_t::remains_unnoted() const
 {
   if ( current_stack <= 0 )
   {
@@ -2135,16 +2192,25 @@ int buff_t::_resolve_stacks( int stacks )
 
 bool buff_t::trigger( timespan_t duration )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.trigger", false );
+
   return trigger( -1, duration );
 }
 
 bool buff_t::trigger( int stacks, timespan_t duration )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.trigger", false );
+
   return trigger( stacks, DEFAULT_VALUE(), -1, duration );
 }
 
 bool buff_t::trigger( int stacks, double value, double chance, timespan_t duration )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.trigger", false );
+
   if ( _max_stack == 0 || chance == 0 )
     return false;
 
@@ -2219,6 +2285,9 @@ bool buff_t::trigger( int stacks, double value, double chance, timespan_t durati
       if ( it != delay.end() )
       {
         auto d = static_cast<buff_delay_t*>( *it );
+        // Plan 12 (MN-02): the merged stacks keep the first trigger's cause; counted when the merging trigger's cause differs.
+        if ( sim->rl_bl_on && d->rl_bl_cause )
+          rl_buff_ledger::note_delay_merge( this, *d->rl_bl_cause, rl_bl_current_cause( this ) );
         d->stacks += stacks;
         d->value = value;
       }
@@ -2243,6 +2312,9 @@ bool buff_t::trigger( int stacks, double value, double chance, timespan_t durati
 
 void buff_t::execute( int stacks, double value, timespan_t duration )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.execute" );
+
   if ( value == DEFAULT_VALUE() && default_value != DEFAULT_VALUE() )
     value = default_value;
 
@@ -2284,6 +2356,9 @@ void buff_t::execute( int stacks, double value, timespan_t duration )
 
 void buff_t::increment( int stacks, double value, timespan_t duration )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.increment" );
+
   if ( overridden )
     return;
 
@@ -2309,6 +2384,9 @@ void buff_t::increment( int stacks, double value, timespan_t duration )
 
 void buff_t::decrement( int stacks, double value )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.decrement" );
+
   if ( overridden )
     return;
 
@@ -2327,6 +2405,11 @@ void buff_t::decrement( int stacks, double value )
       stack_uptime[ current_stack ].update( false, sim->current_time() );
 
     current_stack -= stacks;
+
+    // 261001-bac plan 06: a consume inside a ledger frame (the applier list is trimmed oldest first at the next
+    // read or bump).
+    if ( sim->rl_bl_on )
+      rl_buff_ledger::note_consume( this, "decrement", stacks );
 
     if ( value != DEFAULT_VALUE() )
       current_value = value;
@@ -2355,7 +2438,10 @@ void buff_t::decrement( int stacks, double value )
 
 void buff_t::extend_duration( timespan_t extra_seconds )
 {
-  if ( !check() )
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.extend_duration" );
+
+  if ( !check_own() )
   {
     return;
   }
@@ -2376,7 +2462,18 @@ void buff_t::extend_duration( timespan_t extra_seconds )
 
   if ( extra_seconds > timespan_t::zero() )
   {
+    // 261001-bac plan 12: the end before the engine's own reschedule (read only).
+    const timespan_t rl_old_end = sim->rl_bl_on ? expiration.front()->occurs() : timespan_t::zero();
+
     expiration.front()->reschedule( expiration.front()->remains() + extra_seconds );
+
+    // Amendment 1 item 3: an extension is an application by whoever causes it.
+    if ( sim->rl_bl_on )
+    {
+      const timespan_t rl_new_end = expiration.front()->occurs();
+      rl_buff_ledger::applier_extend( this, rl_bl_current_cause( this ), rl_buff_source_player( this ), extra_seconds,
+                                      &rl_old_end, &rl_new_end, 1, "extend_duration" );
+    }
 
     sim->print_log( "{} extends {} by {}. New expiration time: {}", *source, *this, extra_seconds,
                     expiration.front()->occurs() );
@@ -2405,7 +2502,10 @@ void buff_t::extend_duration( timespan_t extra_seconds )
 
 void buff_t::extend_async_duration( timespan_t extra_seconds )
 {
-  if ( !check() )
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.extend_async_duration" );
+
+  if ( !check_own() )
   {
     return;
   }
@@ -2424,15 +2524,30 @@ void buff_t::extend_async_duration( timespan_t extra_seconds )
 
   if ( extra_seconds > timespan_t::zero() )
   {
+    // 261001-bac plan 12: the end of every expiration event, before and after the engine's own re-making (read only).
+    std::vector<timespan_t> rl_old_ends, rl_new_ends;
+    if ( sim->rl_bl_on )
+    {
+      rl_old_ends.reserve( expiration.size() );
+      rl_new_ends.reserve( expiration.size() );
+    }
     for ( size_t i = 0; i < expiration.size(); i++ )
     {
       // instead of rescheduling, cancel the events and create fresh ones to maintain expiration event ordering
       expiration_t* exp = debug_cast<expiration_t*>( expiration[ i ] );
+      if ( sim->rl_bl_on )
+        rl_old_ends.push_back( exp->occurs() );
       expiration[ i ] = make_event<expiration_t>( *sim, this, exp->stack, exp->remains() + extra_seconds );
       event_t::cancel( exp );
+      if ( sim->rl_bl_on )
+        rl_new_ends.push_back( expiration[ i ]->occurs() );
       sim->print_log( "{} extends {} by {}. New expiration time: {}", *source, *this, extra_seconds,
                      expiration[ i ]->occurs() );
     }
+    if ( sim->rl_bl_on )
+      rl_buff_ledger::applier_extend( this, rl_bl_current_cause( this ), rl_buff_source_player( this ), extra_seconds,
+                                      rl_old_ends.data(), rl_new_ends.data(), rl_old_ends.size(),
+                                      "extend_async_duration" );
   }
   else if ( extra_seconds < timespan_t::zero() )
   {
@@ -2444,9 +2559,12 @@ void buff_t::extend_async_duration( timespan_t extra_seconds )
 // Cannot be used for negative adjustments like buff_t::extend_duration() can
 void buff_t::extend_duration_or_trigger( timespan_t duration )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.extend_duration_or_trigger" );
+
   timespan_t d = ( duration >= timespan_t::zero() ) ? duration : buff_duration();
 
-  if ( check() )
+  if ( check_own() )
   {
     extend_duration( d );
   }
@@ -2460,6 +2578,9 @@ void buff_t::extend_duration_or_trigger( timespan_t duration )
 // instead.
 void buff_t::reschedule_tick( timespan_t delta )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.reschedule_tick" );
+
   if ( delta == 0_s )
     return;
 
@@ -2491,6 +2612,9 @@ void buff_t::reschedule_tick( timespan_t delta )
 
 void buff_t::start( int stacks, double value, timespan_t duration )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.start" );
+
   if ( _max_stack == 0 )
     return;
 
@@ -2504,6 +2628,10 @@ void buff_t::start( int stacks, double value, timespan_t duration )
       rl_applied_cause = rl_credit::promote( rl_source->rl_cause_stack.back().cause );
     else
       rl_applied_cause = rl_cause_t{};
+    // 261001-bac plan 05: the ledger's own stamp (see buff.hpp): the cause a deferred (aura delay) trigger
+    // captured when the stack is empty here.
+    if ( sim->rl_bl_on )
+      rl_bl_applied = ( rl_source && !rl_source->rl_cause_stack.empty() ) ? rl_applied_cause : rl_bl_delay_cause;
   }
 
   if ( value == DEFAULT_VALUE() )
@@ -2519,6 +2647,10 @@ void buff_t::start( int stacks, double value, timespan_t duration )
 #endif
 
   timespan_t d = (( duration >= timespan_t::zero() ) ? duration : buff_duration()) * get_time_duration_multiplier();
+
+  // 261001-bac plan 06: the expiry this application's own stacks would have (handed to the bump hook).
+  if ( sim->rl_bl_on )
+    rl_bl_next_expiry = d > timespan_t::zero() ? sim->current_time() + d : timespan_t::max();
 
   if ( sim->current_time() <= timespan_t::from_seconds( 0.01 ) )
   {
@@ -2554,9 +2686,19 @@ void buff_t::start( int stacks, double value, timespan_t duration )
     }
   }
 
-  int before_stacks = check();
+  int before_stacks = check_own();
 
+  // 261001-bac plan 06: the bump hook records this application (appliers, covering appliers of a single-stack buff).
+  // Plan 12 (NT-02): the flag stores happen only when the ledger is on (the ledger-off path does one test of the sim's flag).
+  const bool rl_on = sim->rl_bl_on;
+  if ( rl_on )
+    rl_bl_applying = true;
   bump( stacks, value );
+  if ( rl_on )
+  {
+    rl_bl_applying    = false;
+    rl_bl_next_expiry = timespan_t::min();
+  }
 
   if ( last_start >= timespan_t::zero() )
   {
@@ -2607,6 +2749,9 @@ void buff_t::start( int stacks, double value, timespan_t duration )
 
 void buff_t::refresh( int stacks, double value, timespan_t duration )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.refresh" );
+
   if ( _max_stack == 0 )
     return;
 
@@ -2618,12 +2763,52 @@ void buff_t::refresh( int stacks, double value, timespan_t duration )
     player_t* rl_source = rl_buff_source_player( this );
     if ( rl_source && !rl_source->rl_cause_stack.empty() )
       rl_applied_cause = rl_credit::promote( rl_source->rl_cause_stack.back().cause );
+    // 261001-bac plan 05: as in start(); an empty stack with no deferred trigger leaves the stamp unchanged.
+    if ( sim->rl_bl_on )
+    {
+      if ( rl_source && !rl_source->rl_cause_stack.empty() )
+        rl_bl_applied = rl_applied_cause;
+      else if ( rl_bl_delay_cause.seq >= 0 )
+        rl_bl_applied = rl_bl_delay_cause;
+    }
   }
 
   if ( value == DEFAULT_VALUE() )
     value = current_value;
 
+  // 261001-bac plan 06: this application's own duration, as it would be on its own (not what the refresh
+  // behaviour makes of it together with the time already left, which would let an earlier applier look
+  // covered through a later one's carry-over).
+  timespan_t rl_bl_own = timespan_t::zero();
+  if ( sim->rl_bl_on )
+  {
+    rl_bl_own = ( duration > timespan_t::zero() ? duration
+                                                : ( duration == timespan_t::zero() ? timespan_t::zero() : buff_duration() ) ) *
+                get_time_duration_multiplier();
+    rl_bl_next_expiry = rl_bl_own > timespan_t::zero() ? sim->current_time() + rl_bl_own : timespan_t::max();
+    // Plan 12 (MJ-06): a refresh of a single-stack buff whose refresh behaviour is DISABLED moves nothing (the engine returns below with
+    // the same condition): hand the bump hook "no new coverage" (timespan_t::min()); it adds no covering applier and counts
+    // refresh_no_cover. Multi-stack buffs are left as they were (their stacks still were added).
+    if ( refresh_behavior == buff_refresh_behavior::DISABLED && duration != timespan_t::zero() && max_stack() == 1 )
+      rl_bl_next_expiry = timespan_t::min();
+  }
+
+  // Plan 12 (NT-02): the flag stores happen only when the ledger is on.
+  const bool rl_on = sim->rl_bl_on;
+  // Plan 13 (MJ-12-01): the shared end before this refresh (read only; the end moves below).
+  timespan_t rl_old_end = timespan_t::max();
+  if ( rl_on )
+  {
+    rl_bl_applying = true;
+    if ( !expiration.empty() )
+      rl_old_end = expiration.front()->occurs();
+  }
   bump( stacks, value );
+  if ( rl_on )
+  {
+    rl_bl_applying    = false;
+    rl_bl_next_expiry = timespan_t::min();
+  }
 
   refresh_count++;
 
@@ -2686,6 +2871,9 @@ void buff_t::refresh( int stacks, double value, timespan_t duration )
     }
   }
 
+  if ( rl_on )
+    rl_buff_ledger::applier_end_moved( this, rl_old_end );
+
   if ( sim->log )
   {
     std::string buff_display_name = fmt::format( "{}_{}", name_str, current_stack );
@@ -2708,10 +2896,18 @@ void buff_t::refresh( int stacks, double value, timespan_t duration )
 
 void buff_t::bump( int stacks, double value )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.bump" );
+
   if ( _max_stack == 0 )
     return;
 
   assert( default_chance != 0 && "Buff started with default chance being zero.");
+
+  // 261001-bac plan 06: bring the applier list up to the stacks as they are now (consumes made through
+  // the decrement overrides are trimmed here, oldest first) before this bump adds its own.
+  if ( sim->rl_bl_on )
+    rl_buff_ledger::applier_pre_bump( this );
 
   if ( value == DEFAULT_VALUE() )
     value = default_value;
@@ -2819,6 +3015,11 @@ void buff_t::bump( int stacks, double value )
     overflow_total += stacks;
   }
 
+  // 261001-bac plan 06: the stacks this bump added belong to whoever is applying now. Placed before any callback
+  // that could read the buff (stack_change_callback, below).
+  if ( sim->rl_bl_on )
+    rl_buff_ledger::applier_post_bump( this, stacks, old_stack, rl_bl_current_cause( this ) );
+
   if ( changes_stack_value )
   {
     if ( requires_invalidation )
@@ -2837,7 +3038,7 @@ void buff_t::bump( int stacks, double value )
       cb( this, old_stack, current_stack );
   }
 
-  if ( expire_at_max_stack && at_max_stacks() )
+  if ( expire_at_max_stack && at_max_stacks_own() )
     make_event( *sim, [ this ] { expire(); } );
 
   if ( player )
@@ -2867,6 +3068,9 @@ void buff_t::bump( int stacks, double value )
 
 void buff_t::override_buff( int stacks, double value )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.override_buff" );
+
   if ( _max_stack == 0 )
     return;
 
@@ -2906,6 +3110,9 @@ bool buff_t::can_trigger( action_t* action ) const
 
 bool buff_t::trigger( action_t* action, int stacks, double value, double chance, timespan_t duration )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.trigger", false );
+
   if ( can_trigger( action ) )
   {
     if ( sim->debug )
@@ -2936,6 +3143,9 @@ bool buff_t::can_consume( action_t* action ) const
 
 int buff_t::consume( action_t* action, int stacks )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.consume", 0 );
+
   if ( !stacks || !check() )
     return 0;
 
@@ -2971,6 +3181,9 @@ int buff_t::consume( action_t* action, int stacks )
 
 void buff_t::expire( timespan_t d )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.expire" );
+
   if ( current_stack <= 0 )
   {
     assert( tick_event == nullptr );
@@ -3034,6 +3247,13 @@ void buff_t::expire( timespan_t d )
 
   int old_stack = current_stack;
 
+  // 261001-bac plan 06: a consume/expire inside a ledger frame, and the applier list goes with the stacks.
+  if ( sim->rl_bl_on )
+  {
+    rl_buff_ledger::note_consume( this, "expire", old_stack );
+    rl_buff_ledger::applier_clear( this );
+  }
+
   current_stack = 0;
 
   if ( last_start >= timespan_t::zero() )
@@ -3073,7 +3293,10 @@ void buff_t::expire( timespan_t d )
   {
     player_t* rl_source = rl_buff_source_player( this );
     if ( rl_source )
-      rl_expire_scope.emplace( rl_source, rl_cause_t{ rl_applied_cause.seq, rl_credit::dot_tick_class( rl_applied_cause.cls ) } );  // Phase 259: keeps RL_CAUSE_DECK_MARK
+      rl_expire_scope.emplace( rl_source,
+                               rl_cause_t{ rl_applied_cause.seq, rl_credit::dot_tick_class( rl_applied_cause.cls ),  // Phase 259: keeps RL_CAUSE_DECK_MARK
+                                           rl_applied_cause.press, rl_applied_cause.launch },
+                               /*owner=*/nullptr, "buff_expire" );
   }
 
   if ( expire_callback )
@@ -3102,6 +3325,9 @@ void buff_t::expire( timespan_t d )
 
 void buff_t::cancel()
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.cancel" );
+
   expire();
   event_t::cancel( expiration_delay );
   for ( auto e : delay )
@@ -3199,6 +3425,14 @@ void buff_t::reset()
   // expire() (iteration/fight boundary, not a genuine game-state expiry) does not leak the
   // previous iteration's applier into this call's expire_callback/stack_change_callback scope.
   rl_applied_cause = rl_cause_t{};
+  // Plan 12 (NT-02): the ledger's members are written only with the ledger on, so only then do they need clearing.
+  if ( sim->rl_bl_on )
+  {
+    rl_bl_applied     = rl_cause_t{};
+    rl_bl_delay_cause = rl_cause_t{};
+    rl_bl_appliers.clear();
+    rl_bl_next_expiry = timespan_t::min();
+  }
   expire();
   last_start        = timespan_t::min();
   last_trigger      = timespan_t::min();
@@ -3462,6 +3696,9 @@ util::string_view buff_t::source_name() const
 
 rng::rng_t& buff_t::rng()
 {
+  if ( sim->rl_bl_on )
+    if ( auto* r = rl_buff_ledger::rng_access( sim, "buff" ) )
+      return *r;
   if ( sim->per_source_rng )
     return source_rng_;
   return sim->rng();
@@ -3469,6 +3706,9 @@ rng::rng_t& buff_t::rng()
 
 rng::rng_t& buff_t::rng() const
 {
+  if ( sim->rl_bl_on )
+    if ( auto* r = rl_buff_ledger::rng_access( sim, "buff" ) )
+      return *r;
   if ( sim->per_source_rng )
     return const_cast<buff_t*>( this )->source_rng_;
   return sim -> rng();
@@ -3808,6 +4048,9 @@ void stat_buff_t::update_player_buff_stat( buff_stat_t& buff_stat, int stacks )
 
 void stat_buff_t::bump( int stacks, double value )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.bump" );
+
   buff_t::bump( stacks, value );
 
   for ( auto& buff_stat : stats )
@@ -3821,6 +4064,9 @@ void stat_buff_t::bump( int stacks, double value )
 
 void stat_buff_t::decrement( int stacks, double /* value */ )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.decrement" );
+
   if ( stacks == 0 || current_stack <= stacks )
   {
     expire();
@@ -3839,6 +4085,9 @@ void stat_buff_t::decrement( int stacks, double /* value */ )
     }
 
     current_stack -= stacks;
+
+    if ( sim->rl_bl_on )
+      rl_buff_ledger::note_consume( this, "decrement", stacks );
 
     invalidate_cache();
 
@@ -3918,6 +4167,9 @@ cost_reduction_buff_t::cost_reduction_buff_t( actor_pair_t q, util::string_view 
 
 void cost_reduction_buff_t::bump( int stacks, double value )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.bump" );
+
   if ( value > 0 )
   {
     amount = value;
@@ -3935,6 +4187,9 @@ void cost_reduction_buff_t::bump( int stacks, double value )
 
 void cost_reduction_buff_t::decrement( int stacks, double /* value */ )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.decrement" );
+
   if ( stacks == 0 || current_stack <= stacks )
   {
     expire();
@@ -3944,6 +4199,8 @@ void cost_reduction_buff_t::decrement( int stacks, double /* value */ )
     double delta = amount * stacks;
     player->cost_reduction_loss( school, delta );
     current_stack -= stacks;
+    if ( sim->rl_bl_on )
+      rl_buff_ledger::note_consume( this, "decrement", stacks );
     current_value -= delta;
   }
 }
@@ -3991,6 +4248,9 @@ absorb_buff_t::absorb_buff_t( actor_pair_t q, util::string_view name, const spel
 
 void absorb_buff_t::start( int stacks, double value, timespan_t duration )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.start" );
+
   if ( max_stack() == 0 )
     return;
 
@@ -4004,6 +4264,9 @@ void absorb_buff_t::start( int stacks, double value, timespan_t duration )
 
 void absorb_buff_t::refresh( int stacks, double value, timespan_t duration )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.refresh" );
+
   if ( cumulative )
     value += current_value;
 
@@ -4132,6 +4395,9 @@ absorb_buff_t* absorb_buff_t::set_cumulative( bool c )
 
 bool movement_buff_t::trigger( int stacks, double value, double chance, timespan_t duration )
 {
+  if ( sim->rl_bl_shadow )
+    return rl_buff_ledger::blocked( sim, "buff.trigger", false );
+
 
   for ( const auto& cb : player->callbacks_on_movement )
   {

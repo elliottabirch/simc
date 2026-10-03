@@ -36,6 +36,7 @@
 #include "sim/rl_translog.hpp"
 #include "sim/rl_rng_record.hpp"
 #include "sim/sheet_fight.hpp"
+#include "sim/rl_buff_ledger.hpp"
 
 #include <filesystem>
 #include "sim/scale_factor_control.hpp"
@@ -1979,6 +1980,11 @@ void sim_t::reset()
   // inside this fight's FIGHT_BEGIN..FIGHT_END window.
   rl_rng_record::fight_begin( this );
 
+  // 261001-bac stage 0: per-hit buff ledger fight-begin hook. Single bool test when
+  // rl_buff_ledger= is unset. Pure observer.
+  if ( rl_bl_on )
+    rl_buff_ledger::fight_begin( this );
+
   event_mgr.reset();
 
   expected_iteration_time = max_time * iteration_time_adjust();
@@ -2120,6 +2126,10 @@ void sim_t::combat_begin()
   print_debug( "Combat Begin" );
 
   reset();
+
+  // 261001-bac plan 07: from here on a fight's cooldown records are written (the reset phase above is not part of it).
+  if ( rl_bl_on )
+    rl_buff_ledger::reset_done( this );
 
   // TEMPORARY checkpoint trace (260919-scb T1 follow-up, see SCB-RECEIPT.md Section 7.4/8).
   if ( getenv( "RL_TRACE_RNG" ) != nullptr )
@@ -2421,6 +2431,11 @@ void sim_t::combat_end()
   // entry, then flushes the fight's buffered rows to disk in one write -- mirrors
   // rl_translog::record_close()'s own placement and flush cadence immediately above.
   rl_rng_record::fight_end( this );
+
+  // 261001-bac stage 0: per-hit buff ledger fight-end hook (writes the fight's closing record
+  // with the actor's final credit streams, then flushes). Single bool test when unset.
+  if ( rl_bl_on )
+    rl_buff_ledger::fight_end( this );
 
   //assert( active_enemies == 0 );
   //assert( active_allies == 0 );
@@ -4022,6 +4037,11 @@ bool sim_t::execute()
     // the <path>.rollers.json sidecar and prints the summary line to stderr.
     rl_rng_record::write_footer( this );
 
+    // 261001-bac stage 0: per-hit buff ledger footer (counters, complete:true). Single bool
+    // test when unset.
+    if ( rl_bl_on )
+      rl_buff_ledger::write_footer( this );
+
     // tstl-sylvanas phase 220, plan 220-01 (OBS-07). rl_obs_timing=1
     // readout -- deliberately NOT written into the translog footer (that
     // would couple a perf number into the transport in the same phase
@@ -4549,6 +4569,14 @@ void sim_t::create_options()
   // Random-roll recorder (tstl-sylvanas phase 250, plan 250-01, REC-01/02/03). See sim.hpp's
   // rl_rng_record_file_str doc comment. Default empty, byte-identical to today's behavior.
   add_option( opt_string( "rl_rng_record", rl_rng_record_file_str ) );
+  // 261001-bac stage 0 (research clone only): per-hit buff ledger. See sim.hpp's
+  // rl_buff_ledger_str doc comment. Default empty (off).
+  add_option( opt_string( "rl_buff_ledger", rl_buff_ledger_str ) );
+  add_option( opt_bool( "rl_buff_ledger_guard_probe", rl_buff_ledger_guard_probe ) );
+  add_option( opt_bool( "rl_buff_ledger_cache", rl_buff_ledger_cache ) );
+  add_option( opt_bool( "rl_buff_ledger_ext_probe", rl_buff_ledger_ext_probe ) );
+  add_option( opt_bool( "rl_buff_ledger_charge_probe", rl_buff_ledger_charge_probe ) );
+  add_option( opt_string( "rl_buff_ledger_refund_probe", rl_buff_ledger_refund_probe_str ) );
   // The replay option (tstl-sylvanas phase 253, plan 253-02, REP-01/D-01/D-16). See sim.hpp's
   // rl_rng_replay_file_str doc comment. Default empty, byte-identical to today's behavior when
   // unset. The address choice was removed in phase 254 (Gate 2 verdict); replay always reads
@@ -5955,6 +5983,51 @@ void sim_t::setup( sim_control_t* c )
 
     // Root only -- see sim.hpp's rl_translog member comment.
     rl_translog::open_and_write_header( this );
+  }
+
+  // 261001-bac stage 0 (research clone only): per-hit buff ledger. Refused by name, never
+  // clamped (a ledgered run must be the same run as an unledgered one), before the file is ever
+  // opened. Placed AFTER the rl_translog clamp above so `threads` is the effective count.
+  // An empty value is the same as unset: rl_bl_on stays false and nothing below runs.
+  if ( !rl_buff_ledger_str.empty() )
+  {
+    if ( threads > 1 )
+    {
+      throw sc_invalid_sim_argument(
+          fmt::format( "rl_buff_ledger requires threads=1 (effective threads={}) -- refusing "
+                       "rather than forcing one thread, because a ledgered run must be the same "
+                       "run as an unledgered one.",
+                       threads ) );
+    }
+    if ( !profileset_map.empty() )
+    {
+      throw sc_runtime_error(
+          fmt::format( "rl_buff_ledger= cannot be combined with profilesets ({} defined): each "
+                       "profileset runs in its own sim and would share one ledger file. Run one "
+                       "simc process per profile with a distinct rl_buff_ledger= path instead.",
+                       profileset_map.size() ) );
+    }
+    if ( parent )
+    {
+      throw sc_runtime_error(
+          "rl_buff_ledger= is set on a non-root sim (a profileset's own option block, or a "
+          "calculate_scale_factors=1/dps_plot_stats=/reforge_plot_stat= child sim): only the root "
+          "sim ever opens the ledger, so this option would be silently accepted while nothing is "
+          "ever written for this sim's fights. Set rl_buff_ledger= on the top-level sim options "
+          "only." );
+    }
+    rl_bl_on = true;
+    rl_buff_ledger::open_and_write_header( this );
+    rl_bl_probe = !rl_buff_ledger_refund_probe_str.empty();
+  }
+  else if ( !rl_buff_ledger_refund_probe_str.empty() )
+  {
+    // 261001-bac plan 13: the refund probe needs the ledger (it names presses by the ledger's own press records), so it is refused,
+    // never ignored: a run that asked for a changed fight must not silently run the unchanged one.
+    throw sc_invalid_sim_argument(
+        fmt::format( "rl_buff_ledger_refund_probe='{}' requires rl_buff_ledger=<path> (the probe skips cooldown shortenings caused by "
+                     "presses of the named action, and the ledger is what records presses) -- refusing rather than ignoring it.",
+                     rl_buff_ledger_refund_probe_str ) );
   }
 
   if ( iterations <= 0 )

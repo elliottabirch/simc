@@ -28,6 +28,7 @@
 #include "report/highchart.hpp"
 #include "player/player_scaling.hpp"
 #include "player/set_bonus.hpp"
+#include "sim/rl_buff_ledger.hpp"
 #include "report/decorators.hpp"
 #include "sc_enums.hpp"
 #include "sim/cooldown.hpp"
@@ -10640,9 +10641,14 @@ struct voltaic_blaze_t : public shaman_spell_t
     {
       shaman_spell_t::impact( state );
 
-      make_event( sim, rng().gauss( 500_ms, 25_ms ), [ this, t = state->target ]() {
-        p()->trigger_secondary_flame_shock( t, spell_variant::VOLTAIC_BLAZE );
-      } );
+      // 261001-bac plan 13 (ruling R1): the timer keeps no cause, so the Flame Shock it applies reaches rl_resolve_cause()'s
+      // last branch (no cause). The ledger's own press is captured here and handed back around the application: only the
+      // ledger's press value of that application and its ticks changes, never the reward's stamps (see rl_buff_ledger.hpp).
+      make_event( sim, rng().gauss( 500_ms, 25_ms ),
+                  [ this, t = state->target, rl_carried = rl_buff_ledger::carry_capture( p() ) ]() {
+                    rl_buff_ledger::carry_scope_t rl_carry( sim, rl_carried );
+                    p()->trigger_secondary_flame_shock( t, spell_variant::VOLTAIC_BLAZE );
+                  } );
     }
   };
 
@@ -12759,8 +12765,9 @@ void shaman_t::trigger_windfury_weapon( const action_state_t* state, double over
     // tstl-sylvanas quick task 260918-cbc (Stage A1): the ONLY place windfury damage is priced
     // into the expected total (see this hook's own top-of-file comment) -- route it under the
     // impacting melee's own cause, `state` still being in scope here.
-    rl_credit_route( this, rl_cause_t{ state->rl_cause_seq, state->rl_cause_class }, sim->solver_control_seq,
-                      wf_expected_amount, /*expected=*/true, state->target );
+    rl_credit_route( this,
+                     rl_cause_t{ state->rl_cause_seq, state->rl_cause_class, state->rl_cause_press, state->rl_cause_launch },
+                     sim->solver_control_seq, wf_expected_amount, /*expected=*/true, state->target, "windfury_occurrence" );
 
     const bool ok = rng().roll( wf_chance );
     rl_count_proc( this, rl_proc::id::windfury, wf_chance, ok );

@@ -28,6 +28,47 @@
 #include <vector>
 
 struct buff_t;
+struct player_t;
+
+// 261001-bac plan 03 (research clone only): the read tap. A buff read function reports itself here
+// only while the per-hit ledger's REFERENCE pass has an amount scope open (`g_tap_open`, a plain
+// global that is false at all other times and in every run with rl_buff_ledger= unset, so a read
+// costs one load and a branch). buff.hpp does not see sim_t, which is why this is a global and not
+// `sim->rl_bl_on`; the ledger refuses threads > 1, so there is exactly one writer. Reads made by
+// the APL, by expressions or by the observation code are never logged (the flag is false then).
+//
+// 261001-bac plan 06: the same call sites now also feed the frame reads of the gate check. `g_reads_on` is
+// true while the tap is open OR a ledger frame is open outside the ledger's own passes (one global, one load
+// and one branch per read, false in every run with rl_buff_ledger= unset); note_read tells the two apart.
+namespace rl_buff_ledger
+{
+extern bool g_tap_open;
+extern bool g_reads_on;
+void note_read( const buff_t* b, int stack, double value );
+
+// Plan 06: applier lists (buff.cpp calls these only when sim->rl_bl_on; all are no-ops on the buff's own
+// behaviour, they only maintain buff_t::rl_bl_appliers). `cause` is who is applying right now.
+void applier_pre_bump( buff_t* b );
+void applier_post_bump( buff_t* b, int requested, int old_stack, const rl_cause_t& cause );
+void applier_expire_own( buff_t* b, int stacks );
+// Plan 12 (PREREG Amendment 1 item 3): a positive extension moved this buff's end later. `old_ends` / `new_ends` hold the end
+// of every expiration event the engine moved (one for extend_duration, one per stack event for extend_async_duration), read
+// by buff.cpp before and after its own reschedule; `extra` is the time added (after the time multiplier); `source` is the
+// resolved source player (rl_buff_source_player), `fn` the extend function. The hook only reads.
+void applier_extend( buff_t* b, const rl_cause_t& cause, player_t* source, timespan_t extra, const timespan_t* old_ends,
+                     const timespan_t* new_ends, std::size_t n_exp, const char* fn );
+// Plan 13 (review MJ-12-01): buff_t::refresh moved (or removed) the buff's shared end, from `old_end` (timespan_t::max() for none) to the end it
+// has now. For a synchronous multi-stack buff every open extension window on its applier entries is clipped to end at this moment. The hook
+// only reads the buff and edits the ledger's own lists.
+void applier_end_moved( buff_t* b, timespan_t old_end );
+void applier_clear( buff_t* b );
+void note_consume( buff_t* b, const char* op, int removed );
+// Plan 12 (MN-04): an engine-internal bookkeeping read (start, the extend functions, refresh_duration, bump's maximum-stack test) that is no
+// longer written as a frame read: counted in the footer (own_reads_skipped) when a frame read would have been written.
+void note_own_read( const buff_t* b );
+// Plan 12 (MN-02): a trigger was merged into a pending aura-delay event of the same duration; counted when the two causes differ.
+void note_delay_merge( buff_t* b, const rl_cause_t& first, const rl_cause_t& merging );
+}  // namespace rl_buff_ledger
 struct cooldown_t;
 struct event_t;
 struct expr_t;
@@ -144,6 +185,47 @@ public:
   // path keeps the last known applier). Reset in buff_t::reset(). Pure bookkeeping.
   rl_cause_t rl_applied_cause;
 
+  // 261001-bac plan 05 (research clone only, written only when rl_buff_ledger= is on, read only by the
+  // per-hit ledger): the ledger's own "who applied this buff" stamp. It equals rl_applied_cause except for
+  // a buff whose trigger was DEFERRED by the engine's aura delay (buff_delay_t, default_aura_delay 30 ms for
+  // every non-activated buff triggered in combat): that event runs with no cause on the stack, so
+  // rl_applied_cause is left as "unknown" (class ORPHAN, seq -1) -- measured on the stock rotation, Crash
+  // Lightning and Crackling Surge were never press-applied for that reason. rl_bl_applied instead takes the
+  // cause the delay event captured when the trigger was made (rl_bl_delay_cause, set around the delayed
+  // execute only). rl_applied_cause itself is untouched, so buff ticks, expiry scopes and the existing
+  // credit routing stay exactly as they are.
+  rl_cause_t rl_bl_applied;
+  rl_cause_t rl_bl_delay_cause;
+
+  // 261001-bac plan 06 (research clone only, maintained only when rl_buff_ledger= is on, read only by the
+  // ledger): who applied each stack of this buff. For a buff with more than one stack: one entry per
+  // application with the stacks it added; stacks leave oldest first (consumption), or, for independent
+  // (asynchronous) stacks, with their own expiration. For a single-stack buff (max stack 1): one entry per
+  // application with its OWN expiry (now + the duration that application alone would give); the covering
+  // appliers are the entries whose own expiry is still ahead. `rl_bl_next_expiry` is handed from start()/
+  // refresh() to the bump hook (timespan_t::min() = none, ::max() = never expires).
+  // Plan 12: an extension of a multi-stack buff's end made by a later cause. The entry's stacks belong to `cause` from
+  // `from` (the end before the extension) to `to` (the end after it): only the time the extension added (ruled by the
+  // orchestrator 2026-10-02, PREREG Amendment 2). Empty unless the ledger is on; pruned once `to` has passed.
+  struct rl_bl_ext_t
+  {
+    rl_cause_t cause;
+    timespan_t from;
+    timespan_t to;
+  };
+  struct rl_bl_applier_t
+  {
+    rl_cause_t cause;
+    int stacks;
+    timespan_t expiry;
+    std::vector<rl_bl_ext_t> exts;
+  };
+  std::vector<rl_bl_applier_t> rl_bl_appliers;
+  timespan_t rl_bl_next_expiry = timespan_t::min();
+  // True while start() / refresh() runs its bump: the bump hook then records this application (a single-stack buff
+  // remembers applications, not bumps made by ticks), before any callback of the bump can read the buff.
+  bool rl_bl_applying = false;
+
   // Ticking buff values
   unsigned current_tick;
   parsed_value_t<timespan_t> buff_period;
@@ -202,7 +284,19 @@ public:
    */
   int check() const
   {
-    return current_stack;
+    if ( rl_buff_ledger::g_reads_on )
+      rl_buff_ledger::note_read( this, current_stack, current_value );
+    return check_unnoted();
+  }
+
+  // 261001-bac plan 12 (MN-04): the same values for the engine's own bookkeeping (buff.cpp start, extend_*, bump): not a read of the
+  // fight, so not written as a frame read; check_own() counts it (footer own_reads_skipped) when a frame read would have been written.
+  int check_unnoted() const { return current_stack; }
+  int check_own() const
+  {
+    if ( rl_buff_ledger::g_reads_on )
+      rl_buff_ledger::note_own_read( this );
+    return check_unnoted();
   }
 
   /**
@@ -237,6 +331,8 @@ public:
    */
   double stack_value()
   {
+    if ( rl_buff_ledger::g_reads_on )
+      rl_buff_ledger::note_read( this, current_stack, current_value );
     return current_stack * value();
   }
 
@@ -245,6 +341,8 @@ public:
    */
   virtual double check_value() const
   {
+    if ( rl_buff_ledger::g_reads_on )
+      rl_buff_ledger::note_read( this, current_stack, current_value );
     return current_value;
   }
 
@@ -253,6 +351,8 @@ public:
    */
   double check_stack_value() const
   {
+    if ( rl_buff_ledger::g_reads_on )
+      rl_buff_ledger::note_read( this, current_stack, current_value );
     return current_stack * check_value();
   }
 
@@ -263,6 +363,14 @@ public:
   }
 
   timespan_t remains() const;
+  // Plan 12 (MN-04): remains() for the engine's own bookkeeping (refresh_duration); see check_unnoted().
+  timespan_t remains_unnoted() const;
+  timespan_t remains_own() const
+  {
+    if ( rl_buff_ledger::g_reads_on )
+      rl_buff_ledger::note_own_read( this );
+    return remains_unnoted();
+  }
   timespan_t tick_time_remains() const;
   timespan_t elapsed( timespan_t t ) const { return last_start == timespan_t::min() ? 0_ms : t - last_start; }
   timespan_t last_trigger_time() const { return last_trigger; }
@@ -270,7 +378,20 @@ public:
   bool remains_gt( timespan_t time ) const;
   bool remains_lt( timespan_t time ) const;
   bool has_common_school( school_e ) const;
-  bool at_max_stacks( int mod = 0 ) const { return check() + mod >= max_stack(); }
+  bool at_max_stacks( int mod = 0 ) const
+  {
+    if ( rl_buff_ledger::g_reads_on )
+      rl_buff_ledger::note_read( this, current_stack, current_value );
+    return at_max_stacks_unnoted( mod );
+  }
+  // Plan 12 (MN-04): bump's own maximum-stack test (expire_at_max_stack); see check_unnoted().
+  bool at_max_stacks_unnoted( int mod = 0 ) const { return check_unnoted() + mod >= max_stack(); }
+  bool at_max_stacks_own( int mod = 0 ) const
+  {
+    if ( rl_buff_ledger::g_reads_on )
+      rl_buff_ledger::note_own_read( this );
+    return at_max_stacks_unnoted( mod );
+  }
   // For trigger()/execute(), default value of stacks is -1, since we want to allow for explicit calls of stacks=1 to
   // override using buff_t::_initial_stack
   int _resolve_stacks( int stacks );
@@ -628,7 +749,11 @@ struct damage_buff_t : public buff_t
 
   // Get current direct damage buff multiplier value + NO benefit tracking.
   double check_value_direct() const
-  { return current_stack ? get_mod_multiplier( direct_mod ) : 1.0; }
+  {
+    if ( rl_buff_ledger::g_reads_on )
+      rl_buff_ledger::note_read( this, current_stack, current_value );
+    return current_stack ? get_mod_multiplier( direct_mod ) : 1.0;
+  }
 
   // Get current direct damage buff multiplier value multiplied by current stacks + NO benefit tracking.
   double check_stack_value_direct() const
@@ -647,7 +772,11 @@ struct damage_buff_t : public buff_t
 
   // Get current periodic damage buff multiplier value + NO benefit tracking.
   double check_value_periodic() const
-  { return current_stack ? get_mod_multiplier( periodic_mod ) : 1.0; }
+  {
+    if ( rl_buff_ledger::g_reads_on )
+      rl_buff_ledger::note_read( this, current_stack, current_value );
+    return current_stack ? get_mod_multiplier( periodic_mod ) : 1.0;
+  }
 
   // Get current periodic damage buff multiplier value multiplied by current stacks + NO benefit tracking.
   double check_stack_value_periodic() const
@@ -666,7 +795,11 @@ struct damage_buff_t : public buff_t
 
   // Get current AA damage buff multiplier value + NO benefit tracking.
   double check_value_auto_attack() const
-  { return current_stack ? get_mod_multiplier( auto_attack_mod ) : 1.0; }
+  {
+    if ( rl_buff_ledger::g_reads_on )
+      rl_buff_ledger::note_read( this, current_stack, current_value );
+    return current_stack ? get_mod_multiplier( auto_attack_mod ) : 1.0;
+  }
 
   // Get current AA damage buff multiplier value multiplied by current stacks + NO benefit tracking.
   double check_stack_value_auto_attack() const
@@ -685,7 +818,11 @@ struct damage_buff_t : public buff_t
 
   // Get current additive crit chance buff value + NO benefit tracking.
   double check_value_crit_chance() const
-  { return current_stack ? get_mod_multiplier( crit_chance_mod ) - 1.0 : 0.0; }
+  {
+    if ( rl_buff_ledger::g_reads_on )
+      rl_buff_ledger::note_read( this, current_stack, current_value );
+    return current_stack ? get_mod_multiplier( crit_chance_mod ) - 1.0 : 0.0;
+  }
 
   // Get current additive crit chance buff value multiplied by current stacks + NO benefit tracking.
   double check_stack_value_crit_chance() const

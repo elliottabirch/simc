@@ -6,6 +6,7 @@
 #include "event.hpp"
 #include "player/actor.hpp"
 #include "sim.hpp" // replace with event manager dependency
+#include "sim/rl_buff_ledger.hpp"
 #include "sim/rl_rng_record.hpp"
 
 // ==========================================================================
@@ -44,11 +45,18 @@ rng::rng_t& event_t::rng()
 /// Placement-new operator for creating events. Do not use in user-code.
 void* event_t::operator new( std::size_t size, sim_t& sim )
 {
+  // 261001-bac plan 12 (MJ-04): an event made inside a ledger pass gets memory the event manager never sees (one bool test).
+  if ( sim.rl_bl_shadow )
+    return rl_buff_ledger::scratch_event_block( &sim, size );
   return sim.event_mgr.allocate_event( size );
 }
 
 void event_t::reschedule( timespan_t delta_time )
 {
+  // 261001-bac plan 12 (MJ-04): inside a ledger pass a counted no-op (the event keeps its time and id).
+  if ( _sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &_sim, "event.reschedule" );
+
   // Study-only swing trace/pin (tstl-sylvanas phase 257, plan 257-09, D-18, owner ruling A-125):
   // observes/overrides ONLY the one designated player's own mh/oh execute_event -- a cheap
   // passthrough for every other event the moment the option is inactive (root->rl_rng_recorder
@@ -84,6 +92,10 @@ void event_t::cancel( event_t*& e )
 {
   if ( !e )
     return;
+
+  // 261001-bac plan 12 (MJ-04): inside a ledger pass a counted no-op (the event stays as it is, the pointer is not cleared).
+  if ( e->_sim.rl_bl_shadow )
+    return rl_buff_ledger::blocked( &e->_sim, "event.cancel" );
 
   // Study-only swing trace/pin (tstl-sylvanas phase 257, plan 257-09, D-18): a cheap passthrough
   // for every event but the one designated player's own mh/oh execute_event -- observes the

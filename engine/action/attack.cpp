@@ -11,6 +11,7 @@
 #include "player/stats.hpp"
 #include "sim/cooldown.hpp"
 #include "sim/event.hpp"
+#include "sim/rl_buff_ledger.hpp"
 #include "sim/rl_rng_record.hpp"
 #include "sim/sim.hpp"
 #include "util/rng.hpp"
@@ -385,6 +386,11 @@ void attack_t::reschedule_auto_attack( double old_swing_haste )
     {
       return;
     }
+
+    // 261001-bac plan 05: a swing in flight is rebooked because the auto-attack speed changed (the swing
+    // keeps the speed factors recorded when it was scheduled).
+    if ( sim->rl_bl_on )
+      rl_buff_ledger::note_swing_rescaled( this );
 
     if ( sim->debug )
     {

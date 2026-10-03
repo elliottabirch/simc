@@ -6,6 +6,7 @@
 #include "action/action_state.hpp"
 #include "action/action.hpp"
 #include "player/player.hpp"
+#include "sim/rl_buff_ledger.hpp"
 #include "sim/rl_rng_record.hpp"
 #include "sim/sim.hpp"
 #include <sstream>
@@ -62,6 +63,17 @@ void action_state_t::initialize()
   // through execute() (routing treats it identically to an explicit ORPHAN).
   rl_cause_seq   = -1;
   rl_cause_class = RL_CAUSE_ORPHAN;
+  // 261001-bac stage 0: the ledger's own numbers reset with the cause stamp.
+  rl_cause_press  = -1;
+  rl_cause_launch = -1;
+  // Plan 12 (NT-02): the four ledger-only fields are written only once a ledger is open (nothing else ever writes them).
+  if ( rl_buff_ledger::g_ledger_open )
+  {
+    rl_bl_hit  = 0;
+    rl_bl_app  = 0;
+    rl_bl_snap = -1;
+    rl_bl_pm   = 0;
+  }
   // 250-03 (REC-04): reset to "never stamped" (kind 0, TRIGGER_KIND_NONE) -- a state pulled from
   // state_cache can otherwise still carry a stale press stamp from a PREVIOUS execute().
   rl_press_outer_kind = 0;
@@ -129,6 +141,25 @@ void action_state_t::copy_state( const action_state_t* o )
   // still remembers which decision applied it.
   rl_cause_seq   = o->rl_cause_seq;
   rl_cause_class = o->rl_cause_class;
+  // 261001-bac stage 0: the ledger's own numbers ride the same copy.
+  rl_cause_press  = o->rl_cause_press;
+  rl_cause_launch = o->rl_cause_launch;
+  // The ledger's per-hit entry id is NOT copied (plan 03): it names one hit's parked pass results,
+  // so a DoT state copied from a hit state, a child action's state, or the ledger's own scratch
+  // copies must not inherit it. Only the state run_passes() stamped carries an id.
+  // Plan 12 (MJ-03): the application's `app` id does NOT ride the copy: a child state copied from a hit that applied a DoT
+  // would hand its parent's application to the child's own DoT. It is carried explicitly where a DoT's state is copied from
+  // the applying hit's (action_t::trigger_dot, dot_t::copy).
+  // Plan 05: a copy is neither a full snapshot nor a premade state; the premade entry id is carried
+  // explicitly where it matters (see action_state.hpp).
+  // Plan 12 (NT-02): written only once a ledger is open (with it off nothing writes these fields).
+  if ( rl_buff_ledger::g_ledger_open )
+  {
+    rl_bl_hit  = 0;
+    rl_bl_app  = 0;
+    rl_bl_snap = -1;
+    rl_bl_pm   = 0;
+  }
   // 250-03 (REC-04): carries the press stamp alongside the cause stamp, for the same reason --
   // a DoT's own state at application/refresh remembers which press applied it.
   rl_press_outer_kind    = o->rl_press_outer_kind;
@@ -298,7 +329,10 @@ void travel_event_t::execute()
     // comment -- this wraps impact()'s full virtual dispatch (base body + any override's
     // post-Base::impact() tail) across the DEFERRED travel-time boundary, not just
     // action_t::impact()'s own body.
-    rl_cause_scope_t rl_cause_guard( action->player, rl_cause_t{ state->rl_cause_seq, state->rl_cause_class } );
+    rl_cause_scope_t rl_cause_guard(
+        action->player,
+        rl_cause_t{ state->rl_cause_seq, state->rl_cause_class, state->rl_cause_press, state->rl_cause_launch },
+        /*owner=*/nullptr, "impact", action );
     // 250-03 (REC-04): restores the press that was active when `state` was stamped, across this
     // SAME deferred travel-time boundary -- see do_schedule_travel's zero-travel-time branch
     // (action.cpp) for the sibling call this mirrors.
