@@ -50,7 +50,148 @@ struct module_t;
 // sim (`rl_bc_state`). Returns the module (never null).
 std::shared_ptr<module_t> configure( sim_t* root, credit_mode_t mode, const std::string& verdicts_path, const std::string& translog_path );
 
-// One ledger record line (JSON, no trailing newline needed). Called by the ledger's emit for every record it formats while the module is on.
+// ---- the typed records (plan 03b, owner ruling 10: ONE structured interface) ----
+//
+// Every record the module uses enters it as one of the plain structs below, through the matching `on_*` entry point: the ledger hook builds the
+// struct from the values it holds at its emit point, and the fixture entry (rl_buff_credit_selftest=) converts a fixture line into the same
+// struct and calls the same entry point. Nothing in the module's arithmetic reads JSON. A launch that is a switch launch carries `has_switch`
+// and `sw`; a swing launch carries `speed` (the launch kind itself is not read). Refusals about VALUES (a class outside 0..6, a candidate index
+// above 63) live in the entry points; refusals about JSON SHAPE live in the fixture converter.
+struct applier_t
+{
+  std::int64_t press = 0;
+  int cls            = 0;  // the BASE class 0..6 (never the raw byte with the deck mark)
+  double stacks      = 0.0;
+  bool covering      = true;
+};
+
+struct cand_t
+{
+  std::uint32_t bit = 0;  // index into the pass set's hidden-set mask, 0..63
+  std::string name, owner, kind;
+  std::vector<applier_t> app;
+  bool cov = false;
+};
+
+enum pass_kind_t : std::uint8_t
+{
+  PASS_REF,
+  PASS_HIDE,
+  PASS_OTHER,
+};
+
+struct pass_t
+{
+  pass_kind_t kind    = PASS_OTHER;
+  std::uint64_t hid   = 0;
+  double pre = 0.0, cc = 0.0, cb = 0.0, per = 0.0;
+  bool viol           = false;
+};
+
+struct passset_t
+{
+  std::vector<cand_t> cands;
+  std::vector<pass_t> passes;
+};
+
+struct press_rec_t  // `pr`
+{
+  std::int64_t press = 0, seq = 0;
+};
+
+struct application_rec_t  // `app`
+{
+  std::uint64_t id = 0;
+  passset_t ps;
+};
+
+// A buff entry of a launch: the switch buff of a switch launch (`factor` unused) or one speed buff of a swing launch.
+struct launch_buff_t
+{
+  std::string name, owner;
+  std::vector<applier_t> app;
+  double factor = 0.0;
+};
+
+struct launch_rec_t  // `ln`
+{
+  std::int64_t id    = 0;
+  std::int64_t frame = -1;
+  std::int64_t order = -1;
+  std::string ca;                  // the child action (the verdict table's third key); empty when absent
+  bool has_switch = false;         // a `switch` launch with a truthy switch entry
+  launch_buff_t sw;                // its buff and appliers
+  std::vector<launch_buff_t> speed;  // a `swing` launch's speed buffs: only entries with a finite factor > 0
+};
+
+struct frame_rec_t  // `frm`
+{
+  std::int64_t id     = 0;
+  std::int64_t launch = -1;
+  std::string action;  // empty when absent
+  std::string kind;    // empty when absent
+  std::int64_t cls    = 0;
+};
+
+struct read_rec_t  // `rd`
+{
+  std::int64_t frame = 0, order = 0;
+  bool nz            = false;  // the read was non-zero
+  std::string buff, owner;
+  std::vector<applier_t> app;
+  bool cov = false;
+};
+
+struct draw_rec_t  // `dr`
+{
+  std::int64_t frame = 0, order = 0;
+};
+
+struct cycle_rec_t  // `cyc`
+{
+  std::int64_t id = 0;
+  double t = 0.0, len = 0.0;
+};
+
+struct refund_rec_t  // `ref`
+{
+  std::int64_t cycle = 0, press = 0;
+  double sec = 0.0;
+};
+
+struct use_rec_t  // `use`
+{
+  std::int64_t cycle = 0, press = 0;
+  double t = 0.0;
+};
+
+struct hit_rec_t  // `hit`
+{
+  double ra = 0.0, exp = 0.0;
+  bool exp_excl = false;
+  std::int64_t seq = 0, press = -1, launch = -1, win = 0;
+  int cls    = 0;  // the BASE class 0..6
+  int status = 0;
+  bool ch = false, pet = false, crit = false, tick = false;
+  passset_t ps;                     // the hit's candidates and passes
+  std::vector<std::uint64_t> par;  // the ids of the `app` records the hit names as parents
+};
+
+// The entry points. Each takes its record by value (moved in); the module keeps what it needs. `on_fight_begin` resets the fight's tables.
+void on_fight_begin( module_t& m );
+void on_press( module_t& m, press_rec_t&& r );
+void on_application( module_t& m, application_rec_t&& r );
+void on_launch( module_t& m, launch_rec_t&& r );
+void on_frame( module_t& m, frame_rec_t&& r );
+void on_read( module_t& m, read_rec_t&& r );
+void on_draw( module_t& m, draw_rec_t&& r );
+void on_cycle( module_t& m, cycle_rec_t&& r );
+void on_refund( module_t& m, refund_rec_t&& r );
+void on_use( module_t& m, use_rec_t&& r );
+void on_hit( module_t& m, hit_rec_t&& r );
+
+// (plan 03b Task 1 only, deleted in Task 2) One ledger record line (JSON, no trailing newline needed): the live ledger still hands every kind
+// except `hit` through here while the other kinds are being moved to the typed entry points. The line is converted into the typed record.
 void consume_line( module_t& m, std::string_view line );
 
 // rl_translog::record_close, right after the `.attr` FIGHT block: folds the fight just ended and writes the FIGHT and DECISION records.

@@ -110,6 +110,9 @@ struct state_t
     int status = 0;
     std::string cand_json;  // the entries of hit.cand, comma separated, no brackets
     std::string pass_json;  // the entries of hit.pass, comma separated, no brackets
+    // 261003-s1c plan 03b: the same candidates and passes as typed records (only while the credit is on), captured where the JSON fragments
+    // above are made (pass time: the applier lists depend on the moment they are taken) and moved into the typed hit at hit_sink.
+    rl_buff_credit::passset_t typed;
     std::string guards_json;  // plan 04: names of the shadow guards that fired (status 2), quoted, comma separated
     std::uint32_t n_passes = 0;
     // Plan 05: the candidates written for the hit, so the footer's both_group_candidates is counted where the
@@ -473,7 +476,16 @@ inline void emit( state_t* s, rec_kind_t kind, Format&& format )
   {
     if ( s->credit )
     {
-      // 261003-s1c plan 03: the line just formatted goes to the credit module; without a ledger file it is not kept.
+      if ( kind == REC_HIT )
+      {
+        // 261003-s1c plan 03b: a hit reaches the credit module as a typed record built by hit_sink (rl_buff_credit::on_hit); its text is
+        // written only when a ledger file was asked for.
+        if ( s->to_file )
+          format( s->fight_buf );
+        return;
+      }
+      // 261003-s1c plan 03 (the other kinds, until plan 03b Task 2 moves them): the line just formatted goes to the credit module; without a
+      // ledger file it is not kept.
       const std::size_t mark = s->fight_buf.size();
       format( s->fight_buf );
       rl_buff_credit::consume_line( *s->credit, std::string_view( s->fight_buf ).substr( mark ) );
@@ -496,6 +508,14 @@ inline int cls_out( std::uint8_t cls )
 inline const char* dk_out( std::uint8_t cls )
 {
   return ( cls & RL_CAUSE_DECK_MARK ) != 0 ? "true" : "false";
+}
+
+// 261003-s1c plan 03b: a double as the credit module's typed record carries it, equal to what the JSON text of the same double means to the
+// fixture converter: round-trips exactly; a non-finite double is written `null` and read as 0.0 (for the pass fields and the hit's ra / exp);
+// -0.0 is written `-0` and read as +0.0.
+inline double typed_double( double v )
+{
+  return std::isfinite( v ) ? ( v == 0.0 ? 0.0 : v ) : 0.0;
 }
 
 // The same cause for the ledger's purposes: seq, base class, press and launch (the mark does not make another cause: an applier entry is
@@ -1251,6 +1271,7 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
   int status = 0;
   std::string cand_json;
   std::string pass_json;
+  rl_buff_credit::passset_t typed_ps;  // 261003-s1c plan 03b: the typed candidates and passes (credit on only)
   std::string guards_json;
   bool cached = false;
   std::int32_t fr = cur_frame( s );
@@ -1271,6 +1292,7 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
           fr = it->second.fr;
         cand_json = std::move( it->second.cand_json );
         pass_json = std::move( it->second.pass_json );
+        typed_ps  = std::move( it->second.typed );
         guards_json = std::move( it->second.guards_json );
         cached = it->second.cached;
         pmc_text = std::move( it->second.pmc );
@@ -1352,6 +1374,37 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
       b += ",\"cached\":true";
     b += "}\n";
   } );
+
+  if ( s->credit )
+  {
+    // 261003-s1c plan 03b: the hit as a typed record, built from the values the formatter above uses (parse-equivalence: doubles round-trip, a
+    // non-finite double is `null` -> 0.0, -0.0 -> +0.0, `win` is solver_control_seq, `par` the parent list the text writes), handed to the module
+    // at the hit's emit point (the order the JSON backend writes records in).
+    rl_buff_credit::hit_rec_t rec;
+    rec.ra       = typed_double( state->result_amount );
+    rec.exp      = typed_double( expected_amount );
+    rec.exp_excl = exp_excl;
+    rec.seq      = state->rl_cause_seq;
+    rec.cls      = cls_out( state->rl_cause_class );
+    rec.press    = state->rl_cause_press;
+    rec.launch   = state->rl_cause_launch;
+    rec.win      = static_cast<std::int64_t>( sim->solver_control_seq );
+    rec.status   = status;
+    rec.ch       = hit_chosen;
+    rec.pet      = pet;
+    rec.tick     = tick;
+    const std::string_view res = util::result_type_string( state->result );
+    rec.crit     = res == "crit" || res == "crit-block" || res == "crit_block" || res == "multistrike_crit";
+    rec.ps       = std::move( typed_ps );
+    if ( tick )
+    {
+      if ( parent != 0 )
+        rec.par.push_back( parent );
+    }
+    else if ( state->rl_bl_pm != 0 )
+      rec.par.push_back( state->rl_bl_pm );
+    rl_buff_credit::on_hit( *s->credit, std::move( rec ) );
+  }
 }
 
 void xp_record( player_t* p, const rl_cause_t& cause, double amount, const char* action_name, bool on_chosen )
@@ -1506,15 +1559,16 @@ const rl_cause_t& effective_cause( const buff_t::rl_bl_applier_t& e, timespan_t 
   return e.cause;
 }
 
-// The buff's appliers as `[[press,cls,stacks]...]` (one entry per (press, cls), stacks summed; a buff with more than
-// one stack) or `[[press,cls,1,true]...]` (a single-stack buff: the covering appliers, one entry per press for
-// presses, one per application for the rest). Returns true for the covering form.
-bool write_appliers( std::string& b, state_t* st, buff_t* c )
+// The buff's appliers: the ONE walk (261003-s1c plan 03b). It reconciles the buff's applier list once and returns the typed entries
+// (`[press,cls,stacks]` merged by (press, cls) for a buff with more than one stack, or one entry per press for presses and one per application for
+// the rest, stacks 1, for a single-stack buff: the covering appliers), and the covering form flag. The JSON text is formatted FROM this list
+// (put_appliers) and the credit module reads the same list as typed records, so the two cannot drift. The converter reads both forms with
+// covering = true, so every typed entry carries true.
+bool collect_appliers( state_t* st, buff_t* c, std::vector<rl_buff_credit::applier_t>& out )
 {
-  reconcile_appliers( st, c );  // (the memory backend calls reconcile_appliers alone: its only state effect)
+  reconcile_appliers( st, c );
   const bool covering = covering_mode( c );
-  b += '[';
-  bool first = true;
+  out.clear();
   if ( covering )
   {
     std::vector<std::pair<int, int>> seen;
@@ -1527,39 +1581,54 @@ bool write_appliers( std::string& b, state_t* st, buff_t* c )
           continue;
         seen.push_back( key );
       }
-      if ( !first )
-        b += ',';
-      first = false;
-      fmt::format_to( out_it( b ), "[{},{},1,true]", e.cause.press, cls_out( e.cause.cls ) );
+      out.push_back( { e.cause.press, cls_out( e.cause.cls ), 1.0, true } );
     }
   }
   else
   {
-    std::vector<std::array<int, 3>> merged;
     const timespan_t now = c->sim->current_time();
     for ( const buff_t::rl_bl_applier_t& e : c->rl_bl_appliers )
     {
       const rl_cause_t& who = effective_cause( e, now );
       bool found            = false;
-      for ( std::array<int, 3>& m : merged )
-        if ( press_key( static_cast<std::int16_t>( m[ 0 ] ) ) == press_key( who.press ) && m[ 1 ] == cls_out( who.cls ) )
+      for ( rl_buff_credit::applier_t& m : out )
+        if ( press_key( static_cast<std::int16_t>( m.press ) ) == press_key( who.press ) && m.cls == cls_out( who.cls ) )
         {
-          m[ 2 ] += e.stacks;
+          m.stacks += e.stacks;
           found = true;
           break;
         }
       if ( !found )
-        merged.push_back( { static_cast<int>( who.press ), cls_out( who.cls ), e.stacks } );
-    }
-    for ( const std::array<int, 3>& m : merged )
-    {
-      if ( !first )
-        b += ',';
-      first = false;
-      fmt::format_to( out_it( b ), "[{},{},{}]", m[ 0 ], m[ 1 ], m[ 2 ] );
+        out.push_back( { static_cast<std::int64_t>( who.press ), cls_out( who.cls ), static_cast<double>( e.stacks ), true } );
     }
   }
+  return covering;
+}
+
+// `[[press,cls,stacks]...]` or, for the covering form, `[[press,cls,1,true]...]`, from the typed list.
+void put_appliers( std::string& b, const std::vector<rl_buff_credit::applier_t>& list, bool covering )
+{
+  b += '[';
+  bool first = true;
+  for ( const rl_buff_credit::applier_t& e : list )
+  {
+    if ( !first )
+      b += ',';
+    first = false;
+    if ( covering )
+      fmt::format_to( out_it( b ), "[{},{},1,true]", e.press, e.cls );
+    else
+      fmt::format_to( out_it( b ), "[{},{},{}]", e.press, e.cls, static_cast<int>( e.stacks ) );
+  }
   b += ']';
+}
+
+// Returns true for the covering form.
+bool write_appliers( std::string& b, state_t* st, buff_t* c )
+{
+  std::vector<rl_buff_credit::applier_t> list;
+  const bool covering = collect_appliers( st, c, list );
+  put_appliers( b, list, covering );
   return covering;
 }
 
@@ -2943,22 +3012,52 @@ void put_pass( std::string& b, const pass_rec_t& p, const double* app_ref = null
   fmt::format_to( out_it( b ), ",\"viol\":{}}}", p.viol );
 }
 
-void put_candidate( std::string& b, state_t* st, std::size_t i, const buff_t* c, bool debuff )
+// 261003-s1c plan 03b: the typed pass of a pass entry, equal field for field to what the JSON line of put_pass means to the converter: doubles
+// round-trip exactly; a non-finite double is written `null` and read as 0.0 for pre / cc / cb / per; a double that is -0.0 is written `-0` and read
+// as +0.0 (an equivalence rule, not routing a field through text); `per` is pre / app_ref only for an application pass with app_ref != 0, else 0.0;
+// `viol` is (value != 0).
+rl_buff_credit::pass_t make_typed_pass( const pass_rec_t& p, const double* app_ref = nullptr )
+{
+  rl_buff_credit::pass_t t;
+  const std::string_view kind = p.kind;
+  t.kind = kind == "ref" ? rl_buff_credit::PASS_REF : ( kind == "hide" ? rl_buff_credit::PASS_HIDE : rl_buff_credit::PASS_OTHER );
+  t.hid  = p.hid;
+  t.pre  = typed_double( p.amount.pre );
+  t.cc   = typed_double( p.amount.cc );
+  t.cb   = typed_double( p.amount.cb );
+  t.per  = app_ref != nullptr && *app_ref != 0.0 ? typed_double( p.amount.pre / *app_ref ) : 0.0;
+  t.viol = p.viol != 0;
+  return t;
+}
+
+// 261003-s1c plan 03b: a candidate as the typed record (the ONE applier walk reconciles the buff's list); the text of the entry is formatted from it.
+rl_buff_credit::cand_t make_candidate( state_t* st, std::size_t i, const buff_t* c, bool debuff )
+{
+  rl_buff_credit::cand_t cand;
+  cand.bit   = static_cast<std::uint32_t>( i );
+  cand.name  = c->name_str;
+  cand.owner = c->player->name();
+  const bool is_stat = dynamic_cast<const stat_buff_t*>( c ) != nullptr;
+  cand.kind          = debuff ? "debuff" : ( is_stat ? "stat" : "buff" );
+  cand.cov           = collect_appliers( st, const_cast<buff_t*>( c ), cand.app );
+  return cand;
+}
+
+// The JSON entry of a candidate from its typed record plus the two members the credit does not read (`stacks`, `value`: the members, not
+// check() / check_value(): the ledger's own writing is not a read of the fight).
+void put_candidate( std::string& b, const rl_buff_credit::cand_t& cand, int stacks, double value )
 {
   if ( !b.empty() )
     b += ',';
-  fmt::format_to( out_it( b ), "{{\"i\":{},\"name\":", i );
-  put_string( b, c->name_str );
+  fmt::format_to( out_it( b ), "{{\"i\":{},\"name\":", cand.bit );
+  put_string( b, cand.name );
   b += ",\"owner\":";
-  put_string( b, c->player->name() );
-  const bool is_stat = dynamic_cast<const stat_buff_t*>( c ) != nullptr;
-  // The members, not check() / check_value(): the ledger's own writing is not a read of the fight.
-  fmt::format_to( out_it( b ), ",\"kind\":\"{}\",\"stacks\":{},\"value\":", debuff ? "debuff" : ( is_stat ? "stat" : "buff" ),
-                  c->current_stack );
-  put_double( b, c->current_value );
+  put_string( b, cand.owner );
+  fmt::format_to( out_it( b ), ",\"kind\":\"{}\",\"stacks\":{},\"value\":", cand.kind, stacks );
+  put_double( b, value );
   b += ",\"app\":";
-  const bool covering = write_appliers( b, st, const_cast<buff_t*>( c ) );
-  b += covering ? ",\"cov\":true}" : ",\"cov\":false}";
+  put_appliers( b, cand.app, cand.cov );
+  b += cand.cov ? ",\"cov\":true}" : ",\"cov\":false}";
 }
 
 // What one pass set produced: the passes in record order, the candidates (bit i of a pass's hidden
@@ -3207,16 +3306,23 @@ bool candidates_written( const split_t& sp )
   return sp.status == 1 || sp.status == 2 || sp.status == 4;
 }
 
-// 261003-s1c plan 02: the memory backend builds no text; the only state effect of writing a candidate entry (put_candidate ->
-// write_appliers) is bringing the buff's applier list up to its stacks (reconcile_appliers), which is kept.
-void write_candidates( std::string& out, state_t* st, const split_t& sp, const player_t* target )
+// 261003-s1c plan 02: the memory backend builds no text; the only state effect of writing a candidate entry (the applier walk) is bringing the
+// buff's applier list up to its stacks (reconcile_appliers), which is kept. 261003-s1c plan 03b: with the credit on (`typed` non-null) the
+// candidates are also captured as typed records, from the same single walk.
+void write_candidates( std::string& out, state_t* st, const split_t& sp, const player_t* target, rl_buff_credit::passset_t* typed = nullptr )
 {
   if ( !candidates_written( sp ) )
     return;
   for ( std::size_t i = 0; i < sp.cands.size(); ++i )
   {
-    if ( st->text )
-      put_candidate( out, st, i, sp.cands[ i ], sp.cands[ i ]->player == target );
+    if ( st->text || typed != nullptr )
+    {
+      rl_buff_credit::cand_t cand = make_candidate( st, i, sp.cands[ i ], sp.cands[ i ]->player == target );
+      if ( st->text )
+        put_candidate( out, cand, sp.cands[ i ]->current_stack, sp.cands[ i ]->current_value );
+      if ( typed != nullptr )
+        typed->cands.push_back( std::move( cand ) );
+    }
     else
       reconcile_appliers( st, sp.cands[ i ] );
   }
@@ -3804,12 +3910,15 @@ void run_passes( action_t* a, action_state_t* s, const action_state_t* pre )
   {
     entry.status = sp.status;
     entry.cached = sp.cached;
-    write_candidates( entry.cand_json, st, sp, s->target );
+    write_candidates( entry.cand_json, st, sp, s->target, st->credit ? &entry.typed : nullptr );
     if ( candidates_written( sp ) && !sp.cands.empty() )  // (cand_json is non-empty exactly then in the JSON backend)
       entry.cands = sp.cands;
     if ( st->text )
       for ( const pass_rec_t& p : sp.passes )
         put_pass( entry.pass_json, p );
+    if ( st->credit )
+      for ( const pass_rec_t& p : sp.passes )
+        entry.typed.passes.push_back( make_typed_pass( p ) );
     entry.n_passes = static_cast<std::uint32_t>( sp.passes.size() );
 
     const std::uint64_t id = st->next_hit_id++;
@@ -3954,12 +4063,15 @@ void run_tick_passes( action_t* a, action_state_t* d_state, double tick_multipli
 
   entry.status = sp.status;
   entry.cached = sp.cached;
-  write_candidates( entry.cand_json, st, sp, d_state->target );
+  write_candidates( entry.cand_json, st, sp, d_state->target, st->credit ? &entry.typed : nullptr );
   if ( candidates_written( sp ) && !sp.cands.empty() )  // (cand_json is non-empty exactly then in the JSON backend)
     entry.cands = sp.cands;
   if ( st->text )
     for ( const pass_rec_t& p : sp.passes )
       put_pass( entry.pass_json, p );
+  if ( st->credit )
+    for ( const pass_rec_t& p : sp.passes )
+      entry.typed.passes.push_back( make_typed_pass( p ) );
   entry.n_passes = static_cast<std::uint32_t>( sp.passes.size() );
 
   const std::uint64_t id = st->next_hit_id++;

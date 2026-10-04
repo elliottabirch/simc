@@ -201,179 +201,16 @@ std::string hex_of( const std::uint8_t* p, std::size_t n )
   return s;
 }
 
-// ---- record access ----
+// ---- failure ----
 [[noreturn]] void fail( const std::string& msg )
 {
   throw sc_runtime_error( "rl_buff_credit: " + msg );
 }
 
-struct rec_t
-{
-  const rapidjson::Value& v;
-  const char* kind;
-
-  const rapidjson::Value& field( const char* name ) const
-  {
-    if ( !v.IsObject() || !v.HasMember( name ) )
-      fail( fmt::format( "{} record lacks required field '{}'", kind, name ) );
-    return v[ name ];
-  }
-  bool has( const char* name ) const { return v.IsObject() && v.HasMember( name ); }
-  std::int64_t i64( const char* name ) const
-  {
-    const auto& f = field( name );
-    if ( f.IsInt64() )
-      return f.GetInt64();
-    if ( f.IsUint64() )
-      return static_cast<std::int64_t>( f.GetUint64() );
-    fail( fmt::format( "{} record: field '{}' is not an integer", kind, name ) );
-  }
-  std::uint64_t u64( const char* name ) const
-  {
-    const auto& f = field( name );
-    if ( f.IsUint64() )
-      return f.GetUint64();
-    if ( f.IsInt64() && f.GetInt64() >= 0 )
-      return static_cast<std::uint64_t>( f.GetInt64() );
-    fail( fmt::format( "{} record: field '{}' is not a non-negative integer", kind, name ) );
-  }
-  double num( const char* name, bool null_is_zero = false ) const
-  {
-    const auto& f = field( name );
-    if ( f.IsNumber() )
-      return f.GetDouble();
-    if ( null_is_zero && f.IsNull() )
-      return 0.0;
-    fail( fmt::format( "{} record: field '{}' is not a number", kind, name ) );
-  }
-  bool boolean( const char* name ) const
-  {
-    const auto& f = field( name );
-    if ( !f.IsBool() )
-      fail( fmt::format( "{} record: field '{}' is not a boolean", kind, name ) );
-    return f.GetBool();
-  }
-  std::string str( const char* name ) const
-  {
-    const auto& f = field( name );
-    if ( !f.IsString() )
-      fail( fmt::format( "{} record: field '{}' is not a string", kind, name ) );
-    return std::string( f.GetString(), f.GetStringLength() );
-  }
-  const rapidjson::Value& arr( const char* name ) const
-  {
-    const auto& f = field( name );
-    if ( !f.IsArray() )
-      fail( fmt::format( "{} record: field '{}' is not an array", kind, name ) );
-    return f;
-  }
-};
-
-// The kind of a record line without parsing it: the string after the first `"k"` key.
-std::string_view kind_of( std::string_view line )
-{
-  const auto k = line.find( "\"k\"" );
-  if ( k == std::string_view::npos )
-    return {};
-  std::size_t i = k + 3;
-  while ( i < line.size() && ( line[ i ] == ' ' || line[ i ] == ':' ) )
-    ++i;
-  if ( i >= line.size() || line[ i ] != '"' )
-    return {};
-  ++i;
-  const auto e = line.find( '"', i );
-  if ( e == std::string_view::npos )
-    return {};
-  return line.substr( i, e - i );
-}
-
 // ---- the model: Applier, Player, Group (ledger_reference.py) ----
-struct applier_t
-{
-  std::int64_t press;
-  int cls;
-  double stacks;
-  bool covering;
-};
-
-// parse_applier + require_base_class
-applier_t parse_applier( const rapidjson::Value& raw, const char* where )
-{
-  if ( !raw.IsArray() || raw.Size() < 3 )
-    fail( fmt::format( "{}: an applier entry is not [press, cls, stacks, ...]", where ) );
-  if ( !raw[ 0 ].IsInt64() || !raw[ 1 ].IsInt() || !raw[ 2 ].IsNumber() )
-    fail( fmt::format( "{}: an applier entry has a non-numeric field", where ) );
-  const int cls = raw[ 1 ].GetInt();
-  if ( cls < 0 || cls > CLS_ORPHAN )
-    fail( fmt::format( "{}: applier cls {} is not a base class 0..6 (a raw class byte with the deck mark?)", where, cls ) );
-  const bool covering = raw.Size() > 3 ? ( raw[ 3 ].IsBool() ? raw[ 3 ].GetBool() : raw[ 3 ].GetDouble() != 0.0 ) : true;
-  return applier_t{ raw[ 0 ].GetInt64(), cls, raw[ 2 ].GetDouble(), covering };
-}
-
 bool is_press_applier( const applier_t& a )
 {
   return ( a.cls == CLS_PROC_OF_CAST || a.cls == CLS_PROC_OF_DOT ) && a.press >= 0;
-}
-
-struct cand_t
-{
-  std::uint32_t bit;
-  std::string name, owner, kind;
-  std::vector<applier_t> app;
-  bool cov;
-};
-
-enum pass_kind_t : std::uint8_t { PASS_REF, PASS_HIDE, PASS_OTHER };
-
-struct pass_t
-{
-  pass_kind_t kind;
-  std::uint64_t hid;
-  double pre, cc, cb, per;
-  bool viol;
-};
-
-struct passset_t
-{
-  std::vector<cand_t> cands;
-  std::vector<pass_t> passes;
-};
-
-passset_t parse_passset( const rec_t& r )
-{
-  passset_t out;
-  for ( const auto& c : r.arr( "cand" ).GetArray() )
-  {
-    rec_t cr{ c, "cand entry" };
-    cand_t cd;
-    const std::int64_t bit = cr.i64( "i" );
-    if ( bit < 0 || bit > 63 )
-      fail( fmt::format( "{} record: candidate index {} does not fit a 64-bit hidden-set mask", r.kind, bit ) );
-    cd.bit   = static_cast<std::uint32_t>( bit );
-    cd.name  = cr.str( "name" );
-    cd.owner = cr.str( "owner" );
-    cd.kind  = cr.str( "kind" );
-    cd.cov   = cr.field( "cov" ).IsBool() ? cr.boolean( "cov" ) : cr.num( "cov" ) != 0.0;
-    for ( const auto& a : cr.arr( "app" ).GetArray() )
-      cd.app.push_back( parse_applier( a, "cand.app" ) );
-    out.cands.push_back( std::move( cd ) );
-  }
-  for ( const auto& p : r.arr( "pass" ).GetArray() )
-  {
-    rec_t pr{ p, "pass entry" };
-    pass_t ps;
-    const std::string k = pr.str( "kind" );
-    ps.kind             = k == "ref" ? PASS_REF : ( k == "hide" ? PASS_HIDE : PASS_OTHER );
-    ps.hid              = pr.u64( "hid" );
-    ps.pre              = pr.num( "pre", true );
-    ps.cc               = pr.num( "cc", true );
-    ps.cb               = pr.num( "cb", true );
-    ps.per              = pr.num( "per", true );
-    const auto& viol    = pr.field( "viol" );
-    ps.viol             = viol.IsBool() ? viol.GetBool() : ( viol.IsNumber() && viol.GetDouble() != 0.0 );
-    out.passes.push_back( ps );
-  }
-  return out;
 }
 
 // The four split channels of a player (ledger_reference.Player.channel) plus the two bookkeeping channels of an entry: the dealer's remainder and the
@@ -827,13 +664,24 @@ void load_verdicts( const std::string& path, verdicts_t& out, std::string& sha_h
   if ( doc.HasMember( "site_key" ) && doc[ "site_key" ].IsString() )
     out.site_key = doc[ "site_key" ].GetString();
   const char* frame_field = out.site_key == "kind" ? "fkind" : "fcls";
+  // The verdict table is a configuration file read once here (not a ledger record): its own small field reads.
+  auto field = [ & ]( const rapidjson::Value& site, const char* name ) -> const rapidjson::Value& {
+    if ( !site.IsObject() || !site.HasMember( name ) )
+      fail( fmt::format( "verdict site record lacks required field '{}'", name ) );
+    return site[ name ];
+  };
+  auto text_field = [ & ]( const rapidjson::Value& site, const char* name ) {
+    const auto& f = field( site, name );
+    if ( !f.IsString() )
+      fail( fmt::format( "verdict site record: field '{}' is not a string", name ) );
+    return std::string( f.GetString(), f.GetStringLength() );
+  };
   std::size_t n = 0;
   for ( const auto& s : doc[ "sites" ].GetArray() )
   {
-    rec_t r{ s, "verdict site" };
-    const std::string verdict = r.str( "verdict" );  // a site without a verdict is refused
-    const std::string pa = r.str( "pa" ), ca = r.str( "ca" ), buff = r.str( "buff" );
-    const auto& fk = r.field( frame_field );
+    const std::string verdict = text_field( s, "verdict" );  // a site without a verdict is refused
+    const std::string pa = text_field( s, "pa" ), ca = text_field( s, "ca" ), buff = text_field( s, "buff" );
+    const auto& fk = field( s, frame_field );
     const std::string frame_key = fk.IsString() ? std::string( fk.GetString() ) : std::to_string( fk.IsInt64() ? fk.GetInt64() : 0 );
     if ( verdict == "gate" )
     {
@@ -857,58 +705,6 @@ struct acc3_t
 struct acc2_t
 {
   double v[ 2 ] = { 0.0, 0.0 };
-};
-
-// A swing launch's speed buff (ledger_reference.parse_swing_speed): the buff, its appliers and the speed factor it gives the swing.
-struct speed_t
-{
-  std::string name, owner;
-  std::vector<applier_t> app;
-  double factor;
-};
-
-// An `ln` record, as much of it as the launch chain needs.
-struct ln_t
-{
-  std::int64_t frame = -1;
-  std::int64_t order = -1;
-  std::string ca;              // the child action (the verdict table's third key)
-  bool has_switch = false;     // a `switch` launch with a non-empty `sw` (parse_switch)
-  speed_t sw;                  // its buff and appliers (the `factor` is unused)
-  std::vector<speed_t> speed;  // only a `swing` launch has any; entries with no factor (or a factor <= 0) are dropped at parse
-};
-
-// A `frm` record: the launch the frame was opened under, the owner action and the frame's key into the verdict table (its kind or its class).
-struct frm_t
-{
-  std::int64_t launch = -1;
-  std::string action;
-  std::string kind;
-  std::int64_t cls = 0;
-};
-
-// An `rd` record that can matter to a gate: a NON-ZERO read of a buff some gate site names (anything else is never consulted).
-struct rd_t
-{
-  std::int64_t order;
-  std::string buff, owner;
-  std::vector<applier_t> app;
-  bool cov;
-};
-
-struct cyc_t
-{
-  double t, len;
-};
-struct ref_t
-{
-  std::int64_t press;
-  double sec;
-};
-struct use_t
-{
-  std::int64_t c, press;
-  double t;
 };
 
 // The result of one fold (decision_fold in the reference).
@@ -939,13 +735,13 @@ struct module_t
   std::unordered_map<std::int64_t, std::int64_t> press_seq;  // press -> decision seq
   std::vector<std::int64_t> press_seqs;                      // every `pr` record's seq, file order
   std::unordered_map<std::uint64_t, passset_t> apps;         // `app` records by id
-  std::unordered_map<std::int64_t, ln_t> lns;                // `ln` records by launch id (the swing launches' speed buffs, the switch buff, the gate keys)
-  std::unordered_map<std::int64_t, frm_t> frms;              // `frm` records by frame id
-  std::unordered_map<std::int64_t, std::vector<rd_t>> reads; // frame id -> its non-zero reads of gate buffs, file order
+  std::unordered_map<std::int64_t, launch_rec_t> lns;                // `ln` records by launch id (the swing launches' speed buffs, the switch buff, the gate keys)
+  std::unordered_map<std::int64_t, frame_rec_t> frms;              // `frm` records by frame id
+  std::unordered_map<std::int64_t, std::vector<read_rec_t>> reads; // frame id -> its non-zero reads of gate buffs, file order
   std::unordered_map<std::int64_t, std::vector<std::int64_t>> draws;  // frame id -> the orders of its `dr` records (only frames that have such a read)
-  std::unordered_map<std::int64_t, cyc_t> cycles;            // `cyc` records by cycle id (a later record with the same id wins)
-  std::unordered_map<std::int64_t, std::vector<ref_t>> refs; // cycle id -> its `ref` entries, file order
-  std::vector<use_t> uses;                                   // `use` records, file order
+  std::unordered_map<std::int64_t, cycle_rec_t> cycles;            // `cyc` records by cycle id (a later record with the same id wins)
+  std::unordered_map<std::int64_t, std::vector<refund_rec_t>> refs; // cycle id -> its `ref` entries, file order
+  std::vector<use_rec_t> uses;                                   // `use` records, file order
   std::vector<item_t> items;
   std::uint32_t counter_unknown_press = 0;  // lookups that found no `pr` record (counted while the fold runs)
 };
@@ -964,11 +760,10 @@ std::int64_t press_decision( module_t& m, std::int64_t press, std::uint32_t& unk
 }
 
 // distribution(): the credit distribution of one hit. Fills `item.entries` (the new booking) and `item.split`.
-void distribution( module_t& m, const rec_t& h, item_t& item )
+void distribution( module_t& m, const hit_rec_t& h, item_t& item )
 {
   const double ra  = item.ra;
-  const bool excl  = h.boolean( "exp_excl" );
-  const double exp = excl ? 0.0 : h.num( "exp", true );
+  const double exp = h.exp_excl ? 0.0 : h.exp;
   // The dealer: new_dealer() -- a carried press goes to the decoded press; otherwise the old holder
   entry_t dealer;
   if ( press_is_carried( item.old_press ) )
@@ -990,31 +785,28 @@ void distribution( module_t& m, const rec_t& h, item_t& item )
     item.split = split;
   };
 
-  const std::int64_t status = h.i64( "status" );
+  const std::int64_t status = h.status;
   if ( !( status == 0 || status == 1 ) )
     return whole( false );
   if ( ra == 0.0 && exp == 0.0 )
     return whole( true );
-  const std::string res = h.str( "res" );
-  const bool crit       = res == "crit" || res == "crit-block" || res == "crit_block" || res == "multistrike_crit";
+  const bool crit = h.crit;
 
   players_t players;
   std::vector<bc_group_t> groups;
-  groups.push_back( build_pass_group( parse_passset( h ), players, false ) );
-  const bool tick = h.str( "at" ) == "t";
-  for ( const auto& pid : h.arr( "par" ).GetArray() )
+  groups.push_back( build_pass_group( h.ps, players, false ) );
+  const bool tick = h.tick;
+  for ( const std::uint64_t pid : h.par )
   {
-    if ( !pid.IsUint64() )
-      continue;
-    const auto it = m.apps.find( pid.GetUint64() );
+    const auto it = m.apps.find( pid );
     if ( it != m.apps.end() )
       groups.push_back( build_pass_group( it->second, players, tick ) );
   }
   // launch_chain: the launch records from the hit's own launch up through each parent frame's launch
-  std::vector<const ln_t*> chain;
+  std::vector<const launch_rec_t*> chain;
   {
     std::set<std::int64_t> seen;
-    std::int64_t l = h.i64( "launch" );
+    std::int64_t l = h.launch;
     while ( l >= 0 && chain.size() < 64 )
     {
       const auto lit = m.lns.find( l );
@@ -1027,7 +819,7 @@ void distribution( module_t& m, const rec_t& h, item_t& item )
   }
   // gate_players: along the launch chain, a buff read non-zero in the launching frame before the launch, with no random draw between the read and
   // the launch, at a site whose verdict is "gate" (the loaded table); plus the switch buff of a `switch` launch, which needs no table.
-  for ( const ln_t* rec : chain )
+  for ( const launch_rec_t* rec : chain )
   {
     if ( rec->has_switch )
     {
@@ -1045,10 +837,10 @@ void distribution( module_t& m, const rec_t& h, item_t& item )
     const auto rit = m.reads.find( rec->frame );
     if ( rit == m.reads.end() )
       continue;
-    const frm_t& frame = fit->second;
+    const frame_rec_t& frame = fit->second;
     const std::string frame_key = m.verdicts.site_key == "kind" ? frame.kind : std::to_string( frame.cls );
     std::vector<const std::string*> seen_buffs;  // the distinct buffs of the frame's reads, first-seen order (dict.fromkeys)
-    for ( const rd_t& r0 : rit->second )
+    for ( const read_rec_t& r0 : rit->second )
     {
       bool dup = false;
       for ( const std::string* b : seen_buffs )
@@ -1060,8 +852,8 @@ void distribution( module_t& m, const rec_t& h, item_t& item )
       if ( m.verdicts.gates.count( std::make_tuple( frame.action, frame_key, rec->ca, r0.buff ) ) == 0 )
         continue;
       // nz_read_before: the latest non-zero read of the buff before the launch's order (a tie on the order: the later record)
-      const rd_t* read = nullptr;
-      for ( const rd_t& r1 : rit->second )
+      const read_rec_t* read = nullptr;
+      for ( const read_rec_t& r1 : rit->second )
         if ( r1.buff == r0.buff && r1.order < rec->order && ( read == nullptr || r1.order >= read->order ) )
           read = &r1;
       if ( read == nullptr )
@@ -1089,8 +881,8 @@ void distribution( module_t& m, const rec_t& h, item_t& item )
   bc_group_t swing_group;
   swing_group.swing = true;
   {
-    for ( const ln_t* rec : chain )
-      for ( const speed_t& sf : rec->speed )
+    for ( const launch_rec_t* rec : chain )
+      for ( const launch_buff_t& sf : rec->speed )
       {
         bc_player_t sp;
         sp.key      = { sf.name, sf.owner };
@@ -1174,171 +966,136 @@ void reset_fight( module_t& m )
   m.items.clear();
 }
 
-void process_hit( module_t& m, const rec_t& h )
+// The value rules of the entry points (shared by the live ledger and the fixture converter): a class outside the base classes 0..6 (a raw class
+// byte with the deck mark?) and a candidate index that does not fit the 64-bit hidden-set mask are refused.
+void check_applier( const applier_t& a, const char* where )
 {
+  if ( a.cls < 0 || a.cls > CLS_ORPHAN )
+    fail( fmt::format( "{}: applier cls {} is not a base class 0..6 (a raw class byte with the deck mark?)", where, a.cls ) );
+}
+
+void check_appliers( const std::vector<applier_t>& v, const char* where )
+{
+  for ( const applier_t& a : v )
+    check_applier( a, where );
+}
+
+[[noreturn]] void fail_candidate_bit( const char* kind, std::int64_t bit )
+{
+  fail( fmt::format( "{} record: candidate index {} does not fit a 64-bit hidden-set mask", kind, bit ) );
+}
+
+void check_passset( const passset_t& ps, const char* kind )
+{
+  for ( const cand_t& c : ps.cands )
+  {
+    if ( c.bit > 63 )
+      fail_candidate_bit( kind, c.bit );
+    check_appliers( c.app, "cand.app" );
+  }
+}
+
+void check_launch_buff( const launch_buff_t& b, const char* where )
+{
+  check_appliers( b.app, where );
+}
+
+// A read is kept only when it is non-zero AND its buff is named by some gate site of the loaded table (nothing else can ever be consulted:
+// nz_read_before keeps non-zero reads; is_gate needs the buff). Used by the entry point and by the fixture converter (a read the module would
+// drop is not even parsed there).
+bool read_is_kept( const module_t& m, bool nz, const std::string& buff )
+{
+  return nz && m.verdicts.gate_buffs.count( buff ) != 0;
+}
+
+// A draw is kept only for a frame that has a kept read.
+bool draw_is_kept( const module_t& m, std::int64_t frame )
+{
+  return m.reads.count( frame ) != 0;
+}
+}  // namespace
+
+void on_fight_begin( module_t& m )
+{
+  reset_fight( m );
+}
+
+void on_press( module_t& m, press_rec_t&& r )
+{
+  m.press_seq[ r.press ] = r.seq;
+  m.press_seqs.push_back( r.seq );
+}
+
+void on_application( module_t& m, application_rec_t&& r )
+{
+  check_passset( r.ps, "app" );
+  m.apps[ r.id ] = std::move( r.ps );
+}
+
+void on_launch( module_t& m, launch_rec_t&& r )
+{
+  if ( r.has_switch )
+    check_launch_buff( r.sw, "ln switch entry" );
+  for ( const launch_buff_t& b : r.speed )
+    check_launch_buff( b, "ln speed entry" );
+  m.lns[ r.id ] = std::move( r );
+}
+
+void on_frame( module_t& m, frame_rec_t&& r )
+{
+  m.frms[ r.id ] = std::move( r );
+}
+
+void on_read( module_t& m, read_rec_t&& r )
+{
+  if ( !read_is_kept( m, r.nz, r.buff ) )
+    return;
+  check_appliers( r.app, "rd.app" );
+  m.reads[ r.frame ].push_back( std::move( r ) );
+}
+
+void on_draw( module_t& m, draw_rec_t&& r )
+{
+  // draw_between asks about draws after a read of the same frame, and a draw is written after the read it follows: a frame with no kept read has no use
+  if ( draw_is_kept( m, r.frame ) )
+    m.draws[ r.frame ].push_back( r.order );
+}
+
+void on_cycle( module_t& m, cycle_rec_t&& r )
+{
+  m.cycles[ r.id ] = r;
+}
+
+void on_refund( module_t& m, refund_rec_t&& r )
+{
+  m.refs[ r.cycle ].push_back( r );
+}
+
+void on_use( module_t& m, use_rec_t&& r )
+{
+  m.uses.push_back( r );
+}
+
+void on_hit( module_t& m, hit_rec_t&& r )
+{
+  if ( r.cls < 0 || r.cls > CLS_ORPHAN )
+    fail( fmt::format( "hit record: cls {} is not a base class 0..6", r.cls ) );
+  check_passset( r.ps, "hit" );
   item_t item;
-  item.ra = h.num( "ra", true );
-  const std::int64_t cls = h.i64( "cls" );
-  if ( cls < 0 || cls > CLS_ORPHAN )
-    fail( fmt::format( "hit record: cls {} is not a base class 0..6", cls ) );
-  item.old_press = h.i64( "press" );
-  item.seq   = h.i64( "seq" );
-  if ( !h.has( "win" ) )
-    fail( "hit record lacks required field 'win' (the ledger does not announce 2026-10-04-s1-win)" );
-  item.win = h.i64( "win" );
-  item.ch  = h.has( "ch" ) && h.field( "ch" ).IsBool() && h.field( "ch" ).GetBool();
-  item.own = cls == CLS_CAST || cls == CLS_PROC_OF_CAST || cls == CLS_DOT_TICK || cls == CLS_PROC_OF_DOT;
-  const bool pet = h.has( "pet" ) && h.field( "pet" ).IsBool() && h.field( "pet" ).GetBool();
+  item.ra        = r.ra;
+  item.old_press = r.press;
+  item.seq       = r.seq;
+  item.win       = r.win;
+  item.ch        = r.ch;
+  item.own       = r.cls == CLS_CAST || r.cls == CLS_PROC_OF_CAST || r.cls == CLS_DOT_TICK || r.cls == CLS_PROC_OF_DOT;
   // dealer_group: "press" iff not a pet, an own class and press >= 0; everything else is "nobody"
-  item.nobody = !( !pet && item.own && item.old_press >= 0 );
-  distribution( m, h, item );
+  item.nobody = !( !r.pet && item.own && item.old_press >= 0 );
+  distribution( m, r, item );
   m.items.push_back( std::move( item ) );
 }
 
-void process_record( module_t& m, const rapidjson::Value& doc, std::string_view kind )
+namespace
 {
-  if ( kind == "fb" )
-  {
-    reset_fight( m );
-  }
-  else if ( kind == "pr" )
-  {
-    rec_t r{ doc, "pr" };
-    const std::int64_t press = r.i64( "press" ), seq = r.i64( "seq" );
-    m.press_seq[ press ]     = seq;
-    m.press_seqs.push_back( seq );
-  }
-  else if ( kind == "app" )
-  {
-    rec_t r{ doc, "app" };
-    m.apps[ r.u64( "h" ) ] = parse_passset( r );
-  }
-  else if ( kind == "ln" )
-  {
-    rec_t r{ doc, "ln" };
-    ln_t ln;
-    ln.frame = r.i64( "frame" );
-    ln.order = r.has( "order" ) ? r.i64( "order" ) : -1;
-    ln.ca    = r.has( "ca" ) && r.field( "ca" ).IsString() ? r.str( "ca" ) : std::string();
-    // parse_switch: only a `switch` launch with a truthy `sw` (null, an empty object or list, "" and false are falsy); an entry is the object
-    // {buff, owner?, app?, ...} or the list [buff, appliers]
-    if ( r.str( "lk" ) == "switch" && r.has( "sw" ) )
-    {
-      const auto& sw = r.field( "sw" );
-      const bool truthy = !( sw.IsNull() || ( sw.IsObject() && sw.MemberCount() == 0 ) || ( sw.IsArray() && sw.Size() == 0 ) ||
-                             ( sw.IsString() && sw.GetStringLength() == 0 ) || ( sw.IsBool() && !sw.GetBool() ) || ( sw.IsNumber() && sw.GetDouble() == 0.0 ) );
-      if ( truthy )
-      {
-        if ( sw.IsObject() )
-        {
-          rec_t sr{ sw, "ln switch entry" };
-          ln.sw.name  = sr.str( "buff" );
-          ln.sw.owner = sr.has( "owner" ) ? sr.str( "owner" ) : std::string();
-          if ( sr.has( "app" ) )
-            for ( const auto& a : sr.arr( "app" ).GetArray() )
-              ln.sw.app.push_back( parse_applier( a, "ln switch entry" ) );
-        }
-        else if ( sw.IsArray() && sw.Size() >= 2 && sw[ 0 ].IsString() && sw[ 1 ].IsArray() )
-        {
-          ln.sw.name = std::string( sw[ 0 ].GetString(), sw[ 0 ].GetStringLength() );
-          for ( const auto& a : sw[ 1 ].GetArray() )
-            ln.sw.app.push_back( parse_applier( a, "ln switch entry" ) );
-        }
-        else
-          fail( "ln record: the switch entry is neither {buff, ...} nor [buff, appliers]" );
-        ln.has_switch = true;
-      }
-    }
-    // parse_swing_speed: only a `swing` launch with a non-empty `sf`; an entry is the object {buff, owner?, app?, f?} or the list [buff, app]
-    // (no factor: dropped, but its appliers are still validated like the reference's parse_buff_entry does)
-    if ( r.str( "lk" ) == "swing" && r.has( "sf" ) && r.field( "sf" ).IsArray() )
-      for ( const auto& raw : r.field( "sf" ).GetArray() )
-      {
-        speed_t sp;
-        sp.factor    = 0.0;
-        bool has_f   = false;
-        if ( raw.IsObject() )
-        {
-          rec_t sr{ raw, "ln speed entry" };
-          sp.name  = sr.str( "buff" );
-          sp.owner = sr.has( "owner" ) ? sr.str( "owner" ) : std::string();
-          if ( sr.has( "app" ) )
-            for ( const auto& a : sr.arr( "app" ).GetArray() )
-              sp.app.push_back( parse_applier( a, "ln speed entry" ) );
-          if ( sr.has( "f" ) && !sr.field( "f" ).IsNull() )
-          {
-            sp.factor = sr.num( "f" );
-            has_f     = true;
-          }
-        }
-        else if ( raw.IsArray() && raw.Size() >= 2 && raw[ 1 ].IsArray() )
-        {
-          for ( const auto& a : raw[ 1 ].GetArray() )
-            sp.app.push_back( parse_applier( a, "ln speed entry" ) );
-        }
-        else
-          fail( "ln record: a speed entry is neither {buff, ...} nor [buff, appliers]" );
-        if ( has_f && sp.factor > 0.0 )
-          ln.speed.push_back( std::move( sp ) );
-      }
-    m.lns[ r.i64( "l" ) ] = std::move( ln );
-  }
-  else if ( kind == "frm" )
-  {
-    rec_t r{ doc, "frm" };
-    frm_t fr;
-    fr.launch = r.i64( "launch" );
-    fr.action = r.has( "action" ) && r.field( "action" ).IsString() ? r.str( "action" ) : std::string();
-    fr.kind   = r.has( "kind" ) && r.field( "kind" ).IsString() ? r.str( "kind" ) : std::string();
-    fr.cls    = r.has( "cls" ) ? r.i64( "cls" ) : 0;
-    m.frms[ r.i64( "f" ) ] = std::move( fr );
-  }
-  else if ( kind == "rd" )
-  {
-    // Only a non-zero read of a buff a gate site names can ever be consulted (nz_read_before keeps non-zero reads; is_gate needs the buff).
-    rec_t r{ doc, "rd" };
-    if ( r.boolean( "nz" ) && m.verdicts.gate_buffs.count( r.str( "buff" ) ) )
-    {
-      rd_t rd;
-      rd.order = r.i64( "o" );
-      rd.buff  = r.str( "buff" );
-      rd.owner = r.str( "owner" );
-      for ( const auto& a : r.arr( "app" ).GetArray() )
-        rd.app.push_back( parse_applier( a, "rd.app" ) );
-      rd.cov = r.has( "cov" ) && !r.field( "cov" ).IsNull() && ( r.field( "cov" ).IsBool() ? r.field( "cov" ).GetBool() : r.field( "cov" ).GetDouble() != 0.0 );
-      m.reads[ r.i64( "f" ) ].push_back( std::move( rd ) );
-    }
-  }
-  else if ( kind == "dr" )
-  {
-    // draw_between asks about draws after a read of the same frame, and a draw is written after the read it follows: a frame with no kept read has no use
-    rec_t r{ doc, "dr" };
-    const std::int64_t f = r.i64( "f" );
-    if ( m.reads.count( f ) )
-      m.draws[ f ].push_back( r.i64( "o" ) );
-  }
-  else if ( kind == "cyc" )
-  {
-    rec_t r{ doc, "cyc" };
-    m.cycles[ r.i64( "c" ) ] = cyc_t{ r.num( "t" ), r.num( "len" ) };
-  }
-  else if ( kind == "ref" )
-  {
-    rec_t r{ doc, "ref" };
-    m.refs[ r.i64( "c" ) ].push_back( ref_t{ r.i64( "press" ), r.num( "sec" ) } );
-  }
-  else if ( kind == "use" )
-  {
-    rec_t r{ doc, "use" };
-    m.uses.push_back( use_t{ r.i64( "c" ), r.i64( "press" ), r.num( "t" ) } );
-  }
-  else if ( kind == "hit" )
-  {
-    rec_t r{ doc, "hit" };
-    process_hit( m, r );
-  }
-}
-
 // refund_fractions_u + _cap_fractions (D-05u, "time actually saved"): cast press c -> [(refunding press r, fraction of c's holdings)], sorted by r.
 // For a press c whose cast used cycle y (a `use` record) of length L: N = y's open + L minus the net seconds of y's entries whose cause is NOT a
 // press (press < 0); u = the time of c's cast; P = the sum of the positive net seconds of the refunding presses r != c; the fraction is
@@ -1348,17 +1105,17 @@ using fraction_list_t = std::vector<std::pair<std::int64_t, double>>;
 std::map<std::int64_t, fraction_list_t> refund_fractions_u( const module_t& m )
 {
   std::map<std::int64_t, fraction_list_t> out;
-  static const std::vector<ref_t> none;
-  for ( const use_t& u : m.uses )
+  static const std::vector<refund_rec_t> none;
+  for ( const use_rec_t& u : m.uses )
   {
-    const auto cit        = m.cycles.find( u.c );
+    const auto cit        = m.cycles.find( u.cycle );
     const std::int64_t c  = u.press;
     if ( cit == m.cycles.end() || cit->second.len <= 0.0 || c < 0 )
       continue;
-    const auto rit      = m.refs.find( u.c );
+    const auto rit      = m.refs.find( u.cycle );
     const auto& entries = rit == m.refs.end() ? none : rit->second;
     fraction_list_t net;  // press -> net seconds, insertion order (a Python dict)
-    for ( const ref_t& r : entries )
+    for ( const refund_rec_t& r : entries )
       if ( r.press >= 0 && r.press != c )
       {
         bool found = false;
@@ -1382,7 +1139,7 @@ std::map<std::int64_t, fraction_list_t> refund_fractions_u( const module_t& m )
       continue;
     const double length = cit->second.len;
     double no_press     = 0.0;
-    for ( const ref_t& r : entries )
+    for ( const refund_rec_t& r : entries )
       if ( r.press < 0 )
         no_press += r.sec;
     const double natural  = cit->second.t + length - no_press;
@@ -1699,22 +1456,6 @@ std::shared_ptr<module_t> configure( sim_t* root, credit_mode_t mode, const std:
   return m;
 }
 
-void consume_line( module_t& m, std::string_view line )
-{
-  const std::string_view kind = kind_of( line );
-  if ( kind != "fb" && kind != "pr" && kind != "app" && kind != "hit" && kind != "ln" && kind != "frm" && kind != "rd" && kind != "dr" && kind != "cyc" &&
-       kind != "ref" && kind != "use" )
-    return;  // the other record kinds (xp, cs, zr, cdn, ext, ...) move nothing in this rule
-  if ( ( kind == "rd" || kind == "dr" ) && m.verdicts.gate_buffs.empty() )
-    return;  // no gate site in the table: no read or draw can matter
-  rapidjson::Document doc;
-  std::string text( line );
-  doc.Parse<rapidjson::kParseFullPrecisionFlag>( text.c_str() );
-  if ( doc.HasParseError() || !doc.IsObject() )
-    fail( fmt::format( "a ledger record line is not a JSON object: {}", text.substr( 0, 80 ) ) );
-  process_record( m, doc, kind );
-}
-
 namespace
 {
 void write_fight_records( module_t& m, std::uint32_t iteration, bool collected, bool funnel, const std::vector<std::int64_t>* seqs )
@@ -1779,6 +1520,358 @@ void write_footer( module_t& m, const std::array<std::uint32_t, 12>& ledger_coun
   m.bcr_open = false;
 }
 
+// ==========================================================================================================================================
+// THE FIXTURE CONVERTER (plan 03b, owner ruling 10). The ONLY ledger-record JSON code left in the engine: it reads a fixture line, builds the
+// typed record of its kind exactly as the JSON backend's text means it, and calls the same `on_*` entry point the live ledger calls. Refusals
+// about JSON SHAPE (a missing field, a wrong JSON type, a hit without `win`) are here; refusals about VALUES are in the entry points. It was MOVED
+// from the module's former line parser, not rewritten: the fixture path's meaning is unchanged (a field the old parser read lazily is still read
+// lazily). The verdict table loader is a configuration read and keeps its own small JSON reads.
+// ==========================================================================================================================================
+namespace
+{
+namespace converter
+{
+struct rec_t
+{
+  const rapidjson::Value& v;
+  const char* kind;
+
+  const rapidjson::Value& field( const char* name ) const
+  {
+    if ( !v.IsObject() || !v.HasMember( name ) )
+      fail( fmt::format( "{} record lacks required field '{}'", kind, name ) );
+    return v[ name ];
+  }
+  bool has( const char* name ) const { return v.IsObject() && v.HasMember( name ); }
+  std::int64_t i64( const char* name ) const
+  {
+    const auto& f = field( name );
+    if ( f.IsInt64() )
+      return f.GetInt64();
+    if ( f.IsUint64() )
+      return static_cast<std::int64_t>( f.GetUint64() );
+    fail( fmt::format( "{} record: field '{}' is not an integer", kind, name ) );
+  }
+  std::uint64_t u64( const char* name ) const
+  {
+    const auto& f = field( name );
+    if ( f.IsUint64() )
+      return f.GetUint64();
+    if ( f.IsInt64() && f.GetInt64() >= 0 )
+      return static_cast<std::uint64_t>( f.GetInt64() );
+    fail( fmt::format( "{} record: field '{}' is not a non-negative integer", kind, name ) );
+  }
+  double num( const char* name, bool null_is_zero = false ) const
+  {
+    const auto& f = field( name );
+    if ( f.IsNumber() )
+      return f.GetDouble();
+    if ( null_is_zero && f.IsNull() )
+      return 0.0;
+    fail( fmt::format( "{} record: field '{}' is not a number", kind, name ) );
+  }
+  bool boolean( const char* name ) const
+  {
+    const auto& f = field( name );
+    if ( !f.IsBool() )
+      fail( fmt::format( "{} record: field '{}' is not a boolean", kind, name ) );
+    return f.GetBool();
+  }
+  std::string str( const char* name ) const
+  {
+    const auto& f = field( name );
+    if ( !f.IsString() )
+      fail( fmt::format( "{} record: field '{}' is not a string", kind, name ) );
+    return std::string( f.GetString(), f.GetStringLength() );
+  }
+  const rapidjson::Value& arr( const char* name ) const
+  {
+    const auto& f = field( name );
+    if ( !f.IsArray() )
+      fail( fmt::format( "{} record: field '{}' is not an array", kind, name ) );
+    return f;
+  }
+};
+
+// The kind of a record line without parsing it: the string after the first `"k"` key.
+std::string_view kind_of( std::string_view line )
+{
+  const auto k = line.find( "\"k\"" );
+  if ( k == std::string_view::npos )
+    return {};
+  std::size_t i = k + 3;
+  while ( i < line.size() && ( line[ i ] == ' ' || line[ i ] == ':' ) )
+    ++i;
+  if ( i >= line.size() || line[ i ] != '"' )
+    return {};
+  ++i;
+  const auto e = line.find( '"', i );
+  if ( e == std::string_view::npos )
+    return {};
+  return line.substr( i, e - i );
+}
+
+// parse_applier: the SHAPE of an applier entry [press, cls, stacks, ...]; the class value is checked by the entry points. A three-element entry
+// (the stacked form) is read with covering = true, as is a covering entry.
+applier_t parse_applier( const rapidjson::Value& raw, const char* where )
+{
+  if ( !raw.IsArray() || raw.Size() < 3 )
+    fail( fmt::format( "{}: an applier entry is not [press, cls, stacks, ...]", where ) );
+  if ( !raw[ 0 ].IsInt64() || !raw[ 1 ].IsInt() || !raw[ 2 ].IsNumber() )
+    fail( fmt::format( "{}: an applier entry has a non-numeric field", where ) );
+  const bool covering = raw.Size() > 3 ? ( raw[ 3 ].IsBool() ? raw[ 3 ].GetBool() : raw[ 3 ].GetDouble() != 0.0 ) : true;
+  return applier_t{ raw[ 0 ].GetInt64(), raw[ 1 ].GetInt(), raw[ 2 ].GetDouble(), covering };
+}
+
+std::vector<applier_t> parse_appliers( const rapidjson::Value& list, const char* where )
+{
+  std::vector<applier_t> out;
+  for ( const auto& a : list.GetArray() )
+    out.push_back( parse_applier( a, where ) );
+  return out;
+}
+
+passset_t parse_passset( const rec_t& r )
+{
+  passset_t out;
+  for ( const auto& c : r.arr( "cand" ).GetArray() )
+  {
+    rec_t cr{ c, "cand entry" };
+    cand_t cd;
+    const std::int64_t bit = cr.i64( "i" );
+    if ( bit < 0 || bit > 63 )
+      fail_candidate_bit( r.kind, bit );
+    cd.bit   = static_cast<std::uint32_t>( bit );
+    cd.name  = cr.str( "name" );
+    cd.owner = cr.str( "owner" );
+    cd.kind  = cr.str( "kind" );
+    cd.cov   = cr.field( "cov" ).IsBool() ? cr.boolean( "cov" ) : cr.num( "cov" ) != 0.0;
+    cd.app   = parse_appliers( cr.arr( "app" ), "cand.app" );
+    out.cands.push_back( std::move( cd ) );
+  }
+  for ( const auto& p : r.arr( "pass" ).GetArray() )
+  {
+    rec_t pr{ p, "pass entry" };
+    pass_t ps;
+    const std::string k = pr.str( "kind" );
+    ps.kind             = k == "ref" ? PASS_REF : ( k == "hide" ? PASS_HIDE : PASS_OTHER );
+    ps.hid              = pr.u64( "hid" );
+    ps.pre              = pr.num( "pre", true );
+    ps.cc               = pr.num( "cc", true );
+    ps.cb               = pr.num( "cb", true );
+    ps.per              = pr.num( "per", true );
+    const auto& viol    = pr.field( "viol" );
+    ps.viol             = viol.IsBool() ? viol.GetBool() : ( viol.IsNumber() && viol.GetDouble() != 0.0 );
+    out.passes.push_back( ps );
+  }
+  return out;
+}
+
+launch_rec_t convert_launch( const rec_t& r )
+{
+  launch_rec_t ln;
+  ln.frame = r.i64( "frame" );
+  ln.order = r.has( "order" ) ? r.i64( "order" ) : -1;
+  ln.ca    = r.has( "ca" ) && r.field( "ca" ).IsString() ? r.str( "ca" ) : std::string();
+  // parse_switch: only a `switch` launch with a truthy `sw` (null, an empty object or list, "" and false are falsy); an entry is the object
+  // {buff, owner?, app?, ...} or the list [buff, appliers]
+  if ( r.str( "lk" ) == "switch" && r.has( "sw" ) )
+  {
+    const auto& sw    = r.field( "sw" );
+    const bool truthy = !( sw.IsNull() || ( sw.IsObject() && sw.MemberCount() == 0 ) || ( sw.IsArray() && sw.Size() == 0 ) ||
+                           ( sw.IsString() && sw.GetStringLength() == 0 ) || ( sw.IsBool() && !sw.GetBool() ) || ( sw.IsNumber() && sw.GetDouble() == 0.0 ) );
+    if ( truthy )
+    {
+      if ( sw.IsObject() )
+      {
+        rec_t sr{ sw, "ln switch entry" };
+        ln.sw.name  = sr.str( "buff" );
+        ln.sw.owner = sr.has( "owner" ) ? sr.str( "owner" ) : std::string();
+        if ( sr.has( "app" ) )
+          ln.sw.app = parse_appliers( sr.arr( "app" ), "ln switch entry" );
+      }
+      else if ( sw.IsArray() && sw.Size() >= 2 && sw[ 0 ].IsString() && sw[ 1 ].IsArray() )
+      {
+        ln.sw.name = std::string( sw[ 0 ].GetString(), sw[ 0 ].GetStringLength() );
+        ln.sw.app  = parse_appliers( sw[ 1 ], "ln switch entry" );
+      }
+      else
+        fail( "ln record: the switch entry is neither {buff, ...} nor [buff, appliers]" );
+      ln.has_switch = true;
+    }
+  }
+  // parse_swing_speed: only a `swing` launch with a non-empty `sf`; an entry is the object {buff, owner?, app?, f?} or the list [buff, app]
+  // (no factor: dropped, but its appliers are still validated like the reference's parse_buff_entry does)
+  if ( r.str( "lk" ) == "swing" && r.has( "sf" ) && r.field( "sf" ).IsArray() )
+    for ( const auto& raw : r.field( "sf" ).GetArray() )
+    {
+      launch_buff_t sp;
+      bool has_f = false;
+      if ( raw.IsObject() )
+      {
+        rec_t sr{ raw, "ln speed entry" };
+        sp.name  = sr.str( "buff" );
+        sp.owner = sr.has( "owner" ) ? sr.str( "owner" ) : std::string();
+        if ( sr.has( "app" ) )
+          sp.app = parse_appliers( sr.arr( "app" ), "ln speed entry" );
+        if ( sr.has( "f" ) && !sr.field( "f" ).IsNull() )
+        {
+          sp.factor = sr.num( "f" );
+          has_f     = true;
+        }
+      }
+      else if ( raw.IsArray() && raw.Size() >= 2 && raw[ 1 ].IsArray() )
+        sp.app = parse_appliers( raw[ 1 ], "ln speed entry" );
+      else
+        fail( "ln record: a speed entry is neither {buff, ...} nor [buff, appliers]" );
+      if ( has_f && sp.factor > 0.0 )
+        ln.speed.push_back( std::move( sp ) );
+      else
+        check_appliers( sp.app, "ln speed entry" );  // a dropped entry never reaches an entry point: its appliers are still validated
+    }
+  return ln;
+}
+
+hit_rec_t convert_hit( const rec_t& h )
+{
+  hit_rec_t out;
+  out.ra  = h.num( "ra", true );
+  // (a value outside the int range cannot be a base class: -1 is refused by on_hit like any other non-class)
+  const std::int64_t cls = h.i64( "cls" );
+  out.cls   = cls < INT32_MIN || cls > INT32_MAX ? -1 : static_cast<int>( cls );
+  out.press = h.i64( "press" );
+  out.seq   = h.i64( "seq" );
+  if ( !h.has( "win" ) )
+    fail( "hit record lacks required field 'win' (the ledger does not announce 2026-10-04-s1-win)" );
+  out.win  = h.i64( "win" );
+  out.ch   = h.has( "ch" ) && h.field( "ch" ).IsBool() && h.field( "ch" ).GetBool();
+  out.pet  = h.has( "pet" ) && h.field( "pet" ).IsBool() && h.field( "pet" ).GetBool();
+  out.exp_excl = h.boolean( "exp_excl" );
+  out.exp      = out.exp_excl ? 0.0 : h.num( "exp", true );
+  const std::int64_t status = h.i64( "status" );
+  out.status                = status < INT32_MIN || status > INT32_MAX ? -1 : static_cast<int>( status );
+  // The rest of the record is read only when the module's arithmetic can reach it (the old parser read it lazily): a status other than 0/1, or
+  // nothing to move, ends the distribution at the whole amount.
+  const bool main_path = ( out.status == 0 || out.status == 1 ) && !( out.ra == 0.0 && out.exp == 0.0 );
+  if ( !main_path )
+    return out;
+  const std::string res = h.str( "res" );
+  out.crit              = res == "crit" || res == "crit-block" || res == "crit_block" || res == "multistrike_crit";
+  out.ps                = parse_passset( h );
+  out.tick              = h.str( "at" ) == "t";
+  for ( const auto& pid : h.arr( "par" ).GetArray() )
+    if ( pid.IsUint64() )
+      out.par.push_back( pid.GetUint64() );
+  out.launch = h.i64( "launch" );
+  return out;
+}
+
+// One record line -> its typed record -> its entry point. `live_path` is the Task 1 ledger feed: hits arrive typed from the ledger hook there, so a hit
+// line is skipped (a double feed would double the items).
+void convert_line( module_t& m, std::string_view line, bool live_path )
+{
+  const std::string_view kind = kind_of( line );
+  if ( kind != "fb" && kind != "pr" && kind != "app" && kind != "hit" && kind != "ln" && kind != "frm" && kind != "rd" && kind != "dr" && kind != "cyc" &&
+       kind != "ref" && kind != "use" )
+    return;  // the other record kinds (xp, cs, zr, cdn, ext, ...) move nothing in this rule
+  if ( live_path && kind == "hit" )
+    return;
+  if ( ( kind == "rd" || kind == "dr" ) && m.verdicts.gate_buffs.empty() )
+    return;  // no gate site in the table: no read or draw can matter
+  rapidjson::Document doc;
+  std::string text( line );
+  doc.Parse<rapidjson::kParseFullPrecisionFlag>( text.c_str() );
+  if ( doc.HasParseError() || !doc.IsObject() )
+    fail( fmt::format( "a ledger record line is not a JSON object: {}", text.substr( 0, 80 ) ) );
+  if ( kind == "fb" )
+    on_fight_begin( m );
+  else if ( kind == "pr" )
+  {
+    rec_t r{ doc, "pr" };
+    on_press( m, press_rec_t{ r.i64( "press" ), r.i64( "seq" ) } );
+  }
+  else if ( kind == "app" )
+  {
+    rec_t r{ doc, "app" };
+    application_rec_t a;
+    a.id = r.u64( "h" );
+    a.ps = parse_passset( r );
+    on_application( m, std::move( a ) );
+  }
+  else if ( kind == "ln" )
+  {
+    rec_t r{ doc, "ln" };
+    launch_rec_t ln = convert_launch( r );
+    ln.id           = r.i64( "l" );
+    on_launch( m, std::move( ln ) );
+  }
+  else if ( kind == "frm" )
+  {
+    rec_t r{ doc, "frm" };
+    frame_rec_t fr;
+    fr.launch = r.i64( "launch" );
+    fr.action = r.has( "action" ) && r.field( "action" ).IsString() ? r.str( "action" ) : std::string();
+    fr.kind   = r.has( "kind" ) && r.field( "kind" ).IsString() ? r.str( "kind" ) : std::string();
+    fr.cls    = r.has( "cls" ) ? r.i64( "cls" ) : 0;
+    fr.id     = r.i64( "f" );
+    on_frame( m, std::move( fr ) );
+  }
+  else if ( kind == "rd" )
+  {
+    rec_t r{ doc, "rd" };
+    read_rec_t rd;
+    rd.nz   = r.boolean( "nz" );
+    rd.buff = r.str( "buff" );
+    if ( read_is_kept( m, rd.nz, rd.buff ) )  // the rest is read only for a read the module keeps
+    {
+      rd.order = r.i64( "o" );
+      rd.owner = r.str( "owner" );
+      rd.app   = parse_appliers( r.arr( "app" ), "rd.app" );
+      rd.cov   = r.has( "cov" ) && !r.field( "cov" ).IsNull() && ( r.field( "cov" ).IsBool() ? r.field( "cov" ).GetBool() : r.field( "cov" ).GetDouble() != 0.0 );
+      rd.frame = r.i64( "f" );
+    }
+    else
+      rd.frame = r.i64( "f" );
+    on_read( m, std::move( rd ) );
+  }
+  else if ( kind == "dr" )
+  {
+    rec_t r{ doc, "dr" };
+    draw_rec_t d;
+    d.frame = r.i64( "f" );
+    if ( draw_is_kept( m, d.frame ) )
+      d.order = r.i64( "o" );
+    on_draw( m, std::move( d ) );
+  }
+  else if ( kind == "cyc" )
+  {
+    rec_t r{ doc, "cyc" };
+    on_cycle( m, cycle_rec_t{ r.i64( "c" ), r.num( "t" ), r.num( "len" ) } );
+  }
+  else if ( kind == "ref" )
+  {
+    rec_t r{ doc, "ref" };
+    on_refund( m, refund_rec_t{ r.i64( "c" ), r.i64( "press" ), r.num( "sec" ) } );
+  }
+  else if ( kind == "use" )
+  {
+    rec_t r{ doc, "use" };
+    on_use( m, use_rec_t{ r.i64( "c" ), r.i64( "press" ), r.num( "t" ) } );
+  }
+  else if ( kind == "hit" )
+  {
+    rec_t r{ doc, "hit" };
+    on_hit( m, convert_hit( r ) );
+  }
+}
+}  // namespace converter
+}  // namespace
+
+void consume_line( module_t& m, std::string_view line )
+{
+  converter::convert_line( m, line, /*live_path=*/true );
+}
+
 // ---- the fixture entry ----
 int run_selftest( sim_t* sim )
 {
@@ -1813,14 +1906,14 @@ int run_selftest( sim_t* sim )
       ++lineno;
       if ( line.empty() )
         continue;
-      const std::string_view kind = kind_of( line );
+      const std::string_view kind = converter::kind_of( line );
       if ( kind == "fe" || kind == "ftr" )
       {
         rapidjson::Document doc;
         doc.Parse<rapidjson::kParseFullPrecisionFlag>( line.c_str() );
         if ( doc.HasParseError() || !doc.IsObject() )
           fail( fmt::format( "{}:{}: not a JSON object", sim->rl_buff_credit_selftest_str, lineno ) );
-        rec_t r{ doc, kind == "fe" ? "fe" : "ftr" };
+        converter::rec_t r{ doc, kind == "fe" ? "fe" : "ftr" };
         if ( kind == "fe" )
         {
           const bool collected = r.boolean( "collected" );
@@ -1835,7 +1928,7 @@ int run_selftest( sim_t* sim )
         }
         continue;
       }
-      consume_line( *m, line );
+      converter::convert_line( *m, line, /*live_path=*/false );
     }
     if ( !seen_ftr )
       fail( fmt::format( "{}: the fixture has no footer record", sim->rl_buff_credit_selftest_str ) );
