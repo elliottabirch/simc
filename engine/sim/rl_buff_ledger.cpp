@@ -9,6 +9,8 @@
 
 #include "sim/rl_buff_ledger.hpp"
 
+#include "sim/rl_buff_credit.hpp"
+
 #include "action/action.hpp"
 #include "action/action_state.hpp"
 #include "action/dbc_proc_callback.hpp"
@@ -48,6 +50,8 @@ constexpr int FORMAT_VERSION = 1;
 constexpr std::size_t PASS_HIST_SIZE = 64;
 // LEDGER-FORMAT-S1.md (261003-s1c plan 01 Task 2): the dated amendment this build announces in `hdr.amendments`.
 #define S1_AMENDMENT "2026-10-03-s1-dk-ch"
+// LEDGER-FORMAT-S1.md amendment 2 (261003-s1c plan 03): `win` on every `hit` and `xp` record (the decision window current at the record).
+#define S1_WIN_AMENDMENT "2026-10-04-s1-win"
 
 // The record kinds this build writes (the `hdr` record's `emits` list). stage0_checks.py reads
 // it to decide which identities it can assert.
@@ -77,6 +81,10 @@ struct state_t
   std::string path;
   // 261003-s1c plan 02: the sink. text = the JSON backend (formats records, writes the file); false = the memory backend.
   bool text = true;
+  // 261003-s1c plan 03: the credit module (null: credit off). With it on, every record the hooks format is also handed to it (and, when no
+  // ledger file was asked for, dropped from the buffer: `to_file` false). The credit module is a consumer of the JSON text, so it needs `text`.
+  std::shared_ptr<rl_buff_credit::module_t> credit;
+  bool to_file = true;
   std::string summary_path;                           // memory backend: optional end-of-run summary file
   // Records by kind, both backends. fight_rec_n is the current fight's tally (cleared with fight_buf at fight begin: what the JSON backend
   // would never flush for a fight that does not end, e.g. the trailing reset after the last iteration, is never counted either);
@@ -462,7 +470,19 @@ inline void emit( state_t* s, rec_kind_t kind, Format&& format )
 {
   ++s->fight_rec_n[ kind ];
   if ( s->text )
-    format( s->fight_buf );
+  {
+    if ( s->credit )
+    {
+      // 261003-s1c plan 03: the line just formatted goes to the credit module; without a ledger file it is not kept.
+      const std::size_t mark = s->fight_buf.size();
+      format( s->fight_buf );
+      rl_buff_credit::consume_line( *s->credit, std::string_view( s->fight_buf ).substr( mark ) );
+      if ( !s->to_file )
+        s->fight_buf.resize( mark );
+    }
+    else
+      format( s->fight_buf );
+  }
 }
 
 // 261003-s1c plan 01 Task 2 (production f549d4f346, Phase 259): the class byte of a stamp may carry RL_CAUSE_DECK_MARK (0x80), which is
@@ -564,11 +584,20 @@ void open_and_write_header( sim_t* sim )
   auto st = std::make_shared<state_t>();
   st->path = root->rl_buff_ledger_str;
   st->probe_action = root->rl_buff_ledger_refund_probe_str;
+  st->credit       = root->rl_bc_state;
   // 261003-s1c plan 02: the memory backend opens no file and writes no header (the summary file, when asked for, is written at the end).
   if ( root->rl_buff_ledger_sink_str == "memory" )
   {
     st->text         = false;
     st->summary_path = root->rl_buff_ledger_summary_str;
+    root->rl_bl_state = std::move( st );
+    g_ledger_open     = true;
+    return;
+  }
+  // 261003-s1c plan 03: credit on, no ledger file asked for: the records are formatted and handed to the credit module only.
+  if ( st->path.empty() && st->credit )
+  {
+    st->to_file       = false;
     root->rl_bl_state = std::move( st );
     g_ledger_open     = true;
     return;
@@ -595,7 +624,7 @@ void open_and_write_header( sim_t* sim )
   b += EMITS_JSON;
   // 261003-s1c plan 01 Task 2: announces LEDGER-FORMAT-S1.md (base classes in `cls`, the deck mark as `dk`, the chosen-enemy flag `ch`);
   // ledger_read.py then requires those fields.
-  b += ",\"amendments\":[\"" S1_AMENDMENT "\"]";
+  b += ",\"amendments\":[\"" S1_AMENDMENT "\",\"" S1_WIN_AMENDMENT "\"]";
   b += "}\n";
   st->out << b;
   st->out.flush();
@@ -761,7 +790,7 @@ void fight_end( sim_t* sim )
   s->run_presses += s->fight_presses;
   s->run_xp += s->fight_xp;
 
-  if ( s->text )
+  if ( s->text && s->to_file )
     flush_fight( *s );
 }
 
@@ -1034,9 +1063,22 @@ void write_footer( sim_t* sim )
     }
     return;
   }
-  s->out << b;
-  s->out.flush();
-  s->out.close();
+  if ( s->to_file )
+  {
+    s->out << b;
+    s->out.flush();
+    s->out.close();
+  }
+  if ( s->credit )
+  {
+    // 261003-s1c plan 03: the `.bcr` footer carries the ledger's twelve required-zero counters (translog.BCR_REQUIRED_ZERO_NAMES order).
+    auto sat = []( std::uint64_t v ) { return static_cast<std::uint32_t>( std::min<std::uint64_t>( v, 0xffffffffu ) ); };
+    const std::array<std::uint32_t, 12> c = { sat( s->lost_press ),         sat( s->reference_mismatch ), sat( s->restoring_mismatch ),
+                                              sat( s->stale_hit_id ),       sat( s->unsafe_hits ),        sat( s->ext_unattributed ),
+                                              sat( s->tick_parent_stale ),  sat( s->frame_pop_mismatch ), sat( s->applier_reconciled ),
+                                              sat( s->cd_recovered ),       sat( s->nested_pass_refused ), sat( s->press_carry_overflow ) };
+    rl_buff_credit::write_footer( *s->credit, c );
+  }
 }
 
 std::int16_t carry_capture( const player_t* p )
@@ -1299,6 +1341,8 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
     }
     // Plan 06: the frame the hit's passes ran in (the sink's own frame when it had none).
     fmt::format_to( out_it( b ), ",\"fr\":{}", fr );
+    // 261003-s1c plan 03 (LEDGER-FORMAT-S1.md amendment 2): the decision window current at the hit, rl_credit_route's own `now_seq`.
+    fmt::format_to( out_it( b ), ",\"win\":{}", sim->solver_control_seq );
     if ( !pmc_text.empty() )
     {
       b += ",\"pmc\":";
@@ -1328,6 +1372,7 @@ void xp_record( player_t* p, const rl_cause_t& cause, double amount, const char*
     put_string( b, action_name != nullptr ? action_name : "" );
     b += ",\"actor\":";
     put_string( b, p->name() );
+    fmt::format_to( out_it( b ), ",\"win\":{}", sim->solver_control_seq );  // amendment 2: the decision window
     b += "}\n";
   } );
 }

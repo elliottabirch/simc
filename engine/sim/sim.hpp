@@ -86,6 +86,11 @@ class recorder_t;
 // sim.hpp must NOT include rl_buff_ledger.hpp; the state type is defined in rl_buff_ledger.cpp.
 // Held in a std::shared_ptr (type-erased deleter), exactly like rl_rng_recorder below.
 struct sim_t;
+namespace rl_buff_credit
+{
+struct module_t;
+}  // namespace rl_buff_credit
+
 namespace rl_buff_ledger
 {
 struct state_t;
@@ -835,6 +840,16 @@ struct sim_t : private sc_thread_t
   std::string rl_buff_ledger_refund_probe_str;
   bool rl_bl_probe = false;
   std::shared_ptr<rl_buff_ledger::state_t> rl_bl_state;
+  // 261003-s1c plan 03 (fork clone simc-s1c only): rl_buff_credit=off|nobody|full (absent = off) switches on the buff-applier credit rule (D-05u),
+  // a consumer of the ledger's records that writes `<rl_translog>.bcr` (rl_buff_credit.hpp, BCR-FORMAT.md). nobody/full need rl_translog= and
+  // rl_buff_credit_verdicts=<gate verdict table JSON>, and are refused with rl_buff_ledger_sink=memory. `rl_bc_on` is set once, in sim_t::init.
+  // rl_buff_credit_selftest=<ledger fixture JSON-lines> with rl_buff_credit_selftest_out=<path.bcr> is the fixture entry: no fight runs.
+  std::string rl_buff_credit_str;
+  std::string rl_buff_credit_verdicts_str;
+  std::string rl_buff_credit_selftest_str;
+  std::string rl_buff_credit_selftest_out_str;
+  bool rl_bc_on = false;
+  std::shared_ptr<rl_buff_credit::module_t> rl_bc_state;
   // The replay option (tstl-sylvanas phase 253, plan 253-02, REP-01/D-01/D-16). rl_rng_replay=
   // <path>, off by default (empty string), byte-identical to today's behaviour when unset. A
   // second fight loads the recording at <path> and, at every roll, reuses the recorded raw

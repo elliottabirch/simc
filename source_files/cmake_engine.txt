@@ -160,6 +160,7 @@ sim/rl_target_select.hpp
 sim/rl_translog.hpp
 sim/rl_rng_record.hpp
 sim/sheet_fight.hpp
+sim/rl_buff_credit.hpp
 sim/rl_buff_ledger.hpp
 sim/expressions.hpp
 sim/gain.hpp
@@ -363,6 +364,7 @@ sim/rl_target_select.cpp
 sim/rl_translog.cpp
 sim/rl_rng_record.cpp
 sim/sheet_fight.cpp
+sim/rl_buff_credit.cpp
 sim/rl_buff_ledger.cpp
 sim/expressions.cpp
 sim/gear_stats.cpp

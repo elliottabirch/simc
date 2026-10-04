@@ -13,6 +13,7 @@
 
 #include "player/pet.hpp"
 #include "player/player.hpp"
+#include "sim/rl_buff_credit.hpp"
 #include "sim/rl_buff_ledger.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_rng_record.hpp"
@@ -1067,6 +1068,10 @@ void record_close( sim_t* sim )
       fmt::print( stderr, "RL_ATTR_PRE_FIGHT {}\n", p->rl_attr_pre_fight_real );
     }
   }
+  // 261003-s1c plan 03: the `.bcr` buff-credit sidecar's FIGHT + DECISION records for this fight, right after the `.attr` block above (BCR-FORMAT.md):
+  // the credit module folds the fight's hits per decision over the translog's own decisions. No-op unless rl_buff_credit=nobody|full.
+  if ( root->rl_bc_on )
+    rl_buff_credit::write_fight( *root->rl_bc_state, r.iteration, collected, root->solver_funnel_mode, root->rl_translog_pending_seqs );
   root->rl_translog_pending_seqs.clear();
 
   root->rl_translog_pending_decisions = 0;
