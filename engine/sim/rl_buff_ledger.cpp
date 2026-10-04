@@ -159,8 +159,16 @@ struct state_t
     const player_t* p = nullptr;
     const action_t* owner = nullptr;
     const action_t* act = nullptr;  // owner, else the action whose code runs in the scope (may be null)
-    // (buff, non-zero) pairs already written as `rd` in this frame: at most one record per pair.
-    std::vector<std::pair<const buff_t*, bool>> seen;
+    // (buff, non-zero) pairs already written as `rd` in this frame: at most one record per pair. 261003-s1c plan 02 (lever 3): the
+    // test is the buff's own stamp (buff_t::rl_bl_seen_ser == this frame's serial); this list only remembers what each stamp held before
+    // this frame wrote it, so that popping the frame can put the outer frame's stamp back (see frame_read, frame_pop).
+    struct seen_t
+    {
+      buff_t* b;
+      std::uint64_t prev;  // the stamp before this frame wrote its own
+      int nz;              // which stamp: 0 zero read, 1 non-zero read
+    };
+    std::vector<seen_t> seen;
     // 261003-s1c plan 02 (lever 1): a process-wide unique number for this frame (the stamp buff_t::rl_bl_seen_ser compares with).
     std::uint64_t serial = 0;
     // True when the last record written in this frame is a `dr`: a run of draws with no read, consume or
@@ -168,6 +176,8 @@ struct state_t
     bool last_dr = false;
   };
   std::vector<frame_t> frames;
+  // Lever 3: the capacity of popped frames' `seen` lists is reused (a frame is pushed per dispatch, tens of thousands per fight).
+  std::vector<std::vector<frame_t::seen_t>> seen_pool;
   std::int32_t next_frame = 0;
   std::int64_t next_order = 0;
   // Plan 06: damage-over-time condition reads of this fight, per dot: [frame non-zero, frame zero, pass
@@ -1497,19 +1507,15 @@ void frame_read( const buff_t* cb, int stack, double value )
   // include stacks still waiting in the aura delay while the buff itself is not up: non-zero, flagged `pend`.
   (void) value;
   const bool nz = stack != 0;
-  // Lever 1: a stamp equal to this frame's serial says the pair was already written here (exact). A stamp that differs (another frame
-  // read the buff in between, e.g. a nested frame that has since been popped) falls back to the scan of this frame's own list.
+  // Lever 1 + 3: the stamp of (buff, nz) holds the serial of the innermost open frame that has written the pair (frame_pop puts the
+  // outer frame's stamp back), so a stamp equal to this frame's serial says the pair was already written here, exactly as the scan of
+  // this frame's list did, and a stamp that differs says it was not.
   buff_t* const stamped = const_cast<buff_t*>( cb );
-  if ( stamped->rl_bl_seen_ser[ nz ? 1 : 0 ] == f.serial )
+  std::uint64_t& stamp  = stamped->rl_bl_seen_ser[ nz ? 1 : 0 ];
+  if ( stamp == f.serial )
     return;
-  for ( const auto& e : f.seen )
-    if ( e.first == cb && e.second == nz )
-    {
-      stamped->rl_bl_seen_ser[ nz ? 1 : 0 ] = f.serial;
-      return;
-    }
-  f.seen.emplace_back( cb, nz );
-  stamped->rl_bl_seen_ser[ nz ? 1 : 0 ] = f.serial;
+  f.seen.push_back( { stamped, stamp, nz ? 1 : 0 } );
+  stamp = f.serial;
   f.last_dr = false;
   ++s->reads_written;
 
@@ -1637,6 +1643,11 @@ std::int32_t frame_push( player_t* p, const rl_cause_t& cause, const action_t* o
     return -1;
 
   state_t::frame_t f;
+  if ( !s->seen_pool.empty() )
+  {
+    f.seen = std::move( s->seen_pool.back() );
+    s->seen_pool.pop_back();
+  }
   f.id    = s->next_frame++;
   f.serial = ++g_frame_serial;
   f.p     = p;
@@ -1678,6 +1689,15 @@ void frame_pop( player_t* p, std::int32_t frame )
       continue;
     if ( i + 1 != s->frames.size() )
       ++s->frame_pop_mismatch;
+    // Lever 3: innermost frame first, last write first: every stamp this frame wrote goes back to what it held before.
+    for ( std::size_t k = s->frames.size(); k-- > i; )
+    {
+      auto& seen = s->frames[ k ].seen;
+      for ( std::size_t e = seen.size(); e-- > 0; )
+        seen[ e ].b->rl_bl_seen_ser[ seen[ e ].nz ] = seen[ e ].prev;
+      seen.clear();
+      s->seen_pool.push_back( std::move( seen ) );
+    }
     s->frames.erase( s->frames.begin() + static_cast<std::ptrdiff_t>( i ), s->frames.end() );
     g_frame_depth = s->frames.size();
     g_top_serial  = s->frames.empty() ? 0 : s->frames.back().serial;
