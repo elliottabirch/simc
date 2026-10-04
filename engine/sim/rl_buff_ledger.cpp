@@ -161,6 +161,8 @@ struct state_t
     const action_t* act = nullptr;  // owner, else the action whose code runs in the scope (may be null)
     // (buff, non-zero) pairs already written as `rd` in this frame: at most one record per pair.
     std::vector<std::pair<const buff_t*, bool>> seen;
+    // 261003-s1c plan 02 (lever 1): a process-wide unique number for this frame (the stamp buff_t::rl_bl_seen_ser compares with).
+    std::uint64_t serial = 0;
     // True when the last record written in this frame is a `dr`: a run of draws with no read, consume or
     // launch of this frame between them is one record (it cannot change what lies between a read and a launch).
     bool last_dr = false;
@@ -482,6 +484,9 @@ void flush_fight( state_t& s )
 bool g_shadow_active        = false;
 int g_busy                  = 0;
 std::size_t g_frame_depth   = 0;
+// 261003-s1c plan 02 (lever 1): the serial of the innermost open frame (0 when none), kept beside g_frame_depth at every place that changes
+// the frame stack. A read whose buff carries this serial in its stamp was already written in the innermost frame.
+std::uint64_t g_top_serial  = 0;
 std::vector<buff_t*> g_switch_stack;  // top = the buff of the proc switch whose callback is executing (or null)
 
 std::int32_t cur_frame( const state_t* st )
@@ -598,6 +603,7 @@ void fight_begin( sim_t* sim )
   s->next_cycle = 0;
   s->cd_live = false;
   g_frame_depth = 0;
+  g_top_serial  = 0;
   g_switch_stack.clear();
   update_gate();
   s->probe_done = false;
@@ -1308,6 +1314,10 @@ struct tap_read_t
   double value;
 };
 std::vector<tap_read_t> g_tap_reads;
+// 261003-s1c plan 02 (lever 1): the generation of the read tap (one per reference pass) and the serial of the last frame pushed. Both
+// only ever grow, so a stamp left on a buff by an earlier pass, frame, fight or iteration can never match a current one.
+std::uint64_t g_tap_gen      = 0;
+std::uint64_t g_frame_serial = 0;
 }  // namespace
 
 namespace
@@ -1485,10 +1495,19 @@ void frame_read( const buff_t* cb, int stack, double value )
   // include stacks still waiting in the aura delay while the buff itself is not up: non-zero, flagged `pend`.
   (void) value;
   const bool nz = stack != 0;
+  // Lever 1: a stamp equal to this frame's serial says the pair was already written here (exact). A stamp that differs (another frame
+  // read the buff in between, e.g. a nested frame that has since been popped) falls back to the scan of this frame's own list.
+  buff_t* const stamped = const_cast<buff_t*>( cb );
+  if ( stamped->rl_bl_seen_ser[ nz ? 1 : 0 ] == f.serial )
+    return;
   for ( const auto& e : f.seen )
     if ( e.first == cb && e.second == nz )
+    {
+      stamped->rl_bl_seen_ser[ nz ? 1 : 0 ] = f.serial;
       return;
+    }
   f.seen.emplace_back( cb, nz );
+  stamped->rl_bl_seen_ser[ nz ? 1 : 0 ] = f.serial;
   f.last_dr = false;
   ++s->reads_written;
 
@@ -1518,20 +1537,47 @@ void frame_read( const buff_t* cb, int stack, double value )
 }
 }  // namespace
 
+namespace
+{
+// Lever 1: the first read of a buff in a reference pass (the tap): kept apart so the per-read function below stays small.
+#if defined( __GNUC__ )
+__attribute__( ( noinline ) )
+#endif
+void tap_first_read( const buff_t* b, int stack, double value )
+{
+  const_cast<buff_t*>( b )->rl_bl_tap_gen = g_tap_gen;
+  g_tap_reads.push_back( { b, stack, value } );
+}
+
+#if defined( __GNUC__ )
+__attribute__( ( noinline ) )
+#endif
+void frame_read_slow( const buff_t* b, int stack, double value )
+{
+  frame_read( b, stack, value );
+}
+}  // namespace
+
+// Called on every buff read while g_reads_on is set (millions per ledger-on fight), so the repeat reads leave on one stamp compare:
+// in the tap, a buff already recorded in this reference pass (generation stamp); outside it, a (buff, non-zero) pair already written
+// in the innermost frame (frame serial stamp, exact: see buff_t::rl_bl_seen_ser; with no frame the serial is 0 and the slow path would
+// return at once as well, so a match there changes nothing).
 void note_read( const buff_t* b, int stack, double value )
 {
   if ( !g_tap_open )
   {
-    frame_read( b, stack, value );
+    if ( b->rl_bl_seen_ser[ stack != 0 ? 1 : 0 ] == g_top_serial )
+      return;
+    frame_read_slow( b, stack, value );
     return;
   }
   // A buff read as zero cannot be a candidate (only a read that returned something is a dependency).
   if ( stack == 0 && value == 0.0 )
     return;
-  for ( const tap_read_t& r : g_tap_reads )
-    if ( r.b == b )
-      return;
-  g_tap_reads.push_back( { b, stack, value } );
+  // One reference pass = one generation; the stamp replaces the scan of g_tap_reads (the tap is never nested).
+  if ( b->rl_bl_tap_gen == g_tap_gen )
+    return;
+  tap_first_read( b, stack, value );
 }
 
 // Plan 12: a buff whose source player (the engine's rl_buff_source_player rule) is the RL actor or one of its pets: the buffs the
@@ -1590,6 +1636,7 @@ std::int32_t frame_push( player_t* p, const rl_cause_t& cause, const action_t* o
 
   state_t::frame_t f;
   f.id    = s->next_frame++;
+  f.serial = ++g_frame_serial;
   f.p     = p;
   f.owner = owner;
   f.act   = owner != nullptr ? owner : ctx;
@@ -1610,6 +1657,7 @@ std::int32_t frame_push( player_t* p, const rl_cause_t& cause, const action_t* o
   const std::int32_t id = f.id;
   s->frames.push_back( std::move( f ) );
   g_frame_depth = s->frames.size();
+  g_top_serial  = s->frames.back().serial;
   update_gate();
   // Plan 12: the stage-0-only extension probe acts from inside a press frame (never set in an identity proof).
   if ( sim->rl_buff_ledger_ext_probe )
@@ -1630,6 +1678,7 @@ void frame_pop( player_t* p, std::int32_t frame )
       ++s->frame_pop_mismatch;
     s->frames.erase( s->frames.begin() + static_cast<std::ptrdiff_t>( i ), s->frames.end() );
     g_frame_depth = s->frames.size();
+    g_top_serial  = s->frames.empty() ? 0 : s->frames.back().serial;
     update_gate();
     return;
   }
@@ -2546,6 +2595,7 @@ struct tap_scope_t
     if ( on_ )
     {
       g_tap_reads.clear();
+      ++g_tap_gen;
       g_tap_open = true;
       update_gate();
     }

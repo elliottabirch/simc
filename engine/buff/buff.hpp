@@ -225,6 +225,12 @@ public:
   // True while start() / refresh() runs its bump: the bump hook then records this application (a single-stack buff
   // remembers applications, not bumps made by ticks), before any callback of the bump can read the buff.
   bool rl_bl_applying = false;
+  // 261003-s1c plan 02 (lever 1): O(1) first-read tests for the ledger's read de-duplication (it used to scan a vector per read).
+  // `rl_bl_tap_gen` = the generation of the read tap (one per reference pass) that last recorded this buff; `rl_bl_seen_ser[nz]` = the
+  // serial of the frame that last wrote an `rd` record for this buff with that non-zero flag. A stamp that matches is exact (the buff was
+  // recorded there); a stamp that does not match falls back to the old scan, so nested frames stay exact. Written only by the ledger.
+  std::uint64_t rl_bl_tap_gen = 0;
+  std::uint64_t rl_bl_seen_ser[ 2 ] = { 0, 0 };
 
   // Ticking buff values
   unsigned current_tick;
