@@ -7,6 +7,12 @@
 #include "player.hpp"
 #include "action/action_state.hpp"
 #include "action/action.hpp"
+#include "sim/rl_buff_ledger.hpp"
+
+// 261003-s1c plan 02 (lever 6): this build keeps assert() on (no -DNDEBUG), and every read of a VALID cache entry then recomputes the value
+// through the player's composite function just to compare it with the cached one. Inside the buff ledger's own passes (g_in_pass, false in
+// every fight without the ledger and outside the shadow scope) that check is skipped: it can only abort the program, never change a value,
+// and the ledger invalidates the caches before every pass anyway. Everywhere else the assertions are exactly as before.
 
 
 /**
@@ -93,7 +99,7 @@ double player_stat_cache_t::strength() const
     _strength               = player->strength();
   }
   else
-    assert( _strength == player->strength() );
+    assert( rl_buff_ledger::g_in_pass || ( _strength == player->strength() ) );
   return _strength;
 }
 
@@ -105,7 +111,7 @@ double player_stat_cache_t::agility() const
     _agility               = player->agility();
   }
   else
-    assert( _agility == player->agility() );
+    assert( rl_buff_ledger::g_in_pass || ( _agility == player->agility() ) );
   return _agility;
 }
 
@@ -117,7 +123,7 @@ double player_stat_cache_t::stamina() const
     _stamina               = player->stamina();
   }
   else
-    assert( _stamina == player->stamina() );
+    assert( rl_buff_ledger::g_in_pass || ( _stamina == player->stamina() ) );
   return _stamina;
 }
 
@@ -129,7 +135,7 @@ double player_stat_cache_t::intellect() const
     _intellect               = player->intellect();
   }
   else
-    assert( _intellect == player->intellect() );
+    assert( rl_buff_ledger::g_in_pass || ( _intellect == player->intellect() ) );
   return _intellect;
 }
 
@@ -141,7 +147,7 @@ double player_stat_cache_t::spirit() const
     _spirit               = player->spirit();
   }
   else
-    assert( _spirit == player->spirit() );
+    assert( rl_buff_ledger::g_in_pass || ( _spirit == player->spirit() ) );
   return _spirit;
 }
 
@@ -153,7 +159,7 @@ double player_stat_cache_t::spell_power( school_e s ) const
     _spell_power[ s ]      = player->composite_spell_power( s );
   }
   else
-    assert( _spell_power[ s ] == player->composite_spell_power( s ) );
+    assert( rl_buff_ledger::g_in_pass || ( _spell_power[ s ] == player->composite_spell_power( s ) ) );
   return _spell_power[ s ];
 }
 
@@ -165,7 +171,7 @@ double player_stat_cache_t::attack_power() const
     _attack_power               = player->composite_melee_attack_power();
   }
   else
-    assert( _attack_power == player->composite_melee_attack_power() );
+    assert( rl_buff_ledger::g_in_pass || ( _attack_power == player->composite_melee_attack_power() ) );
   return _attack_power;
 }
 
@@ -179,7 +185,7 @@ double player_stat_cache_t::weapon_attack_power( attack_power_type t ) const
     _weapon_attack_power[ type ] = player->composite_weapon_attack_power_by_type( t );
   }
   else
-    assert( _weapon_attack_power[ type ] == player->composite_weapon_attack_power_by_type( t ) );
+    assert( rl_buff_ledger::g_in_pass || ( _weapon_attack_power[ type ] == player->composite_weapon_attack_power_by_type( t ) ) );
   return _weapon_attack_power[ type ];
 }
 
@@ -191,7 +197,7 @@ double player_stat_cache_t::attack_expertise() const
     _attack_expertise         = player->composite_melee_expertise();
   }
   else
-    assert( _attack_expertise == player->composite_melee_expertise() );
+    assert( rl_buff_ledger::g_in_pass || ( _attack_expertise == player->composite_melee_expertise() ) );
   return _attack_expertise;
 }
 
@@ -221,7 +227,7 @@ double player_stat_cache_t::attack_crit_chance() const
     _attack_crit_chance               = player->composite_melee_crit_chance();
   }
   else
-    assert( _attack_crit_chance == player->composite_melee_crit_chance() );
+    assert( rl_buff_ledger::g_in_pass || ( _attack_crit_chance == player->composite_melee_crit_chance() ) );
   return _attack_crit_chance;
 }
 
@@ -233,7 +239,7 @@ double player_stat_cache_t::attack_haste() const
     _attack_haste               = player->composite_melee_haste();
   }
   else
-    assert( _attack_haste == player->composite_melee_haste() );
+    assert( rl_buff_ledger::g_in_pass || ( _attack_haste == player->composite_melee_haste() ) );
   return _attack_haste;
 }
 
@@ -245,7 +251,7 @@ double player_stat_cache_t::auto_attack_speed() const
     _auto_attack_speed               = player->composite_melee_auto_attack_speed();
   }
   else
-    assert( _auto_attack_speed == player->composite_melee_auto_attack_speed() );
+    assert( rl_buff_ledger::g_in_pass || ( _auto_attack_speed == player->composite_melee_auto_attack_speed() ) );
   return _auto_attack_speed;
 }
 
@@ -257,7 +263,7 @@ double player_stat_cache_t::spell_hit() const
     _spell_hit               = player->composite_spell_hit();
   }
   else
-    assert( _spell_hit == player->composite_spell_hit() );
+    assert( rl_buff_ledger::g_in_pass || ( _spell_hit == player->composite_spell_hit() ) );
   return _spell_hit;
 }
 
@@ -269,7 +275,7 @@ double player_stat_cache_t::spell_crit_chance() const
     _spell_crit_chance               = player->composite_spell_crit_chance();
   }
   else
-    assert( _spell_crit_chance == player->composite_spell_crit_chance() );
+    assert( rl_buff_ledger::g_in_pass || ( _spell_crit_chance == player->composite_spell_crit_chance() ) );
   return _spell_crit_chance;
 }
 
@@ -282,7 +288,7 @@ double player_stat_cache_t::rppm_haste_coeff() const
   }
   else
   {
-    assert( _rppm_haste_coeff == 1.0 / std::min( player->cache.spell_haste(), player->cache.attack_haste() ) );
+    assert( rl_buff_ledger::g_in_pass || ( _rppm_haste_coeff == 1.0 / std::min( player->cache.spell_haste(), player->cache.attack_haste() ) ) );
   }
   return _rppm_haste_coeff;
 }
@@ -296,7 +302,7 @@ double player_stat_cache_t::rppm_crit_coeff() const
   }
   else
   {
-    assert( _rppm_crit_coeff == 1.0 + std::max( player->cache.attack_crit_chance(), player->cache.spell_crit_chance() ) );
+    assert( rl_buff_ledger::g_in_pass || ( _rppm_crit_coeff == 1.0 + std::max( player->cache.attack_crit_chance(), player->cache.spell_crit_chance() ) ) );
   }
   return _rppm_crit_coeff;
 }
@@ -309,7 +315,7 @@ double player_stat_cache_t::spell_haste() const
     _spell_haste               = player->composite_spell_haste();
   }
   else
-    assert( _spell_haste == player->composite_spell_haste() );
+    assert( rl_buff_ledger::g_in_pass || ( _spell_haste == player->composite_spell_haste() ) );
   return _spell_haste;
 }
 
@@ -321,7 +327,7 @@ double player_stat_cache_t::spell_cast_speed() const
     _spell_cast_speed               = player->composite_spell_cast_speed();
   }
   else
-    assert( _spell_cast_speed == player->composite_spell_cast_speed() );
+    assert( rl_buff_ledger::g_in_pass || ( _spell_cast_speed == player->composite_spell_cast_speed() ) );
   return _spell_cast_speed;
 }
 
@@ -333,7 +339,7 @@ double player_stat_cache_t::dodge() const
     _dodge               = player->composite_dodge();
   }
   else
-    assert( _dodge == player->composite_dodge() );
+    assert( rl_buff_ledger::g_in_pass || ( _dodge == player->composite_dodge() ) );
   return _dodge;
 }
 
@@ -345,7 +351,7 @@ double player_stat_cache_t::parry() const
     _parry               = player->composite_parry();
   }
   else
-    assert( _parry == player->composite_parry() );
+    assert( rl_buff_ledger::g_in_pass || ( _parry == player->composite_parry() ) );
   return _parry;
 }
 
@@ -357,7 +363,7 @@ double player_stat_cache_t::block() const
     _block               = player->composite_block();
   }
   else
-    assert( _block == player->composite_block() );
+    assert( rl_buff_ledger::g_in_pass || ( _block == player->composite_block() ) );
   return _block;
 }
 
@@ -369,7 +375,7 @@ double player_stat_cache_t::crit_avoidance() const
     _crit_avoidance               = player->composite_crit_avoidance();
   }
   else
-    assert( _crit_avoidance == player->composite_crit_avoidance() );
+    assert( rl_buff_ledger::g_in_pass || ( _crit_avoidance == player->composite_crit_avoidance() ) );
   return _crit_avoidance;
 }
 
@@ -381,7 +387,7 @@ double player_stat_cache_t::miss() const
     _miss               = player->composite_miss();
   }
   else
-    assert( _miss == player->composite_miss() );
+    assert( rl_buff_ledger::g_in_pass || ( _miss == player->composite_miss() ) );
   return _miss;
 }
 
@@ -393,7 +399,7 @@ double player_stat_cache_t::armor() const
     _armor               = player->composite_armor();
   }
   else
-    assert( _armor == player->composite_armor() );
+    assert( rl_buff_ledger::g_in_pass || ( _armor == player->composite_armor() ) );
   return _armor;
 }
 
@@ -406,7 +412,7 @@ double player_stat_cache_t::mastery() const
     _mastery_value         = player->composite_mastery_value();
   }
   else
-    assert( _mastery == player->composite_mastery() );
+    assert( rl_buff_ledger::g_in_pass || ( _mastery == player->composite_mastery() ) );
   return _mastery;
 }
 
@@ -424,7 +430,7 @@ double player_stat_cache_t::mastery_value() const
     _mastery_value         = player->composite_mastery_value();
   }
   else
-    assert( _mastery_value == player->composite_mastery_value() );
+    assert( rl_buff_ledger::g_in_pass || ( _mastery_value == player->composite_mastery_value() ) );
   return _mastery_value;
 }
 
@@ -436,7 +442,7 @@ double player_stat_cache_t::bonus_armor() const
     _bonus_armor               = player->composite_bonus_armor();
   }
   else
-    assert( _bonus_armor == player->composite_bonus_armor() );
+    assert( rl_buff_ledger::g_in_pass || ( _bonus_armor == player->composite_bonus_armor() ) );
   return _bonus_armor;
 }
 
@@ -448,7 +454,7 @@ double player_stat_cache_t::damage_versatility() const
     _damage_versatility               = player->composite_damage_versatility();
   }
   else
-    assert( _damage_versatility == player->composite_damage_versatility() );
+    assert( rl_buff_ledger::g_in_pass || ( _damage_versatility == player->composite_damage_versatility() ) );
   return _damage_versatility;
 }
 
@@ -460,7 +466,7 @@ double player_stat_cache_t::heal_versatility() const
     _heal_versatility               = player->composite_heal_versatility();
   }
   else
-    assert( _heal_versatility == player->composite_heal_versatility() );
+    assert( rl_buff_ledger::g_in_pass || ( _heal_versatility == player->composite_heal_versatility() ) );
   return _heal_versatility;
 }
 
@@ -472,7 +478,7 @@ double player_stat_cache_t::mitigation_versatility() const
     _mitigation_versatility               = player->composite_mitigation_versatility();
   }
   else
-    assert( _mitigation_versatility == player->composite_mitigation_versatility() );
+    assert( rl_buff_ledger::g_in_pass || ( _mitigation_versatility == player->composite_mitigation_versatility() ) );
   return _mitigation_versatility;
 }
 
@@ -484,7 +490,7 @@ double player_stat_cache_t::leech() const
     _leech               = player->composite_leech();
   }
   else
-    assert( _leech == player->composite_leech() );
+    assert( rl_buff_ledger::g_in_pass || ( _leech == player->composite_leech() ) );
   return _leech;
 }
 
@@ -496,7 +502,7 @@ double player_stat_cache_t::run_speed() const
     _run_speed               = player->composite_movement_speed();
   }
   else
-    assert( _run_speed == player->composite_movement_speed() );
+    assert( rl_buff_ledger::g_in_pass || ( _run_speed == player->composite_movement_speed() ) );
   return _run_speed;
 }
 
@@ -508,7 +514,7 @@ double player_stat_cache_t::avoidance() const
     _avoidance               = player->composite_avoidance();
   }
   else
-    assert( _avoidance == player->composite_avoidance() );
+    assert( rl_buff_ledger::g_in_pass || ( _avoidance == player->composite_avoidance() ) );
   return _avoidance;
 }
 
@@ -520,7 +526,7 @@ double player_stat_cache_t::corruption() const
     _corruption               = player->composite_corruption();
   }
   else
-    assert( _corruption == player->composite_corruption() );
+    assert( rl_buff_ledger::g_in_pass || ( _corruption == player->composite_corruption() ) );
   return _corruption;
 }
 
@@ -532,7 +538,7 @@ double player_stat_cache_t::corruption_resistance() const
     _corruption_resistance               = player->composite_corruption_resistance();
   }
   else
-    assert( _corruption_resistance == player->composite_corruption_resistance() );
+    assert( rl_buff_ledger::g_in_pass || ( _corruption_resistance == player->composite_corruption_resistance() ) );
   return _corruption_resistance;
 }
 
@@ -544,7 +550,7 @@ double player_stat_cache_t::player_multiplier( school_e s ) const
     _player_mult[ s ]      = player->composite_player_multiplier( s );
   }
   else
-    assert( _player_mult[ s ] == player->composite_player_multiplier( s ) );
+    assert( rl_buff_ledger::g_in_pass || ( _player_mult[ s ] == player->composite_player_multiplier( s ) ) );
   return _player_mult[ s ];
 }
 
@@ -558,7 +564,7 @@ double player_stat_cache_t::player_heal_multiplier( const action_state_t* s ) co
     _player_heal_mult[ sch ]      = player->composite_player_heal_multiplier( s );
   }
   else
-    assert( _player_heal_mult[ sch ] == player->composite_player_heal_multiplier( s ) );
+    assert( rl_buff_ledger::g_in_pass || ( _player_heal_mult[ sch ] == player->composite_player_heal_multiplier( s ) ) );
   return _player_heal_mult[ sch ];
 }
 
@@ -571,7 +577,7 @@ double player_stat_cache_t::pet_damage_multiplier( const action_state_t* s, bool
     _pet_damage_multiplier[ idx ]      = player->composite_player_pet_damage_multiplier( s, guardian );
   }
   else
-    assert( _pet_damage_multiplier[ idx ] == player->composite_player_pet_damage_multiplier( s, guardian ) );
+    assert( rl_buff_ledger::g_in_pass || ( _pet_damage_multiplier[ idx ] == player->composite_player_pet_damage_multiplier( s, guardian ) ) );
   return _pet_damage_multiplier[ idx ];
 }
 
