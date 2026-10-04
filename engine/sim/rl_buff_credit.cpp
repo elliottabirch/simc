@@ -377,8 +377,8 @@ passset_t parse_passset( const rec_t& r )
 }
 
 enum channel_t : std::uint8_t { CH_HIDE = 0, CH_STAT = 1, CH_GATE = 2, CH_SWING = 3 };
-// Task 1 (the tracer): the hide channel only. Python: `channels=HIDE_ONLY`.
-constexpr bool CHANNEL_ALLOWED[ 4 ] = { true, false, false, false };
+// Task 2: hide, stat and swing; the gate channel (and the refund sweep) are Task 3's. Python: `channels=NO_GATE`.
+constexpr bool CHANNEL_ALLOWED[ 4 ] = { true, true, false, true };
 
 struct bc_player_t
 {
@@ -410,6 +410,8 @@ struct bc_player_t
 
 struct bc_group_t
 {
+  bool swing    = false;                                  // Python: kind == "swing" (speed factors of a swing launch; no passes)
+  std::vector<std::pair<int, double>> speed;              // swing: (player id, speed factor) in the order the chain met them
   bool per_mode = false;                                  // Python: mode == "per"
   std::vector<std::pair<std::uint32_t, int>> cands;       // (bit index, player id) of the press-applied candidates
   std::unordered_map<std::uint64_t, pass_t> passes;       // hidden-set mask -> pass record (a later record with the same mask wins)
@@ -523,6 +525,15 @@ bool group_factor( const bc_group_t& g, std::uint64_t hidden, bool crit, pair_t&
 {
   if ( g.bad )
     return false;
+  if ( g.swing )
+  {
+    double f = 1.0;
+    for ( const auto& sp : g.speed )
+      if ( ( hidden >> sp.first ) & 1u )
+        f /= sp.second;
+    out = { f, f };
+    return true;
+  }
   std::uint64_t mask = 0;
   for ( const auto& c : g.cands )
     if ( ( hidden >> c.second ) & 1u )
@@ -843,6 +854,21 @@ struct acc2_t
   double v[ 2 ] = { 0.0, 0.0 };
 };
 
+// A swing launch's speed buff (ledger_reference.parse_swing_speed): the buff, its appliers and the speed factor it gives the swing.
+struct speed_t
+{
+  std::string name, owner;
+  std::vector<applier_t> app;
+  double factor;
+};
+
+// An `ln` record, as much of it as the launch chain needs (Task 3 adds the switch buff and the gate fields).
+struct ln_t
+{
+  std::int64_t frame = -1;
+  std::vector<speed_t> speed;  // only a `swing` launch has any; entries with no factor (or a factor <= 0) are dropped at parse
+};
+
 // The result of one fold (decision_fold in the reference).
 struct fold_t
 {
@@ -871,6 +897,8 @@ struct module_t
   std::unordered_map<std::int64_t, std::int64_t> press_seq;  // press -> decision seq
   std::vector<std::int64_t> press_seqs;                      // every `pr` record's seq, file order
   std::unordered_map<std::uint64_t, passset_t> apps;         // `app` records by id
+  std::unordered_map<std::int64_t, ln_t> lns;                // `ln` records by launch id (the swing launches' speed buffs)
+  std::unordered_map<std::int64_t, std::int64_t> frm_launch; // `frm` records: frame id -> the launch the frame was opened under
   std::vector<item_t> items;
   std::uint32_t counter_unknown_press = 0;  // lookups that found no `pr` record (counted while the fold runs)
 };
@@ -934,13 +962,53 @@ void distribution( module_t& m, const rec_t& h, item_t& item )
     if ( it != m.apps.end() )
       groups.push_back( build_pass_group( it->second, players, tick ) );
   }
+  // launch_chain: the launch records from the hit's own launch up through each parent frame's launch
+  std::vector<const ln_t*> chain;
+  {
+    std::set<std::int64_t> seen;
+    std::int64_t l = h.i64( "launch" );
+    while ( l >= 0 && chain.size() < 64 )
+    {
+      const auto lit = m.lns.find( l );
+      if ( lit == m.lns.end() || !seen.insert( l ).second )
+        break;
+      chain.push_back( &lit->second );
+      const auto fit = m.frm_launch.find( lit->second.frame );
+      l              = fit != m.frm_launch.end() ? fit->second : -1;
+    }
+  }
+  // the swing channel: the speed buffs of the chain's swing launches, one group of speed factors (a player met twice keeps its first factor)
+  bc_group_t swing_group;
+  swing_group.swing = true;
+  if ( CHANNEL_ALLOWED[ CH_SWING ] )
+    for ( const ln_t* rec : chain )
+      for ( const speed_t& sf : rec->speed )
+      {
+        bc_player_t sp;
+        sp.key      = { sf.name, sf.owner };
+        sp.kind     = "speed";
+        sp.appliers = sf.app;
+        sp.swing    = true;
+        if ( !sp.press_applied() )
+          continue;
+        bool met = false;
+        for ( const auto& have : swing_group.speed )
+          if ( players.list[ have.first ].key == sp.key )
+            met = true;
+        if ( met )
+          continue;
+        const int id = players.merge( std::move( sp ) );
+        swing_group.speed.push_back( { id, sf.factor } );
+      }
+  if ( !swing_group.speed.empty() )
+    groups.push_back( std::move( swing_group ) );
   std::uint64_t gate_ids = 0;
   for ( std::size_t i = 0; i < players.list.size(); ++i )
     if ( players.list[ i ].gate )
       gate_ids |= std::uint64_t( 1 ) << i;
   std::uint64_t effective = 0;
   for ( const auto& g : groups )
-    if ( !mark_effective( g, crit, effective, gate_ids ) )
+    if ( !g.swing && !mark_effective( g, crit, effective, gate_ids ) )
       return whole( false );
   // chosen = {k: pl for k, pl in players.items() if k in effective or pl.gate or pl.swing}
   std::vector<int> chosen;
@@ -984,6 +1052,8 @@ void reset_fight( module_t& m )
   m.press_seq.clear();
   m.press_seqs.clear();
   m.apps.clear();
+  m.lns.clear();
+  m.frm_launch.clear();
   m.items.clear();
 }
 
@@ -1025,6 +1095,50 @@ void process_record( module_t& m, const rapidjson::Value& doc, std::string_view 
   {
     rec_t r{ doc, "app" };
     m.apps[ r.u64( "h" ) ] = parse_passset( r );
+  }
+  else if ( kind == "ln" )
+  {
+    rec_t r{ doc, "ln" };
+    ln_t ln;
+    ln.frame = r.i64( "frame" );
+    // parse_swing_speed: only a `swing` launch with a non-empty `sf`; an entry is the object {buff, owner?, app?, f?} or the list [buff, app]
+    // (no factor: dropped, but its appliers are still validated like the reference's parse_buff_entry does)
+    if ( r.str( "lk" ) == "swing" && r.has( "sf" ) && r.field( "sf" ).IsArray() )
+      for ( const auto& raw : r.field( "sf" ).GetArray() )
+      {
+        speed_t sp;
+        sp.factor    = 0.0;
+        bool has_f   = false;
+        if ( raw.IsObject() )
+        {
+          rec_t sr{ raw, "ln speed entry" };
+          sp.name  = sr.str( "buff" );
+          sp.owner = sr.has( "owner" ) ? sr.str( "owner" ) : std::string();
+          if ( sr.has( "app" ) )
+            for ( const auto& a : sr.arr( "app" ).GetArray() )
+              sp.app.push_back( parse_applier( a, "ln speed entry" ) );
+          if ( sr.has( "f" ) && !sr.field( "f" ).IsNull() )
+          {
+            sp.factor = sr.num( "f" );
+            has_f     = true;
+          }
+        }
+        else if ( raw.IsArray() && raw.Size() >= 2 && raw[ 1 ].IsArray() )
+        {
+          for ( const auto& a : raw[ 1 ].GetArray() )
+            sp.app.push_back( parse_applier( a, "ln speed entry" ) );
+        }
+        else
+          fail( "ln record: a speed entry is neither {buff, ...} nor [buff, appliers]" );
+        if ( has_f && sp.factor > 0.0 )
+          ln.speed.push_back( std::move( sp ) );
+      }
+    m.lns[ r.i64( "l" ) ] = std::move( ln );
+  }
+  else if ( kind == "frm" )
+  {
+    rec_t r{ doc, "frm" };
+    m.frm_launch[ r.i64( "f" ) ] = r.i64( "launch" );
   }
   else if ( kind == "hit" )
   {
@@ -1216,7 +1330,7 @@ std::shared_ptr<module_t> configure( sim_t* root, credit_mode_t mode, const std:
   write_bytes( *m, &h, sizeof( h ) );
   m->bcr.flush();
   fmt::print( stderr, "[RL_BUFF_CREDIT] mode={} rule=D-05u verdicts_sha256={}\n", mode_name( mode ), m->verdicts_sha_hex );
-  fmt::print( stderr, "[RL_BUFF_CREDIT_TRACER] channels=hide refunds=off (plan 03 Task 1: gates, swing, stat and refunds are not built)\n" );
+  fmt::print( stderr, "[RL_BUFF_CREDIT_TRACER] channels=hide,stat,swing gates=off refunds=off (plan 03 Task 2: the gate channel and the refund sweep are not built)\n" );
   std::fflush( stderr );
   return m;
 }
@@ -1224,8 +1338,8 @@ std::shared_ptr<module_t> configure( sim_t* root, credit_mode_t mode, const std:
 void consume_line( module_t& m, std::string_view line )
 {
   const std::string_view kind = kind_of( line );
-  if ( kind != "fb" && kind != "pr" && kind != "app" && kind != "hit" )
-    return;  // the other record kinds are the gate and refund channels' (Tasks 2 and 3)
+  if ( kind != "fb" && kind != "pr" && kind != "app" && kind != "hit" && kind != "ln" && kind != "frm" )
+    return;  // the other record kinds are the gate and refund channels' (Task 3)
   rapidjson::Document doc;
   std::string text( line );
   doc.Parse<rapidjson::kParseFullPrecisionFlag>( text.c_str() );

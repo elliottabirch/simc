@@ -14,9 +14,9 @@
 // GENERIC ARITHMETIC ONLY: no spell, buff or action name appears in this module. Everything is keyed by ids and strings that arrive in the
 // records and in the loaded verdict table.
 //
-// TRACER STATE (Task 1 of plan 03): the hide channel only (press-applied buffs and debuffs whose own hiding changes a hit: self and
-// damage-over-time parent groups), no gates, no swing channel, no stat channel, no refunds. The build says so on stderr
-// (`[RL_BUFF_CREDIT_TRACER]`); Tasks 2 and 3 extend it and remove the line.
+// INTERMEDIATE STATE (Task 2 of plan 03): the hide, stat and swing channels (press-applied buffs and debuffs whose own hiding changes a hit,
+// stat buffs, the speed buffs of a swing launch; self, damage-over-time parent and swing groups), both slices, both copies; no gate channel and no
+// refund sweep yet. The build says so on stderr (`[RL_BUFF_CREDIT_TRACER]`); Task 3 completes it and removes the line.
 #pragma once
 
 #include <array>
