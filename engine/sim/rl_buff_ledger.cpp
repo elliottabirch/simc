@@ -61,10 +61,13 @@ constexpr const char* EMITS_JSON =
 
 // 261003-s1c plan 02: the record sink seam. Every record the hooks produce goes through emit() below with its kind and a
 // formatter. Backend 1 (the JSON backend, option rl_buff_ledger=<path>) runs the formatter into the fight's buffer, which is
-// flushed to the file at fight end exactly as before. Backend 2 (the memory backend, option rl_buff_ledger_sink=memory) counts the
-// record by kind and never runs the formatter: no text is built for a record, no file is opened, and the run's end writes only
-// the summary (rl_buff_ledger_summary=<path>, optional). Everything a hook does besides formatting (counters, applier-list
-// reconciliation, the frame bookkeeping) happens in both backends.
+// flushed to the file at fight end exactly as before. Backend 2 (the memory backend, option rl_buff_ledger_sink=memory, and the default
+// whenever the credit is on and no ledger file is asked for) counts the record by kind and never runs the formatter: no text is built for a
+// record, no file is opened, and the run's end writes only the summary (rl_buff_ledger_summary=<path>, optional). Everything a hook does
+// besides formatting (counters, applier-list reconciliation, the frame bookkeeping) happens in both backends.
+// 261003-s1c plan 03b (owner ruling 10): with the credit on, each hook ALSO builds the typed record of the kinds the credit module uses from
+// the values it holds and hands it to the module's typed entry point (rl_buff_credit.hpp), in emission order, in BOTH backends; no record text
+// is made for the module and none is parsed during a fight.
 enum rec_kind_t : std::uint8_t
 {
   REC_FB, REC_FE, REC_DOTR, REC_PR, REC_HIT, REC_XP, REC_APP, REC_LN, REC_FRM, REC_RD, REC_DR, REC_CS, REC_ZR,
@@ -81,10 +84,9 @@ struct state_t
   std::string path;
   // 261003-s1c plan 02: the sink. text = the JSON backend (formats records, writes the file); false = the memory backend.
   bool text = true;
-  // 261003-s1c plan 03: the credit module (null: credit off). With it on, every record the hooks format is also handed to it (and, when no
-  // ledger file was asked for, dropped from the buffer: `to_file` false). The credit module is a consumer of the JSON text, so it needs `text`.
+  // 261003-s1c plan 03b: the credit module (null: credit off). With it on, the hooks hand it typed records (see above); the sink
+  // (`text`) only decides whether the JSON ledger is also written.
   std::shared_ptr<rl_buff_credit::module_t> credit;
-  bool to_file = true;
   std::string summary_path;                           // memory backend: optional end-of-run summary file
   // Records by kind, both backends. fight_rec_n is the current fight's tally (cleared with fight_buf at fight begin: what the JSON backend
   // would never flush for a fight that does not end, e.g. the trailing reset after the last iteration, is never counted either);
@@ -473,28 +475,7 @@ inline void emit( state_t* s, rec_kind_t kind, Format&& format )
 {
   ++s->fight_rec_n[ kind ];
   if ( s->text )
-  {
-    if ( s->credit )
-    {
-      if ( kind == REC_HIT )
-      {
-        // 261003-s1c plan 03b: a hit reaches the credit module as a typed record built by hit_sink (rl_buff_credit::on_hit); its text is
-        // written only when a ledger file was asked for.
-        if ( s->to_file )
-          format( s->fight_buf );
-        return;
-      }
-      // 261003-s1c plan 03 (the other kinds, until plan 03b Task 2 moves them): the line just formatted goes to the credit module; without a
-      // ledger file it is not kept.
-      const std::size_t mark = s->fight_buf.size();
-      format( s->fight_buf );
-      rl_buff_credit::consume_line( *s->credit, std::string_view( s->fight_buf ).substr( mark ) );
-      if ( !s->to_file )
-        s->fight_buf.resize( mark );
-    }
-    else
-      format( s->fight_buf );
-  }
+    format( s->fight_buf );
 }
 
 // 261003-s1c plan 01 Task 2 (production f549d4f346, Phase 259): the class byte of a stamp may carry RL_CAUSE_DECK_MARK (0x80), which is
@@ -606,7 +587,9 @@ void open_and_write_header( sim_t* sim )
   st->probe_action = root->rl_buff_ledger_refund_probe_str;
   st->credit       = root->rl_bc_state;
   // 261003-s1c plan 02: the memory backend opens no file and writes no header (the summary file, when asked for, is written at the end).
-  if ( root->rl_buff_ledger_sink_str == "memory" )
+  // 261003-s1c plan 03b: it is chosen by the SAME rule sim_t::init applies (effective_memory_sink): the sink option says memory, or the credit is
+  // on, no ledger file is asked for and no sink option is given.
+  if ( effective_memory_sink( root->rl_buff_ledger_sink_str, st->path, st->credit != nullptr ) )
   {
     st->text         = false;
     st->summary_path = root->rl_buff_ledger_summary_str;
@@ -614,13 +597,10 @@ void open_and_write_header( sim_t* sim )
     g_ledger_open     = true;
     return;
   }
-  // 261003-s1c plan 03: credit on, no ledger file asked for: the records are formatted and handed to the credit module only.
-  if ( st->path.empty() && st->credit )
+  if ( st->path.empty() )
   {
-    st->to_file       = false;
-    root->rl_bl_state = std::move( st );
-    g_ledger_open     = true;
-    return;
+    // (sim_t::init refuses this: the JSON backend needs a path. Nothing may ever reach out.open( "" ).)
+    throw sc_runtime_error( "rl_buff_ledger_sink=json needs rl_buff_ledger=<path>." );
   }
   st->out.open( st->path );
   if ( !st->out.is_open() )
@@ -713,6 +693,8 @@ void fight_begin( sim_t* sim )
     put_string( b, s->actor->name() );
     b += "}\n";
   } );
+  if ( s->credit )
+    rl_buff_credit::on_fight_begin( *s->credit );
 }
 
 void reset_done( sim_t* sim )
@@ -810,7 +792,7 @@ void fight_end( sim_t* sim )
   s->run_presses += s->fight_presses;
   s->run_xp += s->fight_xp;
 
-  if ( s->text && s->to_file )
+  if ( s->text )
     flush_fight( *s );
 }
 
@@ -1081,9 +1063,8 @@ void write_footer( sim_t* sim )
       f << sum;
       f.close();
     }
-    return;
   }
-  if ( s->to_file )
+  else
   {
     s->out << b;
     s->out.flush();
@@ -1183,6 +1164,8 @@ std::int16_t open_press( player_t* p, const rl_cause_t& cause )
     put_string( b, p->last_foreground_action ? p->last_foreground_action->name() : std::string() );
     fmt::format_to( out_it( b ), ",\"cls\":{},\"dk\":{}}}\n", cls_out( cause.cls ), dk_out( cause.cls ) );
   } );
+  if ( s->credit )
+    rl_buff_credit::on_press( *s->credit, rl_buff_credit::press_rec_t{ press, cause.seq } );
   return press;
 }
 
@@ -1663,8 +1646,19 @@ void frame_read( const buff_t* cb, int stack, double value )
   buff_t* b        = const_cast<buff_t*>( cb );
   const bool pend  = nz && b->current_stack <= 0;
   const std::int64_t order = s->next_order++;
-  if ( !s->text && nz && !pend )
-    reconcile_appliers( s, b );  // the state effect write_appliers has
+  // The ONE applier walk of this read (plan 03b): it reconciles the buff's list and returns the typed entries, which the JSON text is formatted
+  // from and the credit module reads. Without a consumer of the list (the memory sink, the read dropped by the module) only the reconcile is kept.
+  const bool walk = nz && !pend;
+  const bool keep = s->credit != nullptr && rl_buff_credit::read_is_kept( *s->credit, nz, b->name_str );
+  std::vector<rl_buff_credit::applier_t> applist;
+  bool covering = false;
+  if ( walk )
+  {
+    if ( s->text || keep )
+      covering = collect_appliers( s, b, applist );
+    else
+      reconcile_appliers( s, b );  // the state effect write_appliers has
+  }
   emit( s, REC_RD, [ & ]( std::string& o ) {
     fmt::format_to( out_it( o ), "{{\"k\":\"rd\",\"it\":{},\"t\":", b->sim->current_iteration );
     put_double( o, b->sim->current_time().total_seconds() );
@@ -1673,9 +1667,8 @@ void frame_read( const buff_t* cb, int stack, double value )
     o += ",\"owner\":";
     put_string( o, b->player != nullptr ? std::string( b->player->name() ) : std::string() );
     fmt::format_to( out_it( o ), ",\"nz\":{},\"stacks\":{},\"app\":", nz ? "true" : "false", stack );
-    bool covering = false;
-    if ( nz && !pend )
-      covering = write_appliers( o, s, b );
+    if ( walk )
+      put_appliers( o, applist, covering );
     else
       o += "[]";
     fmt::format_to( out_it( o ), ",\"cov\":{}", covering ? "true" : "false" );
@@ -1683,6 +1676,18 @@ void frame_read( const buff_t* cb, int stack, double value )
       o += ",\"pend\":true";
     o += "}\n";
   } );
+  if ( keep )
+  {
+    rl_buff_credit::read_rec_t rec;
+    rec.frame = f.id;
+    rec.order = order;
+    rec.nz    = nz;
+    rec.buff  = b->name_str;
+    rec.owner = b->player != nullptr ? std::string( b->player->name() ) : std::string();
+    rec.app   = std::move( applist );
+    rec.cov   = covering;
+    rl_buff_credit::on_read( *s->credit, std::move( rec ) );
+  }
 }
 }  // namespace
 
@@ -1807,6 +1812,16 @@ std::int32_t frame_push( player_t* p, const rl_cause_t& cause, const action_t* o
     put_string( o, f.act != nullptr ? std::string( f.act->name() ) : std::string() );
     o += "}\n";
   } );
+  if ( s->credit )
+  {
+    rl_buff_credit::frame_rec_t rec;
+    rec.id     = f.id;
+    rec.launch = cause.launch;
+    rec.action = f.act != nullptr ? std::string( f.act->name() ) : std::string();
+    rec.kind   = kind != nullptr ? std::string( kind ) : std::string( owner != nullptr ? "dispatch" : "scope" );
+    rec.cls    = cls_out( cause.cls );
+    rl_buff_credit::on_frame( *s->credit, std::move( rec ) );
+  }
 
   const std::int32_t id = f.id;
   s->frames.push_back( std::move( f ) );
@@ -2447,8 +2462,16 @@ std::int32_t note_launch( action_t* child, player_t* child_target, const char* k
   }
   ++s->launches_by_kind[ lk ];
 
-  if ( !s->text && sw != nullptr )
-    reconcile_appliers( s, sw );  // the state effect write_appliers has
+  // The ONE applier walk of the switch buff (plan 03b); see frame_read.
+  std::vector<rl_buff_credit::applier_t> sw_list;
+  bool sw_cov = false;
+  if ( sw != nullptr )
+  {
+    if ( s->credit )
+      sw_cov = collect_appliers( s, sw, sw_list );
+    else if ( !s->text )
+      reconcile_appliers( s, sw );  // the state effect write_appliers has
+  }
   emit( s, REC_LN, [ & ]( std::string& o ) {
     fmt::format_to( out_it( o ), "{{\"k\":\"ln\",\"it\":{},\"t\":", sim->current_iteration );
     put_double( o, sim->current_time().total_seconds() );
@@ -2468,13 +2491,33 @@ std::int32_t note_launch( action_t* child, player_t* child_target, const char* k
       o += ",\"owner\":";
       put_string( o, sw->player != nullptr ? std::string( sw->player->name() ) : std::string() );
       fmt::format_to( out_it( o ), ",\"stacks\":{},\"app\":", sw->current_stack );
-      const bool covering = write_appliers( o, s, sw );
+      bool covering = sw_cov;
+      if ( s->credit )
+        put_appliers( o, sw_list, sw_cov );
+      else
+        covering = write_appliers( o, s, sw );
       fmt::format_to( out_it( o ), ",\"cov\":{}}}", covering ? "true" : "false" );
     }
     else
       o += "null";
     o += ",\"sf\":null}\n";
   } );
+  if ( s->credit )
+  {
+    rl_buff_credit::launch_rec_t rec;
+    rec.id     = l;
+    rec.frame  = parent->id;
+    rec.order  = order;
+    rec.ca     = std::string( child->name() );
+    if ( sw != nullptr )
+    {
+      rec.has_switch = true;
+      rec.sw.name    = sw->name_str;
+      rec.sw.owner   = sw->player != nullptr ? std::string( sw->player->name() ) : std::string();
+      rec.sw.app     = std::move( sw_list );
+    }
+    rl_buff_credit::on_launch( *s->credit, std::move( rec ) );
+  }
   return l;
 }
 
@@ -3561,11 +3604,15 @@ std::uint64_t write_app_record( state_t* st, action_t* a, action_state_t* s, con
   const std::int32_t r_launch = cause != nullptr ? cause->launch : s->rl_cause_launch;
   // (the memory backend builds no text: write_candidates then only reconciles the applier lists)
   std::string cand_json;
-  write_candidates( cand_json, st, sp, s->target );
+  rl_buff_credit::application_rec_t typed_app;  // 261003-s1c plan 03b: the typed candidates and passes (credit on only)
+  write_candidates( cand_json, st, sp, s->target, st->credit ? &typed_app.ps : nullptr );
   std::string pass_json;
   if ( st->text )
     for ( const pass_rec_t& p : sp.passes )
       put_pass( pass_json, p, &ref );
+  if ( st->credit )
+    for ( const pass_rec_t& p : sp.passes )
+      typed_app.ps.passes.push_back( make_typed_pass( p, &ref ) );
   emit( st, REC_APP, [ & ]( std::string& b ) {
     fmt::format_to( out_it( b ), "{{\"k\":\"app\",\"it\":{},\"t\":", sim->current_iteration );
     put_double( b, sim->current_time().total_seconds() );
@@ -3593,6 +3640,11 @@ std::uint64_t write_app_record( state_t* st, action_t* a, action_state_t* s, con
     }
     b += "}\n";
   } );
+  if ( st->credit )
+  {
+    typed_app.id = h;
+    rl_buff_credit::on_application( *st->credit, std::move( typed_app ) );
+  }
   return h;
 }
 
@@ -3744,6 +3796,8 @@ rng::rng_t* rng_access( sim_t* sim, const char* family )
           put_string( o, family );
           o += "}\n";
         } );
+        if ( s->credit && rl_buff_credit::draw_is_kept( *s->credit, f.id ) )
+          rl_buff_credit::on_draw( *s->credit, rl_buff_credit::draw_rec_t{ f.id, order } );
       }
     }
     return nullptr;
@@ -4154,12 +4208,25 @@ void run_swing_passes( action_t* a )
   ++st->swing_launches;
 
   sim_t* sim     = a->sim;
-  if ( !st->text && ( status == 0 || status == 2 ) )
+  // The ONE applier walk of each speed entry the record lists (plan 03b): with the credit on it returns the typed entries, which the JSON text is
+  // formatted from; with the memory sink and no credit only the reconcile (the state effect write_appliers has) is kept.
+  struct speed_walk_t
   {
-    // The state effect write_appliers has, for the candidates the record would list.
+    std::vector<rl_buff_credit::applier_t> list;
+    bool cov = false;
+  };
+  std::vector<speed_walk_t> walks;
+  if ( ( st->credit != nullptr || !st->text ) && ( status == 0 || status == 2 ) )
+  {
+    walks.resize( cands.size() );
     for ( std::size_t i = 0; i < cands.size(); ++i )
       if ( !( hidden_times[ i ] == real || real.total_millis() == 0 ) )
-        reconcile_appliers( st, const_cast<buff_t*>( cands[ i ] ) );
+      {
+        if ( st->credit )
+          walks[ i ].cov = collect_appliers( st, const_cast<buff_t*>( cands[ i ] ), walks[ i ].list );
+        else
+          reconcile_appliers( st, const_cast<buff_t*>( cands[ i ] ) );
+      }
   }
   emit( st, REC_LN, [ & ]( std::string& b ) {
     fmt::format_to( out_it( b ), "{{\"k\":\"ln\",\"it\":{},\"t\":", sim->current_iteration );
@@ -4190,7 +4257,10 @@ void run_swing_passes( action_t* a )
         put_string( b, c->player->name() );
         fmt::format_to( out_it( b ), ",\"stacks\":{},\"kind\":\"{}\",\"app\":", c->current_stack,
                         dynamic_cast<const stat_buff_t*>( c ) != nullptr ? "stat" : "speed" );
-        write_appliers( b, st, const_cast<buff_t*>( c ) );
+        if ( st->credit )
+          put_appliers( b, walks[ i ].list, walks[ i ].cov );
+        else
+          write_appliers( b, st, const_cast<buff_t*>( c ) );
         b += ",\"f\":";
         put_double( b, static_cast<double>( hidden_times[ i ].total_millis() ) /
                            static_cast<double>( real.total_millis() ) );
@@ -4206,6 +4276,32 @@ void run_swing_passes( action_t* a )
     }
     b += "}\n";
   } );
+  if ( st->credit )
+  {
+    // The typed swing launch: only the speed entries with a finite factor > 0 are kept (the factor is hidden swing time / real swing time; a
+    // non-finite one is written `null` and read as no factor).
+    rl_buff_credit::launch_rec_t rec;
+    rec.id    = l;
+    rec.frame = -1;
+    rec.order = -1;
+    rec.ca    = std::string( a->name() );
+    if ( status == 0 || status == 2 )
+      for ( std::size_t i = 0; i < cands.size(); ++i )
+      {
+        if ( hidden_times[ i ] == real || real.total_millis() == 0 )
+          continue;
+        const double f = static_cast<double>( hidden_times[ i ].total_millis() ) / static_cast<double>( real.total_millis() );
+        if ( !( std::isfinite( f ) && f > 0.0 ) )
+          continue;
+        rl_buff_credit::launch_buff_t lb;
+        lb.name   = cands[ i ]->name_str;
+        lb.owner  = std::string( cands[ i ]->player->name() );
+        lb.app    = std::move( walks[ i ].list );
+        lb.factor = f;
+        rec.speed.push_back( std::move( lb ) );
+      }
+    rl_buff_credit::on_launch( *st->credit, std::move( rec ) );
+  }
 }
 
 std::int32_t take_swing_launch( const action_t* a )
@@ -4309,6 +4405,9 @@ std::int32_t cd_open_cycle( state_t* st, const cooldown_t* cd, std::int64_t len_
       o += ",\"mc\":true";
     o += "}\n";
   } );
+  if ( st->credit )
+    rl_buff_credit::on_cycle( *st->credit, rl_buff_credit::cycle_rec_t{ id, typed_double( cd->sim.current_time().total_seconds() ),
+                                                                          typed_double( ms_to_seconds( len_ms ) ) } );
   return id;
 }
 
@@ -4324,6 +4423,8 @@ void cd_write_ref( state_t* st, const cooldown_t* cd, std::int32_t c, std::int64
     fmt::format_to( out_it( o ), ",\"press\":{},\"cls\":{},\"dk\":{},\"src\":\"{}\",\"seq\":{},\"launch\":{}}}\n", cause.press,
                     cls_out( cause.cls ), dk_out( cause.cls ), src, cause.seq, cause.launch );
   } );
+  if ( st->credit )
+    rl_buff_credit::on_refund( *st->credit, rl_buff_credit::refund_rec_t{ c, cause.press, typed_double( ms_to_seconds( ms ) ) } );
 }
 
 void cd_write_use( state_t* st, const cooldown_t* cd, std::int32_t c )
@@ -4335,6 +4436,8 @@ void cd_write_use( state_t* st, const cooldown_t* cd, std::int32_t c )
     fmt::format_to( out_it( o ), ",\"c\":{},\"press\":{},\"cls\":{},\"dk\":{},\"seq\":{}}}\n", c, cause.press,
                     cls_out( cause.cls ), dk_out( cause.cls ), cause.seq );
   } );
+  if ( st->credit )
+    rl_buff_credit::on_use( *st->credit, rl_buff_credit::use_rec_t{ c, cause.press, typed_double( cd->sim.current_time().total_seconds() ) } );
 }
 
 void cd_write_cdn( state_t* st, const cooldown_t* cd, const action_t* a, bool ignored = false )

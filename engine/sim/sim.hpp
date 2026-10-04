@@ -842,7 +842,9 @@ struct sim_t : private sc_thread_t
   std::shared_ptr<rl_buff_ledger::state_t> rl_bl_state;
   // 261003-s1c plan 03 (fork clone simc-s1c only): rl_buff_credit=off|nobody|full (absent = off) switches on the buff-applier credit rule (D-05u),
   // a consumer of the ledger's records that writes `<rl_translog>.bcr` (rl_buff_credit.hpp, BCR-FORMAT.md). nobody/full need rl_translog= and
-  // rl_buff_credit_verdicts=<gate verdict table JSON>, and are refused with rl_buff_ledger_sink=memory. `rl_bc_on` is set once, in sim_t::init.
+  // rl_buff_credit_verdicts=<gate verdict table JSON>. The module reads typed records the ledger hooks build (plan 03b), so it runs on either sink:
+  // with no rl_buff_ledger= and no rl_buff_ledger_sink= the ledger runs the memory sink; rl_buff_ledger=<path> also writes the JSON file;
+  // rl_buff_ledger_sink=json with no path is refused. `rl_bc_on` is set once, in sim_t::init.
   // rl_buff_credit_selftest=<ledger fixture JSON-lines> with rl_buff_credit_selftest_out=<path.bcr> is the fixture entry: no fight runs.
   std::string rl_buff_credit_str;
   std::string rl_buff_credit_verdicts_str;

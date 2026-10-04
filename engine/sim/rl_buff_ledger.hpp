@@ -115,8 +115,16 @@ inline constexpr std::uint64_t APP_PREMADE  = ~std::uint64_t( 0 ) - 1;  // a dot
 // they keep their default member initialisers.
 extern bool g_ledger_open;
 
+// 261003-s1c plan 03b: THE rule for which sink runs (sim_t::init and open_and_write_header both call it, so there is one copy): the memory
+// sink when the sink option says "memory", or when the credit is on, no ledger file is asked for (`path` empty) and no sink option is given.
+// (The option strings themselves are never rewritten.)
+inline bool effective_memory_sink( const std::string& sink, const std::string& path, bool credit_on )
+{
+  return sink == "memory" || ( credit_on && path.empty() && sink.empty() );
+}
+
 // Opens the output file (root sim only; refusals were already made by the caller, sim_t::setup)
-// and writes the `hdr` record. Sets up the ledger state on the root sim.
+// and writes the `hdr` record. Sets up the ledger state on the root sim. With the memory sink (effective_memory_sink) no file is opened.
 void open_and_write_header( sim_t* sim );
 
 // Fight begin (sim_t::reset() beside the roll recorder's call): resets the per-fight counters

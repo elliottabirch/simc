@@ -6011,15 +6011,17 @@ void sim_t::setup( sim_control_t* c )
   {
     throw sc_invalid_sim_argument( fmt::format( "rl_buff_ledger_sink='{}' is not a sink (json, memory).", rl_buff_ledger_sink_str ) );
   }
-  const bool rl_bl_memory = rl_buff_ledger_sink_str == "memory";
   // 261003-s1c plan 03: the credit switch. An unknown value is refused at parse (never defaulted); nobody/full need the translog (the `.bcr`
-  // sits beside its `.attr`), the verdict table, and the text records of the JSON backend (so the memory sink is refused).
+  // sits beside its `.attr`) and the verdict table. 261003-s1c plan 03b: the credit module reads typed records the ledger hooks build, so it
+  // runs on either sink; with no ledger file and no sink option the ledger runs the memory sink (rl_buff_ledger::effective_memory_sink, the one
+  // rule open_and_write_header applies too). The option strings are not rewritten.
   rl_buff_credit::credit_mode_t rl_bc_mode = rl_buff_credit::credit_mode_t::off;
   if ( !rl_buff_credit_str.empty() && !rl_buff_credit::parse_mode( rl_buff_credit_str, rl_bc_mode ) )
   {
     throw sc_invalid_sim_argument( fmt::format( "rl_buff_credit='{}' is not a credit switch (off, nobody, full).", rl_buff_credit_str ) );
   }
   const bool rl_bc_requested = rl_bc_mode != rl_buff_credit::credit_mode_t::off;
+  const bool rl_bl_memory    = rl_buff_ledger::effective_memory_sink( rl_buff_ledger_sink_str, rl_buff_ledger_str, rl_bc_requested );
   if ( rl_bc_requested )
   {
     if ( rl_translog_file_str.empty() )
@@ -6030,9 +6032,10 @@ void sim_t::setup( sim_control_t* c )
     {
       throw sc_invalid_sim_argument( "rl_buff_credit=nobody|full needs rl_buff_credit_verdicts=<path> (the gate verdict table)." );
     }
-    if ( rl_bl_memory )
+    if ( rl_buff_ledger_sink_str == "json" && rl_buff_ledger_str.empty() )
     {
-      throw sc_invalid_sim_argument( "rl_buff_credit=nobody|full cannot be combined with rl_buff_ledger_sink=memory: the credit module reads the ledger's record text." );
+      throw sc_invalid_sim_argument( "rl_buff_credit=nobody|full with rl_buff_ledger_sink=json needs rl_buff_ledger=<path> (the JSON sink writes the ledger "
+                                     "file); leave rl_buff_ledger_sink unset for the memory sink, or give a path." );
     }
   }
   else if ( !rl_buff_credit_verdicts_str.empty() )
@@ -6046,7 +6049,7 @@ void sim_t::setup( sim_control_t* c )
   }
   if ( !rl_buff_ledger_summary_str.empty() && !rl_bl_memory )
   {
-    throw sc_invalid_sim_argument( "rl_buff_ledger_summary= belongs to the memory sink: it needs rl_buff_ledger_sink=memory." );
+    throw sc_invalid_sim_argument( "rl_buff_ledger_summary= belongs to the memory sink: it needs rl_buff_ledger_sink=memory (or the credit with no rl_buff_ledger= path, whose default sink is memory)." );
   }
   if ( !rl_buff_ledger_str.empty() || rl_bl_memory || rl_bc_requested )
   {

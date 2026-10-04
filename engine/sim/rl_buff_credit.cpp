@@ -1000,9 +1000,11 @@ void check_launch_buff( const launch_buff_t& b, const char* where )
   check_appliers( b.app, where );
 }
 
+}  // namespace
+
 // A read is kept only when it is non-zero AND its buff is named by some gate site of the loaded table (nothing else can ever be consulted:
-// nz_read_before keeps non-zero reads; is_gate needs the buff). Used by the entry point and by the fixture converter (a read the module would
-// drop is not even parsed there).
+// nz_read_before keeps non-zero reads; is_gate needs the buff). Used by the entry point, by the ledger (which skips building a record the module
+// would drop) and by the fixture converter (a read the module would drop is not even parsed there).
 bool read_is_kept( const module_t& m, bool nz, const std::string& buff )
 {
   return nz && m.verdicts.gate_buffs.count( buff ) != 0;
@@ -1013,7 +1015,6 @@ bool draw_is_kept( const module_t& m, std::int64_t frame )
 {
   return m.reads.count( frame ) != 0;
 }
-}  // namespace
 
 void on_fight_begin( module_t& m )
 {
@@ -1766,16 +1767,13 @@ hit_rec_t convert_hit( const rec_t& h )
   return out;
 }
 
-// One record line -> its typed record -> its entry point. `live_path` is the Task 1 ledger feed: hits arrive typed from the ledger hook there, so a hit
-// line is skipped (a double feed would double the items).
-void convert_line( module_t& m, std::string_view line, bool live_path )
+// One fixture record line -> its typed record -> its entry point.
+void convert_line( module_t& m, std::string_view line )
 {
   const std::string_view kind = kind_of( line );
   if ( kind != "fb" && kind != "pr" && kind != "app" && kind != "hit" && kind != "ln" && kind != "frm" && kind != "rd" && kind != "dr" && kind != "cyc" &&
        kind != "ref" && kind != "use" )
     return;  // the other record kinds (xp, cs, zr, cdn, ext, ...) move nothing in this rule
-  if ( live_path && kind == "hit" )
-    return;
   if ( ( kind == "rd" || kind == "dr" ) && m.verdicts.gate_buffs.empty() )
     return;  // no gate site in the table: no read or draw can matter
   rapidjson::Document doc;
@@ -1867,11 +1865,6 @@ void convert_line( module_t& m, std::string_view line, bool live_path )
 }  // namespace converter
 }  // namespace
 
-void consume_line( module_t& m, std::string_view line )
-{
-  converter::convert_line( m, line, /*live_path=*/true );
-}
-
 // ---- the fixture entry ----
 int run_selftest( sim_t* sim )
 {
@@ -1928,7 +1921,7 @@ int run_selftest( sim_t* sim )
         }
         continue;
       }
-      converter::convert_line( *m, line, /*live_path=*/false );
+      converter::convert_line( *m, line );
     }
     if ( !seen_ftr )
       fail( fmt::format( "{}: the fixture has no footer record", sim->rl_buff_credit_selftest_str ) );

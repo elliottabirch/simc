@@ -190,9 +190,11 @@ void on_refund( module_t& m, refund_rec_t&& r );
 void on_use( module_t& m, use_rec_t&& r );
 void on_hit( module_t& m, hit_rec_t&& r );
 
-// (plan 03b Task 1 only, deleted in Task 2) One ledger record line (JSON, no trailing newline needed): the live ledger still hands every kind
-// except `hit` through here while the other kinds are being moved to the typed entry points. The line is converted into the typed record.
-void consume_line( module_t& m, std::string_view line );
+// Would the module keep this record? A read is kept only when it is non-zero and its buff is named by a gate site of the loaded verdict table;
+// a draw only for a frame that has a kept read. The ledger asks before it builds a read or draw record the module would drop (the same
+// test the entry points apply, so the answer cannot differ).
+bool read_is_kept( const module_t& m, bool nz, const std::string& buff );
+bool draw_is_kept( const module_t& m, std::int64_t frame );
 
 // rl_translog::record_close, right after the `.attr` FIGHT block: folds the fight just ended and writes the FIGHT and DECISION records.
 // `decision_seqs` are the translog's decisions of the fight in write order (rl_translog_pending_seqs).
@@ -203,7 +205,7 @@ void write_fight( module_t& m, std::uint32_t iteration, bool collected, bool fun
 void write_footer( module_t& m, const std::array<std::uint32_t, 12>& ledger_counters );
 
 // The fixture entry (sim_t::setup, option rl_buff_credit_selftest=<fixture.jsonl>, with rl_buff_credit_selftest_out=<path.bcr>, rl_buff_credit and
-// rl_buff_credit_verdicts): reads ledger JSON records from the fixture, feeds the module the way the live ledger does, writes the `.bcr`, runs no
-// fight. Returns a process exit code (0 written, 2 refused with the reason on stderr).
+// rl_buff_credit_verdicts): reads ledger JSON records from the fixture, converts each into the typed record of its kind and calls the entry point the
+// live ledger calls, writes the `.bcr`, runs no fight. It is the only place a ledger record's JSON is read. Returns a process exit code (0 written, 2 refused with the reason on stderr).
 int run_selftest( sim_t* sim );
 }  // namespace rl_buff_credit
