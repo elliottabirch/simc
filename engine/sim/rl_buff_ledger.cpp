@@ -266,6 +266,28 @@ struct state_t
   // dealer's or its owner's own buff, and not a debuff the dealer put on the hit's own target), or
   // `cls<N>|press<pos|neg>` (the buff's own applier stamp is not a press: class N, press >= 0 or not).
   std::map<std::string, std::uint64_t> noncandidate_reads;
+  // 261003-s1c plan 02 (lever 4): the per-pass-set tally behind `noncandidate_reads` is kept under (buff, reason) and its text is made
+  // once, the first time a pair is seen, instead of formatting a string and walking a string-keyed map on every pass set; write_footer
+  // folds it into `noncandidate_reads` (same keys, same counts, same order in the footer).
+  struct nc_key_t
+  {
+    const buff_t* b;
+    std::uint32_t tag;  // 0 noplayer, 1 foreign, else 2 + 2 * applier class + (press >= 0)
+    bool operator==( const nc_key_t& o ) const { return b == o.b && tag == o.tag; }
+  };
+  struct nc_key_hash_t
+  {
+    std::size_t operator()( const nc_key_t& k ) const
+    {
+      return std::hash<const void*>()( k.b ) ^ ( std::size_t( k.tag ) * 0x9E3779B97F4A7C15ull );
+    }
+  };
+  struct nc_val_t
+  {
+    std::uint64_t count;
+    std::string text;
+  };
+  std::unordered_map<nc_key_t, nc_val_t, nc_key_hash_t> noncandidate_fast;
   // Plan 05 diagnostic (footer `premade_uncovered_by_action`): premade_uncovered per action name.
   std::map<std::string, std::uint64_t> uncovered_by_action;
 
@@ -749,6 +771,11 @@ void write_footer( sim_t* sim )
   state_t* s = root->rl_bl_state.get();
   if ( s == nullptr )
     return;
+
+  // Lever 4: fold the (buff, reason) tally into the footer's string-keyed map.
+  for ( const auto& kv : s->noncandidate_fast )
+    s->noncandidate_reads[ kv.second.text ] += kv.second.count;
+  s->noncandidate_fast.clear();
 
   std::string b;
   b += "{\"k\":\"ftr\",\"complete\":true";
@@ -2785,6 +2812,26 @@ const std::vector<stat_buff_t*>& stat_buffs_of( state_t* st, player_t* p )
   return it->second;
 }
 
+// Lever 4: one pass set read a buff that did not become a candidate, for the reason `tag`.
+void note_noncandidate( state_t* st, const buff_t* b, std::uint32_t tag )
+{
+  const state_t::nc_key_t key{ b, tag };
+  auto it = st->noncandidate_fast.find( key );
+  if ( it != st->noncandidate_fast.end() )
+  {
+    ++it->second.count;
+    return;
+  }
+  std::string text;
+  if ( tag == 0 )
+    text = fmt::format( "{}|noplayer", b->name_str );
+  else if ( tag == 1 )
+    text = fmt::format( "{}|foreign", b->name_str );
+  else
+    text = fmt::format( "{}|cls{}|press{}", b->name_str, static_cast<int>( ( tag - 2 ) >> 1 ), ( tag & 1 ) != 0 ? "pos" : "neg" );
+  st->noncandidate_fast.emplace( key, state_t::nc_val_t{ 1, std::move( text ) } );
+}
+
 void collect_candidates( state_t* st, player_t* dealer, player_t* owner, player_t* target, std::vector<buff_t*>& out )
 {
   for ( const tap_read_t& r : g_tap_reads )
@@ -2792,20 +2839,19 @@ void collect_candidates( state_t* st, player_t* dealer, player_t* owner, player_
     buff_t* b = const_cast<buff_t*>( r.b );
     if ( b->player == nullptr )
     {
-      ++st->noncandidate_reads[ fmt::format( "{}|noplayer", b->name_str ) ];
+      note_noncandidate( st, b, 0 );
       continue;
     }
     const bool own    = b->player == dealer || ( owner != nullptr && b->player == owner );
     const bool debuff = b->player == target && ( b->source == dealer || ( owner != nullptr && b->source == owner ) );
     if ( !own && !debuff )
     {
-      ++st->noncandidate_reads[ fmt::format( "{}|foreign", b->name_str ) ];
+      note_noncandidate( st, b, 1 );
       continue;
     }
     if ( !press_applied( st, b ) )
     {
-      ++st->noncandidate_reads[ fmt::format( "{}|cls{}|press{}", b->name_str, cls_out( b->rl_bl_applied.cls ),
-                                             b->rl_bl_applied.press >= 0 ? "pos" : "neg" ) ];
+      note_noncandidate( st, b, 2 + 2 * static_cast<std::uint32_t>( cls_out( b->rl_bl_applied.cls ) ) + ( b->rl_bl_applied.press >= 0 ? 1u : 0u ) );
       continue;
     }
     out.push_back( b );
