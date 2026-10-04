@@ -78,7 +78,11 @@ struct state_t
   // 261003-s1c plan 02: the sink. text = the JSON backend (formats records, writes the file); false = the memory backend.
   bool text = true;
   std::string summary_path;                           // memory backend: optional end-of-run summary file
-  std::array<std::uint64_t, REC_KIND_COUNT> rec_n{};  // records by kind, both backends (never reset: a run total)
+  // Records by kind, both backends. fight_rec_n is the current fight's tally (cleared with fight_buf at fight begin: what the JSON backend
+  // would never flush for a fight that does not end, e.g. the trailing reset after the last iteration, is never counted either);
+  // fight_end adds it to rec_n, the run total.
+  std::array<std::uint64_t, REC_KIND_COUNT> fight_rec_n{};
+  std::array<std::uint64_t, REC_KIND_COUNT> rec_n{};
 
   // The current fight's buffered records; flushed at fight end only. Cleared at fight begin, so a
   // trailing fight_begin() (sim_t's final reset() after the last iteration) is never written.
@@ -422,7 +426,7 @@ void put_count_object( std::string& b, const char* key, const std::map<std::stri
 template <typename Format>
 inline void emit( state_t* s, rec_kind_t kind, Format&& format )
 {
-  ++s->rec_n[ kind ];
+  ++s->fight_rec_n[ kind ];
   if ( s->text )
     format( s->fight_buf );
 }
@@ -577,6 +581,7 @@ void fight_begin( sim_t* sim )
   s->actor = sim->player_no_pet_list[ 0 ];
 
   s->fight_buf.clear();
+  s->fight_rec_n.fill( 0 );
   s->in_fight = true;
   s->in_hit_sink = false;
   s->hit_table.clear();
@@ -708,6 +713,8 @@ void fight_end( sim_t* sim )
                     s->fight_xp );
   } );
 
+  for ( int k = 0; k < REC_KIND_COUNT; ++k )
+    s->rec_n[ k ] += s->fight_rec_n[ k ];
   ++s->run_fights;
   if ( collected )
     ++s->run_collected_fights;
