@@ -1136,17 +1136,18 @@ fold_t fold_fight( module_t& m, const std::vector<std::int64_t>* decision_seqs )
   {
     if ( k == UNKNOWN_KEY || dset.count( k ) )
       continue;  // an unknown press was counted at the lookup
+    // MOVED, not merely touched (a background hit at the pull that kept its whole amount is no finding): a moved value above the
+    // conservation tolerance of the copy, in either slice.
     bool nonzero = false;
-    for ( int c = 0; c < 2 && !nonzero; ++c )
+    for ( int c = 0; c < 2; ++c )
     {
-      const auto oi = old_[ c ].find( k );
-      const auto ni = new_[ c ].find( k );
-      if ( oi != old_[ c ].end() )
-        for ( int i = 0; i < 3; ++i )
-          nonzero = nonzero || oi->second.v[ i ] != 0.0;
-      if ( ni != new_[ c ].end() )
-        for ( int i = 0; i < 2; ++i )
-          nonzero = nonzero || ni->second.v[ i ] != 0.0;
+      const auto oi  = old_[ c ].find( k );
+      const auto ni  = new_[ c ].find( k );
+      const acc3_t o = oi == old_[ c ].end() ? acc3_t{} : oi->second;
+      const acc2_t n = ni == new_[ c ].end() ? acc2_t{} : ni->second;
+      const double tol = REL_TOL * std::max( out.abs_total[ c ], 1.0 );
+      if ( std::fabs( n.v[ 0 ] - ( o.v[ 0 ] + o.v[ 1 ] ) ) > tol || std::fabs( n.v[ 1 ] - o.v[ 2 ] ) > tol )
+        nonzero = true;
     }
     if ( nonzero )
     {
