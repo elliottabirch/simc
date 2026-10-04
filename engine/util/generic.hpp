@@ -523,12 +523,23 @@ public:
  * Fancy type-casting function to use when we "know" what type an object pointer
  * really is. Makes sure we are right when debugging.
  */
+namespace rl_buff_ledger
+{
+// 261003-s1c plan 02 (lever 7): true while one of the buff ledger's own passes runs (sim/rl_buff_ledger.hpp).
+extern bool g_in_pass;
+}  // namespace rl_buff_ledger
+
 template <typename To, typename From>
 inline To debug_cast( From* ptr )
 {
 #ifdef NDEBUG
   return static_cast<To>( ptr );
 #else
+  // Lever 7: this build keeps assert() on, so every debug_cast is a dynamic_cast plus a check (about a million per ledger-on fight, almost
+  // all of them the class modules' p() accessors). Inside the ledger's own passes, which re-run code the real fight already ran with the
+  // checked cast on the same objects, the plain cast is used; everywhere else (every fight without the ledger) nothing changes.
+  if ( rl_buff_ledger::g_in_pass )
+    return static_cast<To>( ptr );
   To result = dynamic_cast<To>( ptr );
   if ( ptr )
     assert( result );
