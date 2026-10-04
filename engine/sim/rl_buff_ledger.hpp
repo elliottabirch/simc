@@ -270,6 +270,10 @@ rng::rng_t* rng_access( sim_t* sim, const char* family );
 // (buff.hpp, dot.hpp: one load per read). Kept in step by every place that changes one of its inputs.
 extern bool g_reads_on;
 
+// 261003-s1c plan 02 (lever 2): true while one of the ledger's own hidden/reference passes runs (the shadow scope is open). Read by
+// item_database::curve_point_value, which memoises its (pure) result only then; outside a pass nothing changes.
+extern bool g_in_pass;
+
 // rl_cause_scope_t's constructor / destructor (rl_translog.cpp): one ledger frame per scope pushed for the RL
 // actor or its pets outside the ledger's own passes. frame_push writes a `frm` record and returns the frame id
 // (-1 when no frame was pushed); frame_pop pops that frame (and counts frame_pop_mismatch if it was not the top).

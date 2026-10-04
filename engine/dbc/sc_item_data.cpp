@@ -14,9 +14,11 @@
 #include "item/special_effect.hpp"
 #include "item/item.hpp"
 #include "player/player.hpp"
+#include "sim/rl_buff_ledger.hpp"
 #include "sim/sim.hpp"
 #include <cctype>
 #include <cmath>
+#include <cstring>
 
 namespace {
   template <item_subclass_consumable CLASS>
@@ -101,7 +103,48 @@ std::pair<const curve_point_t*, const curve_point_t*> dbc_t::curve_point( unsign
   return { lower_bound, upper_bound };
 }
 
+namespace
+{
+// 261003-s1c plan 02 (lever 2): the buff ledger's hidden passes recompute the player's stat caches from scratch before every pass
+// (the combat-rating diminishing-return curves, a binary search of the whole curve table per lookup, were 9 % of the instructions of a
+// ledger-on fight). curve_point_value is a pure function of (ptr flag, curve id, value): while a pass runs (rl_buff_ledger::g_in_pass,
+// false in every fight without the ledger and outside the passes) the last results are kept in a small direct-mapped table and returned
+// as the very same double. Nothing is memoised outside a pass, so the plain engine path is unchanged.
+struct curve_memo_entry_t
+{
+  std::uint64_t value_bits = 0;
+  unsigned curve_id        = 0;
+  bool ptr                 = false;
+  bool valid               = false;
+  double result            = 0.0;
+};
+constexpr std::size_t CURVE_MEMO_SIZE = 256;
+curve_memo_entry_t g_curve_memo[ CURVE_MEMO_SIZE ];
+}  // namespace
+
 double item_database::curve_point_value( const dbc_t& dbc, unsigned curve_id, double point_value )
+{
+  if ( rl_buff_ledger::g_in_pass )
+  {
+    std::uint64_t bits;
+    std::memcpy( &bits, &point_value, sizeof( bits ) );
+    const std::uint64_t h = ( bits * 0x9E3779B97F4A7C15ull ) ^ ( std::uint64_t( curve_id ) * 0xC2B2AE3D27D4EB4Full ) ^ ( dbc.ptr ? 1u : 0u );
+    curve_memo_entry_t& e = g_curve_memo[ ( h >> 32 ) % CURVE_MEMO_SIZE ];
+    if ( e.valid && e.value_bits == bits && e.curve_id == curve_id && e.ptr == dbc.ptr )
+      return e.result;
+    e.valid = false;
+    const double r = curve_point_value_uncached( dbc, curve_id, point_value );
+    e.value_bits   = bits;
+    e.curve_id     = curve_id;
+    e.ptr          = dbc.ptr;
+    e.result       = r;
+    e.valid        = true;
+    return r;
+  }
+  return curve_point_value_uncached( dbc, curve_id, point_value );
+}
+
+double item_database::curve_point_value_uncached( const dbc_t& dbc, unsigned curve_id, double point_value )
 {
   auto curve_data = dbc.curve_point( curve_id, point_value );
 

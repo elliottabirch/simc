@@ -497,6 +497,7 @@ std::int32_t cur_frame( const state_t* st )
 void update_gate()
 {
   g_reads_on = g_tap_open || ( g_frame_depth > 0 && !g_shadow_active && g_busy == 0 );
+  g_in_pass  = g_shadow_active;
 }
 
 // The ledger's own code reads buffs and actions (to write its records); none of that is a read of the fight.
@@ -1302,6 +1303,7 @@ void xp_record( player_t* p, const rl_cause_t& cause, double amount, const char*
 // runs; note_read records each buff once with a non-zero stack or value, in first-read order.
 bool g_tap_open = false;
 bool g_reads_on = false;
+bool g_in_pass  = false;  // 261003-s1c plan 02 (lever 2): see rl_buff_ledger.hpp
 // Plan 12 (NT-02): see rl_buff_ledger.hpp.
 bool g_ledger_open = false;
 

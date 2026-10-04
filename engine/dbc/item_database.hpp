@@ -67,6 +67,8 @@ bool apply_item_bonus( item_t& item, const item_bonus_entry_t& entry );
 void sort_item_bonuses( item_t& item );
 
 double curve_point_value( const dbc_t& dbc, unsigned curve_id, double point_value );
+// 261003-s1c plan 02 (lever 2): the plain computation behind curve_point_value (which memoises it only inside the ledger's passes).
+double curve_point_value_uncached( const dbc_t& dbc, unsigned curve_id, double point_value );
 void apply_item_scaling( item_t& item, unsigned curve_id, unsigned player_level );
 double apply_combat_rating_multiplier( const item_t& item, double amount, unsigned max_scaling_level = 0 );
 double apply_combat_rating_multiplier( const player_t* player, combat_rating_multiplier_type type, unsigned ilevel, double amount );
