@@ -4572,6 +4572,8 @@ void sim_t::create_options()
   // 261001-bac stage 0 (research clone only): per-hit buff ledger. See sim.hpp's
   // rl_buff_ledger_str doc comment. Default empty (off).
   add_option( opt_string( "rl_buff_ledger", rl_buff_ledger_str ) );
+  add_option( opt_string( "rl_buff_ledger_sink", rl_buff_ledger_sink_str ) );
+  add_option( opt_string( "rl_buff_ledger_summary", rl_buff_ledger_summary_str ) );
   add_option( opt_bool( "rl_buff_ledger_guard_probe", rl_buff_ledger_guard_probe ) );
   add_option( opt_bool( "rl_buff_ledger_cache", rl_buff_ledger_cache ) );
   add_option( opt_bool( "rl_buff_ledger_ext_probe", rl_buff_ledger_ext_probe ) );
@@ -5989,7 +5991,21 @@ void sim_t::setup( sim_control_t* c )
   // clamped (a ledgered run must be the same run as an unledgered one), before the file is ever
   // opened. Placed AFTER the rl_translog clamp above so `threads` is the effective count.
   // An empty value is the same as unset: rl_bl_on stays false and nothing below runs.
-  if ( !rl_buff_ledger_str.empty() )
+  if ( !rl_buff_ledger_sink_str.empty() && rl_buff_ledger_sink_str != "json" && rl_buff_ledger_sink_str != "memory" )
+  {
+    throw sc_invalid_sim_argument( fmt::format( "rl_buff_ledger_sink='{}' is not a sink (json, memory).", rl_buff_ledger_sink_str ) );
+  }
+  const bool rl_bl_memory = rl_buff_ledger_sink_str == "memory";
+  if ( rl_bl_memory && !rl_buff_ledger_str.empty() )
+  {
+    throw sc_invalid_sim_argument( "rl_buff_ledger_sink=memory writes no ledger file: rl_buff_ledger= must be empty (the optional summary is "
+                                   "rl_buff_ledger_summary=<path>)." );
+  }
+  if ( !rl_buff_ledger_summary_str.empty() && !rl_bl_memory )
+  {
+    throw sc_invalid_sim_argument( "rl_buff_ledger_summary= belongs to the memory sink: it needs rl_buff_ledger_sink=memory." );
+  }
+  if ( !rl_buff_ledger_str.empty() || rl_bl_memory )
   {
     if ( threads > 1 )
     {

@@ -55,11 +55,30 @@ constexpr const char* EMITS_JSON =
     "[\"hdr\",\"fb\",\"fe\",\"ftr\",\"pr\",\"hit\",\"xp\",\"app\",\"ln\",\"frm\",\"rd\",\"dr\",\"cs\",\"dotr\",\"zr\",\"cyc\",\"ref\",\"use\",\"cdn\",\"ext\",\"exr\",\"rps\"]";
 }  // namespace
 
+// 261003-s1c plan 02: the record sink seam. Every record the hooks produce goes through emit() below with its kind and a
+// formatter. Backend 1 (the JSON backend, option rl_buff_ledger=<path>) runs the formatter into the fight's buffer, which is
+// flushed to the file at fight end exactly as before. Backend 2 (the memory backend, option rl_buff_ledger_sink=memory) counts the
+// record by kind and never runs the formatter: no text is built for a record, no file is opened, and the run's end writes only
+// the summary (rl_buff_ledger_summary=<path>, optional). Everything a hook does besides formatting (counters, applier-list
+// reconciliation, the frame bookkeeping) happens in both backends.
+enum rec_kind_t : std::uint8_t
+{
+  REC_FB, REC_FE, REC_DOTR, REC_PR, REC_HIT, REC_XP, REC_APP, REC_LN, REC_FRM, REC_RD, REC_DR, REC_CS, REC_ZR,
+  REC_CYC, REC_REF, REC_USE, REC_CDN, REC_RPS, REC_EXT, REC_EXR,
+  REC_KIND_COUNT
+};
+constexpr const char* REC_KIND_NAMES[ REC_KIND_COUNT ] = { "fb", "fe", "dotr", "pr", "hit", "xp", "app", "ln", "frm", "rd",
+                                                           "dr", "cs", "zr", "cyc", "ref", "use", "cdn", "rps", "ext", "exr" };
+
 // The ledger's state, defined here so sim.hpp never sees it (sim.hpp forward-declares it).
 struct state_t
 {
   io::ofstream out;
   std::string path;
+  // 261003-s1c plan 02: the sink. text = the JSON backend (formats records, writes the file); false = the memory backend.
+  bool text = true;
+  std::string summary_path;                           // memory backend: optional end-of-run summary file
+  std::array<std::uint64_t, REC_KIND_COUNT> rec_n{};  // records by kind, both backends (never reset: a run total)
 
   // The current fight's buffered records; flushed at fight end only. Cleared at fight begin, so a
   // trailing fight_begin() (sim_t's final reset() after the last iteration) is never written.
@@ -398,6 +417,16 @@ void put_count_object( std::string& b, const char* key, const std::map<std::stri
   b += '}';
 }
 
+// The sink seam (see rec_kind_t). `format` takes the fight buffer and appends exactly one record line; it is run by the JSON
+// backend only. Nothing the engine reads depends on whether it ran.
+template <typename Format>
+inline void emit( state_t* s, rec_kind_t kind, Format&& format )
+{
+  ++s->rec_n[ kind ];
+  if ( s->text )
+    format( s->fight_buf );
+}
+
 // 261003-s1c plan 01 Task 2 (production f549d4f346, Phase 259): the class byte of a stamp may carry RL_CAUSE_DECK_MARK (0x80), which is
 // not equal to any rl_cause_class enumerator. EVERY class this file reads or compares goes through rl_cause_base(); the raw byte is never
 // compared, never written. The ledger writes the BASE class in `cls` and the mark as a separate bool `dk` (LEDGER-FORMAT-S1.md).
@@ -493,6 +522,15 @@ void open_and_write_header( sim_t* sim )
   auto st = std::make_shared<state_t>();
   st->path = root->rl_buff_ledger_str;
   st->probe_action = root->rl_buff_ledger_refund_probe_str;
+  // 261003-s1c plan 02: the memory backend opens no file and writes no header (the summary file, when asked for, is written at the end).
+  if ( root->rl_buff_ledger_sink_str == "memory" )
+  {
+    st->text         = false;
+    st->summary_path = root->rl_buff_ledger_summary_str;
+    root->rl_bl_state = std::move( st );
+    g_ledger_open     = true;
+    return;
+  }
   st->out.open( st->path );
   if ( !st->out.is_open() )
   {
@@ -575,12 +613,13 @@ void fight_begin( sim_t* sim )
   s->fight_presses = 0;
   s->fight_xp = 0;
 
-  std::string& b = s->fight_buf;
-  fmt::format_to( out_it( b ), "{{\"k\":\"fb\",\"it\":{},\"t\":", sim->current_iteration );
-  put_double( b, sim->current_time().total_seconds() );
-  fmt::format_to( out_it( b ), ",\"seed\":{},\"actor\":", sim->seed );
-  put_string( b, s->actor->name() );
-  b += "}\n";
+  emit( s, REC_FB, [ & ]( std::string& b ) {
+    fmt::format_to( out_it( b ), "{{\"k\":\"fb\",\"it\":{},\"t\":", sim->current_iteration );
+    put_double( b, sim->current_time().total_seconds() );
+    fmt::format_to( out_it( b ), ",\"seed\":{},\"actor\":", sim->seed );
+    put_string( b, s->actor->name() );
+    b += "}\n";
+  } );
 }
 
 void reset_done( sim_t* sim )
@@ -603,10 +642,10 @@ void fight_end( sim_t* sim )
   // datacollection_end() guard): iteration 0 is the warm-up fight unless there is only one.
   const bool collected = ( sim->iterations == 1 || sim->current_iteration >= 1 );
 
-  std::string& b = s->fight_buf;
   // Plan 06: the damage-over-time condition reads of the fight, one record per fight. `counts` is by dot name over
   // both contexts ([non-zero reads, zero reads]); `by_ctx` is by "<dot>|<source actor>|<frame or pass>".
-  {
+  ++s->dotr_rows;
+  emit( s, REC_DOTR, [ & ]( std::string& o ) {
     std::map<std::string, std::array<std::uint64_t, 2>> by_name;
     std::map<std::string, std::array<std::uint64_t, 2>> by_ctx;
     for ( const auto& kv : s->dot_reads )
@@ -623,8 +662,6 @@ void fight_end( sim_t* sim )
       p[ 0 ] += kv.second[ 2 ];
       p[ 1 ] += kv.second[ 3 ];
     }
-    ++s->dotr_rows;
-    std::string& o = s->fight_buf;
     fmt::format_to( out_it( o ), "{{\"k\":\"dotr\",\"it\":{},\"counts\":{{", sim->current_iteration );
     bool first = true;
     for ( const auto& kv : by_name )
@@ -648,26 +685,28 @@ void fight_end( sim_t* sim )
       fmt::format_to( out_it( o ), ":[{},{}]", kv.second[ 0 ], kv.second[ 1 ] );
     }
     o += "}}\n";
-  }
+  } );
 
-  fmt::format_to( out_it( b ), "{{\"k\":\"fe\",\"it\":{},\"t\":", sim->current_iteration );
-  put_double( b, sim->current_time().total_seconds() );
-  fmt::format_to( out_it( b ), ",\"collected\":{},\"real\":[", collected ? "true" : "false" );
-  for ( std::uint32_t i = 0; i < rl_credit::STREAM_COUNT; ++i )
-  {
-    if ( i )
-      b += ',';
-    put_double( b, s->actor->rl_credit.real[ i ] );
-  }
-  b += "],\"exp\":[";
-  for ( std::uint32_t i = 0; i < rl_credit::STREAM_COUNT; ++i )
-  {
-    if ( i )
-      b += ',';
-    put_double( b, s->actor->rl_credit.exp[ i ] );
-  }
-  fmt::format_to( out_it( b ), "],\"n_hit\":{},\"n_press\":{},\"n_xp\":{}}}\n", s->fight_hits, s->fight_presses,
-                  s->fight_xp );
+  emit( s, REC_FE, [ & ]( std::string& b ) {
+    fmt::format_to( out_it( b ), "{{\"k\":\"fe\",\"it\":{},\"t\":", sim->current_iteration );
+    put_double( b, sim->current_time().total_seconds() );
+    fmt::format_to( out_it( b ), ",\"collected\":{},\"real\":[", collected ? "true" : "false" );
+    for ( std::uint32_t i = 0; i < rl_credit::STREAM_COUNT; ++i )
+    {
+      if ( i )
+        b += ',';
+      put_double( b, s->actor->rl_credit.real[ i ] );
+    }
+    b += "],\"exp\":[";
+    for ( std::uint32_t i = 0; i < rl_credit::STREAM_COUNT; ++i )
+    {
+      if ( i )
+        b += ',';
+      put_double( b, s->actor->rl_credit.exp[ i ] );
+    }
+    fmt::format_to( out_it( b ), "],\"n_hit\":{},\"n_press\":{},\"n_xp\":{}}}\n", s->fight_hits, s->fight_presses,
+                    s->fight_xp );
+  } );
 
   ++s->run_fights;
   if ( collected )
@@ -676,7 +715,8 @@ void fight_end( sim_t* sim )
   s->run_presses += s->fight_presses;
   s->run_xp += s->fight_xp;
 
-  flush_fight( *s );
+  if ( s->text )
+    flush_fight( *s );
 }
 
 void write_footer( sim_t* sim )
@@ -918,6 +958,31 @@ void write_footer( sim_t* sim )
   b += '}';
   b += "}\n";
 
+  if ( !s->text )
+  {
+    // The memory backend: no ledger file. The summary (optional) is one JSON object: the records counted by kind and the very
+    // footer the JSON backend would have written.
+    if ( !s->summary_path.empty() )
+    {
+      std::string sum = "{\"k\":\"sum\",\"sink\":\"memory\",\"records\":{";
+      for ( int i = 0; i < REC_KIND_COUNT; ++i )
+      {
+        if ( i )
+          sum += ',';
+        fmt::format_to( out_it( sum ), "\"{}\":{}", REC_KIND_NAMES[ i ], s->rec_n[ i ] );
+      }
+      sum += "},\"ftr\":";
+      sum += b.substr( 0, b.size() - 1 );
+      sum += "}\n";
+      io::ofstream f;
+      f.open( s->summary_path );
+      if ( !f.is_open() )
+        throw sc_runtime_error( fmt::format( "rl_buff_ledger_summary=: cannot open '{}' for writing.", s->summary_path ) );
+      f << sum;
+      f.close();
+    }
+    return;
+  }
   s->out << b;
   s->out.flush();
   s->out.close();
@@ -996,14 +1061,15 @@ std::int16_t open_press( player_t* p, const rl_cause_t& cause )
   if ( !s->probe_action.empty() )
     s->press_is_probe.push_back( p->last_foreground_action != nullptr && s->probe_action == p->last_foreground_action->name() ? 1 : 0 );
 
-  std::string& b = s->fight_buf;
-  fmt::format_to( out_it( b ), "{{\"k\":\"pr\",\"it\":{},\"t\":", p->sim->current_iteration );
-  put_double( b, p->sim->current_time().total_seconds() );
-  fmt::format_to( out_it( b ), ",\"press\":{},\"seq\":{},\"actor\":", press, cause.seq );
-  put_string( b, p->name() );
-  b += ",\"action\":";
-  put_string( b, p->last_foreground_action ? p->last_foreground_action->name() : std::string() );
-  fmt::format_to( out_it( b ), ",\"cls\":{},\"dk\":{}}}\n", cls_out( cause.cls ), dk_out( cause.cls ) );
+  emit( s, REC_PR, [ & ]( std::string& b ) {
+    fmt::format_to( out_it( b ), "{{\"k\":\"pr\",\"it\":{},\"t\":", p->sim->current_iteration );
+    put_double( b, p->sim->current_time().total_seconds() );
+    fmt::format_to( out_it( b ), ",\"press\":{},\"seq\":{},\"actor\":", press, cause.seq );
+    put_string( b, p->name() );
+    b += ",\"action\":";
+    put_string( b, p->last_foreground_action ? p->last_foreground_action->name() : std::string() );
+    fmt::format_to( out_it( b ), ",\"cls\":{},\"dk\":{}}}\n", cls_out( cause.cls ), dk_out( cause.cls ) );
+  } );
   return press;
 }
 
@@ -1135,61 +1201,62 @@ void hit_sink( action_t* a, action_state_t* state, double expected_amount, bool 
     state->rl_bl_hit = 0;
   }
 
-  std::string& b = s->fight_buf;
-  fmt::format_to( out_it( b ), "{{\"k\":\"hit\",\"it\":{},\"t\":", sim->current_iteration );
-  put_double( b, sim->current_time().total_seconds() );
-  fmt::format_to( out_it( b ), ",\"h\":{},\"actor\":", h );
-  put_string( b, a->player->name() );
-  fmt::format_to( out_it( b ), ",\"pet\":{},\"action\":", pet ? "true" : "false" );
-  put_string( b, a->name() );
-  b += ",\"target\":";
-  put_string( b, state->target->name() );
-  fmt::format_to( out_it( b ), ",\"at\":\"{}\",\"res\":\"{}\",\"ra\":", tick ? 't' : 'd',
-                  util::result_type_string( state->result ) );
-  put_double( b, state->result_amount );
-  b += ",\"exp\":";
-  put_double( b, expected_amount );
-  fmt::format_to( out_it( b ),
-                  ",\"exp_excl\":{},\"seq\":{},\"cls\":{},\"dk\":{},\"ch\":{},\"press\":{},\"launch\":{},\"n_targets\":{},"
-                  "\"status\":{},\"cand\":[",
-                  exp_excl ? "true" : "false", state->rl_cause_seq, cls_out( state->rl_cause_class ),
-                  dk_out( state->rl_cause_class ), hit_chosen ? "true" : "false", state->rl_cause_press, state->rl_cause_launch,
-                  state->n_targets, status );
-  b += cand_json;
-  b += "],\"pass\":[";
-  b += pass_json;
-  // Plan 04: a tick of a damage-over-time effect names the `app` record its state carries (null when
-  // the effect came from a state that had none); `par` repeats it as the format's parent list.
-  // Plan 05: a tick action's tick (no rl_bl_app of its own) names the `app` record of the tick action's
-  // application snapshot; a direct hit made from a pre-made state names the `app` record (src "premade")
-  // written when the state was handed to schedule_execute. Direct hits never carry `parent`.
-  if ( tick )
-  {
-    if ( parent != 0 )
-      fmt::format_to( out_it( b ), "],\"par\":[{0}],\"parent\":{0}", parent );
+  emit( s, REC_HIT, [ & ]( std::string& b ) {
+    fmt::format_to( out_it( b ), "{{\"k\":\"hit\",\"it\":{},\"t\":", sim->current_iteration );
+    put_double( b, sim->current_time().total_seconds() );
+    fmt::format_to( out_it( b ), ",\"h\":{},\"actor\":", h );
+    put_string( b, a->player->name() );
+    fmt::format_to( out_it( b ), ",\"pet\":{},\"action\":", pet ? "true" : "false" );
+    put_string( b, a->name() );
+    b += ",\"target\":";
+    put_string( b, state->target->name() );
+    fmt::format_to( out_it( b ), ",\"at\":\"{}\",\"res\":\"{}\",\"ra\":", tick ? 't' : 'd',
+                    util::result_type_string( state->result ) );
+    put_double( b, state->result_amount );
+    b += ",\"exp\":";
+    put_double( b, expected_amount );
+    fmt::format_to( out_it( b ),
+                    ",\"exp_excl\":{},\"seq\":{},\"cls\":{},\"dk\":{},\"ch\":{},\"press\":{},\"launch\":{},\"n_targets\":{},"
+                    "\"status\":{},\"cand\":[",
+                    exp_excl ? "true" : "false", state->rl_cause_seq, cls_out( state->rl_cause_class ),
+                    dk_out( state->rl_cause_class ), hit_chosen ? "true" : "false", state->rl_cause_press, state->rl_cause_launch,
+                    state->n_targets, status );
+    b += cand_json;
+    b += "],\"pass\":[";
+    b += pass_json;
+    // Plan 04: a tick of a damage-over-time effect names the `app` record its state carries (null when
+    // the effect came from a state that had none); `par` repeats it as the format's parent list.
+    // Plan 05: a tick action's tick (no rl_bl_app of its own) names the `app` record of the tick action's
+    // application snapshot; a direct hit made from a pre-made state names the `app` record (src "premade")
+    // written when the state was handed to schedule_execute. Direct hits never carry `parent`.
+    if ( tick )
+    {
+      if ( parent != 0 )
+        fmt::format_to( out_it( b ), "],\"par\":[{0}],\"parent\":{0}", parent );
+      else
+        b += "],\"par\":[],\"parent\":null";
+    }
+    else if ( state->rl_bl_pm != 0 )
+      fmt::format_to( out_it( b ), "],\"par\":[{}]", state->rl_bl_pm );
     else
-      b += "],\"par\":[],\"parent\":null";
-  }
-  else if ( state->rl_bl_pm != 0 )
-    fmt::format_to( out_it( b ), "],\"par\":[{}]", state->rl_bl_pm );
-  else
-    b += "],\"par\":[]";
-  if ( !guards_json.empty() )
-  {
-    b += ",\"guards\":[";
-    b += guards_json;
-    b += ']';
-  }
-  // Plan 06: the frame the hit's passes ran in (the sink's own frame when it had none).
-  fmt::format_to( out_it( b ), ",\"fr\":{}", fr );
-  if ( !pmc_text.empty() )
-  {
-    b += ",\"pmc\":";
-    put_string( b, pmc_text );
-  }
-  if ( cached )
-    b += ",\"cached\":true";
-  b += "}\n";
+      b += "],\"par\":[]";
+    if ( !guards_json.empty() )
+    {
+      b += ",\"guards\":[";
+      b += guards_json;
+      b += ']';
+    }
+    // Plan 06: the frame the hit's passes ran in (the sink's own frame when it had none).
+    fmt::format_to( out_it( b ), ",\"fr\":{}", fr );
+    if ( !pmc_text.empty() )
+    {
+      b += ",\"pmc\":";
+      put_string( b, pmc_text );
+    }
+    if ( cached )
+      b += ",\"cached\":true";
+    b += "}\n";
+  } );
 }
 
 void xp_record( player_t* p, const rl_cause_t& cause, double amount, const char* action_name, bool on_chosen )
@@ -1200,17 +1267,18 @@ void xp_record( player_t* p, const rl_cause_t& cause, double amount, const char*
     return;
 
   ++s->fight_xp;
-  std::string& b = s->fight_buf;
-  fmt::format_to( out_it( b ), "{{\"k\":\"xp\",\"it\":{},\"t\":", sim->current_iteration );
-  put_double( b, sim->current_time().total_seconds() );
-  fmt::format_to( out_it( b ), ",\"seq\":{},\"cls\":{},\"dk\":{},\"ch\":{},\"press\":{},\"launch\":{},\"amount\":", cause.seq,
-                  cls_out( cause.cls ), dk_out( cause.cls ), on_chosen ? "true" : "false", cause.press, cause.launch );
-  put_double( b, amount );
-  b += ",\"action\":";
-  put_string( b, action_name != nullptr ? action_name : "" );
-  b += ",\"actor\":";
-  put_string( b, p->name() );
-  b += "}\n";
+  emit( s, REC_XP, [ & ]( std::string& b ) {
+    fmt::format_to( out_it( b ), "{{\"k\":\"xp\",\"it\":{},\"t\":", sim->current_iteration );
+    put_double( b, sim->current_time().total_seconds() );
+    fmt::format_to( out_it( b ), ",\"seq\":{},\"cls\":{},\"dk\":{},\"ch\":{},\"press\":{},\"launch\":{},\"amount\":", cause.seq,
+                    cls_out( cause.cls ), dk_out( cause.cls ), on_chosen ? "true" : "false", cause.press, cause.launch );
+    put_double( b, amount );
+    b += ",\"action\":";
+    put_string( b, action_name != nullptr ? action_name : "" );
+    b += ",\"actor\":";
+    put_string( b, p->name() );
+    b += "}\n";
+  } );
 }
 
 // ==========================================================================
@@ -1342,7 +1410,7 @@ const rl_cause_t& effective_cause( const buff_t::rl_bl_applier_t& e, timespan_t 
 // presses, one per application for the rest). Returns true for the covering form.
 bool write_appliers( std::string& b, state_t* st, buff_t* c )
 {
-  reconcile_appliers( st, c );
+  reconcile_appliers( st, c );  // (the memory backend calls reconcile_appliers alone: its only state effect)
   const bool covering = covering_mode( c );
   b += '[';
   bool first = true;
@@ -1417,25 +1485,29 @@ void frame_read( const buff_t* cb, int stack, double value )
   f.last_dr = false;
   ++s->reads_written;
 
-  buff_t* b       = const_cast<buff_t*>( cb );
-  std::string& o  = s->fight_buf;
-  fmt::format_to( out_it( o ), "{{\"k\":\"rd\",\"it\":{},\"t\":", b->sim->current_iteration );
-  put_double( o, b->sim->current_time().total_seconds() );
-  fmt::format_to( out_it( o ), ",\"f\":{},\"o\":{},\"buff\":", f.id, s->next_order++ );
-  put_string( o, b->name_str );
-  o += ",\"owner\":";
-  put_string( o, b->player != nullptr ? std::string( b->player->name() ) : std::string() );
-  fmt::format_to( out_it( o ), ",\"nz\":{},\"stacks\":{},\"app\":", nz ? "true" : "false", stack );
-  bool covering = false;
-  const bool pend = nz && b->current_stack <= 0;
-  if ( nz && !pend )
-    covering = write_appliers( o, s, b );
-  else
-    o += "[]";
-  fmt::format_to( out_it( o ), ",\"cov\":{}", covering ? "true" : "false" );
-  if ( pend )
-    o += ",\"pend\":true";
-  o += "}\n";
+  buff_t* b        = const_cast<buff_t*>( cb );
+  const bool pend  = nz && b->current_stack <= 0;
+  const std::int64_t order = s->next_order++;
+  if ( !s->text && nz && !pend )
+    reconcile_appliers( s, b );  // the state effect write_appliers has
+  emit( s, REC_RD, [ & ]( std::string& o ) {
+    fmt::format_to( out_it( o ), "{{\"k\":\"rd\",\"it\":{},\"t\":", b->sim->current_iteration );
+    put_double( o, b->sim->current_time().total_seconds() );
+    fmt::format_to( out_it( o ), ",\"f\":{},\"o\":{},\"buff\":", f.id, order );
+    put_string( o, b->name_str );
+    o += ",\"owner\":";
+    put_string( o, b->player != nullptr ? std::string( b->player->name() ) : std::string() );
+    fmt::format_to( out_it( o ), ",\"nz\":{},\"stacks\":{},\"app\":", nz ? "true" : "false", stack );
+    bool covering = false;
+    if ( nz && !pend )
+      covering = write_appliers( o, s, b );
+    else
+      o += "[]";
+    fmt::format_to( out_it( o ), ",\"cov\":{}", covering ? "true" : "false" );
+    if ( pend )
+      o += ",\"pend\":true";
+    o += "}\n";
+  } );
 }
 }  // namespace
 
@@ -1517,15 +1589,16 @@ std::int32_t frame_push( player_t* p, const rl_cause_t& cause, const action_t* o
   const std::int32_t parent = s->frames.empty() ? -1 : s->frames.back().id;
   ++s->frames_written;
 
-  std::string& o = s->fight_buf;
-  fmt::format_to( out_it( o ), "{{\"k\":\"frm\",\"it\":{},\"t\":", sim->current_iteration );
-  put_double( o, sim->current_time().total_seconds() );
-  fmt::format_to( out_it( o ), ",\"f\":{},\"pf\":{},\"kind\":", f.id, parent );
-  put_string( o, kind != nullptr ? std::string_view( kind ) : ( owner != nullptr ? "dispatch" : "scope" ) );
-  fmt::format_to( out_it( o ), ",\"seq\":{},\"cls\":{},\"dk\":{},\"press\":{},\"launch\":{},\"action\":", cause.seq,
-                  cls_out( cause.cls ), dk_out( cause.cls ), cause.press, cause.launch );
-  put_string( o, f.act != nullptr ? std::string( f.act->name() ) : std::string() );
-  o += "}\n";
+  emit( s, REC_FRM, [ & ]( std::string& o ) {
+    fmt::format_to( out_it( o ), "{{\"k\":\"frm\",\"it\":{},\"t\":", sim->current_iteration );
+    put_double( o, sim->current_time().total_seconds() );
+    fmt::format_to( out_it( o ), ",\"f\":{},\"pf\":{},\"kind\":", f.id, parent );
+    put_string( o, kind != nullptr ? std::string_view( kind ) : ( owner != nullptr ? "dispatch" : "scope" ) );
+    fmt::format_to( out_it( o ), ",\"seq\":{},\"cls\":{},\"dk\":{},\"press\":{},\"launch\":{},\"action\":", cause.seq,
+                    cls_out( cause.cls ), dk_out( cause.cls ), cause.press, cause.launch );
+    put_string( o, f.act != nullptr ? std::string( f.act->name() ) : std::string() );
+    o += "}\n";
+  } );
 
   const std::int32_t id = f.id;
   s->frames.push_back( std::move( f ) );
@@ -1863,28 +1936,29 @@ void applier_extend( buff_t* b, const rl_cause_t& cause, player_t* source, times
   ++by.first;
   by.second += extra.total_seconds();
 
-  std::string& o = st->fight_buf;
-  fmt::format_to( out_it( o ), "{{\"k\":\"ext\",\"it\":{},\"t\":", b->sim->current_iteration );
-  put_double( o, now.total_seconds() );
-  fmt::format_to( out_it( o ), ",\"f\":{},\"buff\":", f );
-  put_string( o, b->name_str );
-  o += ",\"owner\":";
-  put_string( o, b->player != nullptr ? std::string( b->player->name() ) : std::string() );
-  o += ",\"src\":";
-  put_string( o, std::string( source->name() ) );
-  o += ",\"sec\":";
-  put_double( o, extra.total_seconds() );
-  o += ",\"old_end\":";
-  put_double( o, old_ends[ 0 ].total_seconds() );
-  o += ",\"end\":";
-  put_double( o, new_ends[ 0 ].total_seconds() );
-  fmt::format_to( out_it( o ), ",\"n_exp\":{},\"stacks\":{},\"cov\":{},\"press\":{},\"cls\":{},\"dk\":{},\"seq\":{},\"launch\":{},\"fn\":",
-                  n_exp, b->current_stack, covering_mode( b ) ? "true" : "false", cause.press, cls_out( cause.cls ),
-                  dk_out( cause.cls ), cause.seq, cause.launch );
-  put_string( o, fn );
-  if ( g_ext_probing )
-    o += ",\"probe\":true";
-  o += "}\n";
+  emit( st, REC_EXT, [ & ]( std::string& o ) {
+    fmt::format_to( out_it( o ), "{{\"k\":\"ext\",\"it\":{},\"t\":", b->sim->current_iteration );
+    put_double( o, now.total_seconds() );
+    fmt::format_to( out_it( o ), ",\"f\":{},\"buff\":", f );
+    put_string( o, b->name_str );
+    o += ",\"owner\":";
+    put_string( o, b->player != nullptr ? std::string( b->player->name() ) : std::string() );
+    o += ",\"src\":";
+    put_string( o, std::string( source->name() ) );
+    o += ",\"sec\":";
+    put_double( o, extra.total_seconds() );
+    o += ",\"old_end\":";
+    put_double( o, old_ends[ 0 ].total_seconds() );
+    o += ",\"end\":";
+    put_double( o, new_ends[ 0 ].total_seconds() );
+    fmt::format_to( out_it( o ), ",\"n_exp\":{},\"stacks\":{},\"cov\":{},\"press\":{},\"cls\":{},\"dk\":{},\"seq\":{},\"launch\":{},\"fn\":",
+                    n_exp, b->current_stack, covering_mode( b ) ? "true" : "false", cause.press, cls_out( cause.cls ),
+                    dk_out( cause.cls ), cause.seq, cause.launch );
+    put_string( o, fn );
+    if ( g_ext_probing )
+      o += ",\"probe\":true";
+    o += "}\n";
+  } );
 }
 
 namespace
@@ -1919,19 +1993,20 @@ void run_ext_probe( state_t* s, player_t* p, const rl_cause_t& cause )
     {
       const timespan_t end_before = sb->expiration.front()->occurs();
       sb->execute( 1 );
-      std::string& o = s->fight_buf;
-      fmt::format_to( out_it( o ), "{{\"k\":\"exr\",\"it\":{},\"t\":", sb->sim->current_iteration );
-      put_double( o, now.total_seconds() );
-      fmt::format_to( out_it( o ), ",\"f\":{},\"buff\":", innermost_frame( sb->sim ) );
-      put_string( o, sb->name_str );
-      o += ",\"owner\":";
-      put_string( o, sb->player != nullptr ? std::string( sb->player->name() ) : std::string() );
-      o += ",\"end_before\":";
-      put_double( o, end_before.total_seconds() );
-      o += ",\"end\":";
-      put_double( o, ( sb->expiration.empty() ? timespan_t::max() : sb->expiration.front()->occurs() ).total_seconds() );
-      fmt::format_to( out_it( o ), ",\"stacks\":{},\"press\":{},\"cls\":{},\"dk\":{},\"seq\":{},\"launch\":{}}}\n", sb->current_stack,
-                      cause.press, cls_out( cause.cls ), dk_out( cause.cls ), cause.seq, cause.launch );
+      emit( s, REC_EXR, [ & ]( std::string& o ) {
+        fmt::format_to( out_it( o ), "{{\"k\":\"exr\",\"it\":{},\"t\":", sb->sim->current_iteration );
+        put_double( o, now.total_seconds() );
+        fmt::format_to( out_it( o ), ",\"f\":{},\"buff\":", innermost_frame( sb->sim ) );
+        put_string( o, sb->name_str );
+        o += ",\"owner\":";
+        put_string( o, sb->player != nullptr ? std::string( sb->player->name() ) : std::string() );
+        o += ",\"end_before\":";
+        put_double( o, end_before.total_seconds() );
+        o += ",\"end\":";
+        put_double( o, ( sb->expiration.empty() ? timespan_t::max() : sb->expiration.front()->occurs() ).total_seconds() );
+        fmt::format_to( out_it( o ), ",\"stacks\":{},\"press\":{},\"cls\":{},\"dk\":{},\"seq\":{},\"launch\":{}}}\n", sb->current_stack,
+                        cause.press, cls_out( cause.cls ), dk_out( cause.cls ), cause.seq, cause.launch );
+      } );
       ++s->ext_probe_refreshed;
     }
   }
@@ -2039,16 +2114,18 @@ void note_consume( buff_t* b, const char* op, int removed )
   ++s->consumes_written;
   const int after = std::strcmp( op, "expire" ) == 0 ? 0 : b->current_stack;
 
-  std::string& o = s->fight_buf;
-  fmt::format_to( out_it( o ), "{{\"k\":\"cs\",\"it\":{},\"t\":", b->sim->current_iteration );
-  put_double( o, b->sim->current_time().total_seconds() );
-  fmt::format_to( out_it( o ), ",\"f\":{},\"o\":{},\"buff\":", f.id, s->next_order++ );
-  put_string( o, b->name_str );
-  o += ",\"owner\":";
-  put_string( o, b->player != nullptr ? std::string( b->player->name() ) : std::string() );
-  o += ",\"op\":";
-  put_string( o, op );
-  fmt::format_to( out_it( o ), ",\"stacks\":{},\"rm\":{}}}\n", after, removed );
+  const std::int64_t order = s->next_order++;
+  emit( s, REC_CS, [ & ]( std::string& o ) {
+    fmt::format_to( out_it( o ), "{{\"k\":\"cs\",\"it\":{},\"t\":", b->sim->current_iteration );
+    put_double( o, b->sim->current_time().total_seconds() );
+    fmt::format_to( out_it( o ), ",\"f\":{},\"o\":{},\"buff\":", f.id, order );
+    put_string( o, b->name_str );
+    o += ",\"owner\":";
+    put_string( o, b->player != nullptr ? std::string( b->player->name() ) : std::string() );
+    o += ",\"op\":";
+    put_string( o, op );
+    fmt::format_to( out_it( o ), ",\"stacks\":{},\"rm\":{}}}\n", after, removed );
+  } );
 }
 
 void note_dot_read( const dot_t* d, bool non_zero )
@@ -2151,31 +2228,34 @@ std::int32_t note_launch( action_t* child, player_t* child_target, const char* k
   }
   ++s->launches_by_kind[ lk ];
 
-  std::string& o = s->fight_buf;
-  fmt::format_to( out_it( o ), "{{\"k\":\"ln\",\"it\":{},\"t\":", sim->current_iteration );
-  put_double( o, sim->current_time().total_seconds() );
-  fmt::format_to( out_it( o ), ",\"l\":{},\"frame\":{},\"order\":{},\"pa\":", l, parent->id, order );
-  put_string( o, parent->act != nullptr ? std::string( parent->act->name() ) : std::string() );
-  o += ",\"ca\":";
-  put_string( o, child->name() );
-  o += ",\"ct\":";
-  put_string( o, child_target != nullptr ? std::string( child_target->name() ) : std::string() );
-  o += ",\"lk\":";
-  put_string( o, lk );
-  o += ",\"sw\":";
-  if ( sw != nullptr )
-  {
-    o += "{\"buff\":";
-    put_string( o, sw->name_str );
-    o += ",\"owner\":";
-    put_string( o, sw->player != nullptr ? std::string( sw->player->name() ) : std::string() );
-    fmt::format_to( out_it( o ), ",\"stacks\":{},\"app\":", sw->current_stack );
-    const bool covering = write_appliers( o, s, sw );
-    fmt::format_to( out_it( o ), ",\"cov\":{}}}", covering ? "true" : "false" );
-  }
-  else
-    o += "null";
-  o += ",\"sf\":null}\n";
+  if ( !s->text && sw != nullptr )
+    reconcile_appliers( s, sw );  // the state effect write_appliers has
+  emit( s, REC_LN, [ & ]( std::string& o ) {
+    fmt::format_to( out_it( o ), "{{\"k\":\"ln\",\"it\":{},\"t\":", sim->current_iteration );
+    put_double( o, sim->current_time().total_seconds() );
+    fmt::format_to( out_it( o ), ",\"l\":{},\"frame\":{},\"order\":{},\"pa\":", l, parent->id, order );
+    put_string( o, parent->act != nullptr ? std::string( parent->act->name() ) : std::string() );
+    o += ",\"ca\":";
+    put_string( o, child->name() );
+    o += ",\"ct\":";
+    put_string( o, child_target != nullptr ? std::string( child_target->name() ) : std::string() );
+    o += ",\"lk\":";
+    put_string( o, lk );
+    o += ",\"sw\":";
+    if ( sw != nullptr )
+    {
+      o += "{\"buff\":";
+      put_string( o, sw->name_str );
+      o += ",\"owner\":";
+      put_string( o, sw->player != nullptr ? std::string( sw->player->name() ) : std::string() );
+      fmt::format_to( out_it( o ), ",\"stacks\":{},\"app\":", sw->current_stack );
+      const bool covering = write_appliers( o, s, sw );
+      fmt::format_to( out_it( o ), ",\"cov\":{}}}", covering ? "true" : "false" );
+    }
+    else
+      o += "null";
+    o += ",\"sf\":null}\n";
+  } );
   return l;
 }
 
@@ -2719,27 +2799,28 @@ void write_zero_record( state_t* st, action_t* a, player_t* target )
 {
   ++st->zero_records;
   sim_t* sim     = a->sim;
-  std::string& o = st->fight_buf;
-  fmt::format_to( out_it( o ), "{{\"k\":\"zr\",\"it\":{},\"t\":", sim->current_iteration );
-  put_double( o, sim->current_time().total_seconds() );
-  o += ",\"action\":";
-  put_string( o, a->name() );
-  o += ",\"target\":";
-  put_string( o, target != nullptr ? std::string( target->name() ) : std::string() );
-  fmt::format_to( out_it( o ), ",\"f\":{},\"buffs\":[", cur_frame( st ) );
-  bool first = true;
-  for ( const tap_read_t& r : g_tap_reads )
-  {
-    if ( !first )
-      o += ',';
-    first = false;
-    o += "{\"buff\":";
-    put_string( o, r.b->name_str );
-    o += ",\"owner\":";
-    put_string( o, r.b->player != nullptr ? std::string( r.b->player->name() ) : std::string() );
-    fmt::format_to( out_it( o ), ",\"stacks\":{}}}", r.stack );
-  }
-  o += "]}\n";
+  emit( st, REC_ZR, [ & ]( std::string& o ) {
+    fmt::format_to( out_it( o ), "{{\"k\":\"zr\",\"it\":{},\"t\":", sim->current_iteration );
+    put_double( o, sim->current_time().total_seconds() );
+    o += ",\"action\":";
+    put_string( o, a->name() );
+    o += ",\"target\":";
+    put_string( o, target != nullptr ? std::string( target->name() ) : std::string() );
+    fmt::format_to( out_it( o ), ",\"f\":{},\"buffs\":[", cur_frame( st ) );
+    bool first = true;
+    for ( const tap_read_t& r : g_tap_reads )
+    {
+      if ( !first )
+        o += ',';
+      first = false;
+      o += "{\"buff\":";
+      put_string( o, r.b->name_str );
+      o += ",\"owner\":";
+      put_string( o, r.b->player != nullptr ? std::string( r.b->player->name() ) : std::string() );
+      fmt::format_to( out_it( o ), ",\"stacks\":{}}}", r.stack );
+    }
+    o += "]}\n";
+  } );
 }
 
 // One pass of whatever kind the caller runs: nothing hidden unless the caller hid something first.
@@ -2930,12 +3011,24 @@ std::string finish_unsafe( state_t* st, split_t& sp )
 }
 
 // Candidate entries are written for any status with candidates (1 split, 2 unsafe, 4 restoring mismatch).
+bool candidates_written( const split_t& sp )
+{
+  return sp.status == 1 || sp.status == 2 || sp.status == 4;
+}
+
+// 261003-s1c plan 02: the memory backend builds no text; the only state effect of writing a candidate entry (put_candidate ->
+// write_appliers) is bringing the buff's applier list up to its stacks (reconcile_appliers), which is kept.
 void write_candidates( std::string& out, state_t* st, const split_t& sp, const player_t* target )
 {
-  if ( sp.status != 1 && sp.status != 2 && sp.status != 4 )
+  if ( !candidates_written( sp ) )
     return;
   for ( std::size_t i = 0; i < sp.cands.size(); ++i )
-    put_candidate( out, st, i, sp.cands[ i ], sp.cands[ i ]->player == target );
+  {
+    if ( st->text )
+      put_candidate( out, st, i, sp.cands[ i ], sp.cands[ i ]->player == target );
+    else
+      reconcile_appliers( st, sp.cands[ i ] );
+  }
 }
 
 // ---- Plan 07: the optional pass cache --------------------------------------------------------------------------
@@ -3162,44 +3255,47 @@ std::uint64_t write_app_record( state_t* st, action_t* a, action_state_t* s, con
     info.cands.push_back( c );
   st->apps.emplace( h, std::move( info ) );
 
-  sim_t* sim     = a->sim;
-  std::string& b = st->fight_buf;
-  fmt::format_to( out_it( b ), "{{\"k\":\"app\",\"it\":{},\"t\":", sim->current_iteration );
-  put_double( b, sim->current_time().total_seconds() );
-  fmt::format_to( out_it( b ), ",\"h\":{},\"actor\":", h );
-  put_string( b, a->player->name() );
-  b += ",\"action\":";
-  put_string( b, a->name() );
-  b += ",\"target\":";
-  put_string( b, s->target->name() );
+  sim_t* sim = a->sim;
   // A tick action's application snapshot is not stamped (the stamp is written on the states of the hits);
   // the caller hands in the cause of the cast that is executing.
   const std::int64_t r_seq   = cause != nullptr ? cause->seq : s->rl_cause_seq;
   const std::uint8_t r_cls_raw = cause != nullptr ? cause->cls : s->rl_cause_class;
   const std::int16_t r_press = cause != nullptr ? cause->press : s->rl_cause_press;
   const std::int32_t r_launch = cause != nullptr ? cause->launch : s->rl_cause_launch;
-  fmt::format_to( out_it( b ), ",\"seq\":{},\"cls\":{},\"dk\":{},\"press\":{},\"launch\":{},\"n_targets\":{},\"status\":{},\"cand\":[",
-                  r_seq, cls_out( r_cls_raw ), dk_out( r_cls_raw ), r_press, r_launch, s->n_targets, sp.status );
+  // (the memory backend builds no text: write_candidates then only reconciles the applier lists)
   std::string cand_json;
   write_candidates( cand_json, st, sp, s->target );
-  b += cand_json;
-  b += "],\"pass\":[";
   std::string pass_json;
-  for ( const pass_rec_t& p : sp.passes )
-    put_pass( pass_json, p, &ref );
-  b += pass_json;
-  b += ']';
-  if ( src != nullptr )
-    fmt::format_to( out_it( b ), ",\"src\":\"{}\"", src );
-  if ( sp.cached )
-    b += ",\"cached\":true";
-  if ( !guards.empty() )
-  {
-    b += ",\"guards\":[";
-    b += guards;
+  if ( st->text )
+    for ( const pass_rec_t& p : sp.passes )
+      put_pass( pass_json, p, &ref );
+  emit( st, REC_APP, [ & ]( std::string& b ) {
+    fmt::format_to( out_it( b ), "{{\"k\":\"app\",\"it\":{},\"t\":", sim->current_iteration );
+    put_double( b, sim->current_time().total_seconds() );
+    fmt::format_to( out_it( b ), ",\"h\":{},\"actor\":", h );
+    put_string( b, a->player->name() );
+    b += ",\"action\":";
+    put_string( b, a->name() );
+    b += ",\"target\":";
+    put_string( b, s->target->name() );
+    fmt::format_to( out_it( b ), ",\"seq\":{},\"cls\":{},\"dk\":{},\"press\":{},\"launch\":{},\"n_targets\":{},\"status\":{},\"cand\":[",
+                    r_seq, cls_out( r_cls_raw ), dk_out( r_cls_raw ), r_press, r_launch, s->n_targets, sp.status );
+    b += cand_json;
+    b += "],\"pass\":[";
+    b += pass_json;
     b += ']';
-  }
-  b += "}\n";
+    if ( src != nullptr )
+      fmt::format_to( out_it( b ), ",\"src\":\"{}\"", src );
+    if ( sp.cached )
+      b += ",\"cached\":true";
+    if ( !guards.empty() )
+    {
+      b += ",\"guards\":[";
+      b += guards;
+      b += ']';
+    }
+    b += "}\n";
+  } );
   return h;
 }
 
@@ -3343,12 +3439,14 @@ rng::rng_t* rng_access( sim_t* sim, const char* family )
       {
         f.last_dr = true;
         ++s->draws_written;
-        std::string& o = s->fight_buf;
-        fmt::format_to( out_it( o ), "{{\"k\":\"dr\",\"it\":{},\"t\":", sim->current_iteration );
-        put_double( o, sim->current_time().total_seconds() );
-        fmt::format_to( out_it( o ), ",\"f\":{},\"o\":{},\"src\":", f.id, s->next_order++ );
-        put_string( o, family );
-        o += "}\n";
+        const std::int64_t order = s->next_order++;
+        emit( s, REC_DR, [ & ]( std::string& o ) {
+          fmt::format_to( out_it( o ), "{{\"k\":\"dr\",\"it\":{},\"t\":", sim->current_iteration );
+          put_double( o, sim->current_time().total_seconds() );
+          fmt::format_to( out_it( o ), ",\"f\":{},\"o\":{},\"src\":", f.id, order );
+          put_string( o, family );
+          o += "}\n";
+        } );
       }
     }
     return nullptr;
@@ -3516,10 +3614,11 @@ void run_passes( action_t* a, action_state_t* s, const action_state_t* pre )
     entry.status = sp.status;
     entry.cached = sp.cached;
     write_candidates( entry.cand_json, st, sp, s->target );
-    if ( !entry.cand_json.empty() )
+    if ( candidates_written( sp ) && !sp.cands.empty() )  // (cand_json is non-empty exactly then in the JSON backend)
       entry.cands = sp.cands;
-    for ( const pass_rec_t& p : sp.passes )
-      put_pass( entry.pass_json, p );
+    if ( st->text )
+      for ( const pass_rec_t& p : sp.passes )
+        put_pass( entry.pass_json, p );
     entry.n_passes = static_cast<std::uint32_t>( sp.passes.size() );
 
     const std::uint64_t id = st->next_hit_id++;
@@ -3665,10 +3764,11 @@ void run_tick_passes( action_t* a, action_state_t* d_state, double tick_multipli
   entry.status = sp.status;
   entry.cached = sp.cached;
   write_candidates( entry.cand_json, st, sp, d_state->target );
-  if ( !entry.cand_json.empty() )
+  if ( candidates_written( sp ) && !sp.cands.empty() )  // (cand_json is non-empty exactly then in the JSON backend)
     entry.cands = sp.cands;
-  for ( const pass_rec_t& p : sp.passes )
-    put_pass( entry.pass_json, p );
+  if ( st->text )
+    for ( const pass_rec_t& p : sp.passes )
+      put_pass( entry.pass_json, p );
   entry.n_passes = static_cast<std::uint32_t>( sp.passes.size() );
 
   const std::uint64_t id = st->next_hit_id++;
@@ -3751,50 +3851,58 @@ void run_swing_passes( action_t* a )
   ++st->swing_launches;
 
   sim_t* sim     = a->sim;
-  std::string& b = st->fight_buf;
-  fmt::format_to( out_it( b ), "{{\"k\":\"ln\",\"it\":{},\"t\":", sim->current_iteration );
-  put_double( b, sim->current_time().total_seconds() );
-  fmt::format_to( out_it( b ), ",\"l\":{},\"frame\":-1,\"order\":-1,\"pa\":", l );
-  put_string( b, a->name() );
-  b += ",\"ca\":";
-  put_string( b, a->name() );
-  b += ",\"ct\":";
-  put_string( b, a->target->name() );
-  b += ",\"lk\":\"swing\",\"sw\":null,\"sf\":[";
-  // One entry per candidate whose hiding changes the swing time. f = the swing time with the buff hidden
-  // divided by the real swing time (> 1 for a speed buff: without it the swing takes longer).
-  bool first = true;
-  if ( status == 0 || status == 2 )
+  if ( !st->text && ( status == 0 || status == 2 ) )
   {
+    // The state effect write_appliers has, for the candidates the record would list.
     for ( std::size_t i = 0; i < cands.size(); ++i )
+      if ( !( hidden_times[ i ] == real || real.total_millis() == 0 ) )
+        reconcile_appliers( st, const_cast<buff_t*>( cands[ i ] ) );
+  }
+  emit( st, REC_LN, [ & ]( std::string& b ) {
+    fmt::format_to( out_it( b ), "{{\"k\":\"ln\",\"it\":{},\"t\":", sim->current_iteration );
+    put_double( b, sim->current_time().total_seconds() );
+    fmt::format_to( out_it( b ), ",\"l\":{},\"frame\":-1,\"order\":-1,\"pa\":", l );
+    put_string( b, a->name() );
+    b += ",\"ca\":";
+    put_string( b, a->name() );
+    b += ",\"ct\":";
+    put_string( b, a->target->name() );
+    b += ",\"lk\":\"swing\",\"sw\":null,\"sf\":[";
+    // One entry per candidate whose hiding changes the swing time. f = the swing time with the buff hidden
+    // divided by the real swing time (> 1 for a speed buff: without it the swing takes longer).
+    bool first = true;
+    if ( status == 0 || status == 2 )
     {
-      if ( hidden_times[ i ] == real || real.total_millis() == 0 )
-        continue;
-      const buff_t* c = cands[ i ];
-      if ( !first )
-        b += ',';
-      first = false;
-      b += "{\"buff\":";
-      put_string( b, c->name_str );
-      b += ",\"owner\":";
-      put_string( b, c->player->name() );
-      fmt::format_to( out_it( b ), ",\"stacks\":{},\"kind\":\"{}\",\"app\":", c->current_stack,
-                      dynamic_cast<const stat_buff_t*>( c ) != nullptr ? "stat" : "speed" );
-      write_appliers( b, st, const_cast<buff_t*>( c ) );
-      b += ",\"f\":";
-      put_double( b, static_cast<double>( hidden_times[ i ].total_millis() ) /
-                         static_cast<double>( real.total_millis() ) );
-      b += '}';
+      for ( std::size_t i = 0; i < cands.size(); ++i )
+      {
+        if ( hidden_times[ i ] == real || real.total_millis() == 0 )
+          continue;
+        const buff_t* c = cands[ i ];
+        if ( !first )
+          b += ',';
+        first = false;
+        b += "{\"buff\":";
+        put_string( b, c->name_str );
+        b += ",\"owner\":";
+        put_string( b, c->player->name() );
+        fmt::format_to( out_it( b ), ",\"stacks\":{},\"kind\":\"{}\",\"app\":", c->current_stack,
+                        dynamic_cast<const stat_buff_t*>( c ) != nullptr ? "stat" : "speed" );
+        write_appliers( b, st, const_cast<buff_t*>( c ) );
+        b += ",\"f\":";
+        put_double( b, static_cast<double>( hidden_times[ i ].total_millis() ) /
+                           static_cast<double>( real.total_millis() ) );
+        b += '}';
+      }
     }
-  }
-  fmt::format_to( out_it( b ), "],\"status\":{},\"tx\":{}", status, real.total_millis() );
-  if ( !guards.empty() )
-  {
-    b += ",\"guards\":[";
-    b += guards;
-    b += ']';
-  }
-  b += "}\n";
+    fmt::format_to( out_it( b ), "],\"status\":{},\"tx\":{}", status, real.total_millis() );
+    if ( !guards.empty() )
+    {
+      b += ",\"guards\":[";
+      b += guards;
+      b += ']';
+    }
+    b += "}\n";
+  } );
 }
 
 std::int32_t take_swing_launch( const action_t* a )
@@ -3880,23 +3988,24 @@ std::int32_t cd_open_cycle( state_t* st, const cooldown_t* cd, std::int64_t len_
   ++st->cycles_written;
   if ( recovered )
     ++st->cd_recovered;
-  std::string& o = st->fight_buf;
-  cd_begin_record( o, "cyc", cd );
-  fmt::format_to( out_it( o ), ",\"c\":{},\"cd\":", id );
-  put_string( o, cd->name_str );
-  o += ",\"actor\":";
-  put_string( o, cd->player->name() );
-  o += ",\"len\":";
-  put_double( o, ms_to_seconds( len_ms ) );
-  o += ",\"action\":";
-  put_string( o, a != nullptr ? std::string( a->name() ) : std::string() );
-  fmt::format_to( out_it( o ), ",\"ch\":{}", cd->charges > 1 ? cd->current_charge : 0 );
-  if ( recovered )
-    o += ",\"rec\":true";
-  // Plan 12 (MJ-05): a recharge that runs only after a maximum-charges change opens a cycle of the remaining length.
-  if ( max_charge_change )
-    o += ",\"mc\":true";
-  o += "}\n";
+  emit( st, REC_CYC, [ & ]( std::string& o ) {
+    cd_begin_record( o, "cyc", cd );
+    fmt::format_to( out_it( o ), ",\"c\":{},\"cd\":", id );
+    put_string( o, cd->name_str );
+    o += ",\"actor\":";
+    put_string( o, cd->player->name() );
+    o += ",\"len\":";
+    put_double( o, ms_to_seconds( len_ms ) );
+    o += ",\"action\":";
+    put_string( o, a != nullptr ? std::string( a->name() ) : std::string() );
+    fmt::format_to( out_it( o ), ",\"ch\":{}", cd->charges > 1 ? cd->current_charge : 0 );
+    if ( recovered )
+      o += ",\"rec\":true";
+    // Plan 12 (MJ-05): a recharge that runs only after a maximum-charges change opens a cycle of the remaining length.
+    if ( max_charge_change )
+      o += ",\"mc\":true";
+    o += "}\n";
+  } );
   return id;
 }
 
@@ -3905,39 +4014,42 @@ void cd_write_ref( state_t* st, const cooldown_t* cd, std::int32_t c, std::int64
   // Plan 12 (MJ-05): a maximum-charges change refunds nobody (press -1, class 6).
   const rl_cause_t cause = nobody ? rl_cause_t{} : cd_top_cause( st, cd );
   ++st->refunds_written;
-  std::string& o = st->fight_buf;
-  cd_begin_record( o, "ref", cd );
-  fmt::format_to( out_it( o ), ",\"c\":{},\"sec\":", c );
-  put_double( o, ms_to_seconds( ms ) );
-  fmt::format_to( out_it( o ), ",\"press\":{},\"cls\":{},\"dk\":{},\"src\":\"{}\",\"seq\":{},\"launch\":{}}}\n", cause.press,
-                  cls_out( cause.cls ), dk_out( cause.cls ), src, cause.seq, cause.launch );
+  emit( st, REC_REF, [ & ]( std::string& o ) {
+    cd_begin_record( o, "ref", cd );
+    fmt::format_to( out_it( o ), ",\"c\":{},\"sec\":", c );
+    put_double( o, ms_to_seconds( ms ) );
+    fmt::format_to( out_it( o ), ",\"press\":{},\"cls\":{},\"dk\":{},\"src\":\"{}\",\"seq\":{},\"launch\":{}}}\n", cause.press,
+                    cls_out( cause.cls ), dk_out( cause.cls ), src, cause.seq, cause.launch );
+  } );
 }
 
 void cd_write_use( state_t* st, const cooldown_t* cd, std::int32_t c )
 {
   const rl_cause_t cause = cd_top_cause( st, cd );
   ++st->uses_written;
-  std::string& o = st->fight_buf;
-  cd_begin_record( o, "use", cd );
-  fmt::format_to( out_it( o ), ",\"c\":{},\"press\":{},\"cls\":{},\"dk\":{},\"seq\":{}}}\n", c, cause.press,
-                  cls_out( cause.cls ), dk_out( cause.cls ), cause.seq );
+  emit( st, REC_USE, [ & ]( std::string& o ) {
+    cd_begin_record( o, "use", cd );
+    fmt::format_to( out_it( o ), ",\"c\":{},\"press\":{},\"cls\":{},\"dk\":{},\"seq\":{}}}\n", c, cause.press,
+                    cls_out( cause.cls ), dk_out( cause.cls ), cause.seq );
+  } );
 }
 
 void cd_write_cdn( state_t* st, const cooldown_t* cd, const action_t* a, bool ignored = false )
 {
   const rl_cause_t cause = cd_top_cause( st, cd );
   ++st->cdn_written;
-  std::string& o = st->fight_buf;
-  cd_begin_record( o, "cdn", cd );
-  o += ",\"cd\":";
-  put_string( o, cd->name_str );
-  o += ",\"action\":";
-  put_string( o, a != nullptr ? std::string( a->name() ) : std::string() );
-  fmt::format_to( out_it( o ), ",\"press\":{},\"cls\":{},\"dk\":{},\"seq\":{}", cause.press, cls_out( cause.cls ),
-                  dk_out( cause.cls ), cause.seq );
-  if ( ignored )
-    o += ",\"ign\":true";
-  o += "}\n";
+  emit( st, REC_CDN, [ & ]( std::string& o ) {
+    cd_begin_record( o, "cdn", cd );
+    o += ",\"cd\":";
+    put_string( o, cd->name_str );
+    o += ",\"action\":";
+    put_string( o, a != nullptr ? std::string( a->name() ) : std::string() );
+    fmt::format_to( out_it( o ), ",\"press\":{},\"cls\":{},\"dk\":{},\"seq\":{}", cause.press, cls_out( cause.cls ),
+                    dk_out( cause.cls ), cause.seq );
+    if ( ignored )
+      o += ",\"ign\":true";
+    o += "}\n";
+  } );
 }
 }  // namespace
 
@@ -4049,16 +4161,17 @@ bool cd_probe_skip( cooldown_t* cd, const char* src, std::int64_t would_save_ms 
   ++e.first;
   e.second += sec;
   const auto it = st->cds.find( cd );
-  std::string& o = st->fight_buf;
-  cd_begin_record( o, "rps", cd );
-  fmt::format_to( out_it( o ), ",\"c\":{},\"cd\":", it != st->cds.end() ? it->second.cur : -1 );
-  put_string( o, cd->name_str );
-  o += ",\"actor\":";
-  put_string( o, cd->player->name() );
-  o += ",\"sec\":";
-  put_double( o, sec );
-  fmt::format_to( out_it( o ), ",\"press\":{},\"cls\":{},\"dk\":{},\"src\":\"{}\"}}\n", cause.press, cls_out( cause.cls ),
-                  dk_out( cause.cls ), src );
+  emit( st, REC_RPS, [ & ]( std::string& o ) {
+    cd_begin_record( o, "rps", cd );
+    fmt::format_to( out_it( o ), ",\"c\":{},\"cd\":", it != st->cds.end() ? it->second.cur : -1 );
+    put_string( o, cd->name_str );
+    o += ",\"actor\":";
+    put_string( o, cd->player->name() );
+    o += ",\"sec\":";
+    put_double( o, sec );
+    fmt::format_to( out_it( o ), ",\"press\":{},\"cls\":{},\"dk\":{},\"src\":\"{}\"}}\n", cause.press, cls_out( cause.cls ),
+                    dk_out( cause.cls ), src );
+  } );
   return true;
 }
 

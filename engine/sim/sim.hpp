@@ -802,6 +802,11 @@ struct sim_t : private sc_thread_t
   // no profilesets. `rl_bl_on` is set once, in sim_t::init, from a non-empty option value.
   std::string rl_buff_ledger_str;
   bool rl_bl_on = false;
+  // 261003-s1c plan 02: the record sink. "" or "json" = the JSON backend (rl_buff_ledger=<path> writes the file); "memory" = the in-process
+  // backend: the hooks run exactly as with the JSON backend but format no text and open no file (rl_buff_ledger= must then be empty); an
+  // optional end-of-run summary (the footer counters and the records counted by kind) goes to rl_buff_ledger_summary=<path>.
+  std::string rl_buff_ledger_sink_str;
+  std::string rl_buff_ledger_summary_str;
   // True only while the ledger runs its extra (hidden / reference / restoring) amount passes
   // (rl_buff_ledger.cpp, shadow_scope_t). Consulted by buff_t::stack() (no benefit-counter update)
   // and by the parse-effects snapshot_internal (no post-snapshot callbacks). Never set otherwise.
