@@ -2570,10 +2570,15 @@ void remove_stat_contribution( player_t* p, stat_e stat, double amount )
 class hidden_buffs_t
 {
 public:
-  void hide( buff_t* b )
+  hidden_buffs_t() { saved_.reserve( 8 ); }
+  // `sb` is dynamic_cast<stat_buff_t*>( b ), taken once per pass set by run_split (lever 5) instead of once per hide.
+  void hide( buff_t* b, stat_buff_t* sb )
   {
-    saved_.push_back( { b, b->current_stack, b->current_value, nullptr, {} } );
-    if ( auto* sb = dynamic_cast<stat_buff_t*>( b ) )
+    saved_.emplace_back();
+    saved_.back().b     = b;
+    saved_.back().stack = b->current_stack;
+    saved_.back().value = b->current_value;
+    if ( sb != nullptr )
     {
       saved_.back().stat_owner = sb->player;
       saved_.back().stats      = sb->player->current.stats;
@@ -2583,7 +2588,10 @@ public:
     b->current_stack = 0;
     b->current_value = 0.0;
   }
-  ~hidden_buffs_t()
+  void hide( buff_t* b ) { hide( b, dynamic_cast<stat_buff_t*>( b ) ); }
+  // Everything hidden since the last restore goes back bit for bit, in reverse order; the object can then be used again (lever 5: one
+  // object per pass set, its storage reused by every hidden pass).
+  void restore()
   {
     for ( auto it = saved_.rbegin(); it != saved_.rend(); ++it )
     {
@@ -2592,15 +2600,17 @@ public:
       if ( it->stat_owner != nullptr )
         it->stat_owner->current.stats = *it->stats;
     }
+    saved_.clear();
   }
+  ~hidden_buffs_t() { restore(); }
 
 private:
   struct saved_t
   {
-    buff_t* b;
-    int stack;
-    double value;
-    player_t* stat_owner;
+    buff_t* b                   = nullptr;
+    int stack                   = 0;
+    double value                = 0.0;
+    player_t* stat_owner        = nullptr;
     std::optional<gear_stats_t> stats;
   };
   std::vector<saved_t> saved_;
@@ -3063,11 +3073,22 @@ split_t run_split( state_t* st, action_t* a, player_t* dealer, player_t* owner, 
     fire_guard_probe( st, a, dealer, target, cands[ 0 ] );
   }
 
+  // Lever 5: the passes of this set hide and restore through one object, and the stat-buff test is made once per candidate.
+  out.passes.reserve( cands.size() + 8 );
+  std::vector<stat_buff_t*> cand_stat;
+  cand_stat.reserve( cands.size() );
+  for ( buff_t* c : cands )
+    cand_stat.push_back( dynamic_cast<stat_buff_t*>( c ) );
+  hidden_buffs_t hidden;
   auto hidden_pass = [ & ]( std::uint64_t mask ) {
-    hidden_buffs_t hidden;
     for ( std::size_t i = 0; i < cands.size(); ++i )
       if ( mask & ( std::uint64_t( 1 ) << i ) )
-        hidden.hide( cands[ i ] );
+        hidden.hide( cands[ i ], cand_stat[ i ] );
+    struct restore_guard_t
+    {
+      hidden_buffs_t& h;
+      ~restore_guard_t() { h.restore(); }
+    } guard{ hidden };
     out.passes.push_back( { "hide", mask, pass( false, nullptr ), 0 } );
   };
 
