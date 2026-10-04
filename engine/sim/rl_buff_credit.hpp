@@ -14,9 +14,10 @@
 // GENERIC ARITHMETIC ONLY: no spell, buff or action name appears in this module. Everything is keyed by ids and strings that arrive in the
 // records and in the loaded verdict table.
 //
-// INTERMEDIATE STATE (Task 2 of plan 03): the hide, stat and swing channels (press-applied buffs and debuffs whose own hiding changes a hit,
-// stat buffs, the speed buffs of a swing launch; self, damage-over-time parent and swing groups), both slices, both copies; no gate channel and no
-// refund sweep yet. The build says so on stderr (`[RL_BUFF_CREDIT_TRACER]`); Task 3 completes it and removes the line.
+// THE WHOLE RULE (plan 03 Task 3): the hide, stat, swing and gate channels (press-applied buffs and debuffs whose own hiding changes a hit, stat buffs,
+// the speed buffs of a swing launch, and the gate players of a launch chain: a buff read non-zero before a launch at a site the loaded verdict table
+// calls `gate`, plus the switch buff of a `switch` launch), self, damage-over-time parent and swing groups, then the D-05u refund sweep, then the
+// per-decision fold for both slices and both copies. D-05a, D-05 and D-05a-next are NOT here (the training rule is D-05u only).
 #pragma once
 
 #include <array>

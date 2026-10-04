@@ -376,9 +376,9 @@ passset_t parse_passset( const rec_t& r )
   return out;
 }
 
-enum channel_t : std::uint8_t { CH_HIDE = 0, CH_STAT = 1, CH_GATE = 2, CH_SWING = 3 };
-// Task 2: hide, stat and swing; the gate channel (and the refund sweep) are Task 3's. Python: `channels=NO_GATE`.
-constexpr bool CHANNEL_ALLOWED[ 4 ] = { true, true, false, true };
+// The four split channels of a player (ledger_reference.Player.channel) plus the two bookkeeping channels of an entry: the dealer's remainder and the
+// credit a refund moved (`apply_refunds`: channel "refund"). Every split channel is on: this module plays the whole game (Python `channels=ALL`).
+enum channel_t : std::uint8_t { CH_HIDE = 0, CH_STAT = 1, CH_GATE = 2, CH_SWING = 3, CH_DEALER = 4, CH_REFUND = 5 };
 
 struct bc_player_t
 {
@@ -502,7 +502,7 @@ bc_group_t build_pass_group( const passset_t& ps, players_t& players, bool per_m
     pl.kind     = cand.kind;
     pl.appliers = cand.app;
     pl.cov_rule = cand.cov;
-    if ( !pl.press_applied() || !CHANNEL_ALLOWED[ pl.channel() ] )
+    if ( !pl.press_applied() )
       continue;
     g.cands.push_back( { bit, players.merge( std::move( pl ) ) } );
   }
@@ -782,7 +782,8 @@ struct entry_t
 {
   char holder;         // 'P' a press (id), 'S' a decision seq (id), 'W' the item's window (the dealer's remainder of a background or orphan hit)
   std::int64_t id;
-  double real;
+  channel_t channel;
+  double real, exp;    // `exp` (the expectation column) never reaches a `.bcr`; the refund sweep's "anything to move" test reads it, as the reference's does
 };
 
 struct item_t
@@ -801,6 +802,7 @@ struct verdicts_t
 {
   std::string site_key = "cls";
   std::set<std::tuple<std::string, std::string, std::string, std::string>> gates;  // (parent action, frame key, child action, buff)
+  std::set<std::string> gate_buffs;                                                  // the buffs named by any gate site (a read of another buff can never be a gate)
   std::size_t sites = 0;
 };
 
@@ -834,7 +836,10 @@ void load_verdicts( const std::string& path, verdicts_t& out, std::string& sha_h
     const auto& fk = r.field( frame_field );
     const std::string frame_key = fk.IsString() ? std::string( fk.GetString() ) : std::to_string( fk.IsInt64() ? fk.GetInt64() : 0 );
     if ( verdict == "gate" )
+    {
       out.gates.insert( std::make_tuple( pa, frame_key, ca, buff ) );
+      out.gate_buffs.insert( buff );
+    }
     ++n;
   }
   out.sites = n;
@@ -862,11 +867,48 @@ struct speed_t
   double factor;
 };
 
-// An `ln` record, as much of it as the launch chain needs (Task 3 adds the switch buff and the gate fields).
+// An `ln` record, as much of it as the launch chain needs.
 struct ln_t
 {
   std::int64_t frame = -1;
+  std::int64_t order = -1;
+  std::string ca;              // the child action (the verdict table's third key)
+  bool has_switch = false;     // a `switch` launch with a non-empty `sw` (parse_switch)
+  speed_t sw;                  // its buff and appliers (the `factor` is unused)
   std::vector<speed_t> speed;  // only a `swing` launch has any; entries with no factor (or a factor <= 0) are dropped at parse
+};
+
+// A `frm` record: the launch the frame was opened under, the owner action and the frame's key into the verdict table (its kind or its class).
+struct frm_t
+{
+  std::int64_t launch = -1;
+  std::string action;
+  std::string kind;
+  std::int64_t cls = 0;
+};
+
+// An `rd` record that can matter to a gate: a NON-ZERO read of a buff some gate site names (anything else is never consulted).
+struct rd_t
+{
+  std::int64_t order;
+  std::string buff, owner;
+  std::vector<applier_t> app;
+  bool cov;
+};
+
+struct cyc_t
+{
+  double t, len;
+};
+struct ref_t
+{
+  std::int64_t press;
+  double sec;
+};
+struct use_t
+{
+  std::int64_t c, press;
+  double t;
 };
 
 // The result of one fold (decision_fold in the reference).
@@ -897,8 +939,13 @@ struct module_t
   std::unordered_map<std::int64_t, std::int64_t> press_seq;  // press -> decision seq
   std::vector<std::int64_t> press_seqs;                      // every `pr` record's seq, file order
   std::unordered_map<std::uint64_t, passset_t> apps;         // `app` records by id
-  std::unordered_map<std::int64_t, ln_t> lns;                // `ln` records by launch id (the swing launches' speed buffs)
-  std::unordered_map<std::int64_t, std::int64_t> frm_launch; // `frm` records: frame id -> the launch the frame was opened under
+  std::unordered_map<std::int64_t, ln_t> lns;                // `ln` records by launch id (the swing launches' speed buffs, the switch buff, the gate keys)
+  std::unordered_map<std::int64_t, frm_t> frms;              // `frm` records by frame id
+  std::unordered_map<std::int64_t, std::vector<rd_t>> reads; // frame id -> its non-zero reads of gate buffs, file order
+  std::unordered_map<std::int64_t, std::vector<std::int64_t>> draws;  // frame id -> the orders of its `dr` records (only frames that have such a read)
+  std::unordered_map<std::int64_t, cyc_t> cycles;            // `cyc` records by cycle id (a later record with the same id wins)
+  std::unordered_map<std::int64_t, std::vector<ref_t>> refs; // cycle id -> its `ref` entries, file order
+  std::vector<use_t> uses;                                   // `use` records, file order
   std::vector<item_t> items;
   std::uint32_t counter_unknown_press = 0;  // lookups that found no `pr` record (counted while the fold runs)
 };
@@ -926,18 +973,19 @@ void distribution( module_t& m, const rec_t& h, item_t& item )
   entry_t dealer;
   if ( press_is_carried( item.old_press ) )
   {
-    dealer = { 'P', -PRESS_CARRY_BASE - item.old_press, 0.0 };
+    dealer = { 'P', -PRESS_CARRY_BASE - item.old_press, CH_DEALER, 0.0, 0.0 };
   }
   else if ( item.own )
   {
-    dealer = item.old_press >= 0 ? entry_t{ 'P', item.old_press, 0.0 } : entry_t{ 'S', item.seq, 0.0 };
+    dealer = item.old_press >= 0 ? entry_t{ 'P', item.old_press, CH_DEALER, 0.0, 0.0 } : entry_t{ 'S', item.seq, CH_DEALER, 0.0, 0.0 };
   }
   else
-    dealer = { 'W', 0, 0.0 };
+    dealer = { 'W', 0, CH_DEALER, 0.0, 0.0 };
 
   auto whole = [ & ]( bool split ) {
     item.entries.clear();
     dealer.real = ra;
+    dealer.exp  = exp;
     item.entries.push_back( dealer );
     item.split = split;
   };
@@ -973,14 +1021,74 @@ void distribution( module_t& m, const rec_t& h, item_t& item )
       if ( lit == m.lns.end() || !seen.insert( l ).second )
         break;
       chain.push_back( &lit->second );
-      const auto fit = m.frm_launch.find( lit->second.frame );
-      l              = fit != m.frm_launch.end() ? fit->second : -1;
+      const auto fit = m.frms.find( lit->second.frame );
+      l              = fit != m.frms.end() ? fit->second.launch : -1;
+    }
+  }
+  // gate_players: along the launch chain, a buff read non-zero in the launching frame before the launch, with no random draw between the read and
+  // the launch, at a site whose verdict is "gate" (the loaded table); plus the switch buff of a `switch` launch, which needs no table.
+  for ( const ln_t* rec : chain )
+  {
+    if ( rec->has_switch )
+    {
+      bc_player_t gp;
+      gp.key      = { rec->sw.name, rec->sw.owner };
+      gp.kind     = "buff";
+      gp.appliers = rec->sw.app;
+      gp.gate     = true;
+      if ( gp.press_applied() )
+        players.merge( std::move( gp ) );
+    }
+    const auto fit = m.frms.find( rec->frame );
+    if ( fit == m.frms.end() )
+      continue;
+    const auto rit = m.reads.find( rec->frame );
+    if ( rit == m.reads.end() )
+      continue;
+    const frm_t& frame = fit->second;
+    const std::string frame_key = m.verdicts.site_key == "kind" ? frame.kind : std::to_string( frame.cls );
+    std::vector<const std::string*> seen_buffs;  // the distinct buffs of the frame's reads, first-seen order (dict.fromkeys)
+    for ( const rd_t& r0 : rit->second )
+    {
+      bool dup = false;
+      for ( const std::string* b : seen_buffs )
+        if ( *b == r0.buff )
+          dup = true;
+      if ( dup )
+        continue;
+      seen_buffs.push_back( &r0.buff );
+      if ( m.verdicts.gates.count( std::make_tuple( frame.action, frame_key, rec->ca, r0.buff ) ) == 0 )
+        continue;
+      // nz_read_before: the latest non-zero read of the buff before the launch's order (a tie on the order: the later record)
+      const rd_t* read = nullptr;
+      for ( const rd_t& r1 : rit->second )
+        if ( r1.buff == r0.buff && r1.order < rec->order && ( read == nullptr || r1.order >= read->order ) )
+          read = &r1;
+      if ( read == nullptr )
+        continue;
+      // draw_between: any random draw of the frame strictly between the read and the launch
+      bool drew = false;
+      const auto dit = m.draws.find( rec->frame );
+      if ( dit != m.draws.end() )
+        for ( std::int64_t o : dit->second )
+          if ( read->order < o && o < rec->order )
+            drew = true;
+      if ( drew )
+        continue;
+      bc_player_t gp;
+      gp.key      = { r0.buff, read->owner };
+      gp.kind     = "buff";
+      gp.appliers = read->app;
+      gp.cov_rule = read->cov;
+      gp.gate     = true;
+      if ( gp.press_applied() )
+        players.merge( std::move( gp ) );
     }
   }
   // the swing channel: the speed buffs of the chain's swing launches, one group of speed factors (a player met twice keeps its first factor)
   bc_group_t swing_group;
   swing_group.swing = true;
-  if ( CHANNEL_ALLOWED[ CH_SWING ] )
+  {
     for ( const ln_t* rec : chain )
       for ( const speed_t& sf : rec->speed )
       {
@@ -1000,6 +1108,7 @@ void distribution( module_t& m, const rec_t& h, item_t& item )
         const int id = players.merge( std::move( sp ) );
         swing_group.speed.push_back( { id, sf.factor } );
       }
+  }
   if ( !swing_group.speed.empty() )
     groups.push_back( std::move( swing_group ) );
   std::uint64_t gate_ids = 0;
@@ -1031,19 +1140,22 @@ void distribution( module_t& m, const rec_t& h, item_t& item )
   shares( vals, n, 1, sh_exp );
   item.entries.clear();
   item.split = true;
-  double got_real = 0.0;
+  double got_real = 0.0, got_exp = 0.0;
   std::vector<frac_t> fr;
   for ( int k = 0; k < n; ++k )
   {
-    applier_split( players.list[ chosen[ k ] ], fr );
+    const bc_player_t& pl = players.list[ chosen[ k ] ];
+    applier_split( pl, fr );
     for ( const auto& f : fr )
     {
-      const double er = sh_real[ k ] * f.f;
-      item.entries.push_back( { 'P', f.press, er } );
+      const double er = sh_real[ k ] * f.f, ee = sh_exp[ k ] * f.f;
+      item.entries.push_back( { 'P', f.press, pl.channel(), er, ee } );
       got_real += er;
+      got_exp += ee;
     }
   }
   dealer.real = ra - got_real;
+  dealer.exp  = exp - got_exp;
   item.entries.push_back( dealer );
 }
 
@@ -1053,7 +1165,12 @@ void reset_fight( module_t& m )
   m.press_seqs.clear();
   m.apps.clear();
   m.lns.clear();
-  m.frm_launch.clear();
+  m.frms.clear();
+  m.reads.clear();
+  m.draws.clear();
+  m.cycles.clear();
+  m.refs.clear();
+  m.uses.clear();
   m.items.clear();
 }
 
@@ -1101,6 +1218,37 @@ void process_record( module_t& m, const rapidjson::Value& doc, std::string_view 
     rec_t r{ doc, "ln" };
     ln_t ln;
     ln.frame = r.i64( "frame" );
+    ln.order = r.has( "order" ) ? r.i64( "order" ) : -1;
+    ln.ca    = r.has( "ca" ) && r.field( "ca" ).IsString() ? r.str( "ca" ) : std::string();
+    // parse_switch: only a `switch` launch with a truthy `sw` (null, an empty object or list, "" and false are falsy); an entry is the object
+    // {buff, owner?, app?, ...} or the list [buff, appliers]
+    if ( r.str( "lk" ) == "switch" && r.has( "sw" ) )
+    {
+      const auto& sw = r.field( "sw" );
+      const bool truthy = !( sw.IsNull() || ( sw.IsObject() && sw.MemberCount() == 0 ) || ( sw.IsArray() && sw.Size() == 0 ) ||
+                             ( sw.IsString() && sw.GetStringLength() == 0 ) || ( sw.IsBool() && !sw.GetBool() ) || ( sw.IsNumber() && sw.GetDouble() == 0.0 ) );
+      if ( truthy )
+      {
+        if ( sw.IsObject() )
+        {
+          rec_t sr{ sw, "ln switch entry" };
+          ln.sw.name  = sr.str( "buff" );
+          ln.sw.owner = sr.has( "owner" ) ? sr.str( "owner" ) : std::string();
+          if ( sr.has( "app" ) )
+            for ( const auto& a : sr.arr( "app" ).GetArray() )
+              ln.sw.app.push_back( parse_applier( a, "ln switch entry" ) );
+        }
+        else if ( sw.IsArray() && sw.Size() >= 2 && sw[ 0 ].IsString() && sw[ 1 ].IsArray() )
+        {
+          ln.sw.name = std::string( sw[ 0 ].GetString(), sw[ 0 ].GetStringLength() );
+          for ( const auto& a : sw[ 1 ].GetArray() )
+            ln.sw.app.push_back( parse_applier( a, "ln switch entry" ) );
+        }
+        else
+          fail( "ln record: the switch entry is neither {buff, ...} nor [buff, appliers]" );
+        ln.has_switch = true;
+      }
+    }
     // parse_swing_speed: only a `swing` launch with a non-empty `sf`; an entry is the object {buff, owner?, app?, f?} or the list [buff, app]
     // (no factor: dropped, but its appliers are still validated like the reference's parse_buff_entry does)
     if ( r.str( "lk" ) == "swing" && r.has( "sf" ) && r.field( "sf" ).IsArray() )
@@ -1138,7 +1286,51 @@ void process_record( module_t& m, const rapidjson::Value& doc, std::string_view 
   else if ( kind == "frm" )
   {
     rec_t r{ doc, "frm" };
-    m.frm_launch[ r.i64( "f" ) ] = r.i64( "launch" );
+    frm_t fr;
+    fr.launch = r.i64( "launch" );
+    fr.action = r.has( "action" ) && r.field( "action" ).IsString() ? r.str( "action" ) : std::string();
+    fr.kind   = r.has( "kind" ) && r.field( "kind" ).IsString() ? r.str( "kind" ) : std::string();
+    fr.cls    = r.has( "cls" ) ? r.i64( "cls" ) : 0;
+    m.frms[ r.i64( "f" ) ] = std::move( fr );
+  }
+  else if ( kind == "rd" )
+  {
+    // Only a non-zero read of a buff a gate site names can ever be consulted (nz_read_before keeps non-zero reads; is_gate needs the buff).
+    rec_t r{ doc, "rd" };
+    if ( r.boolean( "nz" ) && m.verdicts.gate_buffs.count( r.str( "buff" ) ) )
+    {
+      rd_t rd;
+      rd.order = r.i64( "o" );
+      rd.buff  = r.str( "buff" );
+      rd.owner = r.str( "owner" );
+      for ( const auto& a : r.arr( "app" ).GetArray() )
+        rd.app.push_back( parse_applier( a, "rd.app" ) );
+      rd.cov = r.has( "cov" ) && !r.field( "cov" ).IsNull() && ( r.field( "cov" ).IsBool() ? r.field( "cov" ).GetBool() : r.field( "cov" ).GetDouble() != 0.0 );
+      m.reads[ r.i64( "f" ) ].push_back( std::move( rd ) );
+    }
+  }
+  else if ( kind == "dr" )
+  {
+    // draw_between asks about draws after a read of the same frame, and a draw is written after the read it follows: a frame with no kept read has no use
+    rec_t r{ doc, "dr" };
+    const std::int64_t f = r.i64( "f" );
+    if ( m.reads.count( f ) )
+      m.draws[ f ].push_back( r.i64( "o" ) );
+  }
+  else if ( kind == "cyc" )
+  {
+    rec_t r{ doc, "cyc" };
+    m.cycles[ r.i64( "c" ) ] = cyc_t{ r.num( "t" ), r.num( "len" ) };
+  }
+  else if ( kind == "ref" )
+  {
+    rec_t r{ doc, "ref" };
+    m.refs[ r.i64( "c" ) ].push_back( ref_t{ r.i64( "press" ), r.num( "sec" ) } );
+  }
+  else if ( kind == "use" )
+  {
+    rec_t r{ doc, "use" };
+    m.uses.push_back( use_t{ r.i64( "c" ), r.i64( "press" ), r.num( "t" ) } );
   }
   else if ( kind == "hit" )
   {
@@ -1147,9 +1339,182 @@ void process_record( module_t& m, const rapidjson::Value& doc, std::string_view 
   }
 }
 
+// refund_fractions_u + _cap_fractions (D-05u, "time actually saved"): cast press c -> [(refunding press r, fraction of c's holdings)], sorted by r.
+// For a press c whose cast used cycle y (a `use` record) of length L: N = y's open + L minus the net seconds of y's entries whose cause is NOT a
+// press (press < 0); u = the time of c's cast; P = the sum of the positive net seconds of the refunding presses r != c; the fraction is
+// f_c = min(P, max(0, N - u)) / L and each r gets f_c x (its seconds / P). Fractions over all of c's cycles are scaled to sum to at most 1.
+using fraction_list_t = std::vector<std::pair<std::int64_t, double>>;
+
+std::map<std::int64_t, fraction_list_t> refund_fractions_u( const module_t& m )
+{
+  std::map<std::int64_t, fraction_list_t> out;
+  static const std::vector<ref_t> none;
+  for ( const use_t& u : m.uses )
+  {
+    const auto cit        = m.cycles.find( u.c );
+    const std::int64_t c  = u.press;
+    if ( cit == m.cycles.end() || cit->second.len <= 0.0 || c < 0 )
+      continue;
+    const auto rit      = m.refs.find( u.c );
+    const auto& entries = rit == m.refs.end() ? none : rit->second;
+    fraction_list_t net;  // press -> net seconds, insertion order (a Python dict)
+    for ( const ref_t& r : entries )
+      if ( r.press >= 0 && r.press != c )
+      {
+        bool found = false;
+        for ( auto& kv : net )
+          if ( kv.first == r.press )
+          {
+            kv.second += r.sec;
+            found = true;
+          }
+        if ( !found )
+          net.push_back( { r.press, r.sec } );
+      }
+    fraction_list_t pos;
+    double total_sec = 0.0;
+    for ( const auto& kv : net )
+      if ( kv.second > 0.0 )
+        pos.push_back( kv );
+    for ( const auto& kv : pos )
+      total_sec += kv.second;
+    if ( total_sec <= 0.0 )
+      continue;
+    const double length = cit->second.len;
+    double no_press     = 0.0;
+    for ( const ref_t& r : entries )
+      if ( r.press < 0 )
+        no_press += r.sec;
+    const double natural  = cit->second.t + length - no_press;
+    const double fraction = std::min( total_sec, std::max( 0.0, natural - u.t ) ) / length;
+    if ( fraction <= 0.0 )
+      continue;
+    auto& o = out[ c ];
+    for ( const auto& kv : pos )
+    {
+      bool found = false;
+      for ( auto& have : o )
+        if ( have.first == kv.first )
+        {
+          have.second += fraction * kv.second / total_sec;
+          found = true;
+        }
+      if ( !found )
+        o.push_back( { kv.first, fraction * kv.second / total_sec } );
+    }
+  }
+  for ( auto& cv : out )
+  {
+    double total = 0.0;
+    for ( const auto& kv : cv.second )
+      total += kv.second;
+    if ( total > 1.0 )
+      for ( auto& kv : cv.second )
+        kv.second /= total;
+    std::sort( cv.second.begin(), cv.second.end(), []( const std::pair<std::int64_t, double>& a, const std::pair<std::int64_t, double>& b ) { return a.first < b.first; } );
+  }
+  return out;
+}
+
+// apply_refunds (rule D-05u): the backward sweep. Presses in descending order; for each hit, f_r x (everything c holds on that hit, every channel,
+// realised and expected) moves from c to r (channel "refund"). Each item is its own table (the reference's `hold[key]`); `index` lists, per press, the
+// items that hold a bucket of it. Buckets are merged by (holder, channel) first, as the reference's `hold` is, and the entries are the buckets after
+// the sweep (a bucket emptied by a move stays an entry, as in the reference).
+void apply_refunds( module_t& m )
+{
+  const auto fractions = refund_fractions_u( m );
+  if ( fractions.empty() )
+    return;
+  auto& items = m.items;
+  std::map<std::int64_t, std::vector<std::size_t>> index;
+  for ( std::size_t i = 0; i < items.size(); ++i )
+  {
+    std::vector<entry_t> merged;
+    for ( const entry_t& e : items[ i ].entries )
+    {
+      bool found = false;
+      for ( entry_t& have : merged )
+        if ( have.holder == e.holder && have.id == e.id && have.channel == e.channel )
+        {
+          have.real += e.real;
+          have.exp += e.exp;
+          found = true;
+        }
+      if ( !found )
+        merged.push_back( e );
+    }
+    items[ i ].entries = std::move( merged );
+    for ( const entry_t& e : items[ i ].entries )
+      if ( e.holder == 'P' )
+      {
+        auto& v = index[ e.id ];
+        if ( v.empty() || v.back() != i )
+          v.push_back( i );
+      }
+  }
+  struct snap_t
+  {
+    channel_t channel;
+    double real, exp;
+  };
+  for ( auto cit = fractions.rbegin(); cit != fractions.rend(); ++cit )
+  {
+    const std::int64_t c = cit->first;
+    const auto idx       = index.find( c );
+    if ( idx == index.end() )
+      continue;
+    const std::vector<std::size_t> holders = idx->second;  // list(index.get(c, ()))
+    for ( std::size_t i : holders )
+    {
+      item_t& it = items[ i ];
+      std::vector<snap_t> snap;
+      bool any = false;
+      for ( const entry_t& e : it.entries )
+        if ( e.holder == 'P' && e.id == c )
+        {
+          snap.push_back( { e.channel, e.real, e.exp } );
+          if ( e.real != 0.0 || e.exp != 0.0 )
+            any = true;
+        }
+      if ( snap.empty() || !any )
+        continue;
+      for ( const auto& rf : cit->second )
+      {
+        const std::int64_t r = rf.first;
+        const double f       = rf.second;
+        bool had_press = false;
+        std::size_t dest = it.entries.size();
+        for ( std::size_t k = 0; k < it.entries.size(); ++k )
+          if ( it.entries[ k ].holder == 'P' && it.entries[ k ].id == r )
+          {
+            had_press = true;
+            if ( it.entries[ k ].channel == CH_REFUND )
+              dest = k;
+          }
+        if ( dest == it.entries.size() )
+          it.entries.push_back( { 'P', r, CH_REFUND, 0.0, 0.0 } );
+        for ( const snap_t& s : snap )
+        {
+          it.entries[ dest ].real += f * s.real;
+          it.entries[ dest ].exp += f * s.exp;
+          for ( entry_t& e : it.entries )
+            if ( e.holder == 'P' && e.id == c && e.channel == s.channel )
+            {
+              e.real -= f * s.real;
+              e.exp -= f * s.exp;
+            }
+        }
+        if ( !had_press )
+          index[ r ].push_back( i );
+      }
+    }
+  }
+}
+
 // decision_fold
 fold_t fold_fight( module_t& m, const std::vector<std::int64_t>* decision_seqs )
 {
+  apply_refunds( m );  // analyse_fight: the refund sweep, then the fold
   fold_t out;
   std::array<std::map<std::int64_t, acc3_t>, 2> old_;  // copy -> key -> [old_own, old_interval, old nobody total]
   std::array<std::map<std::int64_t, acc2_t>, 2> new_;  // copy -> key -> [new full, new nobody]
@@ -1330,7 +1695,6 @@ std::shared_ptr<module_t> configure( sim_t* root, credit_mode_t mode, const std:
   write_bytes( *m, &h, sizeof( h ) );
   m->bcr.flush();
   fmt::print( stderr, "[RL_BUFF_CREDIT] mode={} rule=D-05u verdicts_sha256={}\n", mode_name( mode ), m->verdicts_sha_hex );
-  fmt::print( stderr, "[RL_BUFF_CREDIT_TRACER] channels=hide,stat,swing gates=off refunds=off (plan 03 Task 2: the gate channel and the refund sweep are not built)\n" );
   std::fflush( stderr );
   return m;
 }
@@ -1338,8 +1702,11 @@ std::shared_ptr<module_t> configure( sim_t* root, credit_mode_t mode, const std:
 void consume_line( module_t& m, std::string_view line )
 {
   const std::string_view kind = kind_of( line );
-  if ( kind != "fb" && kind != "pr" && kind != "app" && kind != "hit" && kind != "ln" && kind != "frm" )
-    return;  // the other record kinds are the gate and refund channels' (Task 3)
+  if ( kind != "fb" && kind != "pr" && kind != "app" && kind != "hit" && kind != "ln" && kind != "frm" && kind != "rd" && kind != "dr" && kind != "cyc" &&
+       kind != "ref" && kind != "use" )
+    return;  // the other record kinds (xp, cs, zr, cdn, ext, ...) move nothing in this rule
+  if ( ( kind == "rd" || kind == "dr" ) && m.verdicts.gate_buffs.empty() )
+    return;  // no gate site in the table: no read or draw can matter
   rapidjson::Document doc;
   std::string text( line );
   doc.Parse<rapidjson::kParseFullPrecisionFlag>( text.c_str() );
