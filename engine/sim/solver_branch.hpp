@@ -15,6 +15,13 @@
 //   solver_teacher=1                       at every near tie (legal top-two gap < margin)
 //                                          branch the top-K buttons, press the best mean.
 //
+// Label mode (261005-tch), two teacher-only options, both off by default (today's teacher):
+//   solver_teacher_at=k1,k2,...            branch at exactly these decisions (k = seq-1; ascending,
+//                                          distinct, >= 0), whatever the margin, and nowhere else. A
+//                                          listed k the teacher will not branch writes a `skipped` line.
+//   solver_teacher_press=best|net          best (default) presses the best mean; net never changes the
+//                                          press, so the parent plays the net's own fight.
+//
 // The config is module-level (cfg()): every mode refuses threads != 1, profilesets and
 // iterations != 1, so there is exactly one sim per process. sim.hpp is deliberately not
 // edited. See solver_branch.cpp for the fork/pipe protocol and the window return.
@@ -23,6 +30,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 struct sim_t;
 struct player_t;
@@ -57,6 +65,12 @@ struct config_t
   int teacher_topk = 2;
   bool teacher_bootstrap = true;
   std::string teacher_log;
+
+  // Teacher label mode (261005-tch).
+  std::string teacher_at;                    // "k1,k2,..." ; empty = every near tie (today)
+  std::string teacher_press = "best";        // "best" (today) | "net"
+  std::vector<std::int64_t> teacher_at_list;  // parsed from teacher_at by validate()
+  bool teacher_press_net = false;            // set by validate()
 };
 
 config_t& cfg();

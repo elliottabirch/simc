@@ -108,6 +108,8 @@ struct counters_t
   long rss_kb_last = -1;
   long fd_first = -1;
   long fd_last = -1;
+  std::uint64_t listed_reached = 0;  // label mode: listed decisions the parent reached
+  std::uint64_t listed_skipped = 0;  // label mode: reached listed decisions logged `skipped`
 };
 counters_t g_count;
 
@@ -628,6 +630,40 @@ bool parse_buttons_spec( const std::string& spec, int& n_buttons )
 {
   throw sc_invalid_sim_argument( msg );
 }
+
+// solver_teacher_at: "k1,k2,..." -- every token a plain decimal integer >= 0, strictly ascending.
+// Returns an empty string on success, else the reason.
+std::string parse_teacher_at( const std::string& spec, std::vector<std::int64_t>& out )
+{
+  out.clear();
+  if ( spec.empty() )
+    return std::string();
+  std::stringstream ss( spec );
+  std::string tok;
+  std::size_t n_tok = 0;
+  while ( std::getline( ss, tok, ',' ) )
+  {
+    ++n_tok;
+    if ( tok.empty() )
+      return "an empty entry";
+    if ( tok.find_first_not_of( "0123456789" ) != std::string::npos )
+      return fmt::format( "'{}' is not a non-negative integer", tok );
+    if ( tok.size() > 18 )
+      return fmt::format( "'{}' is out of range", tok );
+    const std::int64_t v = std::strtoll( tok.c_str(), nullptr, 10 );
+    if ( !out.empty() && v == out.back() )
+      return fmt::format( "{} is listed twice", v );
+    if ( !out.empty() && v < out.back() )
+      return fmt::format( "{} follows {} (the list must be ascending)", v, out.back() );
+    out.push_back( v );
+  }
+  // a trailing comma leaves getline with no final empty token
+  if ( !spec.empty() && spec.back() == ',' )
+    return "an empty entry";
+  if ( n_tok == 0 )
+    return "an empty entry";
+  return std::string();
+}
 }  // namespace
 
 config_t& cfg()
@@ -646,6 +682,23 @@ void validate( sim_t* sim )
   const bool resalt = c.resalt_at_decision >= 0;
   const bool branch = c.branch_at >= 0;
   const bool teacher = c.teacher;
+
+  // Label mode options (261005-tch): checked BEFORE the no-mode return, so neither can be silently
+  // ignored on a run without solver_teacher=1.
+  if ( c.teacher_press != "best" && c.teacher_press != "net" )
+    refuse( fmt::format( "solver_teacher_press='{}' is not 'best' or 'net'.", c.teacher_press ) );
+  c.teacher_press_net = c.teacher_press == "net";
+  if ( !c.teacher_at.empty() && !teacher )
+    refuse( "solver_teacher_at requires solver_teacher=1." );
+  if ( c.teacher_press_net && !teacher )
+    refuse( "solver_teacher_press=net requires solver_teacher=1." );
+  {
+    const std::string why = parse_teacher_at( c.teacher_at, c.teacher_at_list );
+    if ( !why.empty() )
+      refuse( fmt::format( "solver_teacher_at='{}' is not an ascending list of distinct integers >= 0 (k = seq-1): {}.",
+                           c.teacher_at, why ) );
+  }
+
   if ( !resalt && !branch && !teacher )
     return;
 
@@ -723,6 +776,8 @@ void validate( sim_t* sim )
                            c.teacher_n * c.teacher_topk ) );
     if ( !c.branch_translog_dir.empty() )
       refuse( "solver_branch_translog_dir requires solver_branch_at, solver_branch_window=0 and rl_translog=." );
+    if ( !c.teacher_at_list.empty() && c.teacher_n < 1 )
+      refuse( fmt::format( "solver_teacher_at requires solver_teacher_n >= 1 (got {}).", c.teacher_n ) );
   }
   if ( branch )
   {
@@ -778,10 +833,10 @@ void validate( sim_t* sim )
   g_any = true;
   if ( teacher )
     fmt::print( "[RL_TEACHER] margin={:.17g} n={} window={:.17g} topk={} bootstrap={} divisor={:.17g} gamma={:.17g} "
-                "jobs={} fd_isolation={} salt_base={} log={}\n",
+                "jobs={} fd_isolation={} salt_base={} log={} listed={} press={}\n",
                 c.teacher_margin, c.teacher_n, c.teacher_window, c.teacher_topk, c.teacher_bootstrap ? 1 : 0,
                 c.value_divisor, c.gamma, c.branch_jobs, c.child_fd_isolation ? 1 : 0, c.branch_salt_base,
-                c.teacher_log );
+                c.teacher_log, c.teacher_at_list.size(), c.teacher_press );
   else if ( resalt )
     fmt::print( "[RL_RESALT_AT_DECISION] k={} salt={}\n", c.resalt_at_decision, sim->per_source_rng_salt );
   else if ( branch )
@@ -870,14 +925,45 @@ void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
   {
     ++g_count.decisions;
     const bool near_tie = legal_count >= 2 && !std::isnan( q_margin ) && q_margin < c.teacher_margin;
-    if ( !near_tie )
+    if ( near_tie )
+      ++g_count.near_ties;
+    const bool listed_mode = !c.teacher_at_list.empty();
+    if ( listed_mode )
+    {
+      // Label mode: exactly the listed decisions, whatever the margin, and nowhere else.
+      if ( !std::binary_search( c.teacher_at_list.begin(), c.teacher_at_list.end(), k ) )
+        return;
+      ++g_count.listed_reached;
+    }
+    else if ( !near_tie )
+    {
       return;
-    ++g_count.near_ties;
+    }
     int n_sel = 0;
     for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
       n_sel += select_mask[ i ] ? 1 : 0;
-    if ( c.teacher_n <= 0 || forced || exploratory || n_sel < 2 )
+    if ( listed_mode )
+    {
+      // A listed decision the teacher will not branch is logged by name, with no stats.
+      const char* skip = legal_count < 2 ? "fewer_than_2_legal"
+                         : forced        ? "forced"
+                         : exploratory   ? "exploratory"
+                         : n_sel < 2     ? "held_or_fewer_than_2_selectable"
+                                         : nullptr;
+      if ( skip )
+      {
+        ++g_count.listed_skipped;
+        if ( g_teacher_log )
+          *g_teacher_log << fmt::format(
+              "{{\"seq\":{},\"t\":{},\"press\":{},\"margin\":{},\"legal\":{},\"n_sel\":{},\"skipped\":\"{}\"}}\n", seq,
+              jnum( t_float32( sim ) ), idx, jnum( static_cast<double>( q_margin ) ), legal_count, n_sel, skip );
+        return;
+      }
+    }
+    else if ( c.teacher_n <= 0 || forced || exploratory || n_sel < 2 )
+    {
       return;
+    }
 
     const std::vector<int> cands = top_k( q, select_mask, c.teacher_topk );
     if ( cands.empty() || cands[ 0 ] != idx )
@@ -946,13 +1032,14 @@ void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
       pick = cands[ best ];
       ++g_count.branched;
       if ( pick != net )
-        ++g_count.overrides;
-      idx = pick;
+        ++g_count.overrides;  // press=net: the override the teacher WOULD have made
+      if ( !c.teacher_press_net )
+        idx = pick;
     }
 
     if ( g_teacher_log )
     {
-      std::string jc, jq, jok, jmR, jsR, jmRB, jsRB;
+      std::string jc, jq, jok, jmR, jsR, jmRB, jsRB, jend;
       for ( std::size_t i = 0; i < cands.size(); ++i )
       {
         const char* sep = i ? "," : "";
@@ -963,15 +1050,21 @@ void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
         jsR += sep + jnum( st[ i ].se_R );
         jmRB += sep + jnum( st[ i ].mean_RB );
         jsRB += sep + jnum( st[ i ].se_RB );
+        // per button: OK children whose window ended at fight end (boot = 0)
+        int n_ended = 0;
+        for ( const auto& r : br.res )
+          if ( r.button == cands[ i ] && r.ok && r.ended == 1 )
+            ++n_ended;
+        jend += sep + std::to_string( n_ended );
       }
       *g_teacher_log << fmt::format(
           "{{\"seq\":{},\"t\":{},\"net\":{},\"cands\":[{}],\"q\":[{}],\"margin\":{},\"n\":{},\"ok\":[{}],"
           "\"mean_R\":[{}],\"se_R\":[{}],\"mean_RB\":[{}],\"se_RB\":[{}],\"diff_mean\":{},\"diff_se\":{},"
           "\"pick\":{},\"override\":{},\"skipped_fail\":{},\"children\":{},\"child_fail\":{},"
-          "\"child_cpu_s\":{},\"fork_cpu_s\":{},\"wall_s\":{}}}\n",
+          "\"child_cpu_s\":{},\"fork_cpu_s\":{},\"wall_s\":{},\"n_pair\":{},\"ended\":[{}]}}\n",
           seq, jnum( t_float32( sim ) ), net, jc, jq, jnum( static_cast<double>( q_margin ) ), c.teacher_n, jok, jmR, jsR,
           jmRB, jsRB, jnum( diff_mean ), jnum( diff_se ), pick, pick != net ? 1 : 0, fail ? 1 : 0, br.res.size(),
-          br.child_fail, jnum( br.child_cpu_s ), jnum( br.fork_cpu_s ), jnum( br.wall_s ) );
+          br.child_fail, jnum( br.child_cpu_s ), jnum( br.fork_cpu_s ), jnum( br.wall_s ), diffs.size(), jend );
     }
   }
 }
@@ -1035,12 +1128,14 @@ void write_summary( sim_t* sim )
       "{{\"summary\":1,\"decisions\":{},\"near_ties\":{},\"branched\":{},\"overrides\":{},\"skipped_fail\":{},"
       "\"children\":{},\"children_reaped\":{},\"child_fail\":{},\"child_cpu_s\":{},\"fork_cpu_s\":{},"
       "\"wall_branch_s\":{},\"self_cpu_s\":{},\"children_cpu_total_s\":{},\"rss_kb_first\":{},\"rss_kb_last\":{},"
-      "\"fd_first\":{},\"fd_last\":{},\"config\":{{\"margin\":{},\"n\":{},\"window\":{},\"topk\":{},"
+      "\"fd_first\":{},\"fd_last\":{},\"listed\":{},\"listed_reached\":{},\"listed_skipped\":{},\"press\":\"{}\","
+      "\"config\":{{\"margin\":{},\"n\":{},\"window\":{},\"topk\":{},"
       "\"bootstrap\":{},\"divisor\":{},\"gamma\":{},\"jobs\":{},\"salt_base\":{},\"fd_isolation\":{}}}}}",
       g_count.decisions, g_count.near_ties, g_count.branched, g_count.overrides, g_count.skipped_fail, g_count.children,
       g_count.children_reaped, g_count.child_fail, jnum( g_count.child_cpu_s ), jnum( g_count.fork_cpu_s ),
       jnum( g_count.wall_branch_s ), jnum( self_cpu ), jnum( kids_cpu ), g_count.rss_kb_first, g_count.rss_kb_last,
-      g_count.fd_first, g_count.fd_last, jnum( c.teacher_margin ), c.teacher_n, jnum( c.teacher_window ), c.teacher_topk,
+      g_count.fd_first, g_count.fd_last, c.teacher_at_list.size(), g_count.listed_reached, g_count.listed_skipped,
+      c.teacher_press_net ? "net" : "best", jnum( c.teacher_margin ), c.teacher_n, jnum( c.teacher_window ), c.teacher_topk,
       c.teacher_bootstrap ? 1 : 0, jnum( c.value_divisor ), jnum( c.gamma ), c.branch_jobs, c.branch_salt_base,
       c.child_fd_isolation ? 1 : 0 );
   if ( g_teacher_log )
