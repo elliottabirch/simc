@@ -17,12 +17,23 @@
 // (button, salt), button-major and salt-ascending, at most `jobs` alive at once. Each child
 // writes exactly ONE line into a pipe with one write() and leaves only through _exit(), so no
 // destructor or atexit handler can flush an inherited stream into a parent file:
-//     OK <button> <salt> <R> <boot> <t_end> <ended 0|1> <Dwin> <n_dec>
+//     OK <button> <salt> <R> <boot> <t_end> <ended 0|1> <Dwin> <n_dec> <cut_state>
 //     FAIL <button> <salt> <code> <msg>
+//
+// EXACT CUT (261005-tch2, solver_branch_cut=exact). At become_child a window_cut_event_t is
+// created at exactly t_k + W. Same-time events run in ascending insertion order, so it runs before
+// every event the child itself schedules for that millisecond. The event records cut_state (3
+// channeling, 2 casting, 1 inside the GCD, 0 idle), runs the opening of player_ready_event_t::
+// execute() (player.cpp) and then p->execute_action(): the production foreground decision path,
+// whose solver_control::choose() reaches on_decision(), where the child cuts (g_child.cutting) with
+// t = T and boot = pow(gamma, T - t_k) * top_q. cut_state on the pipe line: -1 a decision cut, 0-3
+// the exact cut, 4 the fight's end. FAIL 75 sleeping_at_cut, FAIL 74 cut_not_reached.
 // ==========================================================================
 #include "sim/solver_branch.hpp"
 
+#include "action/action.hpp"
 #include "player/player.hpp"
+#include "sim/event.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_policy_constants.h"
 #include "sim/rl_translog.hpp"
@@ -84,6 +95,10 @@ struct child_state_t
   int n_dec = 0;
   bool have_line = false;
   std::string line;
+  // exact cut (261005-tch2)
+  bool cut_exact = false;  // this child's window ends at the window_cut_event_t, never on a decision's time
+  bool cutting = false;    // set by the event right before p->execute_action(); on_decision cuts on it
+  int cut_state = -1;      // recorded by the event at T
 };
 child_state_t g_child;
 
@@ -180,11 +195,12 @@ double t_float32( const sim_t* sim )
 #endif
 }
 
-// R, boot and Dwin in %.17g (exact double round trip); t_end in %.9g (a float32 value).
-std::string make_ok_line( double R, double boot, double t_end, int ended, double dwin, int n_dec )
+// R, boot and Dwin in %.17g (exact double round trip); t_end in %.9g (a float32 value). cut_state:
+// -1 a decision cut, 0-3 the exact cut (idle, GCD, casting, channeling), 4 the fight's end.
+std::string make_ok_line( double R, double boot, double t_end, int ended, double dwin, int n_dec, int cut_state )
 {
-  return fmt::format( "OK {} {} {:.17g} {:.17g} {:.9g} {} {:.17g} {}\n", g_child.button, g_child.salt, R, boot,
-                      t_end, ended, dwin, n_dec );
+  return fmt::format( "OK {} {} {:.17g} {:.17g} {:.9g} {} {:.17g} {} {}\n", g_child.button, g_child.salt, R, boot,
+                      t_end, ended, dwin, n_dec, cut_state );
 }
 
 std::string make_fail_line( int code, const std::string& msg )
@@ -229,6 +245,7 @@ struct child_result_t
   int ended = 0;
   double dwin = 0.0;
   int n_dec = 0;
+  int cut_state = -1;
   int exit_code = -1;
   int signal = 0;
   std::string fail;
@@ -292,6 +309,43 @@ button_stats_t stats_for( const batch_result_t& br, int button )
 }
 
 #if defined( __linux__ )
+// 261005-tch2: the exact window cut. Created by become_child() at fork time, at exactly t_k + W.
+struct window_cut_event_t final : public event_t
+{
+  window_cut_event_t( sim_t& s, timespan_t delta ) : event_t( s, delta )
+  {
+  }
+  const char* name() const override
+  {
+    return "Solver-Branch-Window-Cut";
+  }
+  void execute() override
+  {
+    player_t* p = g_child.p;
+    const timespan_t now = sim().current_time();
+    // a. what the actor is doing at T
+    g_child.cut_state = p->channeling ? 3 : p->executing ? 2 : p->gcd_ready > now ? 1 : 0;
+    // b. a sleeping (dead) actor has no decision to make: loud, counted in child_fail
+    if ( p->current.sleeping )
+      child_write_and_exit( make_fail_line( 75, "sleeping_at_cut" ), 75 );
+    // c. the opening of player_ready_event_t::execute() (player.cpp), in effect
+    event_t::cancel( p->readying );
+    p->current_execute_type = execute_type::FOREGROUND;
+    if ( p->queueing )
+    {
+      event_t::cancel( p->queueing->queue_event );
+      p->queueing = nullptr;
+    }
+    event_t::cancel( p->off_gcd );
+    event_t::cancel( p->cast_while_casting_poll_event );
+    // d. the production foreground decision path; on_decision() cuts and _exit()s inside it
+    g_child.cutting = true;
+    p->execute_action();
+    // e. never reached when the cut works
+    child_write_and_exit( make_fail_line( 74, "cut_not_reached" ), 74 );
+  }
+};
+
 void become_child( sim_t* sim, player_t* p, std::uint64_t seq, int button, std::uint64_t salt, double window,
                    const std::string& translog_dir, int read_fd, int write_fd )
 {
@@ -373,6 +427,15 @@ void become_child( sim_t* sim, player_t* p, std::uint64_t seq, int button, std::
   g_child.last_D = g_child.D_k;
   g_child.acc = 0.0;
   g_child.n_dec = 0;
+
+  // 261005-tch2: the exact cut. Created here, at fork time and before the child's own press returns,
+  // so it runs before every event the child schedules for the same millisecond (ascending insertion
+  // order). The sim clock is integer milliseconds, so T is exactly t_k + W.
+  g_child.cut_exact = c.cut_exact && window > 0.0;
+  g_child.cutting = false;
+  g_child.cut_state = -1;
+  if ( g_child.cut_exact )
+    make_event<window_cut_event_t>( *sim, *sim, timespan_t::from_seconds( window ) );
 }
 #endif
 
@@ -521,14 +584,15 @@ bool run_batch( sim_t* sim, player_t* p, std::uint64_t seq, const std::vector<in
         continue;
       if ( tag == "OK" )
       {
-        std::string sR, sB, sT, sE, sD, sN;
-        ws >> sR >> sB >> sT >> sE >> sD >> sN;
+        std::string sR, sB, sT, sE, sD, sN, sC;
+        ws >> sR >> sB >> sT >> sE >> sD >> sN >> sC;
         r->R = std::strtod( sR.c_str(), nullptr );
         r->boot = std::strtod( sB.c_str(), nullptr );
         r->t_end = std::strtod( sT.c_str(), nullptr );
         r->ended = std::atoi( sE.c_str() );
         r->dwin = std::strtod( sD.c_str(), nullptr );
         r->n_dec = std::atoi( sN.c_str() );
+        r->cut_state = sC.empty() ? -1 : std::atoi( sC.c_str() );
         r->ok = true;
       }
       else if ( tag == "FAIL" )
@@ -699,6 +763,17 @@ void validate( sim_t* sim )
                            c.teacher_at, why ) );
   }
 
+  // Window cut (261005-tch2): checked BEFORE the no-mode return too, so it can never be silently
+  // ignored on a run that branches nowhere.
+  if ( c.branch_cut != "decision" && c.branch_cut != "exact" )
+    refuse( fmt::format( "solver_branch_cut='{}' is not 'decision' or 'exact'.", c.branch_cut ) );
+  c.cut_exact = c.branch_cut == "exact";
+  if ( c.cut_exact && !branch && !teacher )
+    refuse( "solver_branch_cut=exact requires solver_branch_at= or solver_teacher=1." );
+  if ( c.cut_exact && branch && !( c.branch_window > 0.0 ) )
+    refuse( "solver_branch_cut=exact requires solver_branch_window > 0 (window 0 plays to the fight's end: there is "
+            "nothing to cut)." );
+
   if ( !resalt && !branch && !teacher )
     return;
 
@@ -833,10 +908,10 @@ void validate( sim_t* sim )
   g_any = true;
   if ( teacher )
     fmt::print( "[RL_TEACHER] margin={:.17g} n={} window={:.17g} topk={} bootstrap={} divisor={:.17g} gamma={:.17g} "
-                "jobs={} fd_isolation={} salt_base={} log={} listed={} press={}\n",
+                "jobs={} fd_isolation={} salt_base={} log={} listed={} press={} cut={}\n",
                 c.teacher_margin, c.teacher_n, c.teacher_window, c.teacher_topk, c.teacher_bootstrap ? 1 : 0,
                 c.value_divisor, c.gamma, c.branch_jobs, c.child_fd_isolation ? 1 : 0, c.branch_salt_base,
-                c.teacher_log, c.teacher_at_list.size(), c.teacher_press );
+                c.teacher_log, c.teacher_at_list.size(), c.teacher_press, c.cut_exact ? "exact" : "decision" );
   else if ( resalt )
     fmt::print( "[RL_RESALT_AT_DECISION] k={} salt={}\n", c.resalt_at_decision, sim->per_source_rng_salt );
   else if ( branch )
@@ -860,10 +935,20 @@ void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
     const double D = p->solver_damage_so_far;
     g_child.acc += std::pow( g_child.gamma, g_child.last_t - g_child.t_k ) * ( ( D - g_child.last_D ) / g_child.divisor );
     ++g_child.n_dec;
-    if ( g_child.window > 0.0 && t >= g_child.t_k + g_child.window )
+    if ( g_child.cut_exact )
+    {
+      // 261005-tch2: only the window_cut_event_t ends an exact window (t is T, in float32).
+      if ( g_child.cutting )
+      {
+        const double boot = std::pow( g_child.gamma, t - g_child.t_k ) * static_cast<double>( top_q );
+        child_write_and_exit(
+            make_ok_line( g_child.acc, boot, t, 0, D - g_child.D_k, g_child.n_dec, g_child.cut_state ), 0 );
+      }
+    }
+    else if ( g_child.window > 0.0 && t >= g_child.t_k + g_child.window )
     {
       const double boot = std::pow( g_child.gamma, t - g_child.t_k ) * static_cast<double>( top_q );
-      child_write_and_exit( make_ok_line( g_child.acc, boot, t, 0, D - g_child.D_k, g_child.n_dec ), 0 );
+      child_write_and_exit( make_ok_line( g_child.acc, boot, t, 0, D - g_child.D_k, g_child.n_dec, -1 ), 0 );
     }
     g_child.last_t = t;
     g_child.last_D = D;
@@ -898,9 +983,9 @@ void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
       {
         *g_branch_out << fmt::format(
             "{{\"k\":{},\"t_k\":{},\"button\":{},\"salt\":{},\"ok\":{},\"R\":{},\"boot\":{},\"t_end\":{},\"ended\":{},"
-            "\"Dwin\":{},\"n_dec\":{},\"fail\":{}}}\n",
+            "\"Dwin\":{},\"n_dec\":{},\"cut_state\":{},\"fail\":{}}}\n",
             k, jnum( t_k ), r.button, r.salt, r.ok ? 1 : 0, jnum( r.R ), jnum( r.boot ), jnum( r.t_end ), r.ended,
-            jnum( r.dwin ), r.n_dec, r.ok ? std::string( "null" ) : fmt::format( "\"{}\"", r.fail ) );
+            jnum( r.dwin ), r.n_dec, r.cut_state, r.ok ? std::string( "null" ) : fmt::format( "\"{}\"", r.fail ) );
       }
       std::string blist;
       for ( std::size_t i = 0; i < buttons.size(); ++i )
@@ -1039,7 +1124,7 @@ void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
 
     if ( g_teacher_log )
     {
-      std::string jc, jq, jok, jmR, jsR, jmRB, jsRB, jend;
+      std::string jc, jq, jok, jmR, jsR, jmRB, jsRB, jend, jet, jspan, jbusy;
       for ( std::size_t i = 0; i < cands.size(); ++i )
       {
         const char* sep = i ? "," : "";
@@ -1052,19 +1137,44 @@ void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
         jsRB += sep + jnum( st[ i ].se_RB );
         // per button: OK children whose window ended at fight end (boot = 0)
         int n_ended = 0;
+        // 261005-tch2, per button over OK children: end_t = the median t_end (an even count averages
+        // the two middle values), end_t_span = max - min, cut_busy = how many cut with cut_state 1..3.
+        std::vector<double> te;
+        int n_busy = 0;
         for ( const auto& r : br.res )
-          if ( r.button == cands[ i ] && r.ok && r.ended == 1 )
+        {
+          if ( r.button != cands[ i ] || !r.ok )
+            continue;
+          if ( r.ended == 1 )
             ++n_ended;
+          te.push_back( r.t_end );
+          if ( r.cut_state >= 1 && r.cut_state <= 3 )
+            ++n_busy;
+        }
+        double med = std::numeric_limits<double>::quiet_NaN();
+        double span = std::numeric_limits<double>::quiet_NaN();
+        if ( !te.empty() )
+        {
+          std::sort( te.begin(), te.end() );
+          const std::size_t m = te.size() / 2;
+          med = te.size() % 2 ? te[ m ] : ( te[ m - 1 ] + te[ m ] ) / 2.0;
+          span = te.back() - te.front();
+        }
         jend += sep + std::to_string( n_ended );
+        jet += sep + jnum( med );
+        jspan += sep + jnum( span );
+        jbusy += sep + std::to_string( n_busy );
       }
       *g_teacher_log << fmt::format(
           "{{\"seq\":{},\"t\":{},\"net\":{},\"cands\":[{}],\"q\":[{}],\"margin\":{},\"n\":{},\"ok\":[{}],"
           "\"mean_R\":[{}],\"se_R\":[{}],\"mean_RB\":[{}],\"se_RB\":[{}],\"diff_mean\":{},\"diff_se\":{},"
           "\"pick\":{},\"override\":{},\"skipped_fail\":{},\"children\":{},\"child_fail\":{},"
-          "\"child_cpu_s\":{},\"fork_cpu_s\":{},\"wall_s\":{},\"n_pair\":{},\"ended\":[{}]}}\n",
+          "\"child_cpu_s\":{},\"fork_cpu_s\":{},\"wall_s\":{},\"n_pair\":{},\"ended\":[{}],"
+          "\"end_t\":[{}],\"end_t_span\":[{}],\"cut_busy\":[{}]}}\n",
           seq, jnum( t_float32( sim ) ), net, jc, jq, jnum( static_cast<double>( q_margin ) ), c.teacher_n, jok, jmR, jsR,
           jmRB, jsRB, jnum( diff_mean ), jnum( diff_se ), pick, pick != net ? 1 : 0, fail ? 1 : 0, br.res.size(),
-          br.child_fail, jnum( br.child_cpu_s ), jnum( br.fork_cpu_s ), jnum( br.wall_s ), diffs.size(), jend );
+          br.child_fail, jnum( br.child_cpu_s ), jnum( br.fork_cpu_s ), jnum( br.wall_s ), diffs.size(), jend, jet,
+          jspan, jbusy );
     }
   }
 }
@@ -1078,7 +1188,7 @@ void on_combat_end( sim_t* sim )
   const double t_end = t_float32( sim );
   g_child.acc +=
       std::pow( g_child.gamma, g_child.last_t - g_child.t_k ) * ( ( D_end - g_child.last_D ) / g_child.divisor );
-  const std::string line = make_ok_line( g_child.acc, 0.0, t_end, 1, D_end - g_child.D_k, g_child.n_dec );
+  const std::string line = make_ok_line( g_child.acc, 0.0, t_end, 1, D_end - g_child.D_k, g_child.n_dec, 4 );
   if ( g_child.translog_mode )
   {
     g_child.line = line;
@@ -1130,14 +1240,14 @@ void write_summary( sim_t* sim )
       "\"wall_branch_s\":{},\"self_cpu_s\":{},\"children_cpu_total_s\":{},\"rss_kb_first\":{},\"rss_kb_last\":{},"
       "\"fd_first\":{},\"fd_last\":{},\"listed\":{},\"listed_reached\":{},\"listed_skipped\":{},\"press\":\"{}\","
       "\"config\":{{\"margin\":{},\"n\":{},\"window\":{},\"topk\":{},"
-      "\"bootstrap\":{},\"divisor\":{},\"gamma\":{},\"jobs\":{},\"salt_base\":{},\"fd_isolation\":{}}}}}",
+      "\"bootstrap\":{},\"divisor\":{},\"gamma\":{},\"jobs\":{},\"salt_base\":{},\"fd_isolation\":{},\"cut\":\"{}\"}}}}",
       g_count.decisions, g_count.near_ties, g_count.branched, g_count.overrides, g_count.skipped_fail, g_count.children,
       g_count.children_reaped, g_count.child_fail, jnum( g_count.child_cpu_s ), jnum( g_count.fork_cpu_s ),
       jnum( g_count.wall_branch_s ), jnum( self_cpu ), jnum( kids_cpu ), g_count.rss_kb_first, g_count.rss_kb_last,
       g_count.fd_first, g_count.fd_last, c.teacher_at_list.size(), g_count.listed_reached, g_count.listed_skipped,
       c.teacher_press_net ? "net" : "best", jnum( c.teacher_margin ), c.teacher_n, jnum( c.teacher_window ), c.teacher_topk,
       c.teacher_bootstrap ? 1 : 0, jnum( c.value_divisor ), jnum( c.gamma ), c.branch_jobs, c.branch_salt_base,
-      c.child_fd_isolation ? 1 : 0 );
+      c.child_fd_isolation ? 1 : 0, c.cut_exact ? "exact" : "decision" );
   if ( g_teacher_log )
   {
     *g_teacher_log << js << "\n";

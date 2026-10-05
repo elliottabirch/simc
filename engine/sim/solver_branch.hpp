@@ -22,6 +22,13 @@
 //   solver_teacher_press=best|net          best (default) presses the best mean; net never changes the
 //                                          press, so the parent plays the net's own fight.
 //
+// Window cut (261005-tch2), branch and teacher, off by default (today's cut):
+//   solver_branch_cut=decision|exact       decision (default) ends a child's window at its first decision at or
+//                                          after t_k + W (today, byte for byte). exact schedules a window-end
+//                                          event at exactly t_k + W: there the child makes a real foreground
+//                                          decision through player_t::execute_action() (the net's value at T,
+//                                          whatever the actor is doing), writes its line and exits.
+//
 // The config is module-level (cfg()): every mode refuses threads != 1, profilesets and
 // iterations != 1, so there is exactly one sim per process. sim.hpp is deliberately not
 // edited. See solver_branch.cpp for the fork/pipe protocol and the window return.
@@ -71,6 +78,10 @@ struct config_t
   std::string teacher_press = "best";        // "best" (today) | "net"
   std::vector<std::int64_t> teacher_at_list;  // parsed from teacher_at by validate()
   bool teacher_press_net = false;            // set by validate()
+
+  // Window cut (261005-tch2).
+  std::string branch_cut = "decision";       // "decision" (today) | "exact"
+  bool cut_exact = false;                    // set by validate()
 };
 
 config_t& cfg();

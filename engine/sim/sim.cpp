@@ -4528,6 +4528,8 @@ void sim_t::create_options()
     // Label mode (261005-tch): validated in solver_branch::validate(), refused by name there.
     add_option( opt_string( "solver_teacher_at", sb.teacher_at ) );
     add_option( opt_string( "solver_teacher_press", sb.teacher_press ) );
+    // Window cut (261005-tch2): decision (default, today) | exact; refused by name in validate().
+    add_option( opt_string( "solver_branch_cut", sb.branch_cut ) );
   }
   // S1 (260927-s1-spend-timing): forbids lightning_bolt/tempest (and, 261002-8rs, primordial_storm
   // when the action table offers it; the third Lightning-family spender is untouched) below n stacks
