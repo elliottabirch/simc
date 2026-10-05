@@ -7,6 +7,7 @@
 
 #include "action/action.hpp"
 #include "action/attack.hpp"
+#include "buff/buff.hpp"
 #include "decision_dump.hpp"
 #include "player/player.hpp"
 #include "sim/event.hpp"
@@ -389,6 +390,23 @@ static std::uint16_t chosen_enemy_index_of( const player_t* p )
                                        : rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK;
 }
 
+// 261005-tch2 (solver_mask_no_enemy): true when no enemy can be attacked -- every enemy on the
+// non-sleeping list is invulnerable (an `invulnerable` raid event, e.g. a route layout's immune boss)
+// or a sheet hazard (never an active enemy, player.cpp's arise), or the list is empty. Read live at
+// the boundary, so a pack that arrived earlier in the same millisecond counts.
+static bool no_attackable_enemy( sim_t* sim )
+{
+  for ( player_t* t : sim->target_non_sleeping_list )
+  {
+    if ( t->sheet_hazard )
+      continue;
+    if ( t->debuffs.invulnerable && t->debuffs.invulnerable->check() )
+      continue;
+    return false;
+  }
+  return true;
+}
+
 action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
 {
   sim_t* sim = p->sim;
@@ -621,6 +639,14 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
   // matches every one of its pet records.
   if ( sim->solver_control_str.empty() && std::strcmp( p->name(), RL_ACTOR_NAME ) != 0 )
     return apl_choice;
+
+  // 261005-tch2 (solver_mask_no_enemy): at a background (off-GCD / cast-while-casting) boundary no wait
+  // is legal (build_mask's R1), so with every cast masked there is nothing to press: this boundary is
+  // not a decision at all -- nothing executes, and it returns BEFORE the seq increment below so the
+  // decision count and the translog's seq stay contiguous. One bool test when the option is off.
+  // (Only the in-process transport reaches here with the option on: setup() refuses solver_control=.)
+  if ( sim->solver_mask_no_enemy && et != execute_type::FOREGROUND && no_attackable_enemy( sim ) )
+    return nullptr;
 
   // Shared across both transports (210-05R Task 1) -- incremented exactly
   // once per decision boundary regardless of which transport answers it.
@@ -929,6 +955,22 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
         if ( sim->solver_min_maelstrom_spend_primordial_storm_idx >= 0 )
           mask[ sim->solver_min_maelstrom_spend_primordial_storm_idx ] = 0;
       }
+    }
+
+    // 261005-tch2 (owner, 2026-10-05: "can we just mask all spells to be uncastable while not in
+    // combat?"): solver_mask_no_enemy. While no enemy can be attacked (no_attackable_enemy above:
+    // the walk between packs on a route layout) every non-wait button is masked. Placed with S1:
+    // after the allow-list AND (a narrow arm cannot re-legalize it) and before the all-illegal
+    // refusal and build_obs, so the net's own legality inputs, the legal top_q/q_margin and the
+    // translog row all carry the masked set. Only a foreground boundary reaches here with the
+    // condition true (the background case returned before the seq increment), and at a foreground
+    // boundary the unanchored wait stays legal, so this cannot manufacture an all-illegal mask on
+    // its own. Off (default): one bool test, byte-identical to a run built before this option.
+    if ( sim->solver_mask_no_enemy && no_attackable_enemy( sim ) )
+    {
+      for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+        if ( RL_ACTIONS[ i ].kind != rl_action_kind::wait )
+          mask[ i ] = 0;
     }
 
     // 222-07 (CR-04): the allow-list AND above can manufacture an

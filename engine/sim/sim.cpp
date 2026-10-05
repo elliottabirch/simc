@@ -4539,6 +4539,9 @@ void sim_t::create_options()
   // why no separate hand-rolled parse block is needed (unlike solver_force_decision_str above).
   // Name resolution against RL_ACTIONS happens below, in its own fail-closed block.
   add_option( opt_int( "solver_min_maelstrom_spend", solver_min_maelstrom_spend, 0, 10 ) );
+  // 261005-tch2 (owner 2026-10-05): every non-wait button masked while no enemy can be attacked. See
+  // sim.hpp's solver_mask_no_enemy doc comment; in-process transport only, refused by name below.
+  add_option( opt_bool( "solver_mask_no_enemy", solver_mask_no_enemy ) );
   // 260927-d1 (D1 patchwerk disagreement census, Stage 1 Task 2): records the engine's own APL
   // pick per decision to the `.apl` sidecar. Requires rl_translog= -- validated below, in its own
   // fail-closed block immediately after solver_min_maelstrom_spend's own above. See sim.hpp's
@@ -5613,6 +5616,15 @@ void sim_t::setup( sim_control_t* c )
           solver_min_maelstrom_spend_lightning_bolt_idx < 0 ? "NOT FOUND" : "found",
           solver_min_maelstrom_spend_tempest_idx < 0 ? "NOT FOUND" : "found" ) );
     }
+  }
+
+  // 261005-tch2: solver_mask_no_enemy lives in choose()'s in-process arm only. Refuse by name rather
+  // than silently doing nothing on the FIFO transport or on a run with no policy at all.
+  if ( solver_mask_no_enemy && ( solver_policy_str.empty() || !solver_control_str.empty() ) )
+  {
+    throw sc_runtime_error(
+        "solver_mask_no_enemy=1 requires solver_policy= and no solver_control= (in-process transport "
+        "only)." );
   }
 
   // 260927-d1 (D1 patchwerk disagreement census, Stage 1 Task 2): solver_record_apl_choice=1 has

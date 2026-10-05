@@ -1105,6 +1105,16 @@ struct sim_t : private sc_thread_t
   // primordial_storm button (the width-325 table has none), and the option then masks exactly the two
   // required spenders as before.
   int solver_min_maelstrom_spend_primordial_storm_idx = -1;
+  // 261005-tch2 (owner, 2026-10-05: "can we just mask all spells to be uncastable while not in
+  // combat?"): while NO enemy can be attacked -- every enemy on target_non_sleeping_list is
+  // invulnerable or a sheet hazard, or the list is empty: the walk between packs on a route layout --
+  // the in-process arm masks every non-wait button, so the net's legality inputs, its legal top_q and
+  // the translog row all see the masked set (solver_control.cpp, beside S1). At a background
+  // (off-GCD / cast-while-casting) boundary no wait is legal, so there the boundary is not a decision
+  // at all: choose() returns nullptr before the seq increment. bool, default false/absent = off,
+  // byte-identical to a run built before this option existed. In-process transport only (refused by
+  // name in setup() otherwise).
+  bool solver_mask_no_enemy = false;
   // 260927-d1 (D1 patchwerk disagreement census, Stage 1 Task 2): records the engine's own APL
   // pick (the `apl_choice` parameter solver_control::choose() already receives) to a SIDECAR file
   // beside the main translog -- `<rl_translog_file_str>.apl`, format 1, see rl_translog.hpp's APL
