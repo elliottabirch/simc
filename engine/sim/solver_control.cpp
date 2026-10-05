@@ -13,6 +13,7 @@
 #include "sim/rl_policy.hpp"
 #include "sim/rl_target_select.hpp"
 #include "sim/rl_translog.hpp"
+#include "sim/solver_branch.hpp"
 #include "sim/sim.hpp"
 #include "util/io.hpp"
 
@@ -1121,6 +1122,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // point for this decision. Gated only by the NATURAL mask (not select_mask) -- forcing is an
     // override of selection itself, and should be refused only when true engine legality
     // disagrees, the same thing the FIFO arm's own forced_deviation.forced() checks.
+    bool forced_here = false;  // 261005-branch-teacher: the teacher never overrides a forced press
     for ( const auto& [ forced_k, forced_action ] : sim->solver_force_decisions )
     {
       if ( static_cast<std::int64_t>( seq - 1 ) == forced_k )
@@ -1132,11 +1134,10 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
               "engine's own natural mask disagrees", forced_action, forced_k, seq ) );
         }
         idx = forced_action;
+        forced_here = true;
         break;
       }
     }
-
-    const rl_action_desc& action = RL_ACTIONS[ idx ];
 
     // 221-03 (ACT-05/ACT-06, Task 2 point 4): cleared for EVERY decision
     // (not just non-wait ones) -- same discipline as the FIFO arm's own
@@ -1184,6 +1185,16 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // silently disagree about what "best" meant at this boundary. NaN when
     // no action was legal, matching q_margin's own convention.
     const float top_q = legal_count >= 1 ? best : std::numeric_limits<float>::quiet_NaN();
+
+    // 261005-branch-teacher (sim/solver_branch.hpp): decision-anchored re-salt, fork() branching at
+    // a decision, and the branching teacher. One bool test and a return when no mode is on. Runs
+    // after the inputs, mask, values and the margin exist and before the press; may change `idx`
+    // (a branch child's button, or the teacher's pick). q_margin/top_q stay the net's own numbers.
+    // `action` is bound AFTER this call (it used to be bound right after the force loop above; the
+    // lines in between read only mask/q/sim fields, never `action`).
+    solver_branch::on_decision( sim, p, seq, q, mask, select_mask, legal_count, q_margin, top_q, exploratory,
+                                forced_here, idx );
+    const rl_action_desc& action = RL_ACTIONS[ idx ];
 
     if ( action.kind == rl_action_kind::cast )
     {

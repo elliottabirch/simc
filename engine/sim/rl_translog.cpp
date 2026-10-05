@@ -1124,6 +1124,36 @@ void flush_pending( sim_t* sim )
   root->rl_translog_buffer.clear();
 }
 
+void branch_child_disable( sim_t* sim )
+{
+  sim_t* root = root_of( sim );
+  // Deliberate leaks: the parent owns these objects' buffers and file descriptors; the child
+  // must neither flush nor close them (it leaves through _exit(), so nothing else will).
+  (void)root->rl_translog_stream.release();
+  (void)root->rl_translog_attr_stream.release();
+  (void)root->rl_translog_apl_stream.release();
+  root->rl_translog_zstd_cstream = nullptr;
+  root->rl_translog_file_str.clear();
+}
+
+void branch_child_reopen( sim_t* sim, const std::string& base )
+{
+  sim_t* root = root_of( sim );
+  if ( root->rl_translog_fight_count != 0 )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_translog: branch_child_reopen refused -- {} fight(s) already closed in this process",
+        root->rl_translog_fight_count ) );
+  }
+  (void)root->rl_translog_stream.release();
+  (void)root->rl_translog_attr_stream.release();
+  (void)root->rl_translog_apl_stream.release();
+  root->rl_translog_zstd_cstream = nullptr;
+  root->rl_translog_zstd_rows_in_frame = 0;
+  root->rl_translog_file_str = base;
+  open_and_write_header( sim );
+}
+
 void write_footer( sim_t* sim )
 {
   sim_t* root = root_of( sim );

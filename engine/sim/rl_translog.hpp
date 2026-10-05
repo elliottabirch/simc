@@ -1430,4 +1430,19 @@ void write_footer( sim_t* sim );
 // rl_translog= is unset or nothing is buffered.
 void flush_pending( sim_t* sim );
 
+// 261005-branch-teacher (solver_branch.cpp): called ONLY in a fork()ed branch child, before it
+// plays on. Leaks (release(), never destroys or flushes) every inherited translog stream and the
+// zstd context, then clears rl_translog_file_str so every writer above returns on its
+// `file_str.empty()` guard -- the child can never append to the parent's files.
+void branch_child_disable( sim_t* sim );
+
+// 261005-branch-teacher: called ONLY in a fork()ed branch child (solver_branch_translog_dir=, one
+// fight per process). Leaks the inherited streams exactly like branch_child_disable(), then opens
+// a fresh translog at `base` through open_and_write_header() (new .zst with a new zstd context and
+// the header fed in ZSTD_e_continue exactly as at startup, new .procs.json/.credit.json, new .attr
+// with its header). KEEPS the in-memory row buffer, row count and pending decisions/seqs: they
+// already hold every row of this fight, so the child's file is header + all rows + close + footer,
+// fed to zstd in the same sequence a fresh process feeds it. Refused after a fight has closed.
+void branch_child_reopen( sim_t* sim, const std::string& base );
+
 } // namespace rl_translog

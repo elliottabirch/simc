@@ -38,6 +38,7 @@
 #include "sim/sheet_fight.hpp"
 #include "sim/rl_buff_credit.hpp"
 #include "sim/rl_buff_ledger.hpp"
+#include "sim/solver_branch.hpp"
 
 #include <filesystem>
 #include "sim/scale_factor_control.hpp"
@@ -2426,6 +2427,8 @@ void sim_t::combat_end()
   // close row is written on BOTH transports and with neither (D-08).
   // No-op when rl_translog= is unset.
   rl_translog::record_close( this );
+  // 261005-branch-teacher: a branch child closes its window here (no-op otherwise).
+  solver_branch::on_combat_end( this );
 
   // Random-roll recorder fight-end hook (phase 250, plan 250-01, REC-01/02/03). No-op when
   // rl_rng_record= is unset. Writes this fight's per-roller COUNTER entries and a FIGHT_END
@@ -3714,8 +3717,11 @@ bool sim_t::iterate()
       }
     } while ( more_work && !canceled );
   }
-  catch ( const std::exception& )
+  catch ( const std::exception& e )
   {
+    // 261005-branch-teacher: a branch child reports FAIL and _exit()s (never returns).
+    if ( solver_branch::is_child() )
+      solver_branch::on_child_exception( this, e.what() );
     std::throw_with_nested( sc_runtime_error( fmt::format( "Iteration ({})", current_iteration ) ) );
   }
 
@@ -4032,6 +4038,10 @@ bool sim_t::execute()
     // reply-stream read must still get its EOF on a failed iteration.
     // No-op when rl_translog= is unset.
     rl_translog::write_footer( this );
+    // 261005-branch-teacher: a translog-mode branch child writes its line and _exit()s here; the
+    // parent's teacher summary follows.
+    solver_branch::on_after_footer( this );
+    solver_branch::write_summary( this );
 
     // Random-roll recorder footer (phase 250, plan 250-01, REC-01/02/03). No-op when
     // rl_rng_record= is unset. Writes the FOOTER entry, flushes and closes the stream, writes
@@ -4079,6 +4089,10 @@ bool sim_t::execute()
       std::fflush( stderr );
     }
   }
+
+  // 261005-branch-teacher: a branch child that reaches this point has no result (the run failed
+  // without an exception reaching iterate()) -- FAIL and _exit(), never on to the parent's reports.
+  solver_branch::on_execute_end( this );
 
   elapsed_cpu  = chrono::elapsed( start_cpu_time );
   elapsed_time = chrono::elapsed( start_wall_time );
@@ -4488,6 +4502,30 @@ void sim_t::create_options()
   // block immediately after solver_hold_windows_str's own -- see sim.hpp's
   // solver_force_decision_str doc comment.
   add_option( opt_string( "solver_force_decision", solver_force_decision_str ) );
+  // 261005-branch-teacher: fork() branching at a decision and the branching teacher. Bound to
+  // solver_branch::cfg() (module-level -- every mode refuses threads!=1/profilesets/iterations!=1,
+  // so one sim per process); validated once at the end of setup(). See sim/solver_branch.hpp.
+  {
+    solver_branch::config_t& sb = solver_branch::cfg();
+    add_option( opt_int( "solver_branch_at", sb.branch_at ) );
+    add_option( opt_string( "solver_branch_buttons", sb.branch_buttons ) );
+    add_option( opt_int( "solver_branch_n", sb.branch_n, 1, 256 ) );
+    add_option( opt_uint64( "solver_branch_salt_base", sb.branch_salt_base ) );
+    add_option( opt_float( "solver_branch_window", sb.branch_window, 0.0, std::numeric_limits<double>::max() ) );
+    add_option( opt_string( "solver_branch_translog_dir", sb.branch_translog_dir ) );
+    add_option( opt_string( "solver_branch_out", sb.branch_out ) );
+    add_option( opt_int( "solver_branch_jobs", sb.branch_jobs, 1, 12 ) );
+    add_option( opt_float( "solver_branch_value_divisor", sb.value_divisor ) );
+    add_option( opt_float( "solver_branch_gamma", sb.gamma ) );
+    add_option( opt_bool( "solver_branch_child_fd_isolation", sb.child_fd_isolation ) );
+    add_option( opt_bool( "solver_teacher", sb.teacher ) );
+    add_option( opt_float( "solver_teacher_margin", sb.teacher_margin, 0.0, std::numeric_limits<double>::max() ) );
+    add_option( opt_int( "solver_teacher_n", sb.teacher_n, 0, 256 ) );
+    add_option( opt_float( "solver_teacher_window", sb.teacher_window ) );
+    add_option( opt_int( "solver_teacher_topk", sb.teacher_topk, 2, 8 ) );
+    add_option( opt_bool( "solver_teacher_bootstrap", sb.teacher_bootstrap ) );
+    add_option( opt_string( "solver_teacher_log", sb.teacher_log ) );
+  }
   // S1 (260927-s1-spend-timing): forbids lightning_bolt/tempest (and, 261002-8rs, primordial_storm
   // when the action table offers it; the third Lightning-family spender is untouched) below n stacks
   // of Maelstrom Weapon. 0..10 range-checked and
@@ -4568,6 +4606,9 @@ void sim_t::create_options()
   // to today's per_source_rng=1 behavior when unset.
   add_option( opt_timespan( "per_source_rng_resalt_at", per_source_rng_resalt_at ) );
   add_option( opt_uint64( "per_source_rng_salt", per_source_rng_salt ) );
+  // 261005-branch-teacher: the decision-anchored form (re-salt at decision k, seq-1 == k, after the
+  // net's inputs/mask/values and before the press). See sim/solver_branch.hpp.
+  add_option( opt_int( "per_source_rng_resalt_at_decision", solver_branch::cfg().resalt_at_decision ) );
   // Random-roll recorder (tstl-sylvanas phase 250, plan 250-01, REC-01/02/03). See sim.hpp's
   // rl_rng_record_file_str doc comment. Default empty, byte-identical to today's behavior.
   add_option( opt_string( "rl_rng_record", rl_rng_record_file_str ) );
@@ -6147,6 +6188,10 @@ void sim_t::setup( sim_control_t* c )
   {
     throw sc_invalid_sim_argument( "'deterministic=1' cannot be used with non-zero target_error values!" );
   }
+
+  // 261005-branch-teacher: refusals and the [RL_TEACHER]/[RL_BRANCH]/[RL_RESALT_AT_DECISION] line.
+  // Returns at once when no mode is on.
+  solver_branch::validate( this );
 }
 
 // sim_t::progress ==========================================================
