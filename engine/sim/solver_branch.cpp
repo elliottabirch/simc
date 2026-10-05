@@ -714,6 +714,16 @@ void validate( sim_t* sim )
     if ( c.branch_jobs < 1 || c.branch_jobs > 12 )
       refuse( fmt::format( "{} requires solver_branch_jobs in 1..12 (got {}).", name, c.branch_jobs ) );
   }
+  if ( teacher )
+  {
+    if ( !( c.teacher_window > 0.0 ) )
+      refuse( fmt::format( "solver_teacher_window must be > 0 (got {}).", c.teacher_window ) );
+    if ( c.teacher_n * c.teacher_topk > 256 )
+      refuse( fmt::format( "solver_teacher_n x solver_teacher_topk = {} exceeds 256 children per batch.",
+                           c.teacher_n * c.teacher_topk ) );
+    if ( !c.branch_translog_dir.empty() )
+      refuse( "solver_branch_translog_dir requires solver_branch_at, solver_branch_window=0 and rl_translog=." );
+  }
   if ( branch )
   {
     int nb = 0;
@@ -758,8 +768,21 @@ void validate( sim_t* sim )
       refuse( fmt::format( "solver_branch_out='{}' cannot be opened for writing.", c.branch_out ) );
   }
 
+  if ( teacher && !c.teacher_log.empty() )
+  {
+    g_teacher_log = std::make_unique<std::ofstream>( c.teacher_log, std::ios::out | std::ios::trunc );
+    if ( !g_teacher_log->is_open() )
+      refuse( fmt::format( "solver_teacher_log='{}' cannot be opened for writing.", c.teacher_log ) );
+  }
+
   g_any = true;
-  if ( resalt )
+  if ( teacher )
+    fmt::print( "[RL_TEACHER] margin={:.17g} n={} window={:.17g} topk={} bootstrap={} divisor={:.17g} gamma={:.17g} "
+                "jobs={} fd_isolation={} salt_base={} log={}\n",
+                c.teacher_margin, c.teacher_n, c.teacher_window, c.teacher_topk, c.teacher_bootstrap ? 1 : 0,
+                c.value_divisor, c.gamma, c.branch_jobs, c.child_fd_isolation ? 1 : 0, c.branch_salt_base,
+                c.teacher_log );
+  else if ( resalt )
     fmt::print( "[RL_RESALT_AT_DECISION] k={} salt={}\n", c.resalt_at_decision, sim->per_source_rng_salt );
   else if ( branch )
     fmt::print( "[RL_BRANCH] at={} buttons={} n={} salt_base={} window={} jobs={} divisor={:.17g} translog_dir={}\n",
@@ -774,10 +797,6 @@ void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
 {
   if ( !g_any )
     return;
-  (void)legal_count;
-  (void)q_margin;
-  (void)exploratory;
-  (void)forced;
 
   // 1. branch child: window accounting
   if ( g_child.active )
@@ -845,6 +864,116 @@ void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
       g_branch_out->flush();
     }
   }
+
+  // 4. teacher
+  if ( c.teacher )
+  {
+    ++g_count.decisions;
+    const bool near_tie = legal_count >= 2 && !std::isnan( q_margin ) && q_margin < c.teacher_margin;
+    if ( !near_tie )
+      return;
+    ++g_count.near_ties;
+    int n_sel = 0;
+    for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+      n_sel += select_mask[ i ] ? 1 : 0;
+    if ( c.teacher_n <= 0 || forced || exploratory || n_sel < 2 )
+      return;
+
+    const std::vector<int> cands = top_k( q, select_mask, c.teacher_topk );
+    if ( cands.empty() || cands[ 0 ] != idx )
+      throw sc_runtime_error( fmt::format(
+          "solver_teacher: the net's pick {} is not the best selectable button {} at decision k={} -- refusing to "
+          "branch from a press the net did not choose",
+          idx, cands.empty() ? -1 : cands[ 0 ], k ) );
+    std::vector<std::uint64_t> salts;
+    for ( int i = 0; i < c.teacher_n; ++i )
+      salts.push_back( c.branch_salt_base + seq * 1000u + static_cast<std::uint64_t>( i ) );
+
+    batch_result_t br;
+    int child_button = -1;
+    if ( run_batch( sim, p, seq, cands, salts, c.teacher_window, std::string(), br, child_button ) )
+    {
+      idx = child_button;
+      return;
+    }
+
+    const int need = ( c.teacher_n + 1 ) / 2;
+    std::vector<button_stats_t> st;
+    bool fail = false;
+    for ( int b : cands )
+    {
+      st.push_back( stats_for( br, b ) );
+      fail = fail || st.back().n_ok < need;
+    }
+    auto score = [ & ]( std::size_t i ) { return c.teacher_bootstrap ? st[ i ].mean_RB : st[ i ].mean_R; };
+
+    // paired difference (net's pick minus runner-up) over salts where both are OK
+    std::vector<double> diffs;
+    if ( cands.size() >= 2 )
+    {
+      for ( std::uint64_t s0 : salts )
+      {
+        const child_result_t* a = nullptr;
+        const child_result_t* b = nullptr;
+        for ( const auto& r : br.res )
+        {
+          if ( r.salt != s0 || !r.ok )
+            continue;
+          if ( r.button == cands[ 0 ] )
+            a = &r;
+          else if ( r.button == cands[ 1 ] )
+            b = &r;
+        }
+        if ( a && b )
+          diffs.push_back( c.teacher_bootstrap ? ( a->R + a->boot ) - ( b->R + b->boot ) : a->R - b->R );
+      }
+    }
+    double diff_mean, diff_se;
+    mean_se( diffs, diff_mean, diff_se );
+
+    const int net = idx;
+    int pick = net;
+    if ( fail )
+    {
+      ++g_count.skipped_fail;
+    }
+    else
+    {
+      std::size_t best = 0;
+      for ( std::size_t i = 1; i < cands.size(); ++i )
+        if ( score( i ) > score( best ) )  // strict: an exact tie stays with the net (rank order)
+          best = i;
+      pick = cands[ best ];
+      ++g_count.branched;
+      if ( pick != net )
+        ++g_count.overrides;
+      idx = pick;
+    }
+
+    if ( g_teacher_log )
+    {
+      std::string jc, jq, jok, jmR, jsR, jmRB, jsRB;
+      for ( std::size_t i = 0; i < cands.size(); ++i )
+      {
+        const char* sep = i ? "," : "";
+        jc += sep + std::to_string( cands[ i ] );
+        jq += sep + jnum( static_cast<double>( q[ cands[ i ] ] ) );
+        jok += sep + std::to_string( st[ i ].n_ok );
+        jmR += sep + jnum( st[ i ].mean_R );
+        jsR += sep + jnum( st[ i ].se_R );
+        jmRB += sep + jnum( st[ i ].mean_RB );
+        jsRB += sep + jnum( st[ i ].se_RB );
+      }
+      *g_teacher_log << fmt::format(
+          "{{\"seq\":{},\"t\":{},\"net\":{},\"cands\":[{}],\"q\":[{}],\"margin\":{},\"n\":{},\"ok\":[{}],"
+          "\"mean_R\":[{}],\"se_R\":[{}],\"mean_RB\":[{}],\"se_RB\":[{}],\"diff_mean\":{},\"diff_se\":{},"
+          "\"pick\":{},\"override\":{},\"skipped_fail\":{},\"children\":{},\"child_fail\":{},"
+          "\"child_cpu_s\":{},\"fork_cpu_s\":{},\"wall_s\":{}}}\n",
+          seq, jnum( t_float32( sim ) ), net, jc, jq, jnum( static_cast<double>( q_margin ) ), c.teacher_n, jok, jmR, jsR,
+          jmRB, jsRB, jnum( diff_mean ), jnum( diff_se ), pick, pick != net ? 1 : 0, fail ? 1 : 0, br.res.size(),
+          br.child_fail, jnum( br.child_cpu_s ), jnum( br.fork_cpu_s ), jnum( br.wall_s ) );
+    }
+  }
 }
 
 void on_combat_end( sim_t* sim )
@@ -893,5 +1022,33 @@ void on_execute_end( sim_t* sim )
 void write_summary( sim_t* sim )
 {
   (void)sim;
+  const config_t& c = g_cfg;
+  if ( !g_any || !c.teacher || g_child.active )
+    return;
+#if defined( __linux__ )
+  const double self_cpu = rusage_cpu_s( RUSAGE_SELF );
+  const double kids_cpu = rusage_cpu_s( RUSAGE_CHILDREN );
+#else
+  const double self_cpu = 0.0, kids_cpu = 0.0;
+#endif
+  const std::string js = fmt::format(
+      "{{\"summary\":1,\"decisions\":{},\"near_ties\":{},\"branched\":{},\"overrides\":{},\"skipped_fail\":{},"
+      "\"children\":{},\"children_reaped\":{},\"child_fail\":{},\"child_cpu_s\":{},\"fork_cpu_s\":{},"
+      "\"wall_branch_s\":{},\"self_cpu_s\":{},\"children_cpu_total_s\":{},\"rss_kb_first\":{},\"rss_kb_last\":{},"
+      "\"fd_first\":{},\"fd_last\":{},\"config\":{{\"margin\":{},\"n\":{},\"window\":{},\"topk\":{},"
+      "\"bootstrap\":{},\"divisor\":{},\"gamma\":{},\"jobs\":{},\"salt_base\":{},\"fd_isolation\":{}}}}}",
+      g_count.decisions, g_count.near_ties, g_count.branched, g_count.overrides, g_count.skipped_fail, g_count.children,
+      g_count.children_reaped, g_count.child_fail, jnum( g_count.child_cpu_s ), jnum( g_count.fork_cpu_s ),
+      jnum( g_count.wall_branch_s ), jnum( self_cpu ), jnum( kids_cpu ), g_count.rss_kb_first, g_count.rss_kb_last,
+      g_count.fd_first, g_count.fd_last, jnum( c.teacher_margin ), c.teacher_n, jnum( c.teacher_window ), c.teacher_topk,
+      c.teacher_bootstrap ? 1 : 0, jnum( c.value_divisor ), jnum( c.gamma ), c.branch_jobs, c.branch_salt_base,
+      c.child_fd_isolation ? 1 : 0 );
+  if ( g_teacher_log )
+  {
+    *g_teacher_log << js << "\n";
+    g_teacher_log->flush();
+  }
+  fmt::print( "[RL_TEACHER_SUMMARY] {}\n", js );
+  std::fflush( stdout );
 }
 }  // namespace solver_branch
