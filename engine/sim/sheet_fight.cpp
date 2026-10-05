@@ -440,9 +440,19 @@ spec_t load_spec( const std::string& path )
   {
     const std::string p = loader_t::at( "waves", i );
     const Value& w = wl[ i ];
-    L.keys( w, { "name", "actor", "npc_game_id", "kind", "count", "at", "time_shift_jitter", "max_health", "must_die",
-                 "spawn_distance_yd", "travel_s", "travel_jitter", "raid_stream", "lifetime_s",
-                 "nominal_lifetime_s" }, p );  // tstl-sylvanas 261-07: the writer carries the add's nominal lifetime for Phase 262
+    // tstl-sylvanas 264 kadd (O17): a /2 add wave may carry the OPTIONAL full_energy object; named in the key list only when
+    // present (keys() demands every listed key), so a wave without it is read exactly as before. Under /1 it is refused by name.
+    const bool has_fe = w.IsObject() && w.HasMember( "full_energy" );
+    if ( has_fe && !is2 )
+      L.fail( p + ".full_energy", "full_energy is a sheet-fight-spec/2 key; it is refused under format sheet-fight-spec/1" );
+    if ( has_fe )
+      L.keys( w, { "name", "actor", "npc_game_id", "kind", "count", "at", "time_shift_jitter", "max_health", "must_die",
+                   "spawn_distance_yd", "travel_s", "travel_jitter", "raid_stream", "lifetime_s", "nominal_lifetime_s",
+                   "full_energy" }, p );
+    else
+      L.keys( w, { "name", "actor", "npc_game_id", "kind", "count", "at", "time_shift_jitter", "max_health", "must_die",
+                   "spawn_distance_yd", "travel_s", "travel_jitter", "raid_stream", "lifetime_s",
+                   "nominal_lifetime_s" }, p );  // tstl-sylvanas 261-07: the writer carries the add's nominal lifetime for Phase 262
     wave_t out;
     out.name = L.str( w[ "name" ], p + ".name", "name" );
     out.actor = L.actor( w[ "actor" ], p + ".actor" );
@@ -534,6 +544,28 @@ spec_t load_spec( const std::string& path )
         L.fail( p + ".nominal_lifetime_s", "missing key nominal_lifetime_s" );
       if ( !w[ "nominal_lifetime_s" ].IsNull() )
         L.fail( p + ".nominal_lifetime_s", "hazard nominal_lifetime_s must be null" );  // tstl-sylvanas 261-07
+    }
+    if ( has_fe )
+    {
+      // tstl-sylvanas 264 kadd (O17): the full-energy clock. Same accept and refuse rules as validateSheetFightSpec in
+      // scripts/fights/fight-contracts.js; an add wave only, every number finite and positive (first_tick_s may be 0).
+      const std::string fp = p + ".full_energy";
+      if ( kind != "add" )
+        L.fail( fp, "full_energy is for an add wave; a hazard must not carry it" );
+      const Value& f = w[ "full_energy" ];
+      L.keys( f, { "first_tick_s", "fill_per_s", "cast_s", "effect" }, fp );
+      full_energy_t fe;
+      fe.first_tick_s = L.num( f[ "first_tick_s" ], fp + ".first_tick_s", "first_tick_s", false, 0 );
+      fe.fill_per_s   = L.num( f[ "fill_per_s" ], fp + ".fill_per_s", "fill_per_s", false, -1e300, 0 );
+      fe.cast_s       = L.num( f[ "cast_s" ], fp + ".cast_s", "cast_s", false, -1e300, 0 );
+      const Value& e  = f[ "effect" ];
+      L.keys( e, { "category", "duration_s" }, fp + ".effect" );
+      const std::string cat = e[ "category" ].IsString() ? e[ "category" ].GetString() : "";
+      if ( cat != "stun" && cat != "other_realm" )
+        L.fail( fp + ".effect.category", "category must be stun or other_realm (a full_energy effect is played as a stun)" );
+      fe.category   = cat;
+      fe.duration_s = L.num( e[ "duration_s" ], fp + ".effect.duration_s", "duration_s", false, -1e300, 0 );
+      out.full_energy = fe;
     }
     spec.waves.push_back( out );
   }
@@ -873,6 +905,17 @@ struct sheet_fight_event_t::impl_t
     double first_dmg = -1, first_pdmg = -1, first_swing = -1, stream_taken = 0;
     double dmg_base = 0, dmg_total = 0;
     double stream_from_s = 0, stream_rate = 0;
+    // tstl-sylvanas 264 kadd (O17): the full-energy clock's state (only used when the wave carries full_energy and the option is on).
+    // full_energy_s: the fight time the add reached 100 energy while alive (negative: not yet / died first). One entry of fe_casts
+    // per landed effect: its window, the index of its downtime window and the players the stun holds (the end event releases them).
+    struct fe_cast_t
+    {
+      double start_s, end_s;
+      size_t window;
+      std::vector<player_t*> affected;
+    };
+    double full_energy_s = -1;
+    std::vector<fe_cast_t> fe_casts;
   };
   struct wave_rt_t
   {
@@ -1032,6 +1075,33 @@ struct sheet_fight_event_t::impl_t
     arrive_event_t( sim_t& s, impl_t* i, int n, timespan_t t ) : event_t( s, t ), im( i ), inst( n ) {}
     const char* name() const override { return "sheet_fight_arrive"; }
     void execute() override { im->on_arrive( inst ); }
+  };
+  // tstl-sylvanas 264 kadd (O17): the full-energy clock of one add instance. fe_full: the add reaches 100 energy (a cast starts);
+  // fe_land: the running cast lands (its stun starts, the next cast starts at once); fe_end: the landed stun's duration is over.
+  // Each is dropped when the add is no longer alive (fe_end is not: a landed stun always ends). No draw anywhere.
+  struct fe_full_event_t : event_t
+  {
+    impl_t* im;
+    int inst;
+    fe_full_event_t( sim_t& s, impl_t* i, int n, timespan_t t ) : event_t( s, t ), im( i ), inst( n ) {}
+    const char* name() const override { return "sheet_fight_full_energy"; }
+    void execute() override { im->fe_full( inst ); }
+  };
+  struct fe_land_event_t : event_t
+  {
+    impl_t* im;
+    int inst;
+    fe_land_event_t( sim_t& s, impl_t* i, int n, timespan_t t ) : event_t( s, t ), im( i ), inst( n ) {}
+    const char* name() const override { return "sheet_fight_full_energy_land"; }
+    void execute() override { im->fe_land( inst ); }
+  };
+  struct fe_end_event_t : event_t
+  {
+    impl_t* im;
+    int inst, k;
+    fe_end_event_t( sim_t& s, impl_t* i, int n, int kk, timespan_t t ) : event_t( s, t ), im( i ), inst( n ), k( kk ) {}
+    const char* name() const override { return "sheet_fight_full_energy_end"; }
+    void execute() override { im->fe_end( inst, k ); }
   };
   // tstl-sylvanas 265-03: a random mechanic's cast moment and the end of its effect. check_phase: the cast is dropped when
   // its phase has already ended (like a spec cast); a cast triggered by a crossing or another cast with no extra delay is
@@ -1287,9 +1357,67 @@ struct sheet_fight_event_t::impl_t
       {
         const double travel = jit_value( wv.travel_jitter, wv.travel_s.value_or( 0.0 ) );  // tstl-sylvanas 261-04
         make_event<arrive_event_t>( *sim, *sim, this, idx, timespan_t::from_seconds( travel ) );
+        // tstl-sylvanas 264 kadd (O17): one full-energy event per add instance, at its spawn + first tick + 100 / fill rate.
+        if ( fe_on( wv ) )
+          make_event<fe_full_event_t>( *sim, *sim, this, idx,
+                                       timespan_t::from_seconds( wv.full_energy->first_tick_s + 100.0 / wv.full_energy->fill_per_s ) );
       }
     }
     invalidate_target_caches();
+  }
+
+  // ---- full energy (tstl-sylvanas 264 kadd, O17) -------------------------------------------------
+  // True when this wave's full_energy clock is played: a /2 spec, the wave carries the key, and the option is not 0.
+  bool fe_on( const sheet_fight_spec::wave_t& wv ) const { return spec.format == 2 && wv.full_energy && sim->solver_sheet_full_energy != 0; }
+
+  // The add reached 100 energy. If it is still alive, record the moment and start its first cast; from now on nothing can interrupt it.
+  void fe_full( int idx )
+  {
+    auto& in = *insts[ idx ];
+    if ( !in.alive )  // the add's death cancels the clock
+      return;
+    in.full_energy_s = r3( now() );
+    make_event<fe_land_event_t>( *sim, *sim, this, idx, timespan_t::from_seconds( spec.waves[ in.wave ].full_energy->cast_s ) );
+  }
+
+  // The running cast lands: stun every non-pet, non-sleeping player for the effect's duration (the shared stun path of the random
+  // mechanics, so overlapping stuns are counted), record the window, and start the next cast at once.
+  void fe_land( int idx )
+  {
+    auto& in = *insts[ idx ];
+    if ( !in.alive )  // the add's death cancels the cycle
+      return;
+    const auto& fe = *spec.waves[ in.wave ].full_energy;
+    const int k    = static_cast<int>( in.fe_casts.size() );
+    inst_t::fe_cast_t c;
+    c.start_s = r3( now() );
+    c.end_s   = r3( c.start_s + fe.duration_s );
+    c.window  = windows.size();
+    // Indices, not iterators: starting an effect can change the lists.
+    for ( size_t i = 0; i < sim->player_non_sleeping_list.size(); ++i )
+    {
+      auto* p = sim->player_non_sleeping_list[ i ];
+      if ( !p->is_pet() )
+        c.affected.push_back( p );
+    }
+    windows.push_back( { "stun", current_phase, c.start_s, -1.0, nullptr } );  // the downtime readers see it like any stun window
+    in.fe_casts.push_back( std::move( c ) );
+    for ( auto* p : in.fe_casts[ k ].affected )
+      sheet_fight_stun_start( p );
+    make_event<fe_end_event_t>( *sim, *sim, this, idx, k, timespan_t::from_seconds( fe.duration_s ) );
+    make_event<fe_land_event_t>( *sim, *sim, this, idx, timespan_t::from_seconds( fe.cast_s ) );
+  }
+
+  // The landed effect's duration is over: hand the turn back through the shared helper and close its downtime window.
+  void fe_end( int idx, int k )
+  {
+    auto& c = insts[ idx ]->fe_casts[ k ];
+    // As the stock raid event's finish does: a player who fell asleep meanwhile is dropped first.
+    c.affected.erase( std::remove_if( c.affected.begin(), c.affected.end(), []( const player_t* p ) { return p->is_sleeping(); } ),
+                      c.affected.end() );
+    for ( auto* p : c.affected )
+      sheet_fight_stun_end( sim, p );
+    windows[ c.window ].end_s = r3( now() );
   }
 
   // The add reaches melee: it is put next to the first engaged boss, 2 yards to the side (walking in is SIM-11).
@@ -2171,6 +2299,22 @@ struct sheet_fight_event_t::impl_t
         w.Double( *wv.max_health );
       else
         w.Null();
+      // tstl-sylvanas 264 kadd (O17): written only for an add whose wave carries full_energy while the option is on, so every
+      // other add's record is unchanged byte for byte. full_energy_casts: one {start_s, end_s} per landed effect window.
+      if ( fe_on( wv ) )
+      {
+        key( "full_energy_s" ); num_or_null( in.full_energy_s );
+        key( "full_energy_casts" );
+        w.StartArray();
+        for ( const auto& c : in.fe_casts )
+        {
+          w.StartObject();
+          key( "start_s" ); w.Double( c.start_s );
+          key( "end_s" ); w.Double( c.end_s );
+          w.EndObject();
+        }
+        w.EndArray();
+      }
       w.EndObject();
     }
     w.EndArray();

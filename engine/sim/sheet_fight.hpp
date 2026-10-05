@@ -114,6 +114,16 @@ struct wave_stream_t
   double damage_per_s = 0, start_after_spawn_s = 0;
   std::string lifetime_jitter;
 };
+// tstl-sylvanas 264 kadd (O17): the optional full-energy clock of an add wave (sheet-fight-spec/2 only). The add's energy starts
+// filling first_tick_s after it spawns at fill_per_s per second and is full 100 / fill_per_s later; from then on the add can no
+// longer be interrupted, so a cast of cast_s seconds starts at that moment and every cast lands: its effect (a stun of duration_s
+// on every non-pet, non-sleeping player) starts at the landing, and the next cast starts at once, for as long as the add lives.
+// No random draw is made for it, ever.
+struct full_energy_t
+{
+  double first_tick_s = 0, fill_per_s = 0, cast_s = 0, duration_s = 0;
+  std::string category;  // stun | other_realm (both played as a stun of duration_s)
+};
 struct wave_t
 {
   std::string name, actor, kind;  // kind: add | hazard
@@ -126,6 +136,7 @@ struct wave_t
   double spawn_distance_yd = 0;
   std::string travel_jitter;
   std::optional<wave_stream_t> raid_stream;
+  std::optional<full_energy_t> full_energy;  // tstl-sylvanas 264 kadd (O17): format 2, add waves only
 };
 // tstl-sylvanas 265-03: sheet-fight-spec/2 (Phase 265 D-08..D-11). A random mechanic is something a boss may do to the raid
 // that lands on the player only some of the time; the controller plays it itself (never as a phase child), so the

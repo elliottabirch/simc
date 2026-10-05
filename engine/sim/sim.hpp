@@ -1056,6 +1056,11 @@ struct sim_t : private sc_thread_t
   // consulted by the aimed-target pass (rl_target_select.cpp) and its record keys are written; with 0 the list is parsed and
   // validated but never consulted and the keys are not written (a fight then plays exactly as it does with no list).
   int solver_sheet_do_not_hit = 1;
+  // tstl-sylvanas 264 kadd (O17): solver_sheet_full_energy (default 1; 0 or 1 only). With 1 a sheet-fight-spec/2 add wave's
+  // full_energy clock is played (the add's cast lands its stun once the add is at 100 energy) and its per-add record keys are
+  // written; with 0 the key is parsed and validated but never played and the keys are not written (a fight then plays and
+  // records exactly as it does with no key).
+  int solver_sheet_full_energy = 1;
   std::string solver_fight_timeline_str;
   // Non-owning: the controller lives in raid_events (created by raid_event_t::init under SheetFight).
   sheet_fight_event_t* sheet_fight = nullptr;
