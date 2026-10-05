@@ -2400,6 +2400,9 @@ void raid_event_t::reset()
   num_starts        = 0;
   is_up             = false;
   activation_status = activation_status_e::not_yet_activated;
+  // tstl-sylvanas pairing probe 261005: per-fight state; left set, fight 2+ of a process read the previous fight's last draw.
+  saved_duration    = 0_ms;
+  saved_cooldown    = 0_ms;
   event_t::cancel( cooldown_event );
   event_t::cancel( duration_event );
   event_t::cancel( start_event );
