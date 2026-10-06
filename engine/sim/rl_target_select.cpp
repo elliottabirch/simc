@@ -385,25 +385,31 @@ bool generic_filter( const action_t* a, player_t* candidate, bool harmful )
   return true;
 }
 
-// ---- tstl-sylvanas 264-05 (O4): the sheet-declared do-not-hit rule -------------------------------------------------------
-// A boss the sheet declares do-not-hit (for a phase or a window; see sheet_fight_do_not_hit) is removed from the single-target
-// AIMED candidate sets while at least one other candidate remains. Keyed on the declaration only, so it covers every aimed token
-// whatever TARGETED_TOKENS holds (the eight at width 325, the ninth after the talent build). The rule never empties a set, never
-// changes a legality bit (generic_filter, rl_counts_as_enemy and every enemy count are untouched), never touches an area spell
-// and never looks at a shield. It reads the controller's state and draws nothing. With no entry (every non-sheet fight, a /1 spec,
-// a /2 spec without an entry, or solver_sheet_do_not_hit=0) none of the functions below changes anything.
+// ---- tstl-sylvanas 264-05 (O4) + 261006-dnh-F1: the sheet-declared do-not-hit rule (STRICT) --------------------------------
+// A boss the sheet declares do-not-hit (for a phase or a window; see sheet_fight_do_not_hit) is NEVER a candidate for a
+// single-target AIMED press while the declaration is active -- even when it is the only enemy an aimed spell can reach, and even
+// when every candidate is do-not-hit (owner ruling 2026-10-06: "we should also mask immune targets as eligible, so we cant ever
+// choose them as targets", and "Drop him too" for the lone case; this reverses O4's old keep-when-alone exception). When the drop
+// empties the set, select() returns nullptr: the aimed button's legality bit goes to 0, exactly as for any other empty set.
+// Keyed on the declaration only, so it covers every aimed token whatever TARGETED_TOKENS holds (the eight at width 325, the ninth
+// after the talent build). generic_filter, rl_counts_as_enemy and every enemy count are untouched, an area spell still reaches the
+// boss, and the rule never looks at a shield. It reads the controller's state and draws nothing. With no entry (every non-sheet
+// fight, a /1 spec, a /2 spec without an entry, or solver_sheet_do_not_hit=0) none of the functions below changes anything.
 
-// Fills `kept` with the members of `set` that are not do-not-hit (same order) and returns true, only when the rule fires: at
-// least one member is do-not-hit and at least one is not. Counts nothing.
+// Fills `kept` with the members of `set` that are not do-not-hit (same order; possibly none) and returns true, only when the rule
+// fires: at least one member is do-not-hit. Counts nothing.
 static bool dnh_split( const sim_t* sim, const std::vector<player_t*>& set, std::vector<player_t*>& kept )
 {
   if ( sim->fight_style != FIGHT_STYLE_SHEET_FIGHT || sim->sheet_fight == nullptr )
     return false;
-  std::size_t n = 0;
+  bool any = false;
   for ( const player_t* t : set )
     if ( sheet_fight_do_not_hit( sim, t ) )
-      ++n;
-  if ( n == 0 || n == set.size() )
+    {
+      any = true;
+      break;
+    }
+  if ( !any )
     return false;
   kept.clear();
   for ( player_t* t : set )
@@ -412,10 +418,9 @@ static bool dnh_split( const sim_t* sim, const std::vector<player_t*>& set, std:
   return true;
 }
 
-// select()'s own pass (counts for the record): two or more candidates with at least one not do-not-hit -> every do-not-hit
-// candidate removed (one drop counted per removed candidate per active entry); exactly one candidate that is do-not-hit -> kept and
-// counted as sole_kept; every candidate do-not-hit -> unchanged. When it prunes, the unpruned set is left in `unpruned` (the
-// Chain Lightning hop walk keeps reading every candidate, because a chain still reaches a do-not-hit boss).
+// select()'s own pass (counts for the record): every do-not-hit candidate is removed (one drop counted per removed candidate per
+// active entry; a drop that leaves the set empty is also counted as a sole_dropped). When it prunes, the unpruned set is left in
+// `unpruned` (the Chain Lightning hop walk keeps reading every candidate, because a chain still reaches a do-not-hit boss).
 static bool dnh_prune_candidates( const sim_t* sim, std::vector<player_t*>& set, std::vector<player_t*>& unpruned )
 {
   if ( sim->fight_style != FIGHT_STYLE_SHEET_FIGHT || sim->sheet_fight == nullptr )
@@ -426,19 +431,13 @@ static bool dnh_prune_candidates( const sim_t* sim, std::vector<player_t*>& set,
       ++n;
   if ( n == 0 )
     return false;
-  if ( set.size() == 1 )
-  {
-    sheet_fight_note_do_not_hit( sim, set.front(), true );
-    return false;
-  }
-  if ( n == set.size() )
-    return false;
+  const bool empties = ( n == set.size() );
   unpruned = set;
   set.clear();
   for ( player_t* t : unpruned )
   {
     if ( sheet_fight_do_not_hit( sim, t ) )
-      sheet_fight_note_do_not_hit( sim, t, false );
+      sheet_fight_note_do_not_hit( sim, t, empties );
     else
       set.push_back( t );
   }
@@ -557,10 +556,21 @@ void refresh_chosen( player_t* p )
     if ( stormstrike != nullptr && generic_filter( stormstrike, t, /*harmful=*/true ) )
       melee_legal.push_back( t );
   }
-  // tstl-sylvanas 264-05 (O4): do-not-hit enemies leave the eligible list while at least one other eligible enemy remains.
+  // tstl-sylvanas 264-05 (O4) + 261006-dnh-F1 (strict): a do-not-hit enemy is never re-picked as the tag. The Stormstrike-legal list
+  // is stripped first; when nothing is left of it, the hittable list is stripped instead (R3's fallback, still without a do-not-hit
+  // boss). With nothing else hittable the pick is nullptr and the old tag is kept (R2).
   std::vector<player_t*>        dnh_kept;
-  const std::vector<player_t*>& eligible_all = melee_legal.empty() ? hittable : melee_legal;
-  const std::vector<player_t*>& eligible     = dnh_split( p->sim, eligible_all, dnh_kept ) ? dnh_kept : eligible_all;
+  std::vector<player_t*>        dnh_kept_hittable;
+  const std::vector<player_t*>* eligible_ptr = &melee_legal;
+  if ( dnh_split( p->sim, melee_legal, dnh_kept ) )
+    eligible_ptr = &dnh_kept;
+  if ( eligible_ptr->empty() )
+  {
+    eligible_ptr = &hittable;
+    if ( dnh_split( p->sim, hittable, dnh_kept_hittable ) )
+      eligible_ptr = &dnh_kept_hittable;
+  }
+  const std::vector<player_t*>& eligible = *eligible_ptr;
   player_t*                     pick     = eligible.empty() ? nullptr : eligible.front();
   if ( p->sim->solver_random_chosen_enemy && eligible.size() >= 2 )
   {
@@ -703,8 +713,8 @@ enemy_fact build_enemy_fact( const action_t* a, player_t* candidate )
 std::vector<enemy_fact> build_candidate_facts( const action_t* a, bool harmful )
 {
   std::vector<enemy_fact> out;
-  // tstl-sylvanas 264-05 (O4): the set the aim exploration draws from and the dump lists is the SAME set select() blocks (same
-  // do-not-hit pass, no counting here), so its order and size match the stamped block's slots.
+  // tstl-sylvanas 264-05 (O4) + 261006-dnh-F1: the set the aim exploration draws from and the dump lists is the SAME set select() blocks (same
+  // strict do-not-hit pass, no counting here), so its order and size match the stamped block's slots.
   std::vector<player_t*> gathered, kept;
   for ( player_t* t : a->sim->target_non_sleeping_list )
     if ( t->is_enemy() && rl_counts_as_enemy( t ) && generic_filter( a, t, harmful ) )
@@ -1061,11 +1071,13 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
   if ( candidates.empty() )
     return nullptr;
 
-  // tstl-sylvanas 264-05 (O4): the sheet-declared do-not-hit pass. Right after the gather and BEFORE the candidate block is
-  // captured or any score is read: a do-not-hit boss leaves the set while another candidate remains (never empties it, never
-  // changes whether this action is legal -- the set is non-empty before and after).
+  // tstl-sylvanas 264-05 (O4) + 261006-dnh-F1 (strict): the sheet-declared do-not-hit pass. Right after the gather and BEFORE the
+  // candidate block is captured or any score is read: every do-not-hit boss leaves the set, even the only one. When that empties
+  // the set the answer is the same as for the empty gather above: no pick, the legality bit goes to 0.
   std::vector<player_t*>& unpruned_candidates = g_unpruned_candidate_buffer;
   const bool              dnh_pruned = dnh_prune_candidates( a->sim, candidates, unpruned_candidates );
+  if ( candidates.empty() )
+    return nullptr;
 
   // 240-05 Task 2 (D1(a)/D8(a)): BOTH of this function's former overflow refusals (the
   // scorer-declared-slots refusal, and the `!capture_block && pref == preference_scorer` refusal

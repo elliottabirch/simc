@@ -253,9 +253,10 @@ std::vector<sheet_fight_mark_state_t> sheet_fight_priority_marks( const sim_t* s
 // and alive, and its phase is the current one or its window holds the current time). A PURE READ: no draw, no event, no state
 // change. False outside SheetFight, for a /1 spec, for a /2 spec with no entry, and when the option solver_sheet_do_not_hit is 0.
 bool sheet_fight_do_not_hit( const sim_t* sim, const player_t* enemy );
-// Counter bookkeeping for the aimed-target pass: one call per candidate the pass removed (sole_kept false) or kept because it was
-// the only candidate (sole_kept true), for every active entry that names `enemy`. Never draws, never schedules.
-void sheet_fight_note_do_not_hit( const sim_t* sim, const player_t* enemy, bool sole_kept );
+// Counter bookkeeping for the aimed-target pass: one call per candidate the pass removed, for every active entry that names
+// `enemy`; sole_dropped is true when the removal left the aimed candidate set empty (nothing else could be hit). Every call
+// counts one `dropped`; a sole_dropped call also counts one `sole_dropped`. Never draws, never schedules.
+void sheet_fight_note_do_not_hit( const sim_t* sim, const player_t* enemy, bool sole_dropped );
 
 struct sheet_fight_event_t : public raid_event_t
 {
@@ -283,7 +284,7 @@ struct sheet_fight_event_t : public raid_event_t
   std::vector<sheet_fight_mark_state_t> priority_marks_now() const;
   // tstl-sylvanas 264-05 (O4): see sheet_fight_do_not_hit / sheet_fight_note_do_not_hit above.
   bool do_not_hit_now( const player_t* enemy ) const;
-  void do_not_hit_note( const player_t* enemy, bool sole_kept );
+  void do_not_hit_note( const player_t* enemy, bool sole_dropped );
 
   // tstl-sylvanas 265-03: stun bookkeeping for a sheet-fight-spec/2 fight (see sheet_fight_stun_start in raid_event.cpp). Every stun,
   // the engine's own and the controller's, goes through the shared start and end helpers; the controller counts how many hold

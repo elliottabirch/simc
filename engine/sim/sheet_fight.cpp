@@ -967,7 +967,7 @@ struct sheet_fight_event_t::impl_t
   // tick (like the priority windows); the filter itself reads the entry's exact state at the moment of the decision.
   struct dnh_count_t
   {
-    long long dropped = 0, sole_kept = 0;
+    long long dropped = 0, sole_dropped = 0;
   };
   struct dnh_window_t
   {
@@ -2151,7 +2151,7 @@ struct sheet_fight_event_t::impl_t
     return false;
   }
 
-  void do_not_hit_note( const player_t* enemy, bool sole_kept )
+  void do_not_hit_note( const player_t* enemy, bool sole_dropped )
   {
     if ( !dnh_on() )
       return;
@@ -2162,10 +2162,9 @@ struct sheet_fight_event_t::impl_t
         for ( const auto& b : bosses )
           if ( b.actor == enemy && b.spec->actor == spec.do_not_hit[ k ].enemy )
           {
-            if ( sole_kept )
-              ++dnh_counts[ k ].sole_kept;
-            else
-              ++dnh_counts[ k ].dropped;
+            ++dnh_counts[ k ].dropped;
+            if ( sole_dropped )
+              ++dnh_counts[ k ].sole_dropped;
           }
   }
 
@@ -2493,7 +2492,7 @@ struct sheet_fight_event_t::impl_t
           w.StartObject();
           key( "entry" ); w.String( spec.do_not_hit[ k ].name.c_str() );
           key( "dropped" ); w.Int64( c.dropped );
-          key( "sole_kept" ); w.Int64( c.sole_kept );
+          key( "sole_dropped" ); w.Int64( c.sole_dropped );
           w.EndObject();
         }
         w.EndArray();
@@ -2792,9 +2791,9 @@ bool sheet_fight_event_t::do_not_hit_now( const player_t* enemy ) const
   return impl->do_not_hit_now( enemy );
 }
 
-void sheet_fight_event_t::do_not_hit_note( const player_t* enemy, bool sole_kept )
+void sheet_fight_event_t::do_not_hit_note( const player_t* enemy, bool sole_dropped )
 {
-  impl->do_not_hit_note( enemy, sole_kept );
+  impl->do_not_hit_note( enemy, sole_dropped );
 }
 
 bool sheet_fight_do_not_hit( const sim_t* sim, const player_t* enemy )
@@ -2804,11 +2803,11 @@ bool sheet_fight_do_not_hit( const sim_t* sim, const player_t* enemy )
   return sim->sheet_fight->do_not_hit_now( enemy );
 }
 
-void sheet_fight_note_do_not_hit( const sim_t* sim, const player_t* enemy, bool sole_kept )
+void sheet_fight_note_do_not_hit( const sim_t* sim, const player_t* enemy, bool sole_dropped )
 {
   if ( !sim || sim->fight_style != FIGHT_STYLE_SHEET_FIGHT || !sim->sheet_fight )
     return;
-  sim->sheet_fight->do_not_hit_note( enemy, sole_kept );
+  sim->sheet_fight->do_not_hit_note( enemy, sole_dropped );
 }
 
 std::vector<sheet_fight_mark_state_t> sheet_fight_priority_marks( const sim_t* sim )
