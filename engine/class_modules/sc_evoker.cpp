@@ -451,11 +451,13 @@ struct simplified_player_t : public player_t
       { "demo",
         { ROLE_SPELL, 19.0, true, 1.5_s, 0.5, -1, 8, 1, -0.2, 9000.0, 0.0011, 0.1, 0.35,
           { 
-            { "60s_cds_p1", 0.2,  30_s,  60_s,  3_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
-            { "60s_cds_p2", 0.2,  30_s,  60_s,  7_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
-            { "60s_cds_p3", 0.1,  30_s,  60_s, 11_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
+            { "60s_cds_p1", 0.1,  38_s,  60_s,  3_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
+            { "60s_cds_p2", 0.2,  34_s,  60_s,  3_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
+            { "60s_cds_p3", 0.2,  30_s,  60_s,  3_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
             { "60s_cds_p4", 0.1,  20_s,  60_s,  3_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
             { "60s_cds_p5", 0.3,  15_s,  60_s,  3_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, true },
+            { "60s_cds_p6", -0.0909,   7_s,  60_s,  3_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
+            { "60s_cds_p7", -0.1667,   3_s,  60_s,  3_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
             { "20s_cds",    0.2,  12_s,  20_s,  2_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
             { "120s_cds",   0.2,  15_s, 120_s,  2_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
             { "120s_cds_2", 0.2,  15_s, 120_s,  2_s, bob_buff_type_e::BUFF_HASTE, false },
@@ -585,15 +587,17 @@ struct simplified_player_t : public player_t
       { "demo",
         { ROLE_SPELL, 21.2, true, 1.5_s, 0.5, -1, 8, 1, -0.2, 9000.0, 0.0011, 0.1, 0.35,
           { 
-            { "60s_cds_p1", 0.2,  30_s,  60_s,  3_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
-            { "60s_cds_p2", 0.2,  30_s,  60_s,  7_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
-            { "60s_cds_p3", 0.1,  30_s,  60_s, 11_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
+            { "60s_cds_p1", 0.1,  38_s,  60_s,  3_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
+            { "60s_cds_p2", 0.2,  34_s,  60_s,  3_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
+            { "60s_cds_p3", 0.2,  30_s,  60_s,  3_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
             { "60s_cds_p4", 0.1,  20_s,  60_s,  3_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
             { "60s_cds_p5", 0.3,  15_s,  60_s,  3_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, true },
-            { "20s_cds",    0.2,  12_s,  20_s,  2_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
-            { "120s_cds",   0.2,  15_s, 120_s,  2_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
-            { "120s_cds_2", 0.2,  15_s, 120_s,  2_s, bob_buff_type_e::BUFF_HASTE, false },
-            { "dps_pot",  695.0,  30_s, 300_s,  7_s, bob_buff_type_e::BUFF_FLAT_PRIMARY, false } 
+            { "60s_cds_p6", -0.0909,   7_s,  60_s,  3_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
+            { "60s_cds_p7", -0.1667,   3_s,  60_s,  3_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
+            { "20s_cds",    0.2,  12_s,  20_s,  3_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
+            { "120s_cds",   0.2,  15_s, 120_s,  3_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
+            { "120s_cds_2", 0.2,  15_s, 120_s,  3_s, bob_buff_type_e::BUFF_HASTE, false },
+            { "dps_pot",  695.0,  30_s, 300_s,  3_s, bob_buff_type_e::BUFF_FLAT_PRIMARY, false } 
           }
         } 
       },
@@ -602,7 +606,7 @@ struct simplified_player_t : public player_t
           { 
             { "90s_cds",   1.2, 15_s, 90_s, 3_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, true },
             { "45s_cds",   0.8, 12_s, 45_s, 3_s, bob_buff_type_e::BUFF_PERCENT_DAMAGE, false },
-            { "dps_pot", 695.0, 30_s, 320_s, 2_s, bob_buff_type_e::BUFF_FLAT_PRIMARY, false } 
+            { "dps_pot", 695.0, 30_s, 320_s, 3_s, bob_buff_type_e::BUFF_FLAT_PRIMARY, false } 
           }
         }
       },
@@ -715,7 +719,7 @@ struct simplified_player_t : public player_t
 
     if ( trigger_sense_power )
     {
-      b->add_stack_change_callback( [ this, duration ]( buff_t* b, int, int _new ) {
+      b->add_stack_change_callback( [ this, duration ]( buff_t*, int, int _new ) {
         if ( _new )
         {
           buffs.sense_power->trigger( duration );
@@ -978,6 +982,27 @@ struct simplified_player_t : public player_t
     player_t::init_base_stats();
     type = PLAYER_SIMPLIFIED;
   }
+
+  double composite_mitigation_multiplier( const action_state_t* s, school_e school, bool ) const override
+  {
+    auto m = player_t::composite_mitigation_multiplier( s, school, true );
+    
+    if ( role == ROLE_TANK )
+      return 0.4 * m;
+
+    return m;
+  }
+
+  double composite_parry() const override
+  {
+    auto parry = player_t::composite_parry();
+
+    if ( role == ROLE_TANK )
+      return parry + 0.5;
+
+    return parry;
+  }
+
 
   void init_items() override
   {
@@ -7521,6 +7546,11 @@ public:
 
     da *= 1.0 + p( s )->talent.mighty_inferno->effectN( 1 ).percent();
 
+    if ( p( s )->buff.ebon_might_self_buff->check() )
+    {
+      da *= 1.0 + p( s )->buff.ebon_might_self_buff->data().effectN( 1 ).percent();
+    }
+
     return da;
   }
 };
@@ -7840,7 +7870,7 @@ public:
     may_dodge = may_parry = may_block = false;
     background                        = true;
     aoe                               = -1;
-    spell_power_mod.direct            = 0.3;  // Hardcoded for some reason, 19/05/2023
+    spell_power_mod.direct            = 0.6;  // Hardcoded for some reason, 23/09/2026 DD/MM/YYYY
   }
 
   double composite_da_multiplier( const action_state_t* s ) const override
@@ -7849,6 +7879,12 @@ public:
 
     da *= 1.0 + p( s )->buff.reactive_hide->check_stack_value();
     da *= 1.0 + p( s )->talent.regenerative_chitin->effectN( 2 ).percent();
+
+    if ( p( s )->buff.ebon_might_self_buff->check() )
+    {
+      da *= 1.0 + p( s )->buff.ebon_might_self_buff->data().effectN( 1 ).percent();
+    }
+
     return da;
   }
 
@@ -11328,6 +11364,10 @@ void evoker_t::spawn_mote_of_possibility( player_t* prospective_player, mote_buf
     helper.erase( std::remove_if( helper.begin(), helper.end(), []( player_t* t ) { return t->is_pet(); } ),
                   helper.end() );
 
+    // People still seem to love eating their own balls
+    helper.push_back( target );
+    helper.push_back( target );
+
     switch ( mote_buff )
     {
       case mote_buffs_e::INFERNOS_BLESSING:
@@ -11641,7 +11681,7 @@ struct evoker_module_t : public module_t
                 } );
 
             p->callbacks.register_callback_execute_function(
-                effect->spell_id, []( auto cb, auto spell, player_t* t, auto ) {
+                effect->spell_id, []( auto cb, auto spell, player_t*, auto ) {
                   auto duration = cb->listener->buffs.sense_power->buff_duration();
                   if ( spell->duration() > duration )
                     duration = spell->duration();
