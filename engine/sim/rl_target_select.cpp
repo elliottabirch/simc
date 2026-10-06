@@ -1574,6 +1574,35 @@ void reset( sim_t* )
   rl_policy::clear_hits_action_handle_cache();
 }
 
+// 261005-fight-list (quick 261005-mix, plan 02): the fight-list driver's between-entry hygiene. reset() above
+// empties the per-iteration tables every fight; this adds what reset() never touched -- g_aim_fact_gate_cache
+// (keyed on a bare player_t*, filled once per actor, otherwise never cleared) and the three scratch vectors
+// (whose contents are player_t* / floats from the last decision) -- and routes through reset() for the rest, so
+// the two can never drift apart. Returns the count of entries still held (process_cache_entries()).
+void clear_process_caches()
+{
+  reset( nullptr );
+  g_aim_fact_gate_cache.clear();
+  g_candidate_buffer.clear();
+  g_unpruned_candidate_buffer.clear();
+  g_rules_feature_scratch.clear();
+}
+
+// How many entries the process-wide state of this file holds right now: the keyed tables, the scratch
+// vectors, and the one-fight counters (a non-zero counter counts as one entry).
+std::size_t process_cache_entries()
+{
+  return g_decision_stamp.size() + g_pick_table.size() + g_candidate_block_table.size() +
+         g_target_fact_snapshot_table.size() + g_chain_hop_stash.size() + g_vb_lava_lash_geometry_cache.size() +
+         g_aim_fact_gate_cache.size() + g_candidate_buffer.size() + g_unpruned_candidate_buffer.size() +
+         g_rules_feature_scratch.size() +
+         ( ( g_reresolution_counts.kept_the_pick != 0 || g_reresolution_counts.fell_back_to_player_target != 0 ||
+             g_reresolution_counts.left_no_op_boundary != 0 )
+               ? 1u
+               : 0u ) +
+         ( g_every_targeted_action_illegal != 0 ? 1u : 0u ) + ( g_target_head_no_block_count != 0 ? 1u : 0u );
+}
+
 bool is_targeted_action( const action_t* resolved )
 {
   if ( !resolved )

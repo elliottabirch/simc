@@ -525,6 +525,13 @@ std::uint64_t get_every_targeted_action_illegal_count();
 // that used to contradict its own "(one fight's totals)" parenthetical).
 void reset( sim_t* sim );
 
+// 261005-fight-list (quick 261005-mix, plan 02): everything reset() clears plus the caches reset() never
+// touched (g_aim_fact_gate_cache and the scratch vectors); used only by the `rl_fight_list=` driver between
+// entries. process_cache_entries() counts what this module still holds (the driver adds
+// rl_policy::process_cache_entries() itself and requires the sum to be 0 at the start of every entry).
+void clear_process_caches();
+std::size_t process_cache_entries();
+
 // ---------------------------------------------------------------------------------------------
 // Shaped spells (228-03, TGT-01/D-08, R-A / P228-6). Crash Lightning and Sundering pick a
 // DIRECTION to face, not a cast target -- the "pick" is the enemy whose direction, if faced,

@@ -22,6 +22,10 @@
 // declaration -- so this TU includes it directly, the same way
 // solver_control.cpp does.
 #include "sim/rl_policy.hpp"
+// 261005-fight-list (quick 261005-mix, plan 02): the `rl_fight_list=` driver below hands the translog writer
+// from entry to entry (rl_translog::carry_t) and empties the RL modules' process-wide caches between entries.
+#include "sim/rl_target_select.hpp"
+#include "sim/rl_translog.hpp"
 #include "sim/sim.hpp"
 #include "sim/scale_factor_control.hpp"
 #include "sim/sim_control.hpp"
@@ -35,11 +39,18 @@
 // reachable), <fstream> for the probe's plain-text input file.
 // 260920-cvf stage B, Task 1: <chrono> for std::chrono::steady_clock, used
 // only by the rl_forward_probe_repeats timing loop below.
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <locale>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <vector>
 
 #ifdef SC_SIGACTION
 #include <csignal>
@@ -266,6 +277,449 @@ void print_build_info( const dbc_t& dbc, int display_level )
   fmt::print( " ({})", util::build_info_str( &dbc, display_level ) );
 }
 
+// process_scope_t ==========================================================
+//
+// 261005-fight-list (quick 261005-mix, plan 02): the once-per-process start-up that sim_t::main used to do inline
+// (http cache, API token, dbc::init, class modules, hotfix registration, special effects), extracted into a scope
+// object so the `rl_fight_list=` driver below runs it ONCE and then builds one sim_t per fight inside it. The
+// members are constructed and destroyed in exactly the order the original local variables were (cache,
+// apitoken, [dbc::init, module_t::init, register_hotfixes], special effects; destruction in reverse), so the
+// ordinary path executes the same operations in the same order (proof P-OFF in PLAN-A section 6.2).
+
+struct process_data_init_t
+{
+  process_data_init_t()
+  {
+    dbc::init();
+    module_t::init();
+    unique_gear::register_hotfixes();
+  }
+};
+
+struct process_scope_t
+{
+  cache_initializer_t cache_init;
+  apitoken_initializer_t apitoken_init;
+  process_data_init_t data_init;
+  special_effect_initializer_t special_effect_init;
+
+  process_scope_t() : cache_init( get_cache_directory() + "/simc_cache.dat" )
+  {
+  }
+};
+
+// The fight-list driver (rl_fight_list=) =====================================
+//
+// `simc rl_fight_list=<list file>` runs one fight per entry file, each in its OWN fresh sim_t (a sim_t cannot
+// be reset or reused: sim.cpp setup() "cannot be repeated or reset"), writing ONE translog (format 15). The
+// contract (grammar, refusals, notice lines, hand-over) is docs/FIGHT_LIST.md / PLAN-A section 2 and 3.
+
+constexpr const char* FIGHT_LIST_ARG_PREFIX = "rl_fight_list=";
+constexpr const char* FIGHT_LIST_HEADER = "rl-fight-list-v1";
+
+[[noreturn]] void fight_list_refuse( const std::string& what )
+{
+  throw sc_runtime_error( "rl_fight_list: " + what );
+}
+
+struct fight_list_entry_t
+{
+  bool warmup = false;
+  std::string path;
+  std::uint32_t crc32 = 0;
+  std::uint32_t bytes = 0;
+  double parse_ms = 0.0;
+  std::unique_ptr<sim_control_t> control;
+};
+
+// Options that must read the same in every entry (the driver compares the parsed values): they describe the
+// PROCESS (one output file, one net, one lag model), not the fight.
+const char* const FIGHT_LIST_PROCESS_OPTIONS[] = {
+    "rl_translog",        "solver_policy",         "threads",          "per_source_rng",
+    "output",             "queue_lag_stddev",      "gcd_lag_stddev",   "channel_lag_stddev",
+    "default_world_lag_stddev", "solver_record_apl_choice" };
+
+// Options refused in any entry, by name prefix (PLAN-A section 2.3). Each exists for one reason: the feature
+// keeps process-global state this driver does not carry (solver_branch, rl_buff_*), reads only one process
+// (rl_rng_*), or is a one-shot probe (rl_forward_probe, rl_obs_names_out), or would nest a list.
+const char* const FIGHT_LIST_REFUSED_PREFIXES[] = {
+    "solver_branch", "solver_teacher", "rl_buff_", "rl_rng_", "rl_forward_probe", "rl_obs_names_out", "rl_fight_list" };
+
+// Options refused in any entry, by exact name.
+const char* const FIGHT_LIST_REFUSED_NAMES[] = { "solver_control", "decision_dump" };
+
+// The LAST value an entry's options give `name` (later options win in sim_t, as here), or nullptr when absent.
+const std::string* fight_list_option( const sim_control_t& control, const std::string& name )
+{
+  const std::string* found = nullptr;
+  for ( const auto& tuple : control.options )
+  {
+    if ( tuple.name == name )
+      found = &tuple.value;
+  }
+  return found;
+}
+
+std::vector<unsigned char> fight_list_read_bytes( const std::string& path, const std::string& what )
+{
+  std::ifstream in( path, std::ios::binary );
+  if ( !in.is_open() )
+    fight_list_refuse( fmt::format( "{} '{}' is not readable", what, path ) );
+  std::vector<unsigned char> bytes( ( std::istreambuf_iterator<char>( in ) ), std::istreambuf_iterator<char>() );
+  return bytes;
+}
+
+// Sets sim_signal_handler_t::global_sim for the life of one entry and clears it afterwards (also on a throw), so the
+// signal handler never dereferences a destroyed sim_t (it already tests for null).
+struct fight_list_signal_scope_t
+{
+  explicit fight_list_signal_scope_t( sim_t* sim ) { sim_signal_handler_t::global_sim = sim; }
+  ~fight_list_signal_scope_t() { sim_signal_handler_t::global_sim = nullptr; }
+};
+
+double fight_list_ms( std::chrono::steady_clock::time_point from, std::chrono::steady_clock::time_point to )
+{
+  return std::chrono::duration<double, std::milli>( to - from ).count();
+}
+
+std::vector<fight_list_entry_t> fight_list_read_and_validate( const std::string& list_path )
+{
+  // --- the list file (PLAN-A section 2.2)
+  const std::vector<unsigned char> raw = fight_list_read_bytes( list_path, "the list file" );
+  std::string text( raw.begin(), raw.end() );
+  if ( !text.empty() && text.back() == '\n' )
+    text.pop_back();
+  std::vector<std::string> lines;
+  {
+    std::size_t start = 0;
+    while ( true )
+    {
+      const std::size_t nl = text.find( '\n', start );
+      if ( nl == std::string::npos )
+      {
+        lines.push_back( text.substr( start ) );
+        break;
+      }
+      lines.push_back( text.substr( start, nl - start ) );
+      start = nl + 1;
+    }
+  }
+  if ( lines.empty() || lines[ 0 ] != FIGHT_LIST_HEADER )
+  {
+    fight_list_refuse( fmt::format( "the first line of '{}' must be exactly '{}' (got '{}')", list_path,
+                                    FIGHT_LIST_HEADER, lines.empty() ? std::string() : lines[ 0 ] ) );
+  }
+
+  std::vector<fight_list_entry_t> entries;
+  std::size_t fight_lines = 0;
+  for ( std::size_t i = 1; i < lines.size(); ++i )
+  {
+    const std::string& line = lines[ i ];
+    const std::size_t line_number = i + 1;  // 1-based file line
+    if ( line.empty() )
+      fight_list_refuse( fmt::format( "line {} of '{}' is blank (no blank lines are allowed)", line_number, list_path ) );
+    if ( line.find( '\r' ) != std::string::npos )
+      fight_list_refuse( fmt::format( "line {} of '{}' contains a carriage return", line_number, list_path ) );
+    const std::size_t space = line.find( ' ' );
+    if ( space == std::string::npos )
+    {
+      fight_list_refuse( fmt::format( "line {} of '{}' is '{}': expected 'warmup <path>' or 'fight <path>'", line_number,
+                                      list_path, line ) );
+    }
+    const std::string kind = line.substr( 0, space );
+    const std::string path = line.substr( space + 1 );
+    if ( kind != "warmup" && kind != "fight" )
+    {
+      fight_list_refuse( fmt::format( "line {} of '{}' starts with '{}': expected 'warmup' or 'fight'", line_number,
+                                      list_path, kind ) );
+    }
+    if ( path.empty() || path.find( ' ' ) != std::string::npos )
+    {
+      fight_list_refuse( fmt::format( "line {} of '{}': the path '{}' is empty or contains a space (one space, no space "
+                                      "inside a path)", line_number, list_path, path ) );
+    }
+    if ( path[ 0 ] != '/' )
+      fight_list_refuse( fmt::format( "line {} of '{}': the path '{}' is not absolute", line_number, list_path, path ) );
+    // an '=' would make the option parser read the path as an option, not a file name
+    if ( path.find( '=' ) != std::string::npos )
+      fight_list_refuse( fmt::format( "line {} of '{}': the path '{}' contains '='", line_number, list_path, path ) );
+    if ( kind == "warmup" )
+    {
+      if ( !entries.empty() )
+      {
+        fight_list_refuse( fmt::format( "line {} of '{}': a warmup entry is only allowed as the FIRST entry (and at "
+                                        "most one)", line_number, list_path ) );
+      }
+    }
+    else
+    {
+      ++fight_lines;
+    }
+    fight_list_entry_t entry;
+    entry.warmup = kind == "warmup";
+    entry.path = path;
+    entries.push_back( std::move( entry ) );
+  }
+  if ( fight_lines == 0 )
+    fight_list_refuse( fmt::format( "'{}' has no 'fight' entry", list_path ) );
+
+  // --- every entry file: bytes, CRC, parse, validate (all refusals fire here, before any fight)
+  for ( std::size_t k = 0; k < entries.size(); ++k )
+  {
+    fight_list_entry_t& e = entries[ k ];
+    const auto t0 = std::chrono::steady_clock::now();
+    const std::vector<unsigned char> bytes = fight_list_read_bytes( e.path, fmt::format( "entry {}'s file", k ) );
+    e.bytes = static_cast<std::uint32_t>( bytes.size() );
+    e.crc32 = rl_translog::crc32( bytes.data(), bytes.size() );
+
+    e.control = std::make_unique<sim_control_t>();
+    try
+    {
+      e.control->options.parse_args( std::vector<std::string>{ e.path } );
+    }
+    catch ( const std::exception& )
+    {
+      std::throw_with_nested( std::invalid_argument(
+          fmt::format( "rl_fight_list: entry {} ('{}') has an incorrect option format", k, e.path ) ) );
+    }
+    const sim_control_t& control = *e.control;
+
+    for ( const auto& tuple : control.options )
+    {
+      for ( const char* prefix : FIGHT_LIST_REFUSED_PREFIXES )
+      {
+        if ( tuple.name.compare( 0, std::strlen( prefix ), prefix ) == 0 )
+        {
+          fight_list_refuse( fmt::format( "entry {} ('{}') sets '{}', which a fight list refuses (every option starting "
+                                          "'{}' is refused)", k, e.path, tuple.name, prefix ) );
+        }
+      }
+      for ( const char* name : FIGHT_LIST_REFUSED_NAMES )
+      {
+        if ( tuple.name == name )
+        {
+          fight_list_refuse( fmt::format( "entry {} ('{}') sets '{}', which a fight list refuses", k, e.path,
+                                          tuple.name ) );
+        }
+      }
+    }
+
+    const std::string* iterations = fight_list_option( control, "iterations" );
+    if ( iterations == nullptr || *iterations != "1" )
+    {
+      fight_list_refuse( fmt::format( "entry {} ('{}') must set iterations=1 (got {})", k, e.path,
+                                      iterations == nullptr ? std::string( "no iterations= option" )
+                                                            : "iterations=" + *iterations ) );
+    }
+    if ( fight_list_option( control, "solver_policy" ) == nullptr )
+      fight_list_refuse( fmt::format( "entry {} ('{}') has no solver_policy= (a fight list plays a net)", k, e.path ) );
+    if ( fight_list_option( control, "rl_translog" ) == nullptr )
+      fight_list_refuse( fmt::format( "entry {} ('{}') has no rl_translog= (a fight list writes one translog)", k, e.path ) );
+
+    bool has_player = false;
+    for ( const auto& tuple : control.options )
+    {
+      const player_e type = util::parse_player_type( tuple.name );
+      if ( tuple.name == "copy" || ( type >= DEATH_KNIGHT && type <= WARRIOR ) )
+      {
+        has_player = true;
+        break;
+      }
+    }
+    if ( !has_player )
+      fight_list_refuse( fmt::format( "entry {} ('{}') has no player (nothing to simulate)", k, e.path ) );
+
+    if ( k > 0 )
+    {
+      const sim_control_t& first = *entries[ 0 ].control;
+      for ( const char* name : FIGHT_LIST_PROCESS_OPTIONS )
+      {
+        const std::string* mine = fight_list_option( control, name );
+        const std::string* theirs = fight_list_option( first, name );
+        const bool same = ( mine == nullptr && theirs == nullptr ) ||
+                          ( mine != nullptr && theirs != nullptr && *mine == *theirs );
+        if ( !same )
+        {
+          fight_list_refuse( fmt::format( "entry {} ('{}') sets {}='{}' but entry 0 sets {}='{}' (process-level options "
+                                          "must be identical in every entry)", k, e.path, name,
+                                          mine == nullptr ? std::string( "<absent>" ) : *mine, name,
+                                          theirs == nullptr ? std::string( "<absent>" ) : *theirs ) );
+        }
+      }
+    }
+    e.parse_ms = fight_list_ms( t0, std::chrono::steady_clock::now() );
+  }
+  return entries;
+}
+
+int run_fight_list( const std::vector<std::string>& args )
+{
+  int8_t exit_code = 0;
+
+  try
+  {
+    // --- arguments: the list, and nothing else (PLAN-A section 2.1)
+    std::string list_path;
+    bool have_list = false;
+    for ( const std::string& arg : args )
+    {
+      if ( !have_list && arg.compare( 0, std::strlen( FIGHT_LIST_ARG_PREFIX ), FIGHT_LIST_ARG_PREFIX ) == 0 )
+      {
+        list_path = arg.substr( std::strlen( FIGHT_LIST_ARG_PREFIX ) );
+        have_list = true;
+      }
+      else
+      {
+        fight_list_refuse( fmt::format( "the only argument allowed with rl_fight_list= is the list itself (got '{}')",
+                                        arg ) );
+      }
+    }
+    if ( list_path.empty() )
+      fight_list_refuse( "rl_fight_list= needs the path of a list file" );
+
+    const auto process_start = std::chrono::steady_clock::now();
+
+    process_scope_t process_scope;
+
+    std::vector<fight_list_entry_t> entries = fight_list_read_and_validate( list_path );
+
+    // Hotfixes are applied once, after every entry has been parsed and before the first sim_t is built (the
+    // ordinary path applies them right after its single parse, before setup).
+    hotfix::apply();
+
+    const std::size_t entry_count = entries.size();
+    std::size_t kept_count = 0;
+    for ( const auto& e : entries )
+      kept_count += e.warmup ? 0 : 1;
+    const bool has_warmup = entries[ 0 ].warmup;
+    const std::string* translog_value = fight_list_option( *entries[ 0 ].control, "rl_translog" );
+    fmt::print( stderr, "[RL_FIGHT_LIST] start entries={} warmup={} translog={} format={}\n", entry_count,
+                has_warmup ? 1 : 0, *translog_value, rl_translog::FORMAT_VERSION_FIGHT_LIST );
+    std::fflush( stderr );
+
+    rl_translog::carry_t carry;
+    std::shared_ptr<rl_policy::rl_weights_t> shared_weights;
+
+    for ( std::size_t k = 0; k < entry_count; ++k )
+    {
+      fight_list_entry_t& e = entries[ k ];
+      const bool last = k + 1 == entry_count;
+      const auto t_entry = std::chrono::steady_clock::now();
+
+      std::unique_ptr<sim_t> sim( new sim_t() );
+      fight_list_signal_scope_t signal_scope( sim.get() );
+
+      sim->rl_list_active = true;
+      sim->rl_list_warmup = e.warmup;
+      sim->rl_list_last = last;
+      sim->rl_list_index = static_cast<int>( k );
+      sim->rl_list_crc32 = e.crc32;
+      sim->rl_list_bytes = e.bytes;
+      if ( k > 0 )
+      {
+        rl_translog::adopt( sim.get(), carry );
+        sim->rl_list_shared_weights = shared_weights;
+      }
+
+      // No process-wide cache may still hold an entry from a previous fight (a recycled player_t / action_t / buff_t
+      // address would otherwise be served stale pointers): measured on the freshly built sim_t, THROWN on, then
+      // emptied anyway.
+      const std::size_t caches_at_start =
+          rl_policy::process_cache_entries() + rl_target_select::process_cache_entries();
+      if ( caches_at_start != 0 )
+      {
+        fight_list_refuse( fmt::format( "entry {} ('{}') started with {} stale process-wide cache entries (caches_at_start "
+                                        "must be 0)", k, e.path, caches_at_start ) );
+      }
+      rl_policy::clear_process_caches();
+      rl_target_select::clear_process_caches();
+
+      const auto t_setup = std::chrono::steady_clock::now();
+      try
+      {
+        sim->setup( e.control.get() );
+      }
+      catch ( const std::exception& )
+      {
+        print_version_info( *sim->dbc );
+        fmt::print( "\n" );
+        std::throw_with_nested(
+            std::runtime_error( fmt::format( "rl_fight_list: entry {} ('{}'): Setup failure", k, e.path ) ) );
+      }
+      const double setup_ms = fight_list_ms( t_setup, std::chrono::steady_clock::now() );
+
+      if ( sim->canceled )
+      {
+        fight_list_refuse( fmt::format( "entry {} ('{}') was canceled in setup (nothing to simulate)", k, e.path ) );
+      }
+      if ( k == 0 )
+      {
+        shared_weights = sim->solver_policy_weights;
+        // the version banner, once (the ordinary path prints it after setup)
+        print_version_info( *sim->dbc );
+        fmt::print( "\n" );
+      }
+
+      sim->report_progress = 0;
+      sim->progress_bar.set_base( "Baseline" );
+
+      const auto t_run = std::chrono::steady_clock::now();
+      if ( !( sim->execute() && !sim->rethrow_exception_queue() ) )
+      {
+        fight_list_refuse( fmt::format( "entry {} ('{}') was canceled or failed during the fight", k, e.path ) );
+      }
+      const double execute_ms = fight_list_ms( t_run, std::chrono::steady_clock::now() );
+      const double init_ms = chrono::to_fp_seconds( sim->init_time ) * 1000.0;
+
+      const auto t_close = std::chrono::steady_clock::now();
+      // Everything the entry's objects own is emptied while they are still alive, then the sim is destroyed, then
+      // the caches are emptied once more (the next entry's first act is to require them empty).
+      rl_policy::clear_process_caches();
+      rl_target_select::clear_process_caches();
+      const unsigned shape = static_cast<unsigned>( sim->rl_fight_shape_index );
+      const std::uint32_t tag_setup = sim->rl_tag_setup;
+      const std::uint32_t tag_stat = sim->rl_tag_stat;
+      const std::uint32_t tag_slot = sim->rl_tag_slot;
+      if ( !last )
+        rl_translog::release( sim.get(), carry );
+      sim.reset();
+      rl_policy::clear_process_caches();
+      rl_target_select::clear_process_caches();
+      const double close_ms = fight_list_ms( t_close, std::chrono::steady_clock::now() );
+      const double total_ms = fight_list_ms( t_entry, std::chrono::steady_clock::now() );
+
+      fmt::print( stderr,
+                  "[RL_FIGHT_LIST] entry={} kind={} shape={} setup={} stat={} slot={} crc32={:08x} bytes={} "
+                  "caches_at_start={} parse_ms={:.1f} setup_ms={:.1f} init_ms={:.1f} run_ms={:.1f} close_ms={:.1f} "
+                  "total_ms={:.1f}\n",
+                  k, e.warmup ? "warmup" : "fight", shape, tag_setup, tag_stat, tag_slot, e.crc32, e.bytes,
+                  caches_at_start, e.parse_ms, setup_ms, init_ms, std::max( 0.0, execute_ms - init_ms ), close_ms,
+                  total_ms + e.parse_ms );
+      std::fflush( stderr );
+    }
+
+    fmt::print( stderr, "[RL_FIGHT_LIST] done entries={} kept={} wall_ms={:.1f}\n", entry_count, kept_count,
+                fight_list_ms( process_start, std::chrono::steady_clock::now() ) );
+    std::fflush( stderr );
+  }
+  catch ( const sc_exception& e )
+  {
+    exit_code = 1;
+    fmt::print( stderr, "Error: " );
+    util::print_chained_exception( e, stderr, exit_code );
+    fmt::print( stderr, "\n" );
+  }
+  catch ( const std::exception& e )
+  {
+    exit_code = 1;
+    fmt::print( stderr, "Error: " );
+    util::print_chained_exception( e, stderr, exit_code );
+    fmt::print( stderr, "\n" );
+  }
+
+  return exit_code;
+}
+
 } // anonymous namespace ====================================================
 
 // sim_t::main ==============================================================
@@ -276,13 +730,9 @@ int sim_t::main( const std::vector<std::string>& args )
 
   try
   {
-    cache_initializer_t cache_init( get_cache_directory() + "/simc_cache.dat" );
-    apitoken_initializer_t apitoken_init;
-    dbc::init();
-    module_t::init();
-    unique_gear::register_hotfixes();
-
-    special_effect_initializer_t special_effect_init;
+    // 261005-fight-list: the once-per-process start-up, same operations in the same order as before it was
+    // extracted into process_scope_t (see its comment).
+    process_scope_t process_scope;
 
     sim_control_t control;
 
@@ -609,8 +1059,18 @@ int main( int argc, char** argv )
 {
   std::locale::global( std::locale( "C" ) );
 
+  const io::utf8_args args( argc, argv );
+
+  // 261005-fight-list (quick 261005-mix, plan 02): `rl_fight_list=<list>` runs one fight per entry file in one
+  // process (see run_fight_list). Any other invocation falls through to the unchanged single-sim path.
+  for ( const std::string& arg : args )
+  {
+    if ( arg.compare( 0, std::strlen( FIGHT_LIST_ARG_PREFIX ), FIGHT_LIST_ARG_PREFIX ) == 0 )
+      return run_fight_list( args );
+  }
+
   sim_t sim;
   sim_signal_handler_t::global_sim = &sim;
 
-  return sim.main( io::utf8_args( argc, argv ) );
+  return sim.main( args );
 }

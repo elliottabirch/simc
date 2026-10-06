@@ -124,6 +124,12 @@ struct aim_context_pending_t
   float           indicator[ RL_AIM_CONTEXT_COUNT ] = {};
 };
 aim_context_pending_t g_aim_context_pending;
+
+// 261005-fight-list (quick 261005-mix, plan 02): HOISTED from a function-local static inside
+// capability_effective_bit() (same type, same lazy-fill behaviour, same single-sim/single-thread assert at
+// the fill site) so clear_process_caches() below can reach it. A function-local static is invisible to any
+// other function; without this hoist it was the one per-actor cache of this file no driver could empty.
+std::unordered_map<const player_t*, std::array<int, RL_CAPABILITY_COUNT>> g_capability_bits;
 } // anonymous namespace
 
 // 260914-rbp Task 2c (ADD-2): see rl_policy.hpp's own declaration comment -- clears
@@ -808,7 +814,6 @@ bool capability_effective_bit( player_t* p, std::size_t idx )
 {
   assert( p->sim->threads == 1 && p->sim->profileset_map.empty() &&
           "rl_policy capability-bit cache is single-sim/single-thread by construction (259-07)" );
-  static std::unordered_map<const player_t*, std::array<int, RL_CAPABILITY_COUNT>> g_capability_bits;
   auto it = g_capability_bits.find( p );
   if ( it == g_capability_bits.end() )
   {
@@ -4602,5 +4607,35 @@ wait_result build_wait( const rl_state_t& s, const rl_wait_anchor& anchor )
   const bool floored = seconds_pre_floor < RL_WAIT_FLOOR_SECONDS;
   const double seconds = std::max( seconds_pre_floor, RL_WAIT_FLOOR_SECONDS );
   return wait_result{ seconds, source, floored };
+}
+
+// ---- Fight-list support (quick 261005-mix, plan 02) ----
+//
+// Every process-wide, pointer-keyed cache of this file, emptied together. The fight-list driver (sc_main.cpp,
+// run_fight_list) builds a fresh sim_t per entry, so a player_t / action_t / buff_t address from a destroyed
+// entry can be handed out again to the next one; a cache keyed on that bare address would then serve
+// dangling buff_t* / expr_t* / action_t* (the WR-12 hazard bind_slots() names). The driver calls this before
+// the first entry, after each entry's execute() (while the entry's objects are still alive, so any owned
+// expression is torn down against live memory) and after the entry's sim_t is destroyed, and requires
+// process_cache_entries() == 0 at the start of every entry (it throws by name otherwise).
+// g_names_out_written is deliberately NOT cleared: it is a once-per-process flag, not a cache, and an entry
+// may not set rl_obs_names_out (the driver refuses it).
+void clear_process_caches()
+{
+  g_action_handle_cache.clear();
+  g_hits_action_handle_cache.clear();
+  g_gate_bits_cache.clear();
+  g_aim_context_pending = aim_context_pending_t{};
+  g_capability_bits.clear();
+  g_slot_table_cache.clear();
+  g_enemy_handle_cache.clear();
+}
+
+// How many entries the caches above hold right now (a set aim-context-pending record counts as one).
+std::size_t process_cache_entries()
+{
+  return g_action_handle_cache.size() + g_hits_action_handle_cache.size() + g_gate_bits_cache.size() +
+         ( ( g_aim_context_pending.valid || g_aim_context_pending.p != nullptr ) ? 1u : 0u ) +
+         g_capability_bits.size() + g_slot_table_cache.size() + g_enemy_handle_cache.size();
 }
 } // namespace rl_policy

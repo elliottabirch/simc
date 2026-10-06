@@ -5276,8 +5276,15 @@ void sim_t::setup( sim_control_t* c )
     // has no such excuse, and a first-boundary failure would strand a
     // partially-run sim. load_rlw1 throws sc_runtime_error, named per
     // refusal, on a missing/unreadable/short/bad-magic/unknown-version file.
-    solver_policy_weights =
-        std::make_shared<rl_policy::rl_weights_t>( rl_policy::load_rlw1( solver_policy_str ) );
+    // 261005-fight-list (quick 261005-mix, plan 02): a list entry after the first reuses the net entry 0 already
+    // loaded and validated (the driver requires every entry to name the same solver_policy= and has handed over
+    // entry 0's shared_ptr); the fingerprint and format refusals of load_rlw1 fired on entry 0. The weights are
+    // read-only to a fight apart from `mutable` scratch buffers, which are rewritten before every read.
+    if ( rl_list_active && rl_list_shared_weights )
+      solver_policy_weights = rl_list_shared_weights;
+    else
+      solver_policy_weights =
+          std::make_shared<rl_policy::rl_weights_t>( rl_policy::load_rlw1( solver_policy_str ) );
   }
 
   // 260922-mfh (D5): replaces tj1's solver_hold_until= block (deleted entirely, not kept as a

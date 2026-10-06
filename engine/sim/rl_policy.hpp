@@ -646,4 +646,11 @@ float forward_aim( const rl_aim_t& a, const float* in );
 // address can never leak into the next iteration. See rl_target_select.cpp's reset() for the
 // call site and the ME-1 sibling cache it clears alongside this one.
 void clear_hits_action_handle_cache();
+
+// 261005-fight-list (quick 261005-mix, plan 02): empties EVERY process-wide pointer-keyed cache of
+// rl_policy_obs.cpp (action handles, hits handles, gate bits, aim-context pending record, capability bits, slot
+// tables, enemy handles) and returns the count of entries still held (process_cache_entries()). Used only by the
+// `rl_fight_list=` driver in sc_main.cpp, between entries; see the definition for why each is needed.
+void clear_process_caches();
+std::size_t process_cache_entries();
 }
