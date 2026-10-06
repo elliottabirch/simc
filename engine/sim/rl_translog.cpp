@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 // Pure observer for the RL transition log's per-proc counter block
@@ -355,12 +356,12 @@ void zstd_finish_stream( sim_t* root )
 // answer nobody would ever suspect -- refuse loudly instead of truncating.
 void assert_write_site_ranges( sim_t* sim )
 {
-  if ( sim->current_iteration > 65535 )
+  if ( fight_index( sim ) > 65535 )
   {
     throw sc_runtime_error( fmt::format(
         "rl_translog: current_iteration ({}) exceeds the 16-bit row field -- refusing rather than "
         "truncating.",
-        sim->current_iteration ) );
+        fight_index( sim ) ) );
   }
   if ( sim->thread_index < 0 || sim->thread_index > 255 )
   {
@@ -427,6 +428,11 @@ void open_and_write_header( sim_t* sim )
   sim_t* root = root_of( sim );
   if ( root->rl_translog_file_str.empty() )
     return;
+  // 261005-fight-list: a list entry after the first has adopted the previous entry's open writer (adopt(),
+  // called before setup()); the header, the zstd stream and the sidecars were created once by entry 0.
+  // An ordinary run (and branch_child_reopen(), which releases the stream first) never holds a stream here.
+  if ( root->rl_translog_stream )
+    return;
 
   // 260924-tlz (write-time zstd, owner ruling 2026-09-24, R-TLZ): the on-disk file is the
   // caller's own rl_translog= path PLUS ".zst" -- `rl_translog_file_str` itself is left
@@ -484,7 +490,7 @@ void open_and_write_header( sim_t* sim )
   file_header h{};
   std::memcpy( h.magic, MAGIC, sizeof( MAGIC ) );
   h.endian_canary = ENDIAN_CANARY;
-  h.format_version = FORMAT_VERSION;
+  h.format_version = file_format_version( root );
   h.record_size = RECORD_SIZE;
   h.header_size = HEADER_SIZE;
   // Phase 213 D-08/213-G17: populate both from the loaded weights when a
@@ -526,6 +532,14 @@ void open_and_write_header( sim_t* sim )
   // so a run that never sets rl_fight_shape_index= writes the same zero
   // an old (pre-218) run implicitly wrote.
   h.fight_shape_index = static_cast<std::uint32_t>( root->rl_fight_shape_index );
+  // 261005-fight-list: a format-15 (list) header names no single fight: the three per-fight words read the
+  // sentinel and the reader takes them from each fight-close row's tag instead.
+  if ( root->rl_list_active )
+  {
+    h.fight_shape_index = LIST_WORD_SENTINEL;
+    h.funnel_mode = LIST_WORD_SENTINEL;
+    h.chooser_state = LIST_WORD_SENTINEL;
+  }
   std::strncpy( h.obs_schema_sha, RL_OBS_SCHEMA_SHA, sizeof( h.obs_schema_sha ) - 1 );
   std::strncpy( h.mask_rules_sha, RL_MASK_RULES_SHA, sizeof( h.mask_rules_sha ) - 1 );
   std::strncpy( h.action_space_sha, RL_ACTION_SPACE_SHA, sizeof( h.action_space_sha ) - 1 );
@@ -551,7 +565,7 @@ void open_and_write_header( sim_t* sim )
       throw sc_runtime_error(
           fmt::format( "rl_translog=: unable to open '{}' for writing.", sidecar_path ) );
     }
-    sidecar << "{\"format_version\": " << FORMAT_VERSION << ", \"proc_count\": " << rl_proc::COUNT
+    sidecar << "{\"format_version\": " << file_format_version( root ) << ", \"proc_count\": " << rl_proc::COUNT
             << ", \"record_size\": " << RECORD_SIZE << ", \"proc_block_offset\": " << PROC_BLOCK_OFFSET
             << ", \"names\": [";
     for ( std::uint32_t i = 0; i < rl_proc::COUNT; ++i )
@@ -577,7 +591,7 @@ void open_and_write_header( sim_t* sim )
       throw sc_runtime_error(
           fmt::format( "rl_translog=: unable to open '{}' for writing.", sidecar_path ) );
     }
-    sidecar << "{\"format_version\": " << FORMAT_VERSION
+    sidecar << "{\"format_version\": " << file_format_version( root )
             << ", \"credit_block_offset\": " << CREDIT_BLOCK_OFFSET
             << ", \"chosen_block_offset\": " << CHOSEN_BLOCK_OFFSET
             << ", \"credit_streams\": " << ( 2u * rl_credit::STREAM_COUNT )
@@ -709,7 +723,7 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float ob
   // that ARE reachable in practice), so this is a documented exception
   // rather than a matching loud refusal.
   r.seq = static_cast<std::uint32_t>( seq );
-  r.iteration = static_cast<std::uint16_t>( sim->current_iteration );
+  r.iteration = static_cast<std::uint16_t>( fight_index( sim ) );  // 261005-fight-list: the entry index in a list
   // Version 6 (228-09, D-23/TGT-08): the CHOSEN action's own stamped pick, caller-resolved
   // (lookup_pick(), never recomputed here -- this file is a writer, not a decision-maker).
   r.chosen_target_actor_index = chosen_target_actor_index;
@@ -836,10 +850,24 @@ void record_close( sim_t* sim )
   // That is why this hook is placed AFTER datacollection_end(), where
   // this field is finalised.
   r.fight_length = static_cast<float>( p->iteration_fight_length.total_seconds() );
-  std::memset( r.zero12, 0, sizeof( r.zero12 ) );
+  std::memset( r.fight_tag, 0, sizeof( r.fight_tag ) );
+  std::memset( r.zero12_rest, 0, sizeof( r.zero12_rest ) );
   r.decision_count = root->rl_translog_pending_decisions;
   r.zero_mask = 0;   // version 4: widened to uint32 to sit at decision_record's own mask offset
-  r.iteration = static_cast<std::uint16_t>( sim->current_iteration );
+  r.iteration = static_cast<std::uint16_t>( fight_index( sim ) );  // 261005-fight-list: the entry index in a list
+  if ( sim->rl_list_active )
+  {
+    // 261005-fight-list (format 15): the fight's own tag -- see close_record::fight_tag. Written only in a
+    // list; in every other file these eight words stay zero, byte for byte as before.
+    r.fight_tag[ 0 ] = static_cast<std::uint32_t>( sim->rl_list_index );
+    r.fight_tag[ 1 ] = static_cast<std::uint32_t>( sim->rl_fight_shape_index );
+    r.fight_tag[ 2 ] = sim->rl_tag_setup;
+    r.fight_tag[ 3 ] = sim->rl_tag_stat;
+    r.fight_tag[ 4 ] = sim->rl_tag_slot;
+    r.fight_tag[ 5 ] = ( sim->solver_funnel_mode ? 1u : 0u ) | ( sim->solver_random_chosen_enemy ? 2u : 0u );
+    r.fight_tag[ 6 ] = sim->rl_list_crc32;
+    r.fight_tag[ 7 ] = sim->rl_list_bytes;
+  }
   r.zero_action = 0; // version 4: collapses the old zero62/zero63 uint8 PAIR
 
   // The warm-up-discard verdict, decided HERE and written into the row
@@ -847,7 +875,10 @@ void record_close( sim_t* sim )
   // datacollection_end() guard, so a discarded first fight is explicit
   // data rather than something the reader re-derives from a fight number.
   std::uint8_t flags = 0;
-  const bool collected = ( sim->iterations == 1 || sim->current_iteration >= 1 );
+  // 261005-fight-list: in a list every entry is collected except the warm-up (each entry's own simulator runs
+  // iterations=1, so the ordinary predicate would call every entry collected).
+  const bool collected = sim->rl_list_active ? !sim->rl_list_warmup
+                                             : ( sim->iterations == 1 || sim->current_iteration >= 1 );
   if ( collected )
     flags |= FLAG_COLLECTED;
   r.flags = flags;
@@ -1172,6 +1203,14 @@ void write_footer( sim_t* sim )
   // resolve the root's own actor object. See solo_actor()'s doc comment.
   player_t* p = solo_actor( root );
 
+  // 261005-fight-list: in a list only the LAST entry writes the footer; an earlier entry just banks its own
+  // engine aggregates and leaves every stream open for the next entry (release()/adopt()).
+  if ( root->rl_list_active && !root->rl_list_last )
+  {
+    end_entry( root );
+    return;
+  }
+
   footer_record r{};
   // The engine's OWN run-level numbers -- what makes the footer an
   // independent catch for a wrong field, a wrong offset or a missed
@@ -1183,6 +1222,19 @@ void write_footer( sim_t* sim )
   // tells the two populations apart.
   r.engine_run_aggregate = p->collected_data.compound_dmg.mean();
   r.mean_collected_fight_length = static_cast<float>( p->collected_data.fight_length.mean() );
+  if ( root->rl_list_active )
+  {
+    // 261005-fight-list: this process's collected_data holds only the LAST entry, so the run-level means are
+    // the means over every collected entry: bank this entry too (unless it is the warm-up), then divide.
+    end_entry( root );
+    if ( root->rl_list_kept_count == 0 )
+    {
+      throw sc_runtime_error( "rl_translog: a fight list ended with no collected entry -- nothing to average." );
+    }
+    r.engine_run_aggregate = root->rl_list_sum_damage / static_cast<double>( root->rl_list_kept_count );
+    r.mean_collected_fight_length =
+        static_cast<float>( root->rl_list_sum_length / static_cast<double>( root->rl_list_kept_count ) );
+  }
   r.fight_count = root->rl_translog_fight_count;
   // row_count must count the footer row ITSELF -- "does the total
   // include the footer" is exactly the kind of off-by-one that costs an
@@ -1268,6 +1320,138 @@ void write_footer( sim_t* sim )
     }
     root->rl_translog_apl_stream->close();
   }
+}
+
+// ---- Fight-list support (quick 261005-mix, plan 01) ----
+
+std::uint32_t file_format_version( const sim_t* sim )
+{
+  return sim->rl_list_active ? FORMAT_VERSION_FIGHT_LIST : FORMAT_VERSION;
+}
+
+int fight_index( const sim_t* sim )
+{
+  return sim->rl_list_active ? sim->rl_list_index : sim->current_iteration;
+}
+
+namespace
+{
+// CRC-32/IEEE (reflected, polynomial 0xEDB88320), the algorithm zlib.crc32 implements.
+struct crc_table_t
+{
+  std::uint32_t t[ 256 ];
+  constexpr crc_table_t() : t()
+  {
+    for ( std::uint32_t i = 0; i < 256; ++i )
+    {
+      std::uint32_t c = i;
+      for ( int k = 0; k < 8; ++k )
+        c = ( c & 1u ) ? ( 0xEDB88320u ^ ( c >> 1 ) ) : ( c >> 1 );
+      t[ i ] = c;
+    }
+  }
+};
+constexpr crc_table_t CRC_TABLE{};
+} // anonymous namespace
+
+std::uint32_t crc32( const unsigned char* data, std::size_t n )
+{
+  std::uint32_t c = 0xFFFFFFFFu;
+  for ( std::size_t i = 0; i < n; ++i )
+    c = CRC_TABLE.t[ ( c ^ data[ i ] ) & 0xFFu ] ^ ( c >> 8 );
+  return c ^ 0xFFFFFFFFu;
+}
+
+void end_entry( sim_t* sim )
+{
+  sim_t* root = root_of( sim );
+  if ( root->rl_translog_file_str.empty() || !root->rl_list_active || root->rl_list_warmup )
+    return;
+  player_t* p = solo_actor( root );
+  root->rl_list_sum_damage += p->collected_data.compound_dmg.mean();
+  root->rl_list_sum_length += p->collected_data.fight_length.mean();
+  ++root->rl_list_kept_count;
+}
+
+void release( sim_t* sim, carry_t& carry )
+{
+  sim_t* root = root_of( sim );
+  if ( carry.stream || carry.attr_stream || carry.apl_stream || carry.zstd_cstream != nullptr )
+  {
+    throw sc_runtime_error( "rl_translog: release refused -- the carry already holds a writer." );
+  }
+  carry.stream = std::move( root->rl_translog_stream );
+  carry.buffer = std::move( root->rl_translog_buffer );
+  carry.row_count = root->rl_translog_row_count;
+  carry.fight_count = root->rl_translog_fight_count;
+  carry.collected_fight_count = root->rl_translog_collected_fight_count;
+  carry.pending_decisions = root->rl_translog_pending_decisions;
+  carry.pending_seqs = std::move( root->rl_translog_pending_seqs );
+  carry.summed_close_damage = root->rl_translog_summed_close_damage;
+  carry.attr_stream = std::move( root->rl_translog_attr_stream );
+  carry.apl_stream = std::move( root->rl_translog_apl_stream );
+  carry.apl_decisions = root->rl_translog_apl_decisions;
+  carry.zstd_cstream = root->rl_translog_zstd_cstream;
+  carry.zstd_outbuf = std::move( root->rl_translog_zstd_outbuf );
+  carry.zstd_rows_in_frame = root->rl_translog_zstd_rows_in_frame;
+  carry.sum_collected_damage = root->rl_list_sum_damage;
+  carry.sum_collected_length = root->rl_list_sum_length;
+  carry.collected_entry_count = root->rl_list_kept_count;
+
+  // leave the source in a defined, empty state: nothing it owns can close or free the moved stream
+  root->rl_translog_stream.reset();
+  root->rl_translog_attr_stream.reset();
+  root->rl_translog_apl_stream.reset();
+  root->rl_translog_zstd_cstream = nullptr;
+  root->rl_translog_buffer.clear();
+  root->rl_translog_pending_seqs.clear();
+  root->rl_translog_zstd_outbuf.clear();
+  root->rl_translog_row_count = 0;
+  root->rl_translog_fight_count = 0;
+  root->rl_translog_collected_fight_count = 0;
+  root->rl_translog_pending_decisions = 0;
+  root->rl_translog_summed_close_damage = 0.0;
+  root->rl_translog_apl_decisions = 0;
+  root->rl_translog_zstd_rows_in_frame = 0;
+  root->rl_list_sum_damage = 0.0;
+  root->rl_list_sum_length = 0.0;
+  root->rl_list_kept_count = 0;
+}
+
+void adopt( sim_t* sim, carry_t& carry )
+{
+  sim_t* root = root_of( sim );
+  if ( root->rl_translog_stream || root->rl_translog_attr_stream || root->rl_translog_apl_stream ||
+       root->rl_translog_zstd_cstream != nullptr || root->rl_translog_fight_count != 0 ||
+       root->rl_translog_row_count != 0 )
+  {
+    throw sc_runtime_error( "rl_translog: adopt refused -- the destination sim already holds a writer." );
+  }
+  root->rl_translog_stream = std::move( carry.stream );
+  root->rl_translog_buffer = std::move( carry.buffer );
+  root->rl_translog_row_count = carry.row_count;
+  root->rl_translog_fight_count = carry.fight_count;
+  root->rl_translog_collected_fight_count = carry.collected_fight_count;
+  root->rl_translog_pending_decisions = carry.pending_decisions;
+  root->rl_translog_pending_seqs = std::move( carry.pending_seqs );
+  root->rl_translog_summed_close_damage = carry.summed_close_damage;
+  root->rl_translog_attr_stream = std::move( carry.attr_stream );
+  root->rl_translog_apl_stream = std::move( carry.apl_stream );
+  root->rl_translog_apl_decisions = carry.apl_decisions;
+  root->rl_translog_zstd_cstream = carry.zstd_cstream;
+  root->rl_translog_zstd_outbuf = std::move( carry.zstd_outbuf );
+  root->rl_translog_zstd_rows_in_frame = carry.zstd_rows_in_frame;
+  root->rl_list_sum_damage = carry.sum_collected_damage;
+  root->rl_list_sum_length = carry.sum_collected_length;
+  root->rl_list_kept_count = carry.collected_entry_count;
+
+  carry.stream.reset();
+  carry.attr_stream.reset();
+  carry.apl_stream.reset();
+  carry.zstd_cstream = nullptr;
+  carry.buffer.clear();
+  carry.pending_seqs.clear();
+  carry.zstd_outbuf.clear();
 }
 
 } // namespace rl_translog

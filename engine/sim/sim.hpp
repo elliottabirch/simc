@@ -783,6 +783,29 @@ struct sim_t : private sc_thread_t
   ZSTD_CCtx_s* rl_translog_zstd_cstream = nullptr;
   std::vector<unsigned char> rl_translog_zstd_outbuf;
   std::uint32_t rl_translog_zstd_rows_in_frame = 0;
+  // 261005-fight-list (quick 261005-mix, plan 01; the driver that sets these is plan 02): state of a
+  // process driven with `rl_fight_list=` -- several fights, one sim_t each, one translog file. All of it is
+  // inert (and every writer path byte-identical to a build without it) while rl_list_active is false.
+  // rl_list_index is the entry index (the warm-up, when present, is entry 0) and is what rows carry in their
+  // u16 `iteration`; rl_list_crc32 / rl_list_bytes describe the entry file; rl_fight_tags_str is the
+  // `rl_fight_tags=<setup>:<stat>:<slot>` option's text, parsed in setup() into rl_tag_* (stored always,
+  // used only when rl_list_active); rl_list_shared_weights lets entries after the first reuse the loaded
+  // net. The three rl_list_sum_* / rl_list_kept_count members are the footer accumulators of
+  // rl_translog::end_entry() (collected entries only), handed from entry to entry with the writer state.
+  bool rl_list_active = false;
+  bool rl_list_warmup = false;
+  bool rl_list_last = false;
+  int rl_list_index = 0;
+  std::uint32_t rl_list_crc32 = 0;
+  std::uint32_t rl_list_bytes = 0;
+  std::string rl_fight_tags_str;
+  std::uint32_t rl_tag_setup = 0;
+  std::uint32_t rl_tag_stat = 0;
+  std::uint32_t rl_tag_slot = 0xFFFFFFFFu;
+  std::shared_ptr<rl_policy::rl_weights_t> rl_list_shared_weights;
+  double rl_list_sum_damage = 0.0;
+  double rl_list_sum_length = 0.0;
+  std::uint32_t rl_list_kept_count = 0;
   // Random-roll recorder (tstl-sylvanas phase 250, plan 250-01, REC-01/02/03).
   // rl_rng_record=<path>, off by default (empty string), byte-identical to today's behavior
   // when unset (D-03). Refused by name in setup() unless per_source_rng=1 and threads=1 both

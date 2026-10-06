@@ -4564,6 +4564,13 @@ void sim_t::create_options()
   // pre-mix/unknown sentinel and must stay reachable by simply omitting
   // the option.
   add_option( opt_int( "rl_fight_shape_index", rl_fight_shape_index ) );
+  // 261005-fight-list (quick 261005-mix, plan 01): `rl_fight_tags=<setup>:<stat>:<slot>`, three decimal
+  // unsigned 32-bit numbers (setup_index = 1 + the spec's episode.setups index, stat_index = 1 + the stat-split
+  // deal index, fight_slot = the flat deal slot; 0 / 0 / 4294967295 = none). Stored as text here and parsed in
+  // setup() (a malformed value is refused by name there). Used ONLY inside an `rl_fight_list=` entry, where the
+  // writer copies it into the fight-close row's tag; outside a list it is accepted and ignored, so the very
+  // same entry file can be run the ordinary way.
+  add_option( opt_string( "rl_fight_tags", rl_fight_tags_str ) );
   // tstl-sylvanas phase 220, plan 220-04 (OBS-02). See sim.hpp's
   // rl_obs_names_out_str doc comment. Default empty, disabled.
   add_option( opt_string( "rl_obs_names_out", rl_obs_names_out_str ) );
@@ -5638,6 +5645,57 @@ void sim_t::setup( sim_control_t* c )
     throw sc_runtime_error(
         "solver_record_apl_choice=1 requires rl_translog= (the .apl sidecar has no base path of "
         "its own)." );
+  }
+
+  // 261005-fight-list (quick 261005-mix, plan 01): rl_fight_tags=<setup>:<stat>:<slot>. Empty (the default, and
+  // every ordinary run) leaves the three tag words at 0 / 0 / 0xFFFFFFFF; otherwise exactly three decimal
+  // unsigned 32-bit numbers separated by single colons, or a refusal by name. Parsed always (so a malformed
+  // value never hides until a list uses it), stored always, used only when rl_list_active.
+  if ( !rl_fight_tags_str.empty() )
+  {
+    std::uint64_t parts[ 3 ] = { 0, 0, 0 };
+    std::size_t n_parts = 0;
+    bool ok = true;
+    std::size_t i = 0;
+    const std::string& t = rl_fight_tags_str;
+    while ( ok && n_parts < 3 )
+    {
+      const std::size_t start = i;
+      std::uint64_t v = 0;
+      while ( i < t.size() && t[ i ] >= '0' && t[ i ] <= '9' )
+      {
+        v = v * 10 + static_cast<std::uint64_t>( t[ i ] - '0' );
+        if ( v > 0xFFFFFFFFull )
+        {
+          ok = false;
+          break;
+        }
+        ++i;
+      }
+      if ( !ok || i == start )
+      {
+        ok = false;
+        break;
+      }
+      parts[ n_parts++ ] = v;
+      if ( n_parts < 3 )
+      {
+        if ( i >= t.size() || t[ i ] != ':' )
+          ok = false;
+        else
+          ++i;
+      }
+    }
+    if ( !ok || n_parts != 3 || i != t.size() )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_fight_tags='{}' is malformed: expected <setup_index>:<stat_index>:<fight_slot>, three decimal "
+          "unsigned 32-bit numbers separated by single colons (e.g. rl_fight_tags=2:41:4294967295).",
+          rl_fight_tags_str ) );
+    }
+    rl_tag_setup = static_cast<std::uint32_t>( parts[ 0 ] );
+    rl_tag_stat = static_cast<std::uint32_t>( parts[ 1 ] );
+    rl_tag_slot = static_cast<std::uint32_t>( parts[ 2 ] );
   }
 
   if ( !solver_control_mode_str.empty() && solver_control_str.empty() )

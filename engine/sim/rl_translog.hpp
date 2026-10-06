@@ -287,6 +287,20 @@
 // The candidate block keeps all 23 facts per slot in RL_TARGET_FACT_LIST order; plan 259-07
 // changes WHAT is written (scaled and gated), never the shape. The `.attr` sidecar moves to its
 // own version 2 in the same phase (see the rl_attr namespace below): records grow 24 -> 32 bytes.
+//
+// Fight-list files (quick 261005-mix, plan 01, branch 261005-fight-list): `FORMAT_VERSION_FIGHT_LIST`
+// = 15 is written ONLY by a process driven with `rl_fight_list=` (several fights, each built from its
+// own sim_t, appended to one file); every other file stays format 14 and `FORMAT_VERSION` stays 14.
+// A format-15 file has the same record_size (3568) and header_size (272) as format 14; what differs
+// is (a) the header words fight_shape_index, funnel_mode and chooser_state read LIST_WORD_SENTINEL
+// ("per fight; read the close rows"), (b) the first eight 32-bit words of a fight-close row's formerly
+// zero region are `fight_tag` (entry index, fight shape, set-up, stat split, deal slot, funnel word,
+// entry CRC-32, entry byte count), (c) the u16 `iteration` on every row is the ENTRY index, not the
+// per-simulator iteration (which is always 0 inside an entry), and (d) FLAG_COLLECTED is set on every
+// entry except the warm-up. OFF-IDENTITY GUARANTEE: with the option off every code path below writes
+// the same bytes as before this change (`rl_list_active` is false, the tag words stay zero, the
+// header/sidecar version is 14); this is proved byte for byte against the d0575a77a5 production
+// snapshot (scratch/261005-mix, P-OFF-2).
 
 #pragma once
 
@@ -294,13 +308,18 @@
 #include "sim/rl_policy_constants.h"
 #include "sim/rl_proc_counters.hpp"
 
+#include "util/io.hpp"
+
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 struct sim_t;
 struct player_t;
+struct ZSTD_CCtx_s;
 
 namespace rl_translog
 {
@@ -335,6 +354,14 @@ inline constexpr std::uint32_t FORMAT_VERSION = 14u;  // 261002-8rv (format 14, 
                                                         // aim flags, header aim fields (see
                                                         // top-of-file version-11 comment); 10 was
                                                         // 260918-cbc's credit-by-cause block
+// 261005-fight-list (quick 261005-mix, plan 01): the format number a LIST file (one process, several
+// fights, `rl_fight_list=`) carries. Declared AFTER FORMAT_VERSION on purpose: FORMAT_VERSION stays 14, so
+// every ordinary file, scoring log and repin reader is untouched (the repin regex
+// `FORMAT_VERSION\s*=\s*(\d+)u?` does not match this name). A list file is the only writer of 15.
+inline constexpr std::uint32_t FORMAT_VERSION_FIGHT_LIST = 15u;
+// The value a format-15 header writes into its per-fight words (fight_shape_index, funnel_mode,
+// chooser_state): "per fight -- read the close rows".
+inline constexpr std::uint32_t LIST_WORD_SENTINEL = 0xFFFFFFFFu;
 // RECORD_SIZE stays an integer LITERAL, not a computed expression --
 // scripts/rl/obs_transport_coupling.selftest.py parses this file's own
 // source text for an `ast.Constant`-shaped literal on both sides of the
@@ -694,7 +721,13 @@ struct close_record
                                           //         p->solver_damage_expected_so_far, complete by
                                           //         combat_end -- see top-of-file comment
   float fight_length;                    // @16 -- p->iteration_fight_length.total_seconds()
-  std::uint32_t zero12[ RL_OBS_DIM + 2 ]; // @20..(27+4W) -- written zero
+  // @20..51 -- 261005-fight-list (format 15 only): eight 32-bit words, the fight's tag. Written ZERO in every
+  // format-14 file (the OFF-identity guarantee). In a list file: [0] entry_index (== this row's `iteration`),
+  // [1] fight_shape_index, [2] setup_index, [3] stat_index, [4] fight_slot, [5] funnel_word (bit 0 =
+  // solver_funnel_mode, bit 1 = solver_random_chosen_enemy), [6] entry_crc32 (CRC-32/IEEE of the entry file's
+  // bytes), [7] entry_bytes.
+  std::uint32_t fight_tag[ 8 ];
+  std::uint32_t zero12_rest[ RL_OBS_DIM + 2 - 8 ]; // @52..(27+4W) -- written zero
                                           //         (version 4: sized as W+2 to keep decision_count
                                           //         aligned with decision_record's own shifted seq
                                           //         offset, see top-of-file comment)
@@ -929,7 +962,10 @@ static_assert( offsetof( decision_record, chosen_enemy_actor_index ) + sizeof( s
 static_assert( offsetof( close_record, final_damage_total ) == 0 );
 static_assert( offsetof( close_record, final_damage_expected_total ) == 8 );
 static_assert( offsetof( close_record, fight_length ) == 16 );
-static_assert( offsetof( close_record, zero12 ) == 20 );
+static_assert( offsetof( close_record, fight_tag ) == 20 );
+static_assert( offsetof( close_record, zero12_rest ) == 52 );
+static_assert( sizeof( close_record::fight_tag ) + sizeof( close_record::zero12_rest ) == 4u * ( RL_OBS_DIM + 2u ),
+               "fight_tag + zero12_rest must occupy exactly the bytes the former zero12 array did" );
 static_assert( offsetof( close_record, zero_candidate_features ) == 28u + 4u * RL_OBS_DIM );
 static_assert( offsetof( close_record, decision_count ) == 28u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 static_assert( offsetof( close_record, zero_mask ) == 32u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
@@ -1444,5 +1480,55 @@ void branch_child_disable( sim_t* sim );
 // already hold every row of this fight, so the child's file is header + all rows + close + footer,
 // fed to zstd in the same sequence a fresh process feeds it. Refused after a fight has closed.
 void branch_child_reopen( sim_t* sim, const std::string& base );
+
+// ---- Fight-list support (quick 261005-mix, plan 01; the driver is plan 02) ----
+
+// The writer state a list driver hands from one entry's root sim_t to the next: the 14 root-owned
+// translog members of sim.hpp plus the three footer accumulators. Moved (never copied) by
+// release()/adopt(). `stream` non-null means "a file is open".
+struct carry_t
+{
+  std::unique_ptr<io::ofstream> stream;
+  std::vector<unsigned char> buffer;
+  std::uint32_t row_count = 0;
+  std::uint32_t fight_count = 0;
+  std::uint32_t collected_fight_count = 0;
+  std::uint32_t pending_decisions = 0;
+  std::vector<std::uint64_t> pending_seqs;
+  double summed_close_damage = 0.0;
+  std::unique_ptr<io::ofstream> attr_stream;
+  std::unique_ptr<io::ofstream> apl_stream;
+  std::uint32_t apl_decisions = 0;
+  ZSTD_CCtx_s* zstd_cstream = nullptr;
+  std::vector<unsigned char> zstd_outbuf;
+  std::uint32_t zstd_rows_in_frame = 0;
+  // the footer accumulators (collected entries only)
+  double sum_collected_damage = 0.0;
+  double sum_collected_length = 0.0;
+  std::uint32_t collected_entry_count = 0;
+};
+
+// Moves the writer state OUT of `sim`'s root into `carry` (an empty carry; refuses one that already holds
+// a stream), leaving the sim holding no stream, so destroying the sim closes nothing.
+void release( sim_t* sim, carry_t& carry );
+
+// Moves the writer state from `carry` INTO `sim`'s root, which must not already hold a stream (refused by
+// name). Called before sim_t::setup(), whose open_and_write_header() then returns at once.
+void adopt( sim_t* sim, carry_t& carry );
+
+// Called from write_footer() for a NON-last list entry: adds this entry's engine aggregates (when it is
+// not the warm-up) to the accumulators and returns without writing a footer or closing anything.
+void end_entry( sim_t* sim );
+
+// 14 for an ordinary file, FORMAT_VERSION_FIGHT_LIST when `sim` is a list entry.
+std::uint32_t file_format_version( const sim_t* sim );
+
+// The number stamped into a row's u16 `iteration`: the entry index in a list, else the sim's own
+// current_iteration.
+int fight_index( const sim_t* sim );
+
+// CRC-32/IEEE (the value zlib.crc32 returns) of `n` bytes.
+std::uint32_t crc32( const unsigned char* data, std::size_t n );
+
 
 } // namespace rl_translog
