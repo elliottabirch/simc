@@ -208,7 +208,7 @@ resource_e rl_spec_resource();
 // without filling any pick, and reports that via `out_used_dump_time_compute` below.
 void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_ACTION_DIM ],
                              std::uint8_t out_ready[ RL_ACTION_DIM ], bool is_decision_boundary,
-                             bool* out_used_dump_time_compute = nullptr );
+                             bool* out_used_dump_time_compute = nullptr, bool boundary_is_foreground = true );
 
 // 221-03 (ACT-05/ACT-06) -- the ONE shared raid-event walk, called from
 // read_state() (this file), build_obs()'s raid_event_next_in leaf

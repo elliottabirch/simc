@@ -629,7 +629,8 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground, bool is_d
   // real decision already cast and must read the SAME cached, non-re-bumping legality/pick state
   // write_state_fields' own adjacent read_action_gate_bits call already correctly does. Now
   // threaded straight from this function's own parameter -- see rl_policy.hpp's own doc comment.
-  read_action_gate_bits( p, s.action_resolvable, s.action_ready, is_decision_boundary );
+  read_action_gate_bits( p, s.action_resolvable, s.action_ready, is_decision_boundary, nullptr,
+                         boundary_is_foreground );
 
   return s;
 }
@@ -929,9 +930,32 @@ void rl_capability_assert_no_governed_action_legal( const player_t* p,
 // default 0 and `build_mask` never reads them for a wait candidate.
 // ---------------------------------------------------------------------------
 
+// Phase 270 fork fix (verifier warning W2): the boundary this decision belongs to decides which presses the engine will
+// really execute. At an OFF_GCD or CAST_WHILE_CASTING poll, player.cpp's special_execute_event_t::execute_action()
+// drops a chosen action silently unless `a->usable_during_current_gcd()` (respectively `usable_during_current_cast()`)
+// holds (the `usable( a )` test after choose(), with the two overrides in player_gcd_event_t and player_cwc_event_t). Plain `ready()` says nothing
+// about the running GCD, so before this fix every GCD-bound spell read legal at an off-GCD boundary and pressing it did
+// nothing (arms smoke: 1996 off-GCD decisions, no press produced a cast). A foreground boundary is untouched. The
+// boundary kind comes from player_t::current_execute_type, which the poll event itself is only scheduled under
+// (schedule_off_gcd_ready returns unless it is OFF_GCD); any other value leaves the bit as ready() computed it.
+static bool pressable_at_boundary( const player_t* p, const action_t* a, bool boundary_is_foreground )
+{
+  if ( boundary_is_foreground )
+    return true;
+  switch ( p->current_execute_type )
+  {
+    case execute_type::OFF_GCD:
+      return a->usable_during_current_gcd();
+    case execute_type::CAST_WHILE_CASTING:
+      return a->usable_during_current_cast();
+    default:
+      return true;
+  }
+}
+
 void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_ACTION_DIM ],
                              std::uint8_t out_ready[ RL_ACTION_DIM ], bool is_decision_boundary,
-                             bool* out_used_dump_time_compute )
+                             bool* out_used_dump_time_compute, bool boundary_is_foreground )
 {
   if ( out_used_dump_time_compute )
     *out_used_dump_time_compute = false;
@@ -1072,7 +1096,8 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
         assert( found &&
                 "rl_target_select: a pick just filled for this decision must be immediately "
                 "readable (228-02, D-12)" );
-        out_ready[ i ] = ( a->ready() && pick != nullptr && a->target_ready( pick ) ) ? 1 : 0;
+        out_ready[ i ] = ( a->ready() && pick != nullptr && a->target_ready( pick ) &&
+                           pressable_at_boundary( p, a, boundary_is_foreground ) ) ? 1 : 0;
         // 240-05 Task 2: record this action for the target head's own pass, immediately after
         // this loop -- see that pass's own comment (below) for why identical gating matters.
         targeted_actions_this_decision[ targeted_actions_count++ ] = a;
@@ -1084,7 +1109,8 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
         // boundary path) -- compute the plain gate bits off the action's CURRENT target rather
         // than a per-decision selector pick, since none was ever stamped for this decision. No
         // stamp bump, no fill_pick -- both would corrupt a stamp a boundary call never opened.
-        out_ready[ i ] = ( a->ready() && a->target != nullptr && a->target_ready( a->target ) ) ? 1 : 0;
+        out_ready[ i ] = ( a->ready() && a->target != nullptr && a->target_ready( a->target ) &&
+                           pressable_at_boundary( p, a, boundary_is_foreground ) ) ? 1 : 0;
       }
       if ( out_ready[ i ] )
         any_targeted_action_ready = true;
@@ -1102,7 +1128,8 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
     // against dereferencing a null target inside `target_ready`'s first
     // line (`candidate_target->is_sleeping()`).
     out_ready[ i ] = ( out_resolvable[ i ] && a->ready() && a->target != nullptr &&
-                        a->target_ready( a->target ) ) ? 1 : 0;
+                        a->target_ready( a->target ) &&
+                        pressable_at_boundary( p, a, boundary_is_foreground ) ) ? 1 : 0;
   }
 
   // 246.1-05 (CAP-02): freshly computed this call (never on the cache-hit early return above,

@@ -843,7 +843,7 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
     // current target, rather than cached from the decision that was actually made.
     bool used_dump_time_compute = false;
     rl_policy::read_action_gate_bits( p, action_resolvable, action_ready, is_decision_boundary,
-                                       &used_dump_time_compute );
+                                       &used_dump_time_compute, boundary_is_foreground );
     if ( used_dump_time_compute )
       out << ",\"action_gate_dump_time_compute\":true";
     out << ",\"action_resolvable\":[";
