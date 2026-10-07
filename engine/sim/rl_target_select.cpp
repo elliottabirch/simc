@@ -12,6 +12,7 @@
 #include "fmt/format.h"
 #include "player/pet.hpp"
 #include "player/player.hpp"
+#include "sim/rl_class_plugins.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_translog.hpp"
 #include "sim/sheet_fight.hpp"  // tstl-sylvanas 264-05 (O4): sheet_fight_do_not_hit
@@ -25,7 +26,9 @@
 #include <cstring>
 #include <limits>
 #include <tuple>
+#include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace rl_target_select
@@ -33,51 +36,14 @@ namespace rl_target_select
 namespace
 {
 
-// The nine targeted registry tokens this plan governs (228-02-PLAN.md's TARGETED constant,
-// re-derived from scripts/rl/specs/enhancement.json's specs.enhancement.actions[] at planning
-// time). SHAPED (crash_lightning, sundering) is plan 228-03's, deliberately absent here.
-// 261002-8rv adds flame_shock (a button from width 419), aimed by preference_voltaic_blaze (item
-// 261002-8rs, see preference_for); the aiming head's own spell list (RL_AIM_SPELLS) is unchanged.
+// The targeted registry tokens (the actions that get a per-spell pick) come from the spec header:
+// RL_TARGETED_TOKENS / RL_TARGETED_TOKEN_COUNT, in the header's own order. Plan 268-02 moved the list
+// out of this file. The compile-time check that every aimed spell is a targeted token now lives in
+// rl_header_contract.hpp (it was the 259-05b check), so a spec header that violates it does not build.
 //
-// 230-02 (CK1-1, owner ruling Q1): this is also the target head's own one-hot registry (240-05
-// Task 2) -- run_target_head (below) walks this SAME array for its aiming-spell one-hot, so the
-// shaped pair can never reach the head either. Settled once, not a run-time discovery: Crash
-// Lightning and Sundering cast in the current facing direction only, have no selector and never
-// turn, so they have no pick to score and no column to occupy.
-constexpr const char* TARGETED_TOKENS[] = {
-  "stormstrike", "lightning_bolt", "chain_lightning", "tempest",
-  "windstrike",  "lava_lash",      "voltaic_blaze",   "primordial_storm",
-  "flame_shock",
-};
-
-// 259-05b (fork open question 3): every spell the aim head's one-hot names (RL_AIM_SPELLS, the
-// registry-generated list) must be one of the targeted tokens above -- the head can only ever
-// aim a spell this module resolves a pick for. Proved at COMPILE time (strictly stronger than a
-// load-time assert: a build that violates it does not exist). The loader separately pins the
-// file's declared count and registry sha against the same generated tables.
-constexpr bool aim_token_equal( const char* a, const char* b )
-{
-  while ( *a != '\0' && *a == *b )
-  {
-    ++a;
-    ++b;
-  }
-  return *a == *b;
-}
-constexpr bool aim_spells_all_targeted()
-{
-  for ( std::size_t k = 0; k < RL_AIM_SPELL_COUNT; ++k )
-  {
-    bool found = false;
-    for ( const char* token : TARGETED_TOKENS )
-      found = found || aim_token_equal( RL_AIM_SPELLS[ k ], token );
-    if ( !found )
-      return false;
-  }
-  return true;
-}
-static_assert( aim_spells_all_targeted(),
-               "every RL_AIM_SPELLS token must appear in TARGETED_TOKENS (259-05b)" );
+// 230-02 (CK1-1, owner ruling Q1): the list is also the target head's own one-hot registry (240-05
+// Task 2) -- run_target_head (below) walks this SAME list for its aiming-spell one-hot, so the
+// shaped pair can never reach the head either.
 
 // Per-player monotonic decision counter (228-02's own stamp -- see rl_target_select.hpp's header
 // comment for why neither the handle cache's key nor solver_control's `seq` can serve this role).
@@ -391,7 +357,7 @@ bool generic_filter( const action_t* a, player_t* candidate, bool harmful )
 // when every candidate is do-not-hit (owner ruling 2026-10-06: "we should also mask immune targets as eligible, so we cant ever
 // choose them as targets", and "Drop him too" for the lone case; this reverses O4's old keep-when-alone exception). When the drop
 // empties the set, select() returns nullptr: the aimed button's legality bit goes to 0, exactly as for any other empty set.
-// Keyed on the declaration only, so it covers every aimed token whatever TARGETED_TOKENS holds (the eight at width 325, the ninth
+// Keyed on the declaration only, so it covers every aimed token whatever RL_TARGETED_TOKENS holds (the eight at width 325, the ninth
 // after the talent build). generic_filter, rl_counts_as_enemy and every enemy count are untouched, an area spell still reaches the
 // boss, and the rule never looks at a shield. It reads the controller's state and draws nothing. With no entry (every non-sheet
 // fight, a /1 spec, a /2 spec without an entry, or solver_sheet_do_not_hit=0) none of the functions below changes anything.
@@ -462,6 +428,90 @@ player_t* rl_chosen_enemy_of( const player_t* p )
   return p->rl_chosen_enemy;
 }
 
+namespace
+{
+
+// Phase 268 plan 02 (G268-4, G268-5): everything the chooser and the aiming rules read from the spec
+// header, resolved ONCE per actor at bind time (the actor's arise, through refresh_chosen) and read per
+// decision without name compares or find_action walks. A bad header (a missing probe action, an unknown
+// rule name) is refused right there with the registry id in the message, never at a decision.
+using rule_row_t = std::pair<std::string, rule_resolver_fn>;
+
+struct actor_binding_t
+{
+  const action_t*                                       probe = nullptr;  // RL_CHOOSER_PROBE_ACTION, never null once bound
+  const action_t*                                       melee = nullptr;  // RL_CHOOSER_MELEE_ACTION, null when the actor has none
+  std::vector<rule_row_t>                               rule_rows;        // RL_RULE_PREFS: token -> resolver
+  std::unordered_map<const action_t*, rule_resolver_fn> by_action;        // filled on the first decision of each action
+};
+
+std::unordered_map<const player_t*, actor_binding_t> g_actor_binding_cache;
+
+// The generic rules, available to every class. current_target scores every candidate the same, so the
+// tie ladder in candidate_is_better (the player's current target first, then the stable actor order)
+// decides: the pick is the player's current target whenever it is a legal candidate.
+preference_fn resolve_generic_current_target( const action_t* )
+{
+  return preference_current_target;
+}
+
+preference_fn resolve_generic_shortest_ttd( const action_t* )
+{
+  return preference_shortest_time_to_die;
+}
+
+rule_resolver_fn resolve_rule_name( const player_t* p, const char* token, const char* rule )
+{
+  if ( std::strcmp( rule, "current_target" ) == 0 )
+    return resolve_generic_current_target;
+  if ( std::strcmp( rule, "shortest_ttd" ) == 0 )
+    return resolve_generic_shortest_ttd;
+  const rl_class_plugin& plugin   = rl_class_plugin_for( p );
+  rule_resolver_fn       resolver = rl_class_rule_find( plugin, rule );
+  if ( resolver == nullptr )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_target_select: registry '{}' names aiming rule '{}' for token '{}' but player '{}' (class plugin '{}') "
+        "has no such rule (bind-time refusal)",
+        RL_REGISTRY_ID, rule, token, p->name(), plugin.class_name ) );
+  }
+  return resolver;
+}
+
+// What the per-actor binding cache holds, for process_cache_entries() (Pitfall 11 of the Phase 268 research).
+std::size_t actor_binding_entries()
+{
+  std::size_t n = g_actor_binding_cache.size();
+  for ( const auto& kv : g_actor_binding_cache )
+    n += kv.second.by_action.size();
+  return n;
+}
+
+actor_binding_t& actor_binding_for( const player_t* p )
+{
+  auto it = g_actor_binding_cache.find( p );
+  if ( it != g_actor_binding_cache.end() )
+    return it->second;
+
+  actor_binding_t b;
+  b.probe = p->find_action( RL_CHOOSER_PROBE_ACTION );
+  if ( b.probe == nullptr )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_target_select: registry '{}' names chooser probe action '{}' but player '{}' has no such action "
+        "(bind-time refusal)",
+        RL_REGISTRY_ID, RL_CHOOSER_PROBE_ACTION, p->name() ) );
+  }
+  // A missing melee action is tolerated: the chooser then falls back to the hittable list.
+  b.melee = p->find_action( RL_CHOOSER_MELEE_ACTION );
+  b.rule_rows.reserve( RL_RULE_PREF_COUNT );
+  for ( std::size_t k = 0; k < RL_RULE_PREF_COUNT; ++k )
+    b.rule_rows.emplace_back( RL_RULE_PREFS[ k ].token, resolve_rule_name( p, RL_RULE_PREFS[ k ].token, RL_RULE_PREFS[ k ].rule ) );
+  return g_actor_binding_cache.emplace( p, std::move( b ) ).first->second;
+}
+
+}  // namespace
+
 bool rl_can_be_hit( const player_t* p, const player_t* t )
 {
   if ( t == nullptr || !rl_counts_as_enemy( t ) )
@@ -473,17 +523,10 @@ bool rl_can_be_hit( const player_t* p, const player_t* t )
   if ( t->sim->is_untargetable_enemy( t ) )
     return false;
 
-  const action_t* bolt = p->find_action( "lightning_bolt" );
-  if ( bolt == nullptr )
-  {
-    throw sc_runtime_error( fmt::format(
-        "rl_target_select::rl_can_be_hit: player '{}' has no lightning_bolt action -- refusing rather than "
-        "guessing whether '{}' can be hit (the chosen enemy is judged by the legality of Lightning Bolt)",
-        p->name(), t->name() ) );
-  }
+  const action_t* probe = actor_binding_for( p ).probe;
   // generic_filter takes a non-const candidate (it is the same function the per-spell selector calls);
   // it only reads from it.
-  return generic_filter( bolt, const_cast<player_t*>( t ), /*harmful=*/true );
+  return generic_filter( probe, const_cast<player_t*>( t ), /*harmful=*/true );
 }
 
 // 2026-10-02, 266-09 (research R5, owner F9): in a funnel-mode fight the RL actor's own target and both weapon
@@ -520,6 +563,10 @@ void refresh_chosen( player_t* p )
         p->name(), RL_ACTOR_NAME ) );
   }
 
+  // Bind this actor's header-driven actions and aiming rules now (its arise), so a header that names a
+  // probe action the actor lacks, or a rule no class plugin knows, is refused before any decision.
+  const actor_binding_t& binding = actor_binding_for( p );
+
   // Keep the tag while it can still be hit.
   // tstl-sylvanas 264-05 (O4): ... unless the sheet declares it do-not-hit right now and another enemy that can be hit is not
   // do-not-hit; then the tag is dropped here and re-picked below.
@@ -545,7 +592,7 @@ void refresh_chosen( player_t* p )
   // list order. With it on (266-09, R7) and two or more eligible, the pick is uniform at random, one draw
   // from the chooser's own per-fight stream (solver_target_rng): never the exploration stream, never the
   // engine's. With fewer than two eligible there is no draw. It acts whatever the funnel flag is.
-  const action_t*        stormstrike = p->find_action( "stormstrike" );
+  const action_t*        melee = binding.melee;
   std::vector<player_t*> hittable;
   std::vector<player_t*> melee_legal;
   for ( player_t* t : p->sim->target_non_sleeping_list )
@@ -553,7 +600,7 @@ void refresh_chosen( player_t* p )
     if ( !t->is_enemy() || !rl_can_be_hit( p, t ) )
       continue;
     hittable.push_back( t );
-    if ( stormstrike != nullptr && generic_filter( stormstrike, t, /*harmful=*/true ) )
+    if ( melee != nullptr && generic_filter( melee, t, /*harmful=*/true ) )
       melee_legal.push_back( t );
   }
   // tstl-sylvanas 264-05 (O4) + 261006-dnh-F1 (strict): a do-not-hit enemy is never re-picked as the tag. The Stormstrike-legal list
@@ -872,7 +919,7 @@ enemy_fact build_enemy_fact_for_scoring( const action_t* a, player_t* candidate,
   }
   else if ( a->radius > 0.0 )
   {
-    // Defensive generality only -- no token in TARGETED_TOKENS reaches this branch today (every
+    // Defensive generality only -- no token in RL_TARGETED_TOKENS reaches this branch today (every
     // OTHER registry preference is single-target, so `a->radius` stays 0); kept so a future
     // radius-bearing registry action does not silently skip the neighbour count.
     int neighbours = 0;
@@ -1598,6 +1645,7 @@ void clear_process_caches()
   g_candidate_buffer.clear();
   g_unpruned_candidate_buffer.clear();
   g_rules_feature_scratch.clear();
+  g_actor_binding_cache.clear();
 }
 
 // How many entries the process-wide state of this file holds right now: the keyed tables, the scratch
@@ -1607,7 +1655,7 @@ std::size_t process_cache_entries()
   return g_decision_stamp.size() + g_pick_table.size() + g_candidate_block_table.size() +
          g_target_fact_snapshot_table.size() + g_chain_hop_stash.size() + g_vb_lava_lash_geometry_cache.size() +
          g_aim_fact_gate_cache.size() + g_candidate_buffer.size() + g_unpruned_candidate_buffer.size() +
-         g_rules_feature_scratch.size() +
+         g_rules_feature_scratch.size() + actor_binding_entries() +
          ( ( g_reresolution_counts.kept_the_pick != 0 || g_reresolution_counts.fell_back_to_player_target != 0 ||
              g_reresolution_counts.left_no_op_boundary != 0 )
                ? 1u
@@ -1619,8 +1667,8 @@ bool is_targeted_action( const action_t* resolved )
 {
   if ( !resolved )
     return false;
-  for ( const char* token : TARGETED_TOKENS )
-    if ( resolved->name_str == token )
+  for ( std::size_t k = 0; k < RL_TARGETED_TOKEN_COUNT; ++k )
+    if ( resolved->name_str == RL_TARGETED_TOKENS[ k ] )
       return true;
   return false;
 }
@@ -1628,16 +1676,14 @@ bool is_targeted_action( const action_t* resolved )
 // 228-09 (D-23/TGT-08, dump half) -- see rl_target_select.hpp's own doc comment.
 std::size_t targeted_action_token_count()
 {
-  return sizeof( TARGETED_TOKENS ) / sizeof( TARGETED_TOKENS[ 0 ] );
+  return RL_TARGETED_TOKEN_COUNT;
 }
 
 const char* const* targeted_action_tokens()
 {
-  return TARGETED_TOKENS;
+  return RL_TARGETED_TOKENS;
 }
 
-namespace
-{
 // 233.1-02 Task 2 (R6-15, R6-20): the Thorim's-aware strike SUBSTITUTION -- called once per
 // decision from preference_for() below, for the two strike tokens only (windstrike, stormstrike).
 // primordial_storm and lightning_bolt stay routed to preference_shortest_time_to_die directly by
@@ -1696,65 +1742,54 @@ preference_fn preference_for_thorims_aware_strike( const action_t* resolved, boo
 
   return preference_chain_lightning;
 }
-} // anonymous namespace
 
+// 268-02 (G268-5): the aiming rule of each targeted token is the one the spec header's RL_RULE_PREFS
+// names for it, resolved through the generic rules or the actor's class plugin (the bind is above,
+// actor_binding_for). The per-spell reasoning for each scorer stays with the scorer's own definition below.
+// A resolved action whose name has no row uses current_target (the generic default of contract C-A), so
+// this never returns null for a real action.
+//
+// 261002-8rs (batch 261002-8rq, item 2), kept from the old name chain: the Flame Shock button is aimed by the
+// Voltaic Blaze rule (the header row for it names that rule). That rule's score is (new Flame Shocks inside
+// Voltaic Blaze's cleave) x 1e12 + (1e9 if the candidate lacks THIS caster's Flame Shock) + time to die. For
+// Flame Shock the first term is always 0 (the button is not ready whenever Voltaic Blaze is taken, and without
+// the talent the cleave radius stays 0), so what remains is "an enemy without this caster's Flame Shock first,
+// the longest-lived first within each group". Rejected: the shortest-time-to-die rule (re-applies on a target
+// that already carries it), the Lava Lash rule (prefers carriers), the chain and tempest rules (no Flame Shock
+// state read).
+//
+// Phase 230-02 (SCOR-01, D-01/D-02/R-K) added a run-time switch here -- the PRESENCE of a
+// scorer section in the loaded weights used to swap the rule out for a ninth "scorer"
+// preference entirely. REMOVED 240-05 Task 2 (D1(a)/D8(a)): the rule now runs UNCONDITIONALLY,
+// on every decision, for every arm -- rules, comparator, and both learning arms alike. This is
+// what makes the RULES comparator free (the same binary, the same rule, differing only in
+// whether a loaded head's own overwrite -- run_target_head, called separately from
+// rl_policy_obs.cpp after this rule has already run -- is allowed to touch the pick this
+// function's caller stamped). `preference_for` has no branch returning a scorer
+// preference; there is no `sim`/`solver_policy_weights` read left in this function.
 preference_fn preference_for( const action_t* resolved )
 {
   if ( !resolved )
     return nullptr;
-  const std::string& n = resolved->name_str;
-  preference_fn rule = nullptr;
-  if ( n == "stormstrike" || n == "windstrike" )
-    rule = preference_for_thorims_aware_strike( resolved, n == "stormstrike" );
-  else if ( n == "primordial_storm" || n == "lightning_bolt" )
-    rule = preference_shortest_time_to_die;
-  else if ( n == "lava_lash" )
-    rule = preference_lava_lash;
-  else if ( n == "voltaic_blaze" )
-    rule = preference_voltaic_blaze;
-  else if ( n == "chain_lightning" )
-    rule = preference_chain_lightning;
-  else if ( n == "tempest" )
-    rule = preference_tempest;
-  else if ( n == "flame_shock" )
+  actor_binding_t& binding = actor_binding_for( resolved->player );
+  auto             it      = binding.by_action.find( resolved );
+  if ( it == binding.by_action.end() )
   {
-    // 261002-8rs (batch 261002-8rq, item 2): the aim rule for the Flame Shock button. It was written
-    // while the token was NOT in TARGETED_TOKENS (width 325: joining it adds a `flame_shock` block to
-    // every decision-dump row and decision-channel request and turns `chosen_pick` into an object for
-    // any chosen flame_shock, decision_dump.cpp:915-1088 -- not dormant). The token joined the list in
-    // 261002-8rv, in the same fork commit as the header that offers the flame_shock button, so this
-    // branch is reached from width 419 on.
-    //
-    // Why preference_voltaic_blaze. Its score is (new Flame Shocks inside Voltaic Blaze's cleave) x
-    // 1e12 + (1e9 if the candidate lacks THIS caster's Flame Shock) + time to die. For flame_shock the
-    // first term is always 0: flame_shock_t::ready() is false whenever Voltaic Blaze is taken
-    // (sc_shaman.cpp:8940-8947), and without the talent the cleave radius stays 0
-    // (rl_target_select.hpp:148, sc_shaman.cpp:10602 guard), so count_new_flame_shock_neighbours
-    // returns 0 on its radius <= 0 early exit (above). What remains is "an enemy without this
-    // caster's Flame Shock first, the longest-lived first within each group": put the
-    // damage-over-time effect where it is missing, on the enemy that lives to take every tick.
-    // build_enemy_fact_for_scoring already reads flame_shock_remaining for this rule.
-    //
-    // Rejected: preference_shortest_time_to_die parks on the SHORTEST-lived enemy and never reads
-    // Flame Shock state, so it re-applies on a target that already carries it and puts the effect on
-    // the enemy that dies first; preference_lava_lash prefers enemies that ALREADY carry Flame Shock
-    // (it spreads from a carrier); preference_chain_lightning / preference_tempest score neighbour and
-    // hop counts and read no Flame Shock state; the Thorim's routing above is for the two strikes only.
-    rule = preference_voltaic_blaze;
+    rule_resolver_fn resolver = resolve_generic_current_target;
+    for ( const rule_row_t& row : binding.rule_rows )
+      if ( row.first == resolved->name_str )
+      {
+        resolver = row.second;
+        break;
+      }
+    it = binding.by_action.emplace( resolved, resolver ).first;
   }
-  else
-    return nullptr;
+  return it->second( resolved );
+}
 
-  // Phase 230-02 (SCOR-01, D-01/D-02/R-K) added a run-time switch here -- the PRESENCE of a
-  // scorer section in the loaded weights used to swap the rule out for a ninth "scorer"
-  // preference entirely. REMOVED 240-05 Task 2 (D1(a)/D8(a)): the rule now runs UNCONDITIONALLY,
-  // on every decision, for every arm -- rules, comparator, and both learning arms alike. This is
-  // what makes the RULES comparator free (the same binary, the same rule, differing only in
-  // whether a loaded head's own overwrite -- run_target_head, called separately from
-  // rl_policy_obs.cpp after this rule has already run -- is allowed to touch the pick this
-  // function's caller stamped). `preference_for` no longer has any branch returning a scorer
-  // preference; there is no `sim`/`solver_policy_weights` read left in this function.
-  return rule;
+double preference_current_target( const action_t*, const enemy_fact& )
+{
+  return 0.0;
 }
 
 double preference_shortest_time_to_die( const action_t* a, const enemy_fact& fact )

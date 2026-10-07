@@ -405,10 +405,20 @@ bool is_targeted_action( const action_t* resolved );
 std::size_t targeted_action_token_count();
 const char* const* targeted_action_tokens();
 
-// Dispatches a resolved targeted action to its own preference function by name_str. Returns
-// nullptr for anything is_targeted_action() would refuse (never called in that case by
-// read_action_gate_bits, but kept total rather than partial for safety).
+// The aiming rule of a resolved targeted action: the rule the spec header's RL_RULE_PREFS names for its
+// token, resolved once per actor through the generic rules (current_target, shortest_ttd) or the
+// actor's class plugin (rl_class_plugins.hpp). An action whose name has no row uses current_target.
+// Returns nullptr only for a null argument. An unknown rule name was refused at the actor's arise.
 preference_fn preference_for( const action_t* resolved );
+
+// The generic rule current_target: the same score for every candidate, so select()'s tie ladder
+// (the player's current target first, then the stable actor order) picks the current target whenever
+// it is a legal candidate.
+double preference_current_target( const action_t* a, const enemy_fact& fact );
+
+// The Thorim's-aware strike rule, chosen per decision between the shortest-time-to-die, Tempest and
+// Chain Lightning scorers. Exposed for the shaman class plugin's rule table (rl_class_plugins.cpp).
+preference_fn preference_for_thorims_aware_strike( const action_t* resolved, bool is_stormstrike );
 
 // ---------------------------------------------------------------------------------------------
 // The eight preferences (D-10, R-B). Exposed individually (rather than only through

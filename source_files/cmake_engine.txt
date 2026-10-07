@@ -159,6 +159,7 @@ sim/rl_policy_constants_ca.enhancement.h
 sim/rl_header_contract.hpp
 sim/rl_proc_counters.hpp
 sim/rl_credit.hpp
+sim/rl_class_plugins.hpp
 sim/rl_target_select.hpp
 sim/rl_translog.hpp
 sim/rl_rng_record.hpp
@@ -364,6 +365,7 @@ sim/decision_dump.cpp
 sim/solver_control.cpp
 sim/rl_policy_obs.cpp
 sim/rl_policy_net.cpp
+sim/rl_class_plugins.cpp
 sim/rl_target_select.cpp
 sim/rl_translog.cpp
 sim/rl_rng_record.cpp
