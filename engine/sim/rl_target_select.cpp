@@ -437,12 +437,127 @@ namespace
 // rule name) is refused right there with the registry id in the message, never at a decision.
 using rule_row_t = std::pair<std::string, rule_resolver_fn>;
 
+// Phase 268 plan 03 (G268-6, FORK-03; research Pitfall 6): where each of the RL_TARGET_FEATURES per-candidate facts comes from,
+// decided ONCE per actor at bind time for every index of RL_TARGET_FEATURE_NAMES. A fact is one of three kinds: one of the 12
+// generic facts of enemy_fact, a declared fact (a row of RL_DECLARED_FACTS whose slot is this index), or a per-class geometry
+// fact the class plugin serves by name. A name none of the three can serve is refused at bind. The candidate block is then
+// filled BY INDEX from this table, never by expanding a list of C++ member names, so a spec whose fact names are not enemy_fact
+// members still compiles.
+enum class generic_fact_id : std::uint8_t
+{
+  distance, in_reach, in_range, in_front, alive, immune, immunity_remaining, time_to_die, health_pct, is_boss,
+  neighbours_within_radius, is_current_target
+};
+
+enum class fact_source_kind : std::uint8_t { generic, declared, geometry };
+
+struct feature_source_t
+{
+  fact_source_kind kind    = fact_source_kind::generic;
+  generic_fact_id  generic = generic_fact_id::distance;  // kind == generic
+  std::size_t      declared = 0;                         // kind == declared: the index into RL_DECLARED_FACTS
+  double ( *geometry )( const enemy_fact& ) = nullptr;   // kind == geometry
+};
+
+using feature_sources_t = std::array<feature_source_t, RL_TARGET_FEATURES>;
+
+// The 12 generic facts, by the name they carry in RL_TARGET_FEATURE_NAMES. Returns false for any other name.
+bool generic_fact_by_name( const char* name, generic_fact_id& out )
+{
+  struct row { const char* name; generic_fact_id id; };
+  static const row ROWS[] = {
+    { "distance", generic_fact_id::distance },
+    { "in_reach", generic_fact_id::in_reach },
+    { "in_range", generic_fact_id::in_range },
+    { "in_front", generic_fact_id::in_front },
+    { "alive", generic_fact_id::alive },
+    { "immune", generic_fact_id::immune },
+    { "immunity_remaining", generic_fact_id::immunity_remaining },
+    { "time_to_die", generic_fact_id::time_to_die },
+    { "health_pct", generic_fact_id::health_pct },
+    { "is_boss", generic_fact_id::is_boss },
+    { "neighbours_within_radius", generic_fact_id::neighbours_within_radius },
+    { "is_current_target", generic_fact_id::is_current_target },
+  };
+  for ( const row& r : ROWS )
+    if ( std::strcmp( r.name, name ) == 0 )
+    {
+      out = r.id;
+      return true;
+    }
+  return false;
+}
+
+// The generic fact as a double: a bool or an int widens exactly (so the later cast to float gives the float the old direct
+// cast gave), a double is read as it is.
+double generic_fact_value( const enemy_fact& f, generic_fact_id id )
+{
+  switch ( id )
+  {
+    case generic_fact_id::distance:                 return f.distance;
+    case generic_fact_id::in_reach:                 return f.in_reach ? 1.0 : 0.0;
+    case generic_fact_id::in_range:                 return f.in_range ? 1.0 : 0.0;
+    case generic_fact_id::in_front:                 return f.in_front ? 1.0 : 0.0;
+    case generic_fact_id::alive:                    return f.alive ? 1.0 : 0.0;
+    case generic_fact_id::immune:                   return f.immune ? 1.0 : 0.0;
+    case generic_fact_id::immunity_remaining:       return f.immunity_remaining;
+    case generic_fact_id::time_to_die:              return f.time_to_die;
+    case generic_fact_id::health_pct:               return f.health_pct;
+    case generic_fact_id::is_boss:                  return f.is_boss ? 1.0 : 0.0;
+    case generic_fact_id::neighbours_within_radius: return static_cast<double>( f.neighbours_within_radius );
+    case generic_fact_id::is_current_target:        return f.is_current_target ? 1.0 : 0.0;
+  }
+  return 0.0;
+}
+
+feature_sources_t build_feature_sources( const player_t* p )
+{
+  const rl_class_plugin& plugin = rl_class_plugin_for( p );
+  feature_sources_t      out;
+  for ( std::size_t i = 0; i < RL_TARGET_FEATURES; ++i )
+  {
+    feature_source_t src;
+    bool             resolved = false;
+    for ( std::size_t k = 0; k < RL_DECLARED_FACT_COUNT && !resolved; ++k )
+      if ( RL_DECLARED_FACTS[ k ].slot == i )
+      {
+        src.kind     = fact_source_kind::declared;
+        src.declared = k;
+        resolved     = true;
+      }
+    if ( !resolved && generic_fact_by_name( RL_TARGET_FEATURE_NAMES[ i ], src.generic ) )
+    {
+      src.kind = fact_source_kind::generic;
+      resolved = true;
+    }
+    if ( !resolved )
+    {
+      if ( const rl_geometry_fact* g = rl_class_geometry_find( plugin, RL_TARGET_FEATURE_NAMES[ i ] ) )
+      {
+        src.kind     = fact_source_kind::geometry;
+        src.geometry = g->get;
+        resolved     = true;
+      }
+    }
+    if ( !resolved )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_target_select: registry '{}' names per-candidate feature '{}' (index {}) that is neither a generic fact, a declared "
+          "fact nor a geometry fact of player '{}' (class plugin '{}') (bind-time refusal)",
+          RL_REGISTRY_ID, RL_TARGET_FEATURE_NAMES[ i ], i, p->name(), plugin.class_name ) );
+    }
+    out[ i ] = src;
+  }
+  return out;
+}
+
 struct actor_binding_t
 {
   const action_t*                                       probe = nullptr;  // RL_CHOOSER_PROBE_ACTION, never null once bound
   const action_t*                                       melee = nullptr;  // RL_CHOOSER_MELEE_ACTION, null when the actor has none
   std::vector<rule_row_t>                               rule_rows;        // RL_RULE_PREFS: token -> resolver
   std::unordered_map<const action_t*, rule_resolver_fn> by_action;        // filled on the first decision of each action
+  feature_sources_t                                     feature_sources;  // the per-candidate fact source of each feature index
 };
 
 std::unordered_map<const player_t*, actor_binding_t> g_actor_binding_cache;
@@ -504,6 +619,7 @@ actor_binding_t& actor_binding_for( const player_t* p )
   }
   // A missing melee action is tolerated: the chooser then falls back to the hittable list.
   b.melee = p->find_action( RL_CHOOSER_MELEE_ACTION );
+  b.feature_sources = build_feature_sources( p );  // refuses a feature no source can serve, here, at arise
   b.rule_rows.reserve( RL_RULE_PREF_COUNT );
   for ( std::size_t k = 0; k < RL_RULE_PREF_COUNT; ++k )
     b.rule_rows.emplace_back( RL_RULE_PREFS[ k ].token, resolve_rule_name( p, RL_RULE_PREFS[ k ].token, RL_RULE_PREFS[ k ].rule ) );
@@ -643,6 +759,42 @@ bool obs_is_boss( const player_t* enemy )
   return enemy->is_boss() && enemy->sim->fight_style != FIGHT_STYLE_TRASH_PACK;
 }
 
+// Phase 268 plan 03 (G268-6, FORK-03, owner D6): declared per-candidate facts. See the declaration in the header for the two
+// kinds. Both read the aura the actor itself (`source`) put on the candidate, by its engine name, with the non-creating
+// find_dot / buff_t::find idiom (WR-04: get_dot / buff_t::get CREATE the object on a candidate that never had it).
+double read_declared_fact( const rl_declared_fact& fact, player_t* source, player_t* candidate )
+{
+  switch ( fact.kind )
+  {
+    case rl_fact_kind::dot_remaining:
+    {
+      if ( dot_t* d = candidate->find_dot( fact.name, source ) )
+        return d->remains().total_seconds();
+      if ( buff_t* b = buff_t::find( candidate, fact.name, source ) )
+        return b->remains().total_seconds();
+      return 0.0;
+    }
+    case rl_fact_kind::debuff_stacks:
+    {
+      // check(), never up(): up() mutates benefit bookkeeping (see rl_policy_obs.cpp's note on buff reads).
+      if ( buff_t* b = buff_t::find( candidate, fact.name, source ) )
+        return static_cast<double>( b->check() );
+      if ( dot_t* d = candidate->find_dot( fact.name, source ) )
+        return static_cast<double>( d->current_stack() );
+      return 0.0;
+    }
+  }
+  return 0.0;
+}
+
+std::size_t declared_fact_index_for_feature( const char* feature_name )
+{
+  for ( std::size_t k = 0; k < RL_DECLARED_FACT_COUNT; ++k )
+    if ( std::strcmp( RL_TARGET_FEATURE_NAMES[ RL_DECLARED_FACTS[ k ].slot ], feature_name ) == 0 )
+      return k;
+  return RL_DECLARED_FACT_COUNT;
+}
+
 enemy_fact build_enemy_fact( const action_t* a, player_t* candidate )
 {
   enemy_fact f;
@@ -672,12 +824,12 @@ enemy_fact build_enemy_fact( const action_t* a, player_t* candidate )
   f.is_boss     = obs_is_boss( candidate );  // tstl-sylvanas 260928-tb8
   f.hazard      = candidate->sheet_hazard;  // tstl-sylvanas 262-04 (IN-02, R-6): the actor's own flag, beside is_boss
 
-  // WR-04 (260902/cr4): `find_dot` -- a non-allocating scan of the candidate's existing dot_list --
-  // instead of `get_dot`, which CREATES a dot_t on every candidate that has never been Flame
-  // Shocked, growing `dot_list` on what this function's own callers treat as a read-only query.
-  // Flame Shock on an ARBITRARY enemy, not only the current target (P-5's fix point).
-  dot_t* fs = candidate->find_dot( "flame_shock", a->player );
-  f.flame_shock_remaining = fs ? fs->remains().total_seconds() : 0.0;
+  // Declared facts (Phase 268 plan 03, G268-6): ONE generic loop over the spec header's RL_DECLARED_FACTS, in place of the eight
+  // literal aura reads this function used to hold. Every lookup is the non-creating find / find_dot idiom (WR-04), `source` is
+  // always `a->player` -- these are auras THIS actor puts on the candidate, on ANY enemy, not only the current target (P-5's fix point).
+  // 0.0 is "absent", matching every other *_remaining field's own convention on this struct.
+  for ( std::size_t k = 0; k < RL_DECLARED_FACT_COUNT; ++k )
+    f.declared[ k ] = read_declared_fact( RL_DECLARED_FACTS[ k ], a->player, candidate );
 
   // OBS-03/R-U (tstl-sylvanas 232-02): deterministic geometry, never a target-cache read --
   // count of alive enemies within THIS action's OWN resolved radius of the candidate (a->radius:
@@ -703,51 +855,13 @@ enemy_fact build_enemy_fact( const action_t* a, player_t* candidate )
   f.actor_index        = candidate->actor_index;
   f.actor_spawn_index  = candidate->actor_spawn_index;
 
-  // 228-10 Task 1 Step 1 (D-03/D-16): the missing per-enemy facts, added ONCE here and read from
-  // here by the dump (and later the observation) -- never a second copy. Every lookup uses the
-  // non-allocating `find`/`find_dot` idiom (WR-04's own convention above): buff_t::find() scans
-  // buff_list without creating; player_t::find_dot() scans dot_list without creating. `source`
-  // is always `a->player` -- these are debuffs THIS actor puts on the candidate, mirroring
-  // flame_shock_remaining's own `a->player` source above.
-  if ( buff_t* bc = buff_t::find( candidate, "burning_core", a->player ) )
-    f.burning_core_remaining = bc->remains().total_seconds();
-  if ( buff_t* lr = buff_t::find( candidate, "lightning_rod", a->player ) )
-  {
-    f.lightning_rod_stacks    = lr->check();
-    f.lightning_rod_remaining = lr->remains().total_seconds();
-  }
-  if ( dot_t* vf = candidate->find_dot( "venomfang", a->player ) )
-    f.venomfang_remaining = vf->remains().total_seconds();
-  if ( buff_t* vfd = buff_t::find( candidate, "venomfang_debuff", a->player ) )
-  {
-    f.venomfang_debuff_stacks    = vfd->check();
-    f.venomfang_debuff_remaining = vfd->remains().total_seconds();
-  }
-  if ( dot_t* ruf = candidate->find_dot( "rune_of_unleashed_fire_lingering", a->player ) )
-    f.rune_of_unleashed_fire_lingering_remaining = ruf->remains().total_seconds();
-
-  // 260914-rbp Task 1 Step 6 (R15, rulings Q16): the targeting-lens fields -- see enemy_fact's
-  // own per-field comments (rl_target_select.hpp) for exactly what each counts and why the
-  // ordering is fixed. Computed for EVERY caller (this is the FULL builder, "every field
-  // filled" per this function's own header comment), unlike build_enemy_fact_for_scoring's own
-  // pref-conditional lite computation below.
-  // 260914-rbp Task 2c (NOTE-1): the stash lookup itself is the gate -- chain_hop_count_for_start
-  // already returns 0 when `a` has no stash entry or the entry's stamp is stale (its own doc
-  // comment above), so the `a->name_str == "chain_lightning"` name check this used to require was
-  // a second, redundant gate that additionally (silently) zeroed a Thorim's-routed melee strike's
-  // real hop count -- compute_chain_hop_counts fills the stash keyed on whatever action_t* select()
-  // resolved geometry for (line ~797), not only literal chain_lightning casts.
-  f.chain_hop_count = chain_hop_count_for_start( a, candidate );
-  {
-    const vb_lava_lash_geometry_t& geo = resolve_vb_lava_lash_geometry( a->player );
-    // Task 2b (Q17 review, A2): VB's cleave always hits (and can Flame-Shock) its own pick
-    // (include_pick=true); Lava Lash's spread pick is the SOURCE carrier, never a spread target
-    // (include_pick=false, unchanged).
-    f.vb_new_flame_shocks_within_10yd =
-        count_new_flame_shock_neighbours( a->player, candidate, geo.vb_radius, geo.vb_cap, true );
-    f.lava_lash_spread_within_12yd = count_new_flame_shock_neighbours(
-        a->player, candidate, geo.lava_lash_radius, geo.lava_lash_cap, false );
-  }
+  // The class's own part of the full fact (Phase 268 plan 03, G268-5): the named aura fields completed FROM the declared values
+  // above and the class's geometry counts (shaman: chain hop count, Voltaic Blaze new Flame Shocks, Lava Lash spread -- see
+  // rl_class_plugins.cpp). Computed for EVERY caller (this is the FULL builder, "every field filled"), unlike
+  // build_enemy_fact_for_scoring's own pref-conditional lite computation below. A class with nothing to add has no hook.
+  const rl_class_plugin& plugin = rl_class_plugin_for( a->player );
+  if ( plugin.fill_class_fields != nullptr )
+    plugin.fill_class_fields( a, candidate, f );
 
   return f;
 }
@@ -867,26 +981,12 @@ enemy_fact build_enemy_fact_for_scoring( const action_t* a, player_t* candidate,
   f.candidate   = candidate;
   f.time_to_die = std::min( candidate->time_to_percent( 0 ).total_seconds(), 600.0 );  // WR-10
 
-  if ( pref == preference_lava_lash || pref == preference_voltaic_blaze )
-  {
-    dot_t* fs = candidate->find_dot( "flame_shock", a->player );  // WR-04
-    f.flame_shock_remaining = fs ? fs->remains().total_seconds() : 0.0;
-
-    // 260914-rbp Task 1 Step 6 (R15, rulings Q16): only the ONE new targeting-lens field the
-    // DISPATCHED preference actually reads -- WR-05's own "skip what the dispatched preference
-    // doesn't need" discipline, applied here exactly like flame_shock_remaining just above.
-    // 260914-rbp Task 2c (LO-3): named `vb_ll_geo`, not `geo` -- this function's own parameter
-    // (`const chain_geometry* geo`, the Thorim's branch geometry above) is a DIFFERENT type this
-    // local used to shadow.
-    const vb_lava_lash_geometry_t& vb_ll_geo = resolve_vb_lava_lash_geometry( a->player );
-    // Task 2b (Q17 review, A2): same include_pick convention as build_enemy_fact above.
-    if ( pref == preference_voltaic_blaze )
-      f.vb_new_flame_shocks_within_10yd = count_new_flame_shock_neighbours(
-          a->player, candidate, vb_ll_geo.vb_radius, vb_ll_geo.vb_cap, true );
-    else  // preference_lava_lash
-      f.lava_lash_spread_within_12yd = count_new_flame_shock_neighbours(
-          a->player, candidate, vb_ll_geo.lava_lash_radius, vb_ll_geo.lava_lash_cap, false );
-  }
+  // The scorer-specific part (Phase 268 plan 03, G268-5): only what the DISPATCHED preference reads, filled by the class plugin
+  // (WR-05's own "skip what the dispatched preference doesn't need" discipline). Shaman: Flame Shock remaining and the one
+  // Voltaic Blaze / Lava Lash geometry count. A class with no class-specific scorer has no hook.
+  const rl_class_plugin& plugin = rl_class_plugin_for( a->player );
+  if ( plugin.fill_scoring_fields != nullptr )
+    plugin.fill_scoring_fields( a, candidate, pref, f );
 
   // BL-01 (232-13) / ME-4 (232-15b): the neighbour count is computed at the MODELLED spell's own
   // resolved radius -- Tempest's or Chain Lightning's -- never the caller's (`a`'s) own radius,
@@ -1010,6 +1110,10 @@ void compute_chain_hop_counts( double radius, int cap, const std::vector<player_
 struct aim_fact_gate
 {
   std::array<bool, RL_TARGET_FEATURES> governed_off{};
+  // Phase 268 plan 03: the per-index source of each fact, copied once per actor from the actor binding (built, and any unknown
+  // feature refused, at the actor's arise). Lives here so the per-decision gate lookup also hands the fill its source table
+  // without a second map lookup per candidate; cleared and counted with g_aim_fact_gate_cache.
+  feature_sources_t sources{};
 };
 std::unordered_map<const player_t*, aim_fact_gate> g_aim_fact_gate_cache;
 
@@ -1019,6 +1123,7 @@ const aim_fact_gate& aim_fact_gate_for( player_t* p )
   if ( it != g_aim_fact_gate_cache.end() )
     return it->second;
   aim_fact_gate gate;
+  gate.sources = actor_binding_for( p ).feature_sources;
   for ( std::size_t i = 0; i < RL_TARGET_FEATURES; ++i )
   {
     const int capability = RL_AIM_FACT_DESCS[ i ].capability;
@@ -1046,38 +1151,38 @@ float scaled_fact( float raw, std::size_t i, const aim_fact_gate& gate )
 // (230-02; folded into run_target_head, 240-05 Task 2) so the rules path can fill its own scratch
 // buffer with it too -- pure, no rl_scorer_t dependency.
 //
-// 259-07: the fill order is now the registry's own declaration, `RL_TARGET_FACT_LIST` (generated
-// into rl_policy_constants.h): expanding it below makes the compiler prove every declared fact is
-// a real `enemy_fact` member, in declared order -- a reorder or a rename in the registry fails to
-// compile here rather than silently mis-ordering a wire. Each fact is SCALED into the registry's
-// range and capability-gated (see scaled_fact above); the rules never read this scaled block (they
-// rank on `enemy_fact`'s raw values -- build_enemy_fact's 600 s time-to-die cap stays, the 60 s
-// cap lives only in the scaling's clipDiv).
+// Phase 268 plan 03 (research Pitfall 6): the fill is BY INDEX from the actor's bind-time source table (gate.sources) -- the
+// registry's own declaration order, RL_TARGET_FEATURE_NAMES. Each fact is read as a double (a bool or an int widens exactly)
+// from its generic enemy_fact field, its declared value or its class geometry provider, then SCALED into the registry's
+// range and capability-gated (see scaled_fact above). The generated fact-list macro in the constants header is generated
+// content and no code expands it any more. The rules never read this scaled block (they rank on `enemy_fact`'s raw values --
+// build_enemy_fact's 600 s time-to-die cap stays, the 60 s cap lives only in the scaling's clipDiv).
 void fill_candidate_features( const action_t*, const enemy_fact& fact, float* out,
                               const aim_fact_gate& gate )
 {
-  std::size_t i = 0;
-#define RL_FILL_TARGET_FACT( NAME )                                              \
-  out[ i ] = scaled_fact( static_cast<float>( fact.NAME ), i, gate );           \
-  ++i;
-  RL_TARGET_FACT_LIST( RL_FILL_TARGET_FACT )
-#undef RL_FILL_TARGET_FACT
-
-  assert( i == RL_TARGET_FEATURES &&
-          "fill_candidate_features's fill order does not match RL_TARGET_FEATURES" );
+  for ( std::size_t i = 0; i < RL_TARGET_FEATURES; ++i )
+  {
+    const feature_source_t& src = gate.sources[ i ];
+    double                  value = 0.0;
+    switch ( src.kind )
+    {
+      case fact_source_kind::generic:
+        value = generic_fact_value( fact, src.generic );
+        break;
+      case fact_source_kind::declared:
+        value = fact.declared[ src.declared ];
+        break;
+      case fact_source_kind::geometry:
+        value = src.geometry( fact );
+        break;
+    }
+    out[ i ] = scaled_fact( static_cast<float>( value ), i, gate );
+  }
 }
 
-// The number of facts the registry's X-macro list declares must equal the compiled width.
-constexpr std::size_t aim_fact_list_count()
-{
-  std::size_t n = 0;
-#define RL_COUNT_TARGET_FACT( NAME ) ++n;
-  RL_TARGET_FACT_LIST( RL_COUNT_TARGET_FACT )
-#undef RL_COUNT_TARGET_FACT
-  return n;
-}
-static_assert( aim_fact_list_count() == RL_TARGET_FEATURES,
-               "RL_TARGET_FACT_LIST must declare exactly RL_TARGET_FEATURES facts (259-07)" );
+// The registry's feature-name list must have exactly the compiled width (replaces the old count check of the generated fact-list macro).
+static_assert( sizeof( RL_TARGET_FEATURE_NAMES ) / sizeof( RL_TARGET_FEATURE_NAMES[ 0 ] ) == RL_TARGET_FEATURES,
+               "RL_TARGET_FEATURE_NAMES must list exactly RL_TARGET_FEATURES features (268-03)" );
 
 // 240-05 Task 2 (must_haves: "the head's argmax must reuse this, not invent one"): the ONE tie
 // ladder both select()'s own rule pick (below) and run_target_head's head pick use -- extracted

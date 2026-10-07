@@ -28,6 +28,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "sim/rl_policy_constants_select.h"
+
 class action_t;
 class player_t;
 struct sim_t;
@@ -82,6 +84,12 @@ struct enemy_fact
   double    health_pct              = 0.0;
   bool      is_boss                 = false;
   bool      hazard{ false };                  // tstl-sylvanas 262-04 (R-6): the actor's own sheet-fight hazard flag (floor patch, ghost). Always false by construction (262-09, review IN-01): every candidate that reaches build_enemy_fact has already passed rl_counts_as_enemy, which refuses a hazard, so a hazard is never a target and never counted. Kept as documentation of that rule, not as a net column (R-6: a per-spell pick never sees a hazard, so it would be a constant zero). The brace form dates from target_features_derive.py, which parsed every `name = default;` line of this struct as a per-target feature; Phase 259 deleted that script (feature names now come from the registry), so `= false` would be safe too.
+  // Phase 268 plan 03 (G268-6, FORK-03, owner D6): one value per row of the spec header's RL_DECLARED_FACTS, filled by ONE generic loop
+  // in build_enemy_fact (read_declared_fact below) -- a dot's remaining time, or a debuff's remaining time or stacks, of an aura the
+  // actor itself put on the candidate, 0 when absent. Sized max(count, 1): a zero-length array is not valid C++, and readers iterate
+  // by RL_DECLARED_FACT_COUNT. The named aura fields below stay for the shaman scorers and the decision dump; the shaman class
+  // plugin fills them FROM this array, so a named field and its declared value come from one lookup and cannot disagree.
+  double    declared[ RL_DECLARED_FACT_COUNT > 0 ? RL_DECLARED_FACT_COUNT : 1 ] = {};
   double    flame_shock_remaining   = 0.0;    // candidate->get_dot("flame_shock", a->player)->remains() -- works on ANY enemy, not only the current target (P-5's fix point)
   int       neighbours_within_radius = 0;     // OBS-03/R-U: live enemies within the CALLING action's own `a->radius` (+ `combat_reach`) of the candidate -- deterministic geometry, never a target-cache read. Replaces the always-equal splash/jump neighbour-count pair this struct used to carry (OBS-01/03 landed together, tstl-sylvanas 232-02).
   bool      is_current_target       = false;  // candidate == p->target
@@ -181,6 +189,17 @@ int count_hits_within_radius( player_t* caster, player_t* candidate, double radi
 // 0 when radius <= 0.0 or cap <= 0 (an untalented/unresolved geometry source).
 int count_new_flame_shock_neighbours( player_t* caster, player_t* candidate, double radius, int cap,
                                        bool include_pick );
+
+// Phase 268 plan 03 (G268-6, FORK-03): the value of ONE declared fact for one candidate. `source` is the actor that put the aura
+// on the candidate (a->player). dot_remaining: the remaining seconds of the candidate's dot of that engine name when such a dot
+// exists, else the remaining seconds of its debuff of that name, else 0.0. debuff_stacks: the debuff's current stacks (check(),
+// never up(), which mutates benefit bookkeeping) when such a debuff exists, else the dot's current stack count, else 0.0. Both
+// lookups are the non-creating find / find_dot (never get / get_dot, which would create the object on a candidate that never had it).
+double read_declared_fact( const rl_declared_fact& fact, player_t* source, player_t* candidate );
+
+// The index in RL_DECLARED_FACTS of the row whose slot names the feature `feature_name` in RL_TARGET_FEATURE_NAMES, or
+// RL_DECLARED_FACT_COUNT when the header declares no such fact. A class plugin resolves its named fields through this once.
+std::size_t declared_fact_index_for_feature( const char* feature_name );
 
 // The four-clause generic filter (D-09), checked in the SAME order action_t::target_ready checks
 // them (alive, immune-while-harmful, reach, front) -- generic_filter and target_ready must never

@@ -1387,14 +1387,17 @@ enum class action_leaf_kind
 enum class target_fact_leaf_kind
 {
   found, distance, in_front, in_reach, alive, immune, time_to_die, health_pct,
-  is_boss, flame_shock_remaining, is_current_target,
+  is_boss, is_current_target,
   actor_index, actor_spawn_index,
   // 228-11 (D-16 full inventory, TGT-04/TGT-06): the leaves D-16 names beyond what 228-09 wired
   // in -- every one already a field on enemy_fact (228-02/228-10), read the same way every
   // existing leaf above is (build_enemy_fact() -- never a fresh select() call, D-12).
-  in_range, immunity_remaining, burning_core_remaining, lightning_rod_stacks,
-  lightning_rod_remaining, venomfang_remaining, venomfang_debuff_stacks,
-  venomfang_debuff_remaining, rune_of_unleashed_fire_lingering_remaining,
+  in_range, immunity_remaining,
+  // Phase 268 plan 03 (G268-6, FORK-03): a declared fact -- an aura of the actor on the candidate, named by a row of the spec
+  // header's RL_DECLARED_FACTS. Bound by the leaf's feature name (RL_TARGET_FEATURE_NAMES[ row.slot ]); the read side returns
+  // fact.declared[ the bound row index ]. This one kind replaces the eight shaman aura leaf kinds (flame_shock_remaining,
+  // burning_core_remaining, lightning_rod_*, venomfang_*, rune_of_unleashed_fire_lingering_remaining).
+  declared,
   // OBS-01 (232-02): the previous-pick boolean leaf is REMOVED (the tie-break that consumed it
   // is gone from select()). OBS-03 (232-02) collapsed the always-equal neighbour pair to one
   // leaf, renamed to name the rule it encodes.
@@ -1438,6 +1441,7 @@ struct slot_binding
   // this leaf reads -- resolved ONCE at bind time from the leaf name, never re-parsed per
   // decision.
   target_fact_leaf_kind target_fact_leaf = target_fact_leaf_kind::found;
+  std::size_t target_fact_declared = 0;   // target_fact_leaf == declared: the index into RL_DECLARED_FACTS
 
   // kind == shape_fact (228-11, D-16): which SHAPED action and which of its three descriptive
   // leaves -- both resolved ONCE at bind time from the member/leaf name, never re-parsed per
@@ -2501,7 +2505,16 @@ slot_binding resolve_target_fact_leaf( player_t* p, const std::string& engine_to
 
   const std::string& leaf_name = leaf.leaf;
   target_fact_leaf_kind fk;
-  if ( leaf_name == "found" )                       fk = target_fact_leaf_kind::found;
+  // Phase 268 plan 03 (G268-6): a declared fact first -- the leaf named after the feature a RL_DECLARED_FACTS row fills.
+  std::size_t declared_row = RL_DECLARED_FACT_COUNT;
+  for ( std::size_t k = 0; k < RL_DECLARED_FACT_COUNT; ++k )
+    if ( leaf_name == RL_TARGET_FEATURE_NAMES[ RL_DECLARED_FACTS[ k ].slot ] )
+    {
+      declared_row = k;
+      break;
+    }
+  if ( declared_row < RL_DECLARED_FACT_COUNT )       fk = target_fact_leaf_kind::declared;
+  else if ( leaf_name == "found" )                   fk = target_fact_leaf_kind::found;
   else if ( leaf_name == "distance" )                fk = target_fact_leaf_kind::distance;
   else if ( leaf_name == "in_front" )                fk = target_fact_leaf_kind::in_front;
   else if ( leaf_name == "in_reach" )                fk = target_fact_leaf_kind::in_reach;
@@ -2510,7 +2523,6 @@ slot_binding resolve_target_fact_leaf( player_t* p, const std::string& engine_to
   else if ( leaf_name == "time_to_die" )             fk = target_fact_leaf_kind::time_to_die;
   else if ( leaf_name == "health_pct" )               fk = target_fact_leaf_kind::health_pct;
   else if ( leaf_name == "is_boss" )                  fk = target_fact_leaf_kind::is_boss;
-  else if ( leaf_name == "flame_shock_remaining" )    fk = target_fact_leaf_kind::flame_shock_remaining;
   else if ( leaf_name == "is_current_target" )        fk = target_fact_leaf_kind::is_current_target;
   else if ( leaf_name == "actor_index" )              fk = target_fact_leaf_kind::actor_index;
   else if ( leaf_name == "actor_spawn_index" )        fk = target_fact_leaf_kind::actor_spawn_index;
@@ -2518,13 +2530,6 @@ slot_binding resolve_target_fact_leaf( player_t* p, const std::string& engine_to
   // (228-02/228-10) -- see target_fact_leaf_kind's own comment.
   else if ( leaf_name == "in_range" )                                     fk = target_fact_leaf_kind::in_range;
   else if ( leaf_name == "immunity_remaining" )                           fk = target_fact_leaf_kind::immunity_remaining;
-  else if ( leaf_name == "burning_core_remaining" )                       fk = target_fact_leaf_kind::burning_core_remaining;
-  else if ( leaf_name == "lightning_rod_stacks" )                         fk = target_fact_leaf_kind::lightning_rod_stacks;
-  else if ( leaf_name == "lightning_rod_remaining" )                      fk = target_fact_leaf_kind::lightning_rod_remaining;
-  else if ( leaf_name == "venomfang_remaining" )                          fk = target_fact_leaf_kind::venomfang_remaining;
-  else if ( leaf_name == "venomfang_debuff_stacks" )                      fk = target_fact_leaf_kind::venomfang_debuff_stacks;
-  else if ( leaf_name == "venomfang_debuff_remaining" )                   fk = target_fact_leaf_kind::venomfang_debuff_remaining;
-  else if ( leaf_name == "rune_of_unleashed_fire_lingering_remaining" )   fk = target_fact_leaf_kind::rune_of_unleashed_fire_lingering_remaining;
   else if ( leaf_name == "neighbours_within_radius" )                     fk = target_fact_leaf_kind::neighbours_within_radius;
   else
   {
@@ -2535,6 +2540,7 @@ slot_binding resolve_target_fact_leaf( player_t* p, const std::string& engine_to
   b.kind = slot_binding_kind::target_fact;
   b.bound_action = a;
   b.target_fact_leaf = fk;
+  b.target_fact_declared = declared_row;
   return b;
 }
 
@@ -3980,7 +3986,6 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
             case target_fact_leaf_kind::time_to_die:            raw = fact.time_to_die; break;
             case target_fact_leaf_kind::health_pct:             raw = fact.health_pct; break;
             case target_fact_leaf_kind::is_boss:                raw = fact.is_boss ? 1.0 : 0.0; break;
-            case target_fact_leaf_kind::flame_shock_remaining:  raw = fact.flame_shock_remaining; break;
             case target_fact_leaf_kind::is_current_target:      raw = effective_is_current_target ? 1.0 : 0.0; break;
             case target_fact_leaf_kind::actor_index:            raw = static_cast<double>( fact.actor_index ); break;
             case target_fact_leaf_kind::actor_spawn_index:      raw = static_cast<double>( fact.actor_spawn_index ); break;
@@ -3989,13 +3994,9 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
             // every leaf above already uses.
             case target_fact_leaf_kind::in_range:                            raw = fact.in_range ? 1.0 : 0.0; break;
             case target_fact_leaf_kind::immunity_remaining:                  raw = fact.immunity_remaining; break;
-            case target_fact_leaf_kind::burning_core_remaining:              raw = fact.burning_core_remaining; break;
-            case target_fact_leaf_kind::lightning_rod_stacks:                raw = static_cast<double>( fact.lightning_rod_stacks ); break;
-            case target_fact_leaf_kind::lightning_rod_remaining:             raw = fact.lightning_rod_remaining; break;
-            case target_fact_leaf_kind::venomfang_remaining:                 raw = fact.venomfang_remaining; break;
-            case target_fact_leaf_kind::venomfang_debuff_stacks:             raw = static_cast<double>( fact.venomfang_debuff_stacks ); break;
-            case target_fact_leaf_kind::venomfang_debuff_remaining:          raw = fact.venomfang_debuff_remaining; break;
-            case target_fact_leaf_kind::rune_of_unleashed_fire_lingering_remaining: raw = fact.rune_of_unleashed_fire_lingering_remaining; break;
+            // Phase 268 plan 03: a declared fact reads the value build_enemy_fact's generic loop stored (a double carries an int
+            // stack count exactly, so the raw value is the one the retired per-aura cases produced).
+            case target_fact_leaf_kind::declared:                             raw = fact.declared[ b.target_fact_declared ]; break;
             case target_fact_leaf_kind::neighbours_within_radius:            raw = static_cast<double>( fact.neighbours_within_radius ); break;
             default:
               matched = false;

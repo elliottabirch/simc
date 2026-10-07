@@ -7,7 +7,8 @@
 // rl_class_plugin_for() selects from player_t::type. The generic rules (current_target, shortest_ttd)
 // need no plugin and work for every class.
 //
-// Plans 268-03 to 268-05 append the fact-geometry and hit-provider tables to rl_class_plugin.
+// Plan 268-03 added the per-candidate class-field hooks and the geometry-fact table; plans 268-04 and 268-05 append the
+// hit-provider table to rl_class_plugin.
 // ==========================================================================
 
 #pragma once
@@ -29,11 +30,33 @@ struct rl_class_rule
   rule_resolver_fn resolve;
 };
 
+// Plan 268-03 (G268-5, G268-6): a per-class geometry fact. A spec header names a per-candidate feature in RL_TARGET_FEATURE_NAMES
+// that is neither one of the 12 generic facts nor a declared fact; the class plugin serves it by name, from the enemy_fact the
+// plugin's fill_class_fields completed.
+struct rl_geometry_fact
+{
+  const char* feature;                                          // the feature's name in RL_TARGET_FEATURE_NAMES
+  double ( *get )( const rl_target_select::enemy_fact& fact );  // reads the already-filled value
+};
+
+// Completes the FULL enemy_fact build_enemy_fact made for `candidate` against action `a`: copies the declared values into the
+// class's named fields and computes the class's geometry counts. Nullable (a class with nothing to add).
+using rl_fill_class_fields_fn = void ( * )( const action_t* a, player_t* candidate, rl_target_select::enemy_fact& fact );
+
+// Completes the LITE enemy_fact the scoring loop builds for `candidate`, for the one scorer `pref` the decision dispatched:
+// only what that scorer reads. Nullable.
+using rl_fill_scoring_fields_fn = void ( * )( const action_t* a, player_t* candidate, rl_target_select::preference_fn pref,
+                                              rl_target_select::enemy_fact& fact );
+
 struct rl_class_plugin
 {
-  const char*          class_name;
-  const rl_class_rule* rules;     // may point at a one-row null sentinel when n_rules is 0
-  std::size_t          n_rules;
+  const char*                class_name;
+  const rl_class_rule*       rules;     // may point at a one-row null sentinel when n_rules is 0
+  std::size_t                n_rules;
+  rl_fill_class_fields_fn    fill_class_fields;    // nullable
+  rl_fill_scoring_fields_fn  fill_scoring_fields;  // nullable
+  const rl_geometry_fact*    geometry_facts;       // may point at a one-row null sentinel when n_geometry_facts is 0
+  std::size_t                n_geometry_facts;
 };
 
 // The plugin for a player's class. Never null: a class without a plugin gets the generic one, whose
@@ -42,3 +65,6 @@ const rl_class_plugin& rl_class_plugin_for( const player_t* p );
 
 // The resolver the plugin holds for a rule name, or nullptr when the plugin has no such rule.
 rule_resolver_fn rl_class_rule_find( const rl_class_plugin& plugin, const char* rule_name );
+
+// The geometry fact the plugin serves under a feature name, or nullptr when it has none.
+const rl_geometry_fact* rl_class_geometry_find( const rl_class_plugin& plugin, const char* feature_name );
