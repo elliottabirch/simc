@@ -1327,8 +1327,11 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   // the resource predicate alone to be sufficient for every actor type this
   // hook is called with. See decision_dump.hpp's own "ACTOR SCOPE" doc
   // comment for the full writeup of both crashes.
+  // Phase 268 plan 06 (FORK-06): the resource conjunct names the SPEC's own resource (RL_RESOURCE_NAME through
+  // rl_policy::rl_spec_resource(): maelstrom for enhancement, rage for arms) instead of the Maelstrom literal, so an arms actor's
+  // observation is built and dumped. For enhancement the predicate is the same resource, so its dump is unchanged.
   if ( p->sim->threads == 1 && p->sim->profileset_map.empty() && !p->is_enemy() &&
-       p->resources.is_active( RESOURCE_MAELSTROM ) )
+       p->resources.is_active( rl_policy::rl_spec_resource() ) )
   {
     const rl_policy::slot_table& table = rl_policy::bind_slots( p );
     // 228-11 Task 2 (closing a gap 228-09 disclosed but did not fix, see the targeted_picks
