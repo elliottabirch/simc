@@ -167,10 +167,21 @@ const rl_class_rule SHAMAN_RULES[] = {
   { "shaman.tempest", shaman_tempest },
 };
 
+const rl_class_hit_provider SHAMAN_HIT_PROVIDERS[] = {
+  { "shaman.chain_lightning", rl_hit_reading::chain_lightning },
+  { "shaman.tempest", rl_hit_reading::tempest },
+  { "shaman.crash_lightning", rl_hit_reading::crash_lightning },
+  { "shaman.lava_lash_flame_shock_spread", rl_hit_reading::lava_lash_flame_shock_spread },
+  { "shaman.voltaic_blaze_cleave", rl_hit_reading::voltaic_blaze_cleave },
+  { "shaman.voltaic_blaze_new_flame_shocks", rl_hit_reading::voltaic_blaze_new_flame_shocks },
+  { "shaman.fire_nova", rl_hit_reading::fire_nova },
+};
+
 // A zero-row table holds one all-null sentinel row (a zero-length array is not valid C++); readers
 // iterate by n_rules / n_geometry_facts, never by array size.
 const rl_class_rule    NO_RULES[]    = { { nullptr, nullptr } };
 const rl_geometry_fact NO_GEOMETRY[] = { { nullptr, nullptr } };
+const rl_class_hit_provider NO_HIT_PROVIDERS[] = { { nullptr, rl_hit_reading::chain_lightning } };
 
 const rl_class_plugin SHAMAN_PLUGIN = { "shaman",
                                         SHAMAN_RULES,
@@ -178,10 +189,12 @@ const rl_class_plugin SHAMAN_PLUGIN = { "shaman",
                                         shaman_fill_class_fields,
                                         shaman_fill_scoring_fields,
                                         SHAMAN_GEOMETRY,
-                                        sizeof( SHAMAN_GEOMETRY ) / sizeof( SHAMAN_GEOMETRY[ 0 ] ) };
-// Arms' aiming rules and facts are all generic or declared; the hit providers join this entry in plan 268-04.
-const rl_class_plugin WARRIOR_PLUGIN = { "warrior", NO_RULES, 0, nullptr, nullptr, NO_GEOMETRY, 0 };
-const rl_class_plugin GENERIC_PLUGIN = { "generic", NO_RULES, 0, nullptr, nullptr, NO_GEOMETRY, 0 };
+                                        sizeof( SHAMAN_GEOMETRY ) / sizeof( SHAMAN_GEOMETRY[ 0 ] ),
+                                        SHAMAN_HIT_PROVIDERS,
+                                        sizeof( SHAMAN_HIT_PROVIDERS ) / sizeof( SHAMAN_HIT_PROVIDERS[ 0 ] ) };
+// Arms' aiming rules and facts are all generic or declared; the warrior hit providers join this entry in plan 268-05.
+const rl_class_plugin WARRIOR_PLUGIN = { "warrior", NO_RULES, 0, nullptr, nullptr, NO_GEOMETRY, 0, NO_HIT_PROVIDERS, 0 };
+const rl_class_plugin GENERIC_PLUGIN = { "generic", NO_RULES, 0, nullptr, nullptr, NO_GEOMETRY, 0, NO_HIT_PROVIDERS, 0 };
 
 }  // namespace
 
@@ -211,5 +224,13 @@ const rl_geometry_fact* rl_class_geometry_find( const rl_class_plugin& plugin, c
   for ( std::size_t k = 0; k < plugin.n_geometry_facts; ++k )
     if ( std::strcmp( plugin.geometry_facts[ k ].feature, feature_name ) == 0 )
       return &plugin.geometry_facts[ k ];
+  return nullptr;
+}
+
+const rl_class_hit_provider* rl_class_hit_provider_find( const rl_class_plugin& plugin, const char* provider_name )
+{
+  for ( std::size_t k = 0; k < plugin.n_hit_providers; ++k )
+    if ( std::strcmp( plugin.hit_providers[ k ].provider, provider_name ) == 0 )
+      return &plugin.hit_providers[ k ];
   return nullptr;
 }

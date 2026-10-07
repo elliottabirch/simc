@@ -42,6 +42,7 @@
 #include "sim/proc_rng.hpp"
 #include "sim/raid_event.hpp"
 #include "sim/rl_proc_counters.hpp"
+#include "sim/rl_policy_constants_select.h"
 #include "sim/sim.hpp"
 #include "util/io.hpp"
 #include "util/rng.hpp"
@@ -2678,7 +2679,7 @@ void recorder_t::write_sidecar()
   {
     if ( i != 0 )
       sidecar << ", ";
-    sidecar << "\"" << ( i + 1 ) << "\": \"" << rl_proc::NAMES[ i ] << "\"";
+    sidecar << "\"" << ( i + 1 ) << "\": \"" << RL_PROC_NAMES[ i ] << "\"";   // plan 268-04: the spec header names the procs
   }
   sidecar << ", \"" << static_cast<int>( LABEL_SWING_TABLE ) << "\": \"swing_attack_table\"}";
   sidecar << ", \"labelCalls\": {";

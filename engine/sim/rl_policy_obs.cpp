@@ -35,6 +35,7 @@
 #include "sim/event.hpp"
 #include "sim/expressions.hpp"
 #include "sim/raid_event.hpp"
+#include "sim/rl_class_plugins.hpp"
 #include "sim/rl_target_select.hpp"
 #include "sim/sheet_fight.hpp"  // tstl-sylvanas 262-04: sheet_fight_forecast
 #include "sim/sim.hpp"
@@ -384,6 +385,27 @@ shape_hit_result_t compute_sundering_shape( player_t* p )
 }
 
 // ---------------------------------------------------------------------------
+// Phase 268 plan 04 (G268-7): the spec's own resource. RL_RESOURCE_NAME is the engine's name for it (what
+// util::parse_resource_type accepts: "maelstrom" for enhancement, "rage" for arms). Parsed once per process (the name is a
+// compile-time constant of the header, so the answer never changes); a name the engine does not know is refused here, by name,
+// instead of reading an empty resource.
+// ---------------------------------------------------------------------------
+
+resource_e rl_spec_resource()
+{
+  static const resource_e resource = []() {
+    const resource_e parsed = util::parse_resource_type( RL_RESOURCE_NAME );
+    if ( parsed == RESOURCE_NONE )
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::rl_spec_resource: registry '{}' names resource '{}' (RL_RESOURCE_NAME), which "
+          "util::parse_resource_type does not know",
+          RL_REGISTRY_ID, RL_RESOURCE_NAME ) );
+    return parsed;
+  }();
+  return resource;
+}
+
+// ---------------------------------------------------------------------------
 // Stage 1: read_state -- needs the engine, not exercised by the standalone
 // test executable (plan 210-07).
 // ---------------------------------------------------------------------------
@@ -429,6 +451,14 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground, bool is_d
   // not a re-derived expression, so the two can never drift.
   s.gcd_remains = decision_dump::clamp_nonneg( ( p->gcd_ready - sim->current_time() ).total_seconds() );
   s.has_gcd_remains = true;
+
+  // Phase 268 plan 04 (G268-7, D5): the spec resource's current value, read ONCE here for build_mask's resource_threshold wait
+  // rule (never re-read at the mask site).
+  {
+    const resource_e spec_resource = rl_spec_resource();
+    s.has_resource_current = p->resources.is_active( spec_resource );
+    s.resource_current = s.has_resource_current ? p->resources.current[ spec_resource ] : 0.0;
+  }
 
   // FORK-04b (260902/226-07) -- gcd_length/auto_attack_interval, read ONCE
   // here (the "one reader" rule) so build_wait's re-ask-period cap and the
@@ -1264,7 +1294,7 @@ constexpr double RL_SATURATED_SECONDS = 600.0;
 
 enum class direct_id
 {
-  active_enemies, t, maelstrom,
+  active_enemies, t, resource,   // `resource`: the spec's resource (plan 268-04; was the shaman-only `maelstrom`)
   // stats
   stats_attack_haste, stats_attack_crit_chance, stats_mastery_value,
   // 260923-lrc stage 1D (PLAN.md D24): stats_attack_power REMOVED -- the live in-game addon can
@@ -1422,6 +1452,7 @@ struct slot_binding
   buff_t* buff = nullptr;               // kind == buff
   buff_leaf_kind buff_leaf = buff_leaf_kind::stacks;   // kind == buff
   direct_id direct = direct_id::t;      // kind == direct
+  resource_e resource = RESOURCE_NONE;  // kind == direct, direct == direct_id::resource: which engine resource to read (bound once)
   expr_t* expr = nullptr;               // kind == expression -- non-owning; owned by slot_table::owned_expressions
   cooldown_t* cooldown = nullptr;                        // kind == cooldown
   cooldown_leaf_kind cooldown_leaf = cooldown_leaf_kind::remains;  // kind == cooldown
@@ -1714,7 +1745,7 @@ std::string hits_switch_parent_name( const char* leaf )
 // shaman ever reaches this path, so there is no other actor's absent
 // resource to accidentally read as zero. Applies identically to the
 // cooldowns family's own `charges_fractional` when plan 220-05 binds it.
-slot_binding resolve_scalar_leaf( const rl_leaf_desc& leaf )
+slot_binding resolve_scalar_leaf( const player_t* p, const rl_leaf_desc& leaf )
 {
   slot_binding b;
   b.leaf = &leaf;
@@ -1741,10 +1772,27 @@ slot_binding resolve_scalar_leaf( const rl_leaf_desc& leaf )
     b.direct = direct_id::t;
     return b;
   }
-  if ( std::strcmp( leaf.leaf, "maelstrom" ) == 0 )
+  // Phase 268 plan 04 (G268-7): the resource scalar is generic. `resource.<name>` binds the engine resource util::parse_resource_type
+  // names; a bare leaf equal to RL_RESOURCE_NAME binds the header's own resource (enhancement's wire leaf `maelstrom` keeps its
+  // name and its bytes). An unknown resource name is refused here, at bind, with the registry id.
+  if ( std::strncmp( leaf.leaf, "resource.", 9 ) == 0 )
+  {
+    const resource_e named = util::parse_resource_type( leaf.leaf + 9 );
+    if ( named == RESOURCE_NONE )
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::resolve_scalar_leaf: registry '{}' scalar leaf '{}' names resource '{}', which "
+          "util::parse_resource_type does not know",
+          RL_REGISTRY_ID, leaf.leaf, leaf.leaf + 9 ) );
+    b.kind = slot_binding_kind::direct;
+    b.direct = direct_id::resource;
+    b.resource = named;
+    return b;
+  }
+  if ( std::strcmp( leaf.leaf, RL_RESOURCE_NAME ) == 0 )
   {
     b.kind = slot_binding_kind::direct;
-    b.direct = direct_id::maelstrom;
+    b.direct = direct_id::resource;
+    b.resource = rl_spec_resource();
     return b;
   }
   if ( std::strcmp( leaf.leaf, "raid_event_next_in" ) == 0 )
@@ -1831,46 +1879,33 @@ slot_binding resolve_scalar_leaf( const rl_leaf_desc& leaf )
   // binds to the identical direct_id as its magnitude sibling -- the plain parent name (no
   // suffix) keeps binding the magnitude row exactly as before.
   const std::string hits_dispatch_name = hits_switch_parent_name( leaf.leaf );
-  if ( hits_dispatch_name == "hits.chain_lightning" )
+  // Phase 268 plan 04 (G268-7, FORK-04): every `hits.<member>` scalar binds through the header's RL_HIT_PROVIDERS and the acting
+  // player's class plugin. The row names the provider (spelled <class>.<name>); the plugin maps it to its reading. A provider
+  // the plugin does not have is refused here, at bind, with the registry id, the leaf and the provider. A hits leaf with no
+  // provider row keeps the old behaviour (falls through, ends unresolved; the caller decides what that means).
+  for ( std::size_t k = 0; k < RL_HIT_PROVIDER_COUNT; ++k )
   {
+    const rl_hit_provider& row = RL_HIT_PROVIDERS[ k ];
+    if ( hits_dispatch_name != std::string( row.family ) + "." + row.member )
+      continue;
+    const rl_class_plugin& plugin = rl_class_plugin_for( p );
+    const rl_class_hit_provider* provider = rl_class_hit_provider_find( plugin, row.provider );
+    if ( provider == nullptr )
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::resolve_scalar_leaf: registry '{}' scalar leaf '{}' names hit provider '{}', which the class plugin '{}' "
+          "of player '{}' does not provide",
+          RL_REGISTRY_ID, leaf.leaf, row.provider, plugin.class_name, p->name() ) );
     b.kind = slot_binding_kind::direct;
-    b.direct = direct_id::hits_chain_lightning;
-    return b;
-  }
-  if ( hits_dispatch_name == "hits.tempest" )
-  {
-    b.kind = slot_binding_kind::direct;
-    b.direct = direct_id::hits_tempest;
-    return b;
-  }
-  if ( hits_dispatch_name == "hits.crash_lightning" )
-  {
-    b.kind = slot_binding_kind::direct;
-    b.direct = direct_id::hits_crash_lightning;
-    return b;
-  }
-  if ( hits_dispatch_name == "hits.lava_lash.flame_shock_spread" )
-  {
-    b.kind = slot_binding_kind::direct;
-    b.direct = direct_id::hits_lava_lash_flame_shock_spread;
-    return b;
-  }
-  if ( hits_dispatch_name == "hits.voltaic_blaze.cleave" )
-  {
-    b.kind = slot_binding_kind::direct;
-    b.direct = direct_id::hits_voltaic_blaze_cleave;
-    return b;
-  }
-  if ( hits_dispatch_name == "hits.voltaic_blaze.new_flame_shocks" )
-  {
-    b.kind = slot_binding_kind::direct;
-    b.direct = direct_id::hits_voltaic_blaze_new_flame_shocks;
-    return b;
-  }
-  if ( hits_dispatch_name == "hits.fire_nova" )
-  {
-    b.kind = slot_binding_kind::direct;
-    b.direct = direct_id::hits_fire_nova;
+    switch ( provider->reading )
+    {
+      case rl_hit_reading::chain_lightning:                  b.direct = direct_id::hits_chain_lightning; break;
+      case rl_hit_reading::tempest:                          b.direct = direct_id::hits_tempest; break;
+      case rl_hit_reading::crash_lightning:                  b.direct = direct_id::hits_crash_lightning; break;
+      case rl_hit_reading::lava_lash_flame_shock_spread:     b.direct = direct_id::hits_lava_lash_flame_shock_spread; break;
+      case rl_hit_reading::voltaic_blaze_cleave:             b.direct = direct_id::hits_voltaic_blaze_cleave; break;
+      case rl_hit_reading::voltaic_blaze_new_flame_shocks:   b.direct = direct_id::hits_voltaic_blaze_new_flame_shocks; break;
+      case rl_hit_reading::fire_nova:                        b.direct = direct_id::hits_fire_nova; break;
+    }
     return b;
   }
   // 260914-rbp Task 1's R14 (crash_lightning_next_expiry/crash_lightning_stack_seconds, two
@@ -2028,11 +2063,11 @@ slot_binding resolve_action_expression_leaf( action_t* action, const std::string
 // `cooldown.<name>.full_recharge_time` is not a real generic-cooldown
 // expression (verified empirically) and a cooldown NAME does not always
 // equal its action's name -- in this schema `full_recharge_time` appears
-// ONLY on the `strike` member (the shared Stormstrike/Windstrike cooldown
-// row), whose real action is named "stormstrike", not "strike"; that one
-// mapping is hardcoded here rather than assumed identical to every other
-// cooldown member (which never need it -- no OTHER member in this census
-// declares a `full_recharge_time` leaf).
+// ONLY on enhancement's shared Stormstrike/Windstrike cooldown row, whose
+// real action has a different name than the row; that mapping is the header's
+// RL_COOLDOWN_ROW_ACTION table (plan 268-04, G268-7) rather than assumed
+// identical to every other cooldown member (a row with no alias maps to
+// itself).
 //
 // Deliberately does NOT gate `charges_fractional` on
 // `p->resources.is_active(RESOURCE_MAELSTROM)` (the SC-5 byte-neutrality
@@ -2046,7 +2081,15 @@ slot_binding resolve_cooldown_leaf( player_t* p, cooldown_t* cd, const std::stri
 {
   if ( std::strcmp( leaf.leaf, "full_recharge_time" ) == 0 )
   {
-    const std::string action_token = ( cooldown_token == "strike" ) ? "stormstrike" : cooldown_token;
+    // Phase 268 plan 04 (G268-7): the cooldown-row to action alias comes from the header (RL_COOLDOWN_ROW_ACTION); a row with no
+    // alias maps to itself.
+    std::string action_token = cooldown_token;
+    for ( std::size_t k = 0; k < RL_COOLDOWN_ROW_ACTION_COUNT; ++k )
+      if ( cooldown_token == RL_COOLDOWN_ROW_ACTION[ k ].cooldown_row )
+      {
+        action_token = RL_COOLDOWN_ROW_ACTION[ k ].action_token;
+        break;
+      }
     return resolve_action_expression_leaf( p->find_action( action_token ), "full_recharge_time", leaf, table );
   }
 
@@ -2729,7 +2772,7 @@ const slot_table& bind_slots( player_t* p )
               binding.constant_value = effective ? 1.0 : 0.0;
               break;
             }
-            binding = resolve_scalar_leaf( leaf );
+            binding = resolve_scalar_leaf( p, leaf );
             // 260914-rbp Task 2c (ME-4 fork half): an `unresolved` binding for a `scalars`-family
             // leaf is FATAL, by name -- unlike a family with a legitimate "not present on this
             // profile" absence path (deck/pets/items), every `scalars` leaf name is a literal
@@ -3343,11 +3386,12 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
               raw = s.t;
               status = lookup_status::present;
               break;
-            case direct_id::maelstrom:
+            case direct_id::resource:
               // Read directly off the engine, not off rl_state_t -- there
               // is no POD field for it (see resolve_scalar_leaf's own
-              // comment on why that gate is unnecessary here).
-              raw = p->resources.current[ RESOURCE_MAELSTROM ];
+              // comment on why that gate is unnecessary here). The resource
+              // was bound once, at resolve_scalar_leaf (plan 268-04).
+              raw = p->resources.current[ b.resource ];
               status = lookup_status::present;
               break;
 
@@ -4269,6 +4313,36 @@ double clamp_anchored_wait_pre_floor( const rl_state_t& s, double raw )
     seconds_pre_floor = s.raid_event_next_in;
   return seconds_pre_floor;
 }
+
+// Phase 268 plan 04 (D5, FORK-04): the RL_WAIT_DEFS row of each wait action, matched once per process by the action's label (the
+// header contract pins every row's label to a wait row of RL_ACTIONS). Built from constexpr header data only, so it is not a
+// per-player cache and needs no clearing. nullptr for a non-wait action or a wait with no row.
+//
+// resource_threshold wait semantics (the one place they are written down; Phase 267's mask.py mirrors them): a wait whose
+// RL_ACTIONS anchor kind is `none` and whose RL_WAIT_DEFS row is `resource_threshold` is legal only while the bound spec
+// resource (rl_spec_resource()) is strictly below the row's threshold, on top of every rule a plain next-event wait already has
+// (foreground boundary, illegal-at-buff-cap), and it lasts exactly as long as wait_next_event (build_wait's none-anchor branch,
+// which this reuses unchanged). A wait whose anchor kind is not `none` keeps its legacy anchor whatever its row says
+// (enhancement's wait_maelstrom stays the earlier of the two swings, research Pitfall 12).
+const rl_wait_def* wait_def_for_action( std::size_t i )
+{
+  static const std::array<const rl_wait_def*, RL_ACTION_DIM> table = []() {
+    std::array<const rl_wait_def*, RL_ACTION_DIM> t{};
+    for ( std::size_t a = 0; a < RL_ACTION_DIM; ++a )
+    {
+      if ( RL_ACTIONS[ a ].kind != rl_action_kind::wait || RL_ACTIONS[ a ].label == nullptr )
+        continue;
+      for ( std::size_t k = 0; k < RL_WAIT_DEF_COUNT; ++k )
+        if ( std::strcmp( RL_WAIT_DEFS[ k ].label, RL_ACTIONS[ a ].label ) == 0 )
+        {
+          t[ a ] = &RL_WAIT_DEFS[ k ];
+          break;
+        }
+    }
+    return t;
+  }();
+  return table[ i ];
+}
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -4329,6 +4403,13 @@ void build_mask( const rl_state_t& s, std::uint8_t out_mask[ RL_ACTION_DIM ] )
       }
       if ( a.wait_anchor.kind == rl_wait_anchor_kind::none )
       {
+        // Phase 268 plan 04 (D5): a resource_threshold row on an unanchored wait adds one rule (see wait_def_for_action above).
+        const rl_wait_def* def = wait_def_for_action( i );
+        if ( def != nullptr && def->kind == rl_wait_kind::resource_threshold )
+        {
+          out_mask[ i ] = ( s.has_resource_current && s.resource_current < def->threshold ) ? 1 : 0;
+          continue;
+        }
         out_mask[ i ] = 1;
         continue;
       }

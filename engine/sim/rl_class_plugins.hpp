@@ -7,8 +7,8 @@
 // rl_class_plugin_for() selects from player_t::type. The generic rules (current_target, shortest_ttd)
 // need no plugin and work for every class.
 //
-// Plan 268-03 added the per-candidate class-field hooks and the geometry-fact table; plans 268-04 and 268-05 append the
-// hit-provider table to rl_class_plugin.
+// Plan 268-03 added the per-candidate class-field hooks and the geometry-fact table; plan 268-04 appended the hit-provider
+// table (the shaman rows); plan 268-05 adds the warrior rows.
 // ==========================================================================
 
 #pragma once
@@ -48,6 +48,27 @@ using rl_fill_class_fields_fn = void ( * )( const action_t* a, player_t* candida
 using rl_fill_scoring_fields_fn = void ( * )( const action_t* a, player_t* candidate, rl_target_select::preference_fn pref,
                                               rl_target_select::enemy_fact& fact );
 
+// Plan 268-04 (G268-7, FORK-04): a hit-count provider. A spec header's RL_HIT_PROVIDERS row names a provider spelled
+// "<class>.<name>"; the class plugin that holds that name says which reading computes it. The readings are computed by
+// rl_policy_obs.cpp (they need the per-decision memo that file owns); this table is what makes a provider reachable only through
+// its own class's plugin. Plan 268-05 appends the warrior readings.
+enum class rl_hit_reading
+{
+  chain_lightning,
+  tempest,
+  crash_lightning,
+  lava_lash_flame_shock_spread,
+  voltaic_blaze_cleave,
+  voltaic_blaze_new_flame_shocks,
+  fire_nova,
+};
+
+struct rl_class_hit_provider
+{
+  const char*     provider;   // "<class>.<name>", exactly as a header's RL_HIT_PROVIDERS spells it
+  rl_hit_reading  reading;
+};
+
 struct rl_class_plugin
 {
   const char*                class_name;
@@ -57,6 +78,8 @@ struct rl_class_plugin
   rl_fill_scoring_fields_fn  fill_scoring_fields;  // nullable
   const rl_geometry_fact*    geometry_facts;       // may point at a one-row null sentinel when n_geometry_facts is 0
   std::size_t                n_geometry_facts;
+  const rl_class_hit_provider* hit_providers;      // may point at a one-row null sentinel when n_hit_providers is 0
+  std::size_t                n_hit_providers;
 };
 
 // The plugin for a player's class. Never null: a class without a plugin gets the generic one, whose
@@ -68,3 +91,6 @@ rule_resolver_fn rl_class_rule_find( const rl_class_plugin& plugin, const char* 
 
 // The geometry fact the plugin serves under a feature name, or nullptr when it has none.
 const rl_geometry_fact* rl_class_geometry_find( const rl_class_plugin& plugin, const char* feature_name );
+
+// The hit provider the plugin holds under a provider name, or nullptr when the plugin has no such provider.
+const rl_class_hit_provider* rl_class_hit_provider_find( const rl_class_plugin& plugin, const char* provider_name );

@@ -572,7 +572,7 @@ void open_and_write_header( sim_t* sim )
     {
       if ( i != 0 )
         sidecar << ", ";
-      sidecar << "\"" << rl_proc::NAMES[ i ] << "\"";
+      sidecar << "\"" << RL_PROC_NAMES[ i ] << "\"";   // plan 268-04: the spec header names the procs (RL_PROC_NAME_COUNT == rl_proc::COUNT, pinned)
     }
     sidecar << "]}";
   }

@@ -39,6 +39,7 @@
 // `build_wait` read every one of them and are untouched by this change.
 
 #pragma once
+#include "sc_enums.hpp"
 #include "sim/rl_policy_constants_select.h"
 #include <cstddef>
 #include <cstdint>
@@ -139,6 +140,11 @@ struct rl_state_t
   double fight_remains        = 0.0;   bool has_fight_remains        = false;
   double raid_event_next_in   = 0.0;   bool has_raid_event_next_in   = false;
 
+  // Phase 268 plan 04 (G268-7, D5, FORK-04): the current value of the spec's own resource (RL_RESOURCE_NAME, parsed once by
+  // rl_spec_resource() below), filled in read_state(). build_mask's resource_threshold wait rule reads it; `has_` is false when
+  // the actor does not have that resource active.
+  double resource_current     = 0.0;   bool has_resource_current     = false;
+
   // The removed turn-legality predicate field (R6-27, 233.1-01) was here -- deleted with the
   // whole action.
 
@@ -172,6 +178,11 @@ struct rl_state_t
   const buff_reading*     find_buff( const char* name ) const;
   const cooldown_reading* find_cooldown( const char* name ) const;
 };
+
+// Phase 268 plan 04 (G268-7): the engine resource the spec header names (RL_RESOURCE_NAME), parsed once with
+// util::parse_resource_type. Throws sc_runtime_error naming RL_REGISTRY_ID and the name when the engine does not know the
+// name (RESOURCE_NONE), so a bad header is refused at the first bind, never read as an empty resource.
+resource_e rl_spec_resource();
 
 // 221-01 (ACT-02, Pattern 1) -- Stage 1, needs the engine (same tier as
 // read_state, which calls this to fill its two POD arrays above). Exists so
