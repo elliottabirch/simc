@@ -997,6 +997,12 @@ struct sim_t : private sc_thread_t
   // exactly one writer for the lifetime of the vector.
   bool rl_obs_timing = false;
   std::vector<long long> rl_obs_ns;
+  // Phase 268 (plan 268-05, G268-8). rl_credit_census=1 prints, at each fight's combat end, one JSON
+  // line per non-enemy player to stderr: the six credit streams (realised and expected), the fight's
+  // total realised damage, and the realised damage by action name for the orphan and background
+  // streams (sim_t::combat_end(), beside the translog close row). Pure observer: the only state it
+  // adds is a per-player map filled while this flag is on. Default off prints and counts nothing.
+  bool rl_credit_census = false;
   // P3b fork hook (simc-offline-evaluation-pipeline phase 116, 116-01) -
   // solver_control=<prefix> opens an additive request/reply FIFO pair at the
   // same execute_action() decision boundary as decision_dump=. Empty string

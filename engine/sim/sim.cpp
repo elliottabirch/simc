@@ -53,6 +53,7 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <map>
 #include <random>
 #include <sstream>
 #ifdef SC_WINDOWS
@@ -2427,6 +2428,46 @@ void sim_t::combat_end()
   // close row is written on BOTH transports and with neither (D-08).
   // No-op when rl_translog= is unset.
   rl_translog::record_close( this );
+  // Phase 268 (268-05, G268-8): opt-in credit census, one JSON line per non-enemy player (observer only).
+  if ( rl_credit_census )
+  {
+    auto by_action_json = []( const std::unordered_map<std::string, double>& m ) {
+      std::map<std::string, double> sorted( m.begin(), m.end() );
+      std::string out = "{";
+      bool first = true;
+      for ( const auto& kv : sorted )
+      {
+        if ( !( kv.second > 0.0 ) )
+          continue;
+        if ( !first )
+          out += ",";
+        first = false;
+        out += fmt::format( "\"{}\":{}", kv.first, kv.second );
+      }
+      return out + "}";
+    };
+    auto array_json = []( const double* v ) {
+      std::string out = "[";
+      for ( std::uint32_t i = 0; i < rl_credit::STREAM_COUNT; ++i )
+        out += fmt::format( "{}{}", i ? "," : "", v[ i ] );
+      return out + "]";
+    };
+    std::string names = "[";
+    for ( std::uint32_t i = 0; i < rl_credit::STREAM_COUNT; ++i )
+      names += fmt::format( "{}\"{}\"", i ? "," : "", rl_credit::NAMES[ i ] );
+    names += "]";
+    for ( player_t* p : player_no_pet_list )
+    {
+      if ( p->is_enemy() )
+        continue;
+      fmt::print( stderr,
+                  "{{\"rl_credit_census\":1,\"iteration\":{},\"actor\":\"{}\",\"streams\":{},\"real\":{},"
+                  "\"exp\":{},\"total_real\":{},\"orphan_by_action\":{},\"background_by_action\":{}}}\n",
+                  current_iteration, p->name(), names, array_json( p->rl_credit.real ), array_json( p->rl_credit.exp ),
+                  p->solver_damage_so_far, by_action_json( p->rl_orphan_damage_by_action ),
+                  by_action_json( p->rl_background_damage_by_action ) );
+    }
+  }
   // 261005-branch-teacher: a branch child closes its window here (no-op otherwise).
   solver_branch::on_combat_end( this );
 
@@ -4580,6 +4621,8 @@ void sim_t::create_options()
   // sim.hpp's rl_obs_timing/rl_obs_ns doc comment. Default false, zero
   // overhead when omitted.
   add_option( opt_bool( "rl_obs_timing", rl_obs_timing ) );
+  // Phase 268 (268-05, G268-8): see sim.hpp's rl_credit_census doc comment. Default off.
+  add_option( opt_bool( "rl_credit_census", rl_credit_census ) );
   add_option( opt_bool( "sequence_soft_fail", sequence_soft_fail ) );
   add_option( opt_bool( "sequence_queue_delay", sequence_queue_delay ) );
   // Deterministic proc-roll option (simc-offline-evaluation-pipeline phase

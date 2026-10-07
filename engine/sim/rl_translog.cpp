@@ -178,6 +178,11 @@ void rl_credit_route( player_t* p, rl_cause_t cause, std::uint64_t now_seq, doub
   if ( index == 5u && !expected && action_name != nullptr )
     p->rl_orphan_damage_by_action[ action_name ] += amount;
 
+  // Phase 268 (268-05, G268-8): the background-stream twin of the census above, counted only while
+  // rl_credit_census=1 (observer only: nothing reads it during play).
+  if ( index == 4u && !expected && action_name != nullptr && p->sim->rl_credit_census )
+    p->rl_background_damage_by_action[ action_name ] += amount;
+
   // tstl-sylvanas quick task 260918-atr, stage F1: the .attr sidecar's own-credit accumulator.
   // Mirrors the class predicate above for indices {0,1,2,3} (own_cast/tail_cast/own_dot/
   // tail_dot -- never {4,5}, background/orphan), but keyed by the CAUSING decision's own
