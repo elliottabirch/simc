@@ -154,6 +154,9 @@ sim/decision_dump.hpp
 sim/solver_control.hpp
 sim/rl_policy.hpp
 sim/rl_policy_constants.h
+sim/rl_policy_constants_select.h
+sim/rl_policy_constants_ca.enhancement.h
+sim/rl_header_contract.hpp
 sim/rl_proc_counters.hpp
 sim/rl_credit.hpp
 sim/rl_target_select.hpp

@@ -305,7 +305,7 @@
 #pragma once
 
 #include "sim/rl_credit.hpp"
-#include "sim/rl_policy_constants.h"
+#include "sim/rl_policy_constants_select.h"
 #include "sim/rl_proc_counters.hpp"
 
 #include "util/io.hpp"
