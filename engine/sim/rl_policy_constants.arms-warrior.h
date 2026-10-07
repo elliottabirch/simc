@@ -20,7 +20,7 @@
 
 // ---- Fixed structural preamble (structure, not registry data) ----
 
-enum class rl_family { player_buffs, cooldowns, target_facts, stats, swing_cast, raid_events, legality, scalars };
+enum class rl_family { player_buffs, cooldowns, target_facts, shapes, action_leaves, deck, stats, swing_cast, position, pets, items, raid_events, sim_auras, legality, proc_chances, scalars };
 enum class rl_family_kind { buff, cooldown, enemy_slot, action_expression, expression, direct, legality, proc_chance, target_fact, shape_fact, scalar };
 enum class rl_kind { k_int, k_float, k_seconds, k_bucket };
 enum class rl_action_kind { cast, wait };
