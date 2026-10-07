@@ -989,6 +989,16 @@ public:
 
 namespace
 {  // UNNAMED NAMESPACE
+// Phase 268 (268-05, G268-8, FORK-05): the cause of whatever the player is executing right now, promoted
+// to its PROC_OF_* class, for a delayed event to carry and re-push when its damage finally lands (the
+// sc_shaman.cpp lightning-rod / stormflurry idiom). Called while the triggering action's own dispatch frame
+// is still on the cause stack; an empty stack gives the default (orphan) cause. Pure bookkeeping: reads the
+// stack, touches no roll, schedule or ordering.
+inline rl_cause_t warrior_rl_capture_cause( const player_t* p )
+{
+  return p->rl_cause_stack.empty() ? rl_cause_t{} : rl_credit::promote( p->rl_cause_stack.back().cause );
+}
+
 // Template for common warrior action code. See priest_action_t.
 template <class Base>
 struct warrior_action_t : public parse_action_effects_t<Base>
@@ -1596,9 +1606,11 @@ public:
   {
     action_t* action;
     player_t* target;
+    // Phase 268 (268-05, G268-8): the cause active when the delay was scheduled (Rampage's later hits).
+    rl_cause_t rl_captured_cause;
 
     delayed_execute_event_t( warrior_t* p, action_t* a, player_t* t, timespan_t delay )
-      : event_t( *p->sim, delay ), action( a ), target( t )
+      : event_t( *p->sim, delay ), action( a ), target( t ), rl_captured_cause( warrior_rl_capture_cause( p ) )
     {
       assert( action->background );
     }
@@ -1612,6 +1624,7 @@ public:
     {
       if ( !target->is_sleeping() )
       {
+        rl_cause_scope_t rl_cause_guard( action->player, rl_captured_cause );
         action->set_target( target );
         action->execute();
       }
@@ -3309,6 +3322,16 @@ struct bladestorm_t : public warrior_attack_t
       make_event( sim, [ d ] { d->cancel(); } );
       return;
     }
+
+    // Phase 268 (268-05, G268-8): every strike this tick fires (the unhinged Mortal Strike / Bloodthirst
+    // and the main-hand / off-hand strikes below) is credited to the Bladestorm press that started the
+    // dot, as a dot tick, whichever path calls tick() (a scheduled tick, the final partial tick, tick zero).
+    // Same stamp the generic dot tick scope builds (dot.cpp dot_tick_event_t::execute()).
+    rl_cause_scope_t rl_cause_guard(
+        p(),
+        rl_cause_t{ d->state->rl_cause_seq, rl_credit::dot_tick_class( d->state->rl_cause_class ),
+                    d->state->rl_cause_press, d->state->rl_cause_launch },
+        /*owner=*/nullptr, "tick", this );
 
     warrior_attack_t::tick( d );
     // As of TWW, since bladestorm has an initial tick, unhinged procs on odd ticks
@@ -5821,6 +5844,11 @@ struct ravager_tick_t : public warrior_attack_t
 {
   double rage_from_ravager;
   timespan_t ravaged_debuff_duration;
+  // Phase 268 (268-05, G268-8): the cause of the Ravager press, captured by ravager_t::execute() and
+  // re-pushed around every pulse (the pulses fire from ground_aoe_event_t events with an empty cause
+  // stack). One slot per tick action: a new press replaces it, and Ravager's duration is shorter than
+  // its cooldown, so pulses of two presses never overlap.
+  rl_cause_t rl_captured_cause;
   ravager_tick_t( warrior_t* p, util::string_view name, timespan_t ravaged_debuff_duration )
     : warrior_attack_t( name, p, p->find_spell( 156287 ) ),
       rage_from_ravager( p->specialization() == WARRIOR_PROTECTION ? p->find_spell( 334934 )->effectN( 1 ).resource( RESOURCE_RAGE ) : 0 ),
@@ -5847,6 +5875,8 @@ struct ravager_tick_t : public warrior_attack_t
 
   void execute() override
   {
+    // Pulse: credit the damage to the Ravager press that created the ground effect.
+    rl_cause_scope_t rl_cause_guard( p(), rl_captured_cause );
     warrior_attack_t::execute();
 
     if ( execute_state->n_targets > 0 )
@@ -5945,6 +5975,9 @@ struct ravager_t : public warrior_attack_t
   void execute() override
   {
     warrior_attack_t::execute();
+
+    // Phase 268 (268-05, G268-8): this press's dispatch frame is still on the cause stack here.
+    ravager->rl_captured_cause = warrior_rl_capture_cause( p() );
 
     if ( sim->dbc->wowv() < wowv_t( 12, 1, 0 ) )
     {
@@ -6635,12 +6668,14 @@ struct fury_whirlwind_parent_t : public warrior_attack_t
     if ( oh_first_attack )
       oh_first_attack->execute_on_target( target );
 
-    make_event( *sim, timespan_t::from_millis(data().effectN( 6 ).misc_value1()), [ this ]() { mh_other_attack->execute_on_target( target ); } );
-    make_event( *sim, timespan_t::from_millis(data().effectN( 8 ).misc_value1()), [ this ]() { mh_other_attack->execute_on_target( target ); } );
+    // Phase 268 (268-05, G268-8): the follow-up strikes carry this press's cause (captured by value).
+    const rl_cause_t rl_c = warrior_rl_capture_cause( p() );
+    make_event( *sim, timespan_t::from_millis(data().effectN( 6 ).misc_value1()), [ this, rl_c ]() { rl_cause_scope_t rl_cause_guard( player, rl_c ); mh_other_attack->execute_on_target( target ); } );
+    make_event( *sim, timespan_t::from_millis(data().effectN( 8 ).misc_value1()), [ this, rl_c ]() { rl_cause_scope_t rl_cause_guard( player, rl_c ); mh_other_attack->execute_on_target( target ); } );
     if ( oh_other_attack )
     {
-      make_event( *sim, timespan_t::from_millis(data().effectN( 7 ).misc_value1()), [ this ]() { oh_other_attack->execute_on_target( target ); } );
-      make_event( *sim, timespan_t::from_millis(data().effectN( 9 ).misc_value1()), [ this ]() { oh_other_attack->execute_on_target( target ); } );
+      make_event( *sim, timespan_t::from_millis(data().effectN( 7 ).misc_value1()), [ this, rl_c ]() { rl_cause_scope_t rl_cause_guard( player, rl_c ); oh_other_attack->execute_on_target( target ); } );
+      make_event( *sim, timespan_t::from_millis(data().effectN( 9 ).misc_value1()), [ this, rl_c ]() { rl_cause_scope_t rl_cause_guard( player, rl_c ); oh_other_attack->execute_on_target( target ); } );
     }
   }
 
@@ -6749,8 +6784,10 @@ struct arms_whirlwind_parent_t : public warrior_attack_t
     if ( p() -> talents.arms.fervor_of_battle.ok() && first_attack->num_targets_hit >= p() -> talents.arms.fervor_of_battle -> effectN( 1 ).base_value() )
       fervor_slam->execute_on_target( target );
 
-    make_event( *sim, timespan_t::from_millis(data().effectN( 2 ).misc_value1()), [ this ]() { second_attack->execute_on_target( target ); } );
-    make_event( *sim, timespan_t::from_millis(data().effectN( 3 ).misc_value1()), [ this ]() { third_attack->execute_on_target( target ); } );
+    // Phase 268 (268-05, G268-8): the follow-up strikes carry this press's cause (captured by value).
+    const rl_cause_t rl_c = warrior_rl_capture_cause( p() );
+    make_event( *sim, timespan_t::from_millis(data().effectN( 2 ).misc_value1()), [ this, rl_c ]() { rl_cause_scope_t rl_cause_guard( player, rl_c ); second_attack->execute_on_target( target ); } );
+    make_event( *sim, timespan_t::from_millis(data().effectN( 3 ).misc_value1()), [ this, rl_c ]() { rl_cause_scope_t rl_cause_guard( player, rl_c ); third_attack->execute_on_target( target ); } );
   }
 
   bool ready() override

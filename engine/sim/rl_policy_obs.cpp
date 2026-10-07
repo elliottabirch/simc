@@ -84,6 +84,11 @@ struct hits_action_handles_t
   action_t* lava_lash           = nullptr;
   action_t* voltaic_blaze       = nullptr;
   action_t* fire_nova_explosion = nullptr;
+  // Plan 268-05 (D7): the warrior hit providers' handles, found once by name; null for a class without them.
+  action_t* warrior_cleave      = nullptr;
+  action_t* warrior_whirlwind   = nullptr;
+  action_t* warrior_mortal_strike = nullptr;
+  buff_t*   warrior_sweeping_strikes_buff = nullptr;
 };
 std::unordered_map<const player_t*, hits_action_handles_t> g_hits_action_handle_cache;
 
@@ -99,6 +104,10 @@ const hits_action_handles_t& resolve_hits_action_handles( const player_t* p )
   handles.lava_lash           = p->find_action( "lava_lash" );
   handles.voltaic_blaze       = p->find_action( "voltaic_blaze" );
   handles.fire_nova_explosion = p->find_action( "fire_nova_explosion" );
+  handles.warrior_cleave      = p->find_action( "cleave" );
+  handles.warrior_whirlwind   = p->find_action( "whirlwind" );
+  handles.warrior_mortal_strike = p->find_action( "mortal_strike" );
+  handles.warrior_sweeping_strikes_buff = buff_t::find( const_cast<player_t*>( p ), "sweeping_strikes" );
   return g_hits_action_handle_cache.emplace( p, handles ).first->second;
 }
 
@@ -1346,6 +1355,8 @@ enum class direct_id
   hits_chain_lightning, hits_tempest, hits_crash_lightning,
   hits_lava_lash_flame_shock_spread, hits_voltaic_blaze_cleave, hits_voltaic_blaze_new_flame_shocks,
   hits_fire_nova,
+  // Plan 268-05 (D7): the arms hit-count providers, appended after the seven above so no enumerator value shifts.
+  hits_warrior_cleave, hits_warrior_whirlwind, hits_warrior_sweeping_strikes,
   // 261002-8rs: the Lashing Flames carrier count, appended LAST so no existing enumerator value shifts.
   fw_lashing_flames_carrier_count
   // 260914-rbp Task 1's R14 (crash_lightning_next_expiry/crash_lightning_stack_seconds, two
@@ -1905,6 +1916,9 @@ slot_binding resolve_scalar_leaf( const player_t* p, const rl_leaf_desc& leaf )
       case rl_hit_reading::voltaic_blaze_cleave:             b.direct = direct_id::hits_voltaic_blaze_cleave; break;
       case rl_hit_reading::voltaic_blaze_new_flame_shocks:   b.direct = direct_id::hits_voltaic_blaze_new_flame_shocks; break;
       case rl_hit_reading::fire_nova:                        b.direct = direct_id::hits_fire_nova; break;
+      case rl_hit_reading::warrior_cleave:                   b.direct = direct_id::hits_warrior_cleave; break;
+      case rl_hit_reading::warrior_whirlwind:                b.direct = direct_id::hits_warrior_whirlwind; break;
+      case rl_hit_reading::warrior_sweeping_strikes:         b.direct = direct_id::hits_warrior_sweeping_strikes; break;
     }
     return b;
   }
@@ -3176,6 +3190,10 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
     double voltaic_blaze_cleave           = 0.0;
     double voltaic_blaze_new_flame_shocks = 0.0;
     double fire_nova                      = 0.0;
+    // Plan 268-05 (D7): the arms providers (formulas at the computation below).
+    double warrior_cleave                 = 0.0;
+    double warrior_whirlwind              = 0.0;
+    double warrior_sweeping_strikes       = 0.0;
   };
   bool hits_values_computed = false;
   hits_values_t hits_values;
@@ -3260,6 +3278,73 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
           sum += static_cast<double>( std::min( cap, hits_from_this_carrier ) );
         }
         hits_values.fire_nova = sum;
+      }
+    }
+
+    // Plan 268-05 (D7, FORK-04): the arms hit-count providers. Side-effect free: only n_targets(), radius, range, distances and
+    // buff check() are read; no target_list(), no execute, no ready(), no roll, no schedule. A class without the named action
+    // reads 0 (the shaman providers' missing value). "Live enemy" is the file's own test: awake, an enemy, and
+    // rl_counts_as_enemy (not a sheet-fight hazard or an invulnerable sheet-fight boss).
+    {
+      const hits_action_handles_t& wh = resolve_hits_action_handles( p );
+      auto live_enemy = []( const player_t* t ) {
+        return t != nullptr && !t->is_sleeping() && t->is_enemy() && rl_target_select::rl_counts_as_enemy( t );
+      };
+      player_t* current_target = p->target;
+
+      // hits.cleave: live enemies within Cleave's radius of the current target, the target itself included, capped at Cleave's
+      // n_targets() when that is positive; 0 with no live target.
+      if ( wh.warrior_cleave && live_enemy( current_target ) )
+      {
+        int hits = rl_target_select::count_hits_within_radius( wh.warrior_cleave->player, current_target, wh.warrior_cleave->radius );
+        const int cap = wh.warrior_cleave->n_targets();
+        if ( cap > 0 )
+          hits = std::min( cap, hits );
+        hits_values.warrior_cleave = static_cast<double>( hits );
+      }
+
+      // hits.whirlwind: live enemies within Whirlwind's damage radius (the action's radius, else 8 yd) of the player (plus each
+      // enemy's combat reach), capped at Whirlwind's n_targets() when that is positive.
+      if ( wh.warrior_whirlwind )
+      {
+        const double radius = wh.warrior_whirlwind->radius > 0.0 ? wh.warrior_whirlwind->radius : 8.0;
+        int hits = 0;
+        for ( player_t* t : p->sim->target_non_sleeping_list )
+        {
+          if ( live_enemy( t ) && p->get_player_distance( *t ) <= radius + t->combat_reach )
+            ++hits;
+        }
+        const int cap = wh.warrior_whirlwind->n_targets();
+        if ( cap > 0 )
+          hits = std::min( cap, hits );
+        hits_values.warrior_whirlwind = static_cast<double>( hits );
+      }
+
+      // hits.sweeping_strikes: with the Sweeping Strikes buff up, the smaller of Mortal Strike's n_targets() (which the warrior
+      // module widens to 1 + the buff's extra targets while the buff is up) and the live enemies within Mortal Strike's reach
+      // (its range, 5 yd when the action has none, plus each enemy's combat reach) of the player; with the buff down, 1 when the
+      // current target is a live enemy in that reach, else 0.
+      if ( wh.warrior_mortal_strike )
+      {
+        const double reach = wh.warrior_mortal_strike->range > 0.0 ? wh.warrior_mortal_strike->range : 5.0;
+        const bool   ss_up = wh.warrior_sweeping_strikes_buff != nullptr && wh.warrior_sweeping_strikes_buff->check() > 0;
+        if ( ss_up )
+        {
+          int hits = 0;
+          for ( player_t* t : p->sim->target_non_sleeping_list )
+          {
+            if ( live_enemy( t ) && p->get_player_distance( *t ) <= reach + t->combat_reach )
+              ++hits;
+          }
+          const int cap = wh.warrior_mortal_strike->n_targets();
+          if ( cap > 0 )
+            hits = std::min( cap, hits );
+          hits_values.warrior_sweeping_strikes = static_cast<double>( hits );
+        }
+        else if ( live_enemy( current_target ) && p->get_player_distance( *current_target ) <= reach + current_target->combat_reach )
+        {
+          hits_values.warrior_sweeping_strikes = 1.0;
+        }
       }
     }
 
@@ -3821,6 +3906,20 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
             // on this build).
             case direct_id::hits_fire_nova:
               raw = get_hits_values().fire_nova;
+              status = lookup_status::present;
+              break;
+
+            // Plan 268-05 (D7): the arms providers, read from the same per-decision memo.
+            case direct_id::hits_warrior_cleave:
+              raw = get_hits_values().warrior_cleave;
+              status = lookup_status::present;
+              break;
+            case direct_id::hits_warrior_whirlwind:
+              raw = get_hits_values().warrior_whirlwind;
+              status = lookup_status::present;
+              break;
+            case direct_id::hits_warrior_sweeping_strikes:
+              raw = get_hits_values().warrior_sweeping_strikes;
               status = lookup_status::present;
               break;
 

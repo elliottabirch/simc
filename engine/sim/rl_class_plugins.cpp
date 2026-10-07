@@ -177,6 +177,14 @@ const rl_class_hit_provider SHAMAN_HIT_PROVIDERS[] = {
   { "shaman.fire_nova", rl_hit_reading::fire_nova },
 };
 
+// Plan 268-05 (D7, FORK-04): the arms hit-count providers. The readings live in rl_policy_obs.cpp (they share that file's per-decision
+// memo); formulas are stated in the plan 268-05 SUMMARY and in the comments at hits_values_t there.
+const rl_class_hit_provider WARRIOR_HIT_PROVIDERS[] = {
+  { "warrior.cleave", rl_hit_reading::warrior_cleave },
+  { "warrior.whirlwind", rl_hit_reading::warrior_whirlwind },
+  { "warrior.sweeping_strikes", rl_hit_reading::warrior_sweeping_strikes },
+};
+
 // A zero-row table holds one all-null sentinel row (a zero-length array is not valid C++); readers
 // iterate by n_rules / n_geometry_facts, never by array size.
 const rl_class_rule    NO_RULES[]    = { { nullptr, nullptr } };
@@ -192,8 +200,16 @@ const rl_class_plugin SHAMAN_PLUGIN = { "shaman",
                                         sizeof( SHAMAN_GEOMETRY ) / sizeof( SHAMAN_GEOMETRY[ 0 ] ),
                                         SHAMAN_HIT_PROVIDERS,
                                         sizeof( SHAMAN_HIT_PROVIDERS ) / sizeof( SHAMAN_HIT_PROVIDERS[ 0 ] ) };
-// Arms' aiming rules and facts are all generic or declared; the warrior hit providers join this entry in plan 268-05.
-const rl_class_plugin WARRIOR_PLUGIN = { "warrior", NO_RULES, 0, nullptr, nullptr, NO_GEOMETRY, 0, NO_HIT_PROVIDERS, 0 };
+// Arms' aiming rules and facts are all generic or declared; plan 268-05 added the three warrior hit providers.
+const rl_class_plugin WARRIOR_PLUGIN = { "warrior",
+                                         NO_RULES,
+                                         0,
+                                         nullptr,
+                                         nullptr,
+                                         NO_GEOMETRY,
+                                         0,
+                                         WARRIOR_HIT_PROVIDERS,
+                                         sizeof( WARRIOR_HIT_PROVIDERS ) / sizeof( WARRIOR_HIT_PROVIDERS[ 0 ] ) };
 const rl_class_plugin GENERIC_PLUGIN = { "generic", NO_RULES, 0, nullptr, nullptr, NO_GEOMETRY, 0, NO_HIT_PROVIDERS, 0 };
 
 }  // namespace
