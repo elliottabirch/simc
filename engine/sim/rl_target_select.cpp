@@ -766,22 +766,34 @@ double read_declared_fact( const rl_declared_fact& fact, player_t* source, playe
 {
   switch ( fact.kind )
   {
+    // WR-04 (268 fix pass): names collide between a dot object and a debuff (lightning_rod is an enhancement action and a
+    // debuff; arms colossus_smash is an action and the target debuff). find_dot keeps returning an expired dot object, so a
+    // plain "dot found, return its remains" read answered 0 for a live debuff of the same name. Each kind therefore prefers
+    // its own object type while that object is ACTIVE, and falls through to the other type when it is not. The float layout
+    // of the declared facts is unchanged.
     case rl_fact_kind::dot_remaining:
     {
-      if ( dot_t* d = candidate->find_dot( fact.name, source ) )
-        return d->remains().total_seconds();
+      double       dot_seconds = 0.0;
+      const dot_t* d           = candidate->find_dot( fact.name, source );
+      if ( d != nullptr )
+        dot_seconds = d->remains().total_seconds();
+      if ( dot_seconds > 0.0 )
+        return dot_seconds;
       if ( buff_t* b = buff_t::find( candidate, fact.name, source ) )
         return b->remains().total_seconds();
-      return 0.0;
+      return dot_seconds;
     }
     case rl_fact_kind::debuff_stacks:
     {
       // check(), never up(): up() mutates benefit bookkeeping (see rl_policy_obs.cpp's note on buff reads).
+      double stacks = 0.0;
       if ( buff_t* b = buff_t::find( candidate, fact.name, source ) )
-        return static_cast<double>( b->check() );
+        stacks = static_cast<double>( b->check() );
+      if ( stacks > 0.0 )
+        return stacks;
       if ( dot_t* d = candidate->find_dot( fact.name, source ) )
         return static_cast<double>( d->current_stack() );
-      return 0.0;
+      return stacks;
     }
   }
   return 0.0;
@@ -1730,6 +1742,13 @@ void reset( sim_t* )
   // read a STALE geometry from an unrelated earlier actor. Cleared every iteration, same as the
   // five tables above.
   g_vb_lava_lash_geometry_cache.clear();
+  // Phase 268 fix pass (WR-01): the per-actor binding cache holds raw action_t* pointers (the chooser probe, the melee
+  // action and the by_action keys) that point into the actor's own action list, so an entry must never outlive its actor.
+  // A later iteration's player_t* can reuse a torn-down actor's address; clearing here (the same place and for the same
+  // reason as the geometry cache above) makes the next lookup rebuild from the live actor. The rebuild is a handful of
+  // find_action calls per actor per iteration, off the per-decision path. g_aim_fact_gate_cache copies only the
+  // feature_sources value table (indices and plain function pointers, no action pointer), so it does not share this hazard.
+  g_actor_binding_cache.clear();
   // 260914-rbp Task 2c (ADD-2): the sibling per-actor find_action() handle cache
   // rl_policy_obs.cpp owns (a DIFFERENT translation unit) -- same stale-address hazard, same
   // per-iteration clear, routed through this file's own reset() since sim.cpp's sim_t::reset()

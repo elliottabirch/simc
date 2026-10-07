@@ -1001,6 +1001,20 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       bool any_legal = false;
       for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
         any_legal = any_legal || ( mask[ i ] != 0 );
+      // Phase 268 fix pass (WR-05, ruling G268-11): at an off-GCD / cast-while-casting boundary build_mask makes every
+      // wait illegal (R1), so a spec whose casts are all unavailable there (arms) legitimately has NOTHING legal. That
+      // is a decline, not an error: answer it with the protocol's no-op exactly as the FIFO path does for a "noop"
+      // reply (nothing executes, the pending-wait fields stay clear, the dump reports solver_reply_type "noop").
+      // Only a FOREGROUND boundary, where the unanchored wait is always legal, keeps the fail-closed abort below.
+      if ( !any_legal && !foreground )
+      {
+        sim->solver_control_last_reply_type = "noop";
+        sim->solver_control_has_requested_wait_sec = false;
+        sim->solver_control_last_requested_wait_sec = 0.0;
+        sim->solver_control_last_wait_anchor_label.clear();
+        sim->solver_control_last_wait_source.clear();
+        return nullptr;
+      }
       if ( !any_legal )
       {
         protocol_abort( fmt::format(

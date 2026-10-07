@@ -5,7 +5,8 @@
 // constants also compiles these pins. A header that lacks a C-A field, spells it with another type, or
 // violates a cross-table rule does not compile. Phase 270 swaps the arms header and enhancement's
 // supplement for Phase 267's generated headers; the same pins then prove that 267's output carries the
-// field set (and, for enhancement, today's values).
+// field set (and, for enhancement, today's values: every table the supplement carries is pinned by value below,
+// fix pass WR-02).
 // ==========================================================================
 
 #pragma once
@@ -73,6 +74,33 @@ constexpr bool declared_fact_slots_in_range()
   return true;
 }
 
+// WR-03 (268 fix pass): a slot shared by two declared facts makes the second row unreachable (build_feature_sources takes the
+// first row for a slot and resolve_target_fact_leaf the first name match), and nobody is told. Refuse it at compile time.
+constexpr bool declared_slots_unique()
+{
+  for ( std::size_t k = 0; k < RL_DECLARED_FACT_COUNT; ++k )
+    for ( std::size_t j = k + 1; j < RL_DECLARED_FACT_COUNT; ++j )
+      if ( RL_DECLARED_FACTS[ k ].slot == RL_DECLARED_FACTS[ j ].slot )
+        return false;
+  return true;
+}
+
+// WR-03: every targeted token has exactly one aiming rule. No row would make preference_for fall back to current_target
+// silently; two rows would make the second unreachable (the first matching row wins in actor_binding_for's scan).
+constexpr bool every_targeted_token_has_one_rule()
+{
+  for ( std::size_t t = 0; t < RL_TARGETED_TOKEN_COUNT; ++t )
+  {
+    std::size_t rows = 0;
+    for ( std::size_t k = 0; k < RL_RULE_PREF_COUNT; ++k )
+      if ( streq( RL_RULE_PREFS[ k ].token, RL_TARGETED_TOKENS[ t ] ) )
+        ++rows;
+    if ( rows != 1 )
+      return false;
+  }
+  return true;
+}
+
 constexpr bool wait_labels_are_wait_rows()
 {
   for ( std::size_t k = 0; k < RL_WAIT_DEF_COUNT; ++k )
@@ -125,6 +153,8 @@ static_assert( RL_TARGETED_TOKEN_COUNT >= 1, "C-A: at least one targeted token" 
 static_assert( rl_contract::aim_spells_all_targeted(), "C-A (259-05b): every RL_AIM_SPELLS token must appear in RL_TARGETED_TOKENS" );
 static_assert( rl_contract::rule_prefs_all_targeted(), "C-A: every RL_RULE_PREFS token must appear in RL_TARGETED_TOKENS" );
 static_assert( rl_contract::declared_fact_slots_in_range(), "C-A: every RL_DECLARED_FACTS slot must be below RL_TARGET_FEATURES" );
+static_assert( rl_contract::declared_slots_unique(), "C-A: every RL_DECLARED_FACTS slot must be unique (a shared slot leaves the second row unreachable)" );
+static_assert( rl_contract::every_targeted_token_has_one_rule(), "C-A: every RL_TARGETED_TOKENS token must have exactly one RL_RULE_PREFS row (no row would silently aim with current_target)" );
 static_assert( rl_contract::wait_labels_are_wait_rows(), "C-A: every RL_WAIT_DEFS label must be the label of a wait row of RL_ACTIONS" );
 static_assert( RL_CHOOSER_PROBE_ACTION != nullptr, "C-A: the chooser's probe action is required" );
 
@@ -153,10 +183,104 @@ constexpr bool enhancement_targeted_tokens_unchanged()
   return true;
 }
 
+// WR-02 (268 fix pass): the four tables the first version of these pins left out. Each compares every row against the
+// value the supplement carries today, so Phase 270's header swap fails to compile on a silent change.
+struct pinned_rule { const char* token; const char* rule; };
+struct pinned_fact { rl_fact_kind kind; const char* name; std::size_t slot; const char* feature; };
+struct pinned_wait { const char* label; rl_wait_kind kind; double threshold; };
+struct pinned_hit  { const char* family; const char* member; const char* provider; };
+
+constexpr bool enhancement_rule_prefs_unchanged()
+{
+  constexpr pinned_rule today[ 9 ] = {
+    { "stormstrike",      "shaman.thorims_aware_strike" },
+    { "windstrike",       "shaman.thorims_aware_strike" },
+    { "primordial_storm", "shortest_ttd" },
+    { "lightning_bolt",   "shortest_ttd" },
+    { "lava_lash",        "shaman.lava_lash" },
+    { "voltaic_blaze",    "shaman.voltaic_blaze" },
+    { "chain_lightning",  "shaman.chain_lightning" },
+    { "tempest",          "shaman.tempest" },
+    { "flame_shock",      "shaman.voltaic_blaze" },   // deliberate (261002-8rs): Flame Shock is aimed like Voltaic Blaze
+  };
+  if ( RL_RULE_PREF_COUNT != 9 )
+    return false;
+  for ( std::size_t k = 0; k < 9; ++k )
+    if ( !streq( RL_RULE_PREFS[ k ].token, today[ k ].token ) || !streq( RL_RULE_PREFS[ k ].rule, today[ k ].rule ) )
+      return false;
+  return true;
+}
+
+constexpr bool enhancement_declared_facts_unchanged()
+{
+  constexpr pinned_fact today[ 8 ] = {
+    { rl_fact_kind::dot_remaining, "flame_shock",                      10, "flame_shock_remaining" },
+    { rl_fact_kind::dot_remaining, "burning_core",                     13, "burning_core_remaining" },
+    { rl_fact_kind::debuff_stacks, "lightning_rod",                    14, "lightning_rod_stacks" },
+    { rl_fact_kind::dot_remaining, "lightning_rod",                    15, "lightning_rod_remaining" },
+    { rl_fact_kind::dot_remaining, "venomfang",                        16, "venomfang_remaining" },
+    { rl_fact_kind::debuff_stacks, "venomfang_debuff",                 17, "venomfang_debuff_stacks" },
+    { rl_fact_kind::dot_remaining, "venomfang_debuff",                 18, "venomfang_debuff_remaining" },
+    { rl_fact_kind::dot_remaining, "rune_of_unleashed_fire_lingering", 19, "rune_of_unleashed_fire_lingering_remaining" },
+  };
+  if ( RL_DECLARED_FACT_COUNT != 8 )
+    return false;
+  for ( std::size_t k = 0; k < 8; ++k )
+  {
+    if ( RL_DECLARED_FACTS[ k ].kind != today[ k ].kind || !streq( RL_DECLARED_FACTS[ k ].name, today[ k ].name ) ||
+         RL_DECLARED_FACTS[ k ].slot != today[ k ].slot )
+      return false;
+    if ( RL_DECLARED_FACTS[ k ].slot >= RL_TARGET_FEATURES || !streq( RL_TARGET_FEATURE_NAMES[ RL_DECLARED_FACTS[ k ].slot ], today[ k ].feature ) )
+      return false;
+  }
+  return true;
+}
+
+constexpr bool enhancement_wait_defs_unchanged()
+{
+  constexpr pinned_wait today[ 4 ] = {
+    { "wait_next_event", rl_wait_kind::next_event,         0.0 },
+    { "wait_swing_mh",   rl_wait_kind::swing_mh,           0.0 },
+    { "wait_swing_oh",   rl_wait_kind::swing_oh,           0.0 },
+    { "wait_maelstrom",  rl_wait_kind::resource_threshold, 0.0 },
+  };
+  if ( RL_WAIT_DEF_COUNT != 4 )
+    return false;
+  for ( std::size_t k = 0; k < 4; ++k )
+    if ( !streq( RL_WAIT_DEFS[ k ].label, today[ k ].label ) || RL_WAIT_DEFS[ k ].kind != today[ k ].kind ||
+         RL_WAIT_DEFS[ k ].threshold != today[ k ].threshold )
+      return false;
+  return true;
+}
+
+constexpr bool enhancement_hit_providers_unchanged()
+{
+  constexpr pinned_hit today[ 7 ] = {
+    { "hits", "chain_lightning",                "shaman.chain_lightning" },
+    { "hits", "tempest",                        "shaman.tempest" },
+    { "hits", "crash_lightning",                "shaman.crash_lightning" },
+    { "hits", "lava_lash.flame_shock_spread",   "shaman.lava_lash_flame_shock_spread" },
+    { "hits", "voltaic_blaze.cleave",           "shaman.voltaic_blaze_cleave" },
+    { "hits", "voltaic_blaze.new_flame_shocks", "shaman.voltaic_blaze_new_flame_shocks" },
+    { "hits", "fire_nova",                      "shaman.fire_nova" },
+  };
+  if ( RL_HIT_PROVIDER_COUNT != 7 )
+    return false;
+  for ( std::size_t k = 0; k < 7; ++k )
+    if ( !streq( RL_HIT_PROVIDERS[ k ].family, today[ k ].family ) || !streq( RL_HIT_PROVIDERS[ k ].member, today[ k ].member ) ||
+         !streq( RL_HIT_PROVIDERS[ k ].provider, today[ k ].provider ) )
+      return false;
+  return true;
+}
+
 } // namespace rl_contract
 
 static_assert( rl_contract::proc_names_equal_enum_names(), "enhancement: RL_PROC_NAMES must equal rl_proc::NAMES (P1 compares the sidecar that carries them)" );
 static_assert( rl_contract::enhancement_targeted_tokens_unchanged(), "enhancement: the nine targeted tokens, in today's order" );
+static_assert( rl_contract::enhancement_rule_prefs_unchanged(), "enhancement: the nine aiming rules (token -> rule), in today's order" );
+static_assert( rl_contract::enhancement_declared_facts_unchanged(), "enhancement: the eight declared facts (kind, engine name, slot, feature name at that slot)" );
+static_assert( rl_contract::enhancement_wait_defs_unchanged(), "enhancement: the four wait definitions (label, kind, threshold)" );
+static_assert( rl_contract::enhancement_hit_providers_unchanged(), "enhancement: the seven hit providers (family, member, provider)" );
 static_assert( rl_contract::streq( RL_RESOURCE_NAME, "maelstrom" ), "enhancement: the resource scalar is maelstrom (maelstrom_weapon is a buff)" );
 static_assert( RL_COOLDOWN_ROW_ACTION_COUNT == 1 && rl_contract::streq( RL_COOLDOWN_ROW_ACTION[ 0 ].cooldown_row, "strike" ) &&
                    rl_contract::streq( RL_COOLDOWN_ROW_ACTION[ 0 ].action_token, "stormstrike" ),

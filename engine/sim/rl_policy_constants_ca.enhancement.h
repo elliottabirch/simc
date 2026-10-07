@@ -10,8 +10,11 @@
 // This file is included ONLY by engine/sim/rl_policy_constants_select.h, and only while the generated
 // header lacks the marker macro RL_HEADER_CA_VERSION. When Phase 267's regenerated header (which carries
 // the marker and the same fields) lands in Phase 270, the guard skips this file with no C++ change and
-// this file can then be deleted. The value pins in rl_header_contract.hpp are what prove, at that point,
-// that the regenerated header carries today's values.
+// this file can then be deleted. The value pins in rl_header_contract.hpp (enhancement build only) are what
+// prove, at that point, that the regenerated header carries today's values. Phase 268 fix pass (WR-02): they pin
+// every table below by value: the targeted tokens, the chooser pair, the resource, the cooldown alias, the proc
+// names, and (added by the fix pass, which found the earlier wording over-claimed) RL_RULE_PREFS,
+// RL_DECLARED_FACTS (kind, name, slot and the feature name at that slot), RL_WAIT_DEFS and RL_HIT_PROVIDERS.
 //
 // Conventions: every name is `inline constexpr` at namespace scope, like the generated header's own
 // constants. Every variable-length table has a <NAME>_COUNT constant of type std::size_t; a spec with no
