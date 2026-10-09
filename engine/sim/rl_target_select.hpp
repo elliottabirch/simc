@@ -55,14 +55,17 @@ bool rl_counts_as_enemy( const player_t* t );
 // against its owner's tag). nullptr when there is none (a non-RL-actor player never gets one).
 player_t* rl_chosen_enemy_of( const player_t* p );
 
-// "Can be hit": `rl_counts_as_enemy( t )`, awake, not invulnerable, not an untargetable enemy
-// (hazard or bystander), and legal under `generic_filter` for p's own Lightning Bolt (harmful). Throws
-// by name when p has no lightning_bolt action. Reuses the two existing helpers; never a third copy.
+// "Can be hit": `rl_counts_as_enemy( t )`, awake, not invulnerable, not an untargetable enemy (hazard or bystander), and legal
+// under `generic_filter` for AT LEAST ONE of p's aimed actions (RL_TARGETED_TOKENS; 271-10, owner decision T-2: there is no probe
+// spell any more). An aimed action with no range line (range <= 0) has no distance test of its own and is left out of that test
+// unless no aimed action has a range line. Throws by name (at the actor's first bind) when an aimed action's range disagrees with
+// the header's generated RL_AIMED_SPELL_RANGE_YARDS, or when p has none of the aimed actions. Reuses the existing helpers; never
+// a third copy.
 bool rl_can_be_hit( const player_t* p, const player_t* t );
 
-// The chooser. Keeps the tag while it can be hit; otherwise, if some enemy can be hit, picks the first
-// in `sim->target_non_sleeping_list` order among those also legal for p's Stormstrike (else the first
-// that can be hit); with nothing hittable the old tag is kept. REFUSES (throws) any player that is not
+// The chooser. Keeps the tag while it can be hit; otherwise (271-10, owner decision T-3) picks the NEAREST enemy within melee
+// reach (the registry's RL_TAG_MELEE_ACTION, else the shortest-range aimed action), falling back to the nearest enemy that can
+// be hit at all when none is in melee reach; with nothing hittable the old tag is kept. REFUSES (throws) any player that is not
 // the RL actor: every call site must carry the RL-actor gate itself.
 void refresh_chosen( player_t* p );
 

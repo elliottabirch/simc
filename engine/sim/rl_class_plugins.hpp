@@ -8,7 +8,7 @@
 // need no plugin and work for every class.
 //
 // Plan 268-03 added the per-candidate class-field hooks and the geometry-fact table; plan 268-04 appended the hit-provider
-// table (the shaman rows); plan 268-05 adds the warrior rows.
+// table (the shaman rows); plan 268-05 added the warrior rows, which plan 271-10 retired.
 // ==========================================================================
 
 #pragma once
@@ -51,7 +51,8 @@ using rl_fill_scoring_fields_fn = void ( * )( const action_t* a, player_t* candi
 // Plan 268-04 (G268-7, FORK-04): a hit-count provider. A spec header's RL_HIT_PROVIDERS row names a provider spelled
 // "<class>.<name>"; the class plugin that holds that name says which reading computes it. The readings are computed by
 // rl_policy_obs.cpp (they need the per-decision memo that file owns); this table is what makes a provider reachable only through
-// its own class's plugin. Plan 268-05 appended the three warrior readings (warrior_*).
+// its own class's plugin. (Plan 268-05's three warrior readings were retired in 271-10: arms hit columns are generated
+// "census.<button>" rows that do not go through a class plugin.)
 enum class rl_hit_reading
 {
   chain_lightning,
@@ -61,9 +62,6 @@ enum class rl_hit_reading
   voltaic_blaze_cleave,
   voltaic_blaze_new_flame_shocks,
   fire_nova,
-  warrior_cleave,
-  warrior_whirlwind,
-  warrior_sweeping_strikes,
 };
 
 struct rl_class_hit_provider

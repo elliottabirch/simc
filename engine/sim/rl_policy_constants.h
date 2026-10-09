@@ -2036,8 +2036,8 @@ inline constexpr const char* RL_TARGETED_TOKENS[RL_TARGETED_TOKEN_COUNT] = {
   "primordial_storm",
   "flame_shock",
 };
-inline constexpr const char* RL_CHOOSER_PROBE_ACTION = "lightning_bolt";
-inline constexpr const char* RL_CHOOSER_MELEE_ACTION = "stormstrike";
+inline constexpr double RL_AIMED_SPELL_RANGE_YARDS[RL_TARGETED_TOKEN_COUNT] = {5.0, 40.0, 40.0, 40.0, 30.0, 5.0, 40.0, 5.0, 40.0};
+inline constexpr const char* RL_TAG_MELEE_ACTION = nullptr;
 
 inline constexpr std::size_t RL_RULE_PREF_COUNT = 9;
 inline constexpr rl_rule_pref RL_RULE_PREFS[RL_RULE_PREF_COUNT] = {

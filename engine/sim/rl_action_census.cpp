@@ -646,6 +646,11 @@ std::vector<token_t> walk( player_t* p )
   return out;
 }
 
+std::vector<token_t> walk_classified( player_t* p )
+{
+  return walk_all( p, false );
+}
+
 int count_engine_hits( const node_t& n, const player_t* centre )
 {
   const action_t* a = n.action;

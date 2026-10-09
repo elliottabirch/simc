@@ -553,8 +553,11 @@ feature_sources_t build_feature_sources( const player_t* p )
 
 struct actor_binding_t
 {
-  const action_t*                                       probe = nullptr;  // RL_CHOOSER_PROBE_ACTION, never null once bound
-  const action_t*                                       melee = nullptr;  // RL_CHOOSER_MELEE_ACTION, null when the actor has none
+  // 271-10 (owner decisions T-2, T-3): the chooser's probe and melee actions are gone. An enemy "can be hit" when ANY aimed action's
+  // own range test passes; the tag moves to the nearest enemy in melee reach.
+  std::vector<const action_t*>                          hit_actions;      // the aimed actions an enemy is tested against (see actor_binding_for)
+  const action_t*                                       melee = nullptr;  // the melee-reach action: RL_TAG_MELEE_ACTION, else the shortest-range aimed action
+  double                                                widest_range = 0.0;   // the widest RL_AIMED_SPELL_RANGE_YARDS entry (0: no aimed spell has a range line)
   std::vector<rule_row_t>                               rule_rows;        // RL_RULE_PREFS: token -> resolver
   std::unordered_map<const action_t*, rule_resolver_fn> by_action;        // filled on the first decision of each action
   feature_sources_t                                     feature_sources;  // the per-candidate fact source of each feature index
@@ -609,16 +612,52 @@ actor_binding_t& actor_binding_for( const player_t* p )
     return it->second;
 
   actor_binding_t b;
-  b.probe = p->find_action( RL_CHOOSER_PROBE_ACTION );
-  if ( b.probe == nullptr )
+  // 271-10 (T-2, T-3). Resolve every aimed action (RL_TARGETED_TOKENS) once. The generated range table and the engine must agree:
+  // an aimed action whose own `range` differs from RL_AIMED_SPELL_RANGE_YARDS aborts here, by name (the table is what the addon
+  // and the header contract were generated from). An aimed token the actor has no action for (an untaken talent) is skipped.
+  // An action with NO range line (range <= 0: Colossus Smash) has no distance test of its own, so it says nothing about whether
+  // an enemy is within reach and is left out of `hit_actions`, unless no aimed action has a range line at all.
+  std::vector<const action_t*> ranged;
+  std::vector<const action_t*> unranged;
+  double                       shortest_range = 0.0;
+  const action_t*              shortest_action = nullptr;
+  for ( std::size_t k = 0; k < RL_TARGETED_TOKEN_COUNT; ++k )
+  {
+    const double table_range = RL_AIMED_SPELL_RANGE_YARDS[ k ];
+    b.widest_range           = std::max( b.widest_range, table_range );
+    const action_t* a        = p->find_action( RL_TARGETED_TOKENS[ k ] );
+    if ( a == nullptr )
+      continue;
+    if ( std::fabs( a->range - table_range ) > 1.0e-6 )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_target_select: registry '{}' lists aimed range {} yards for token '{}' but player '{}' has an action with range {} "
+          "(bind-time refusal: the generated range table and the engine must agree)",
+          RL_REGISTRY_ID, table_range, RL_TARGETED_TOKENS[ k ], p->name(), a->range ) );
+    }
+    if ( a->range > 0.0 )
+    {
+      ranged.push_back( a );
+      if ( shortest_action == nullptr || a->range < shortest_range )
+      {
+        shortest_range  = a->range;
+        shortest_action = a;
+      }
+    }
+    else
+      unranged.push_back( a );
+  }
+  b.hit_actions = ranged.empty() ? unranged : ranged;
+  if ( b.hit_actions.empty() )
   {
     throw sc_runtime_error( fmt::format(
-        "rl_target_select: registry '{}' names chooser probe action '{}' but player '{}' has no such action "
-        "(bind-time refusal)",
-        RL_REGISTRY_ID, RL_CHOOSER_PROBE_ACTION, p->name() ) );
+        "rl_target_select: registry '{}' lists {} aimed tokens but player '{}' has none of those actions (bind-time refusal)",
+        RL_REGISTRY_ID, RL_TARGETED_TOKEN_COUNT, p->name() ) );
   }
-  // A missing melee action is tolerated: the chooser then falls back to the hittable list.
-  b.melee = p->find_action( RL_CHOOSER_MELEE_ACTION );
+  // Melee reach: the registry's optional tag melee action, else the shortest-range aimed action.
+  b.melee = ( RL_TAG_MELEE_ACTION != nullptr ) ? p->find_action( RL_TAG_MELEE_ACTION ) : shortest_action;
+  if ( b.melee == nullptr )
+    b.melee = b.hit_actions.front();
   b.feature_sources = build_feature_sources( p );  // refuses a feature no source can serve, here, at arise
   b.rule_rows.reserve( RL_RULE_PREF_COUNT );
   for ( std::size_t k = 0; k < RL_RULE_PREF_COUNT; ++k )
@@ -626,7 +665,57 @@ actor_binding_t& actor_binding_for( const player_t* p )
   return g_actor_binding_cache.emplace( p, std::move( b ) ).first->second;
 }
 
+// ---- 271-10 (owner decision T-2): the aim candidate pool ----
+// The pool is the engaged enemies within the widest aimed range plus each enemy's own combat reach (no bound when distance
+// targeting is off or no aimed spell has a range line), at most RL_TARGET_SLOTS of them, the player's current target first and
+// then the others nearest first (a stable sort, so equal distances keep the engine's list order). Every aimed action's candidate
+// set is this pool run through that action's own generic_filter, so a spell's slots are always a subset of the pool and an overflow
+// of the slot count cannot happen. The addon builds the same pool (enemyFactFrame.ts), so slot order agrees on both sides.
+// Memoised per decision stamp: the pool is built once at the first selector call of a decision, before the cast can retarget the
+// player, and the decision dump's later candidate rebuild (build_candidate_facts) reads the same list. A stamp of 0 (the
+// threads>1 degrade) is never memoised.
+struct aim_pool_cache_t
+{
+  std::uint64_t          stamp = 0;
+  bool                   valid = false;
+  std::vector<player_t*> pool;
+};
+std::unordered_map<const player_t*, aim_pool_cache_t> g_aim_pool_cache;
+std::vector<std::pair<double, player_t*>>             g_aim_pool_scratch;
+
+const std::vector<player_t*>& aim_pool_for( const player_t* p )
+{
+  aim_pool_cache_t&   cache = g_aim_pool_cache[ p ];
+  const std::uint64_t stamp = current_decision_stamp( p );
+  if ( cache.valid && stamp != 0 && cache.stamp == stamp )
+    return cache.pool;
+
+  const double widest  = actor_binding_for( p ).widest_range;
+  const bool   bounded = p->sim->distance_targeting_enabled && widest > 0.0;
+  g_aim_pool_scratch.clear();
+  for ( player_t* t : p->sim->target_non_sleeping_list )
+  {
+    if ( !t->is_enemy() || !rl_counts_as_enemy( t ) )
+      continue;
+    const double dist = p->get_player_distance( *t );
+    if ( bounded && dist > widest + t->combat_reach )
+      continue;
+    g_aim_pool_scratch.emplace_back( t == p->target ? -1.0 : dist, t );
+  }
+  std::stable_sort( g_aim_pool_scratch.begin(), g_aim_pool_scratch.end(),
+                    []( const std::pair<double, player_t*>& l, const std::pair<double, player_t*>& r ) { return l.first < r.first; } );
+  if ( g_aim_pool_scratch.size() > RL_TARGET_SLOTS )
+    g_aim_pool_scratch.resize( RL_TARGET_SLOTS );
+  cache.pool.clear();
+  for ( const auto& e : g_aim_pool_scratch )
+    cache.pool.push_back( e.second );
+  cache.stamp = stamp;
+  cache.valid = stamp != 0;
+  return cache.pool;
+}
+
 }  // namespace
+
 
 bool rl_can_be_hit( const player_t* p, const player_t* t )
 {
@@ -639,10 +728,13 @@ bool rl_can_be_hit( const player_t* p, const player_t* t )
   if ( t->sim->is_untargetable_enemy( t ) )
     return false;
 
-  const action_t* probe = actor_binding_for( p ).probe;
-  // generic_filter takes a non-const candidate (it is the same function the per-spell selector calls);
-  // it only reads from it.
-  return generic_filter( probe, const_cast<player_t*>( t ), /*harmful=*/true );
+  // 271-10 (T-2): hittable by ANY aimed action. generic_filter is the same function the per-spell selector calls (alive, not a
+  // hazard, not immune, within that action's own range plus the candidate's combat reach, in front); it takes a non-const
+  // candidate and only reads from it.
+  for ( const action_t* a : actor_binding_for( p ).hit_actions )
+    if ( generic_filter( a, const_cast<player_t*>( t ), /*harmful=*/true ) )
+      return true;
+  return false;
 }
 
 // 2026-10-02, 266-09 (research R5, owner F9): in a funnel-mode fight the RL actor's own target and both weapon
@@ -679,8 +771,8 @@ void refresh_chosen( player_t* p )
         p->name(), RL_ACTOR_NAME ) );
   }
 
-  // Bind this actor's header-driven actions and aiming rules now (its arise), so a header that names a
-  // probe action the actor lacks, or a rule no class plugin knows, is refused before any decision.
+  // Bind this actor's header-driven actions and aiming rules now (its arise), so a header whose aimed ranges disagree with the
+  // actor's actions, or that names a rule no class plugin knows, is refused before any decision.
   const actor_binding_t& binding = actor_binding_for( p );
 
   // Keep the tag while it can still be hit.
@@ -703,25 +795,38 @@ void refresh_chosen( player_t* p )
     return;
   }
 
-  // Otherwise pick among the enemies that can be hit AND are legal for this player's Stormstrike; failing
-  // that, among those that can be hit at all (R3). With the random option off the pick is the first in the
-  // list order. With it on (266-09, R7) and two or more eligible, the pick is uniform at random, one draw
-  // from the chooser's own per-fight stream (solver_target_rng): never the exploration stream, never the
-  // engine's. With fewer than two eligible there is no draw. It acts whatever the funnel flag is.
+  // Otherwise (271-10, owner decision T-3) pick the NEAREST enemy within melee reach: among the enemies that can be hit by some
+  // aimed action, those that pass the melee action's own range test (the registry's RL_TAG_MELEE_ACTION, else the shortest-range
+  // aimed action; engine range plus the enemy's combat reach, in front, not immune). When none is in melee reach the nearest
+  // enemy that can be hit at all is picked (the old R3 fallback; the redesign text does not say what to do then, and leaving the
+  // tag on an enemy nothing can hit is the one outcome it exists to prevent). With the random option off the pick is the nearest
+  // (ties keep the engine's list order). With it on (266-09, R7) and two or more eligible, the pick is uniform at random, one
+  // draw from the chooser's own per-fight stream (solver_target_rng): never the exploration stream, never the engine's. With
+  // fewer than two eligible there is no draw. It acts whatever the funnel flag is.
   const action_t*        melee = binding.melee;
-  std::vector<player_t*> hittable;
-  std::vector<player_t*> melee_legal;
+  std::vector<std::pair<double, player_t*>> hittable_by_distance;
+  std::vector<std::pair<double, player_t*>> melee_by_distance;
   for ( player_t* t : p->sim->target_non_sleeping_list )
   {
     if ( !t->is_enemy() || !rl_can_be_hit( p, t ) )
       continue;
-    hittable.push_back( t );
+    const double dist = p->get_player_distance( *t );
+    hittable_by_distance.emplace_back( dist, t );
     if ( melee != nullptr && generic_filter( melee, t, /*harmful=*/true ) )
-      melee_legal.push_back( t );
+      melee_by_distance.emplace_back( dist, t );
   }
-  // tstl-sylvanas 264-05 (O4) + 261006-dnh-F1 (strict): a do-not-hit enemy is never re-picked as the tag. The Stormstrike-legal list
-  // is stripped first; when nothing is left of it, the hittable list is stripped instead (R3's fallback, still without a do-not-hit
-  // boss). With nothing else hittable the pick is nullptr and the old tag is kept (R2).
+  auto nearest_first = []( const std::pair<double, player_t*>& l, const std::pair<double, player_t*>& r ) { return l.first < r.first; };
+  std::stable_sort( hittable_by_distance.begin(), hittable_by_distance.end(), nearest_first );
+  std::stable_sort( melee_by_distance.begin(), melee_by_distance.end(), nearest_first );
+  std::vector<player_t*> hittable;
+  std::vector<player_t*> melee_legal;
+  for ( const auto& e : hittable_by_distance )
+    hittable.push_back( e.second );
+  for ( const auto& e : melee_by_distance )
+    melee_legal.push_back( e.second );
+  // tstl-sylvanas 264-05 (O4) + 261006-dnh-F1 (strict): a do-not-hit enemy is never re-picked as the tag. The melee-reach list is
+  // stripped first; when nothing is left of it, the hittable list is stripped instead (still without a do-not-hit boss). With
+  // nothing else hittable the pick is nullptr and the old tag is kept (R2).
   std::vector<player_t*>        dnh_kept;
   std::vector<player_t*>        dnh_kept_hittable;
   const std::vector<player_t*>* eligible_ptr = &melee_legal;
@@ -889,8 +994,8 @@ std::vector<enemy_fact> build_candidate_facts( const action_t* a, bool harmful )
   // tstl-sylvanas 264-05 (O4) + 261006-dnh-F1: the set the aim exploration draws from and the dump lists is the SAME set select() blocks (same
   // strict do-not-hit pass, no counting here), so its order and size match the stamped block's slots.
   std::vector<player_t*> gathered, kept;
-  for ( player_t* t : a->sim->target_non_sleeping_list )
-    if ( t->is_enemy() && rl_counts_as_enemy( t ) && generic_filter( a, t, harmful ) )
+  for ( player_t* t : aim_pool_for( a->player ) )   // 271-10 (T-2): the pool, in its order (current target first, then nearest)
+    if ( generic_filter( a, t, harmful ) )
       gathered.push_back( t );
   const std::vector<player_t*>& legal = dnh_split( a->sim, gathered, kept ) ? kept : gathered;
   for ( player_t* t : legal )
@@ -1227,8 +1332,8 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
   std::vector<player_t*>& candidates = g_candidate_buffer;
   candidates.clear();
   candidates.reserve( a->sim->target_non_sleeping_list.size() );
-  for ( player_t* t : a->sim->target_non_sleeping_list )
-    if ( t->is_enemy() && rl_counts_as_enemy( t ) && generic_filter( a, t, harmful ) )
+  for ( player_t* t : aim_pool_for( a->player ) )   // 271-10 (T-2): the pool, in its order (current target first, then nearest)
+    if ( generic_filter( a, t, harmful ) )
       candidates.push_back( t );
 
   // TGT-02 edge: empty -- no pick, legality bit goes to 0, the unanchored wait stays legal.
@@ -1749,6 +1854,7 @@ void reset( sim_t* )
   // find_action calls per actor per iteration, off the per-decision path. g_aim_fact_gate_cache copies only the
   // feature_sources value table (indices and plain function pointers, no action pointer), so it does not share this hazard.
   g_actor_binding_cache.clear();
+  g_aim_pool_cache.clear();  // 271-10 (T-2): stamps restart at 1 each iteration, so a cached pool must not survive
   // 260914-rbp Task 2c (ADD-2): the sibling per-actor find_action() handle cache
   // rl_policy_obs.cpp owns (a DIFFERENT translation unit) -- same stale-address hazard, same
   // per-iteration clear, routed through this file's own reset() since sim.cpp's sim_t::reset()
@@ -1770,6 +1876,8 @@ void clear_process_caches()
   g_unpruned_candidate_buffer.clear();
   g_rules_feature_scratch.clear();
   g_actor_binding_cache.clear();
+  g_aim_pool_cache.clear();
+  g_aim_pool_scratch.clear();
 }
 
 // How many entries the process-wide state of this file holds right now: the keyed tables, the scratch
@@ -1779,7 +1887,7 @@ std::size_t process_cache_entries()
   return g_decision_stamp.size() + g_pick_table.size() + g_candidate_block_table.size() +
          g_target_fact_snapshot_table.size() + g_chain_hop_stash.size() + g_vb_lava_lash_geometry_cache.size() +
          g_aim_fact_gate_cache.size() + g_candidate_buffer.size() + g_unpruned_candidate_buffer.size() +
-         g_rules_feature_scratch.size() + actor_binding_entries() +
+         g_rules_feature_scratch.size() + actor_binding_entries() + g_aim_pool_cache.size() + g_aim_pool_scratch.size() +
          ( ( g_reresolution_counts.kept_the_pick != 0 || g_reresolution_counts.fell_back_to_player_target != 0 ||
              g_reresolution_counts.left_no_op_boundary != 0 )
                ? 1u

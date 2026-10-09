@@ -20,8 +20,7 @@
 //                           allocates and never draws a random number.
 //   * on_init_finished() / on_combat_end()  write the census JSON when the sim option
 //                           rl_action_census=<path> is set (init, then rewritten at fight end).
-// Nothing else in the fork reads any of it in plan 271-04: the existing hit providers stay as they
-// are (plan 271-10 switches the arms columns to count_engine_hits).
+// Plan 271-10 then switched the arms hit columns to count_engine_hits (walk_classified below).
 //
 // The census only READS. It changes no decision, no random draw and no damage.
 // ==========================================================================
@@ -203,6 +202,12 @@ struct token_t
 
 // Walks every cast token of the active registry header for `p`. Reads only.
 std::vector<token_t> walk( player_t* p );
+
+// walk() followed by the census file's own node classification (which node of each button names its hit rule: `chosen_node`,
+// `multi_target`), WITHOUT the fight-end proc marking (that needs a played fight). 271-10 (H-3): the generated "census.<button>"
+// hit columns resolve their node from this, once per actor at bind time, and count with count_engine_hits. Always available,
+// independent of the rl_action_census=<path> option. Reads only; nothing is cached here.
+std::vector<token_t> walk_classified( player_t* p );
 
 // The ONE counting function. `centre` is the enemy the press is aimed at (the engine never removes
 // it). Returns how many enemies the node hits right now: 1 for a single-target node, otherwise the

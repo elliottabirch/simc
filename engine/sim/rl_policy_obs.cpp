@@ -35,6 +35,7 @@
 #include "sim/event.hpp"
 #include "sim/expressions.hpp"
 #include "sim/raid_event.hpp"
+#include "sim/rl_action_census.hpp"
 #include "sim/rl_class_plugins.hpp"
 #include "sim/rl_target_select.hpp"
 #include "sim/sheet_fight.hpp"  // tstl-sylvanas 262-04: sheet_fight_forecast
@@ -84,11 +85,7 @@ struct hits_action_handles_t
   action_t* lava_lash           = nullptr;
   action_t* voltaic_blaze       = nullptr;
   action_t* fire_nova_explosion = nullptr;
-  // Plan 268-05 (D7): the warrior hit providers' handles, found once by name; null for a class without them.
-  action_t* warrior_cleave      = nullptr;
-  action_t* warrior_whirlwind   = nullptr;
-  action_t* warrior_mortal_strike = nullptr;
-  buff_t*   warrior_sweeping_strikes_buff = nullptr;
+  // (Plan 268-05's warrior handles were retired in 271-10 with the three hand-written warrior hit providers.)
 };
 std::unordered_map<const player_t*, hits_action_handles_t> g_hits_action_handle_cache;
 
@@ -104,11 +101,83 @@ const hits_action_handles_t& resolve_hits_action_handles( const player_t* p )
   handles.lava_lash           = p->find_action( "lava_lash" );
   handles.voltaic_blaze       = p->find_action( "voltaic_blaze" );
   handles.fire_nova_explosion = p->find_action( "fire_nova_explosion" );
-  handles.warrior_cleave      = p->find_action( "cleave" );
-  handles.warrior_whirlwind   = p->find_action( "whirlwind" );
-  handles.warrior_mortal_strike = p->find_action( "mortal_strike" );
-  handles.warrior_sweeping_strikes_buff = buff_t::find( const_cast<player_t*>( p ), "sweeping_strikes" );
   return g_hits_action_handle_cache.emplace( p, handles ).first->second;
+}
+
+// 271-10 (owner decision H-3, scheme A): the generated "census.<button>" hit columns. A header row {family "hits", member <button>,
+// provider "census.<button>"} is bound here, once per actor, to the button's node of the action discovery census
+// (rl_action_census::walk_classified: the same node classification the committed census file records as `chosenNode`), and read
+// per decision with rl_action_census::count_engine_hits. The walk runs at bind regardless of the rl_action_census=<path> option.
+// Lifetime: the same as the slot table that holds the indexes (g_slot_table_cache); both are emptied by clear_process_caches(),
+// never per iteration, because the slot table persists across a sim's iterations and so must the rows its bindings index.
+constexpr std::size_t CENSUS_HIT_ROWS_MAX = 32;   // the per-decision memo in build_obs is sized by this; bind refuses more
+struct census_hit_row_t
+{
+  rl_action_census::token_t census;          // the button's classified walk (nodes, chosen_node)
+  const action_t*           aimed = nullptr; // the resolved action of an AIMED button (its stamped pick is the centre), else null
+};
+struct census_hit_actor_t
+{
+  std::vector<rl_action_census::token_t> walk;   // the whole classified walk, taken once
+  std::vector<census_hit_row_t>          rows;   // the rows bound so far, in bind order
+};
+std::unordered_map<const player_t*, census_hit_actor_t> g_census_hit_actors;
+
+std::size_t census_hit_row_for( player_t* p, const char* token )
+{
+  census_hit_actor_t& actor = g_census_hit_actors[ p ];
+  if ( actor.walk.empty() )
+    actor.walk = rl_action_census::walk_classified( p );
+  for ( std::size_t k = 0; k < actor.rows.size(); ++k )
+    if ( actor.rows[ k ].census.token == token )
+      return k;
+  if ( actor.rows.size() >= CENSUS_HIT_ROWS_MAX )
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::census_hit_row_for: registry '{}' binds more than {} census hit columns on player '{}' (token '{}')",
+        RL_REGISTRY_ID, CENSUS_HIT_ROWS_MAX, p->name(), token ) );
+  const rl_action_census::token_t* found = nullptr;
+  for ( const rl_action_census::token_t& t : actor.walk )
+    if ( t.token == token )
+    {
+      found = &t;
+      break;
+    }
+  if ( found == nullptr )
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::census_hit_row_for: registry '{}' hit provider 'census.{}' names a button that is not a cast token of the "
+        "header (player '{}') (bind-time refusal)",
+        RL_REGISTRY_ID, token, p->name() ) );
+  census_hit_row_t row;
+  row.census = *found;
+  for ( std::size_t k = 0; k < RL_TARGETED_TOKEN_COUNT; ++k )
+    if ( std::strcmp( RL_TARGETED_TOKENS[ k ], token ) == 0 )
+      row.aimed = solver_control::resolve_action( p, token );
+  actor.rows.push_back( std::move( row ) );
+  return actor.rows.size() - 1;
+}
+
+// How many enemies the pressed button hits right now. Side-effect free: count_engine_hits reads positions, reach and the live
+// n_targets(), never target_list(), never a random draw. The centre is the enemy the press is aimed at: the stamped pick of an
+// aimed button (0 when it has none this decision), else the tag (the chosen enemy), else the current target. A button this
+// build cannot press reads 0; a button whose walk found no multi-target node hits its one target.
+double census_hit_count( const player_t* p, const census_hit_row_t& row )
+{
+  if ( !row.census.found )
+    return 0.0;
+  const player_t* centre = nullptr;
+  if ( row.aimed != nullptr )
+  {
+    bool      found = false;
+    player_t* pick  = rl_target_select::lookup_pick( row.aimed, &found );
+    centre          = found ? pick : nullptr;
+  }
+  else
+    centre = p->rl_chosen_enemy != nullptr ? p->rl_chosen_enemy : p->target;
+  if ( centre == nullptr || centre->is_sleeping() || !centre->is_enemy() || !rl_target_select::rl_counts_as_enemy( centre ) )
+    return 0.0;
+  if ( row.census.chosen_node < 0 || static_cast<std::size_t>( row.census.chosen_node ) >= row.census.nodes.size() )
+    return 1.0;
+  return static_cast<double>( rl_action_census::count_engine_hits( row.census.nodes[ static_cast<std::size_t>( row.census.chosen_node ) ], centre ) );
 }
 
 // 260902/cr4 (CR-02): the two output arrays a BOUNDARY read_action_gate_bits call computed for
@@ -1382,8 +1451,9 @@ enum class direct_id
   hits_chain_lightning, hits_tempest, hits_crash_lightning,
   hits_lava_lash_flame_shock_spread, hits_voltaic_blaze_cleave, hits_voltaic_blaze_new_flame_shocks,
   hits_fire_nova,
-  // Plan 268-05 (D7): the arms hit-count providers, appended after the seven above so no enumerator value shifts.
-  hits_warrior_cleave, hits_warrior_whirlwind, hits_warrior_sweeping_strikes,
+  // 271-10 (H-3): every generated "census.<button>" hit column (the slot's `census_row` names which); replaces plan 268-05's three
+  // hand-written warrior providers.
+  hits_census,
   // 261002-8rs: the Lashing Flames carrier count, appended LAST so no existing enumerator value shifts.
   fw_lashing_flames_carrier_count
   // 260914-rbp Task 1's R14 (crash_lightning_next_expiry/crash_lightning_stack_seconds, two
@@ -1490,6 +1560,7 @@ struct slot_binding
   buff_t* buff = nullptr;               // kind == buff
   buff_leaf_kind buff_leaf = buff_leaf_kind::stacks;   // kind == buff
   direct_id direct = direct_id::t;      // kind == direct
+  std::size_t census_row = 0;           // kind == direct, direct == direct_id::hits_census: the index into g_census_hit_actors[p].rows
   resource_e resource = RESOURCE_NONE;  // kind == direct, direct == direct_id::resource: which engine resource to read (bound once)
   expr_t* expr = nullptr;               // kind == expression -- non-owning; owned by slot_table::owned_expressions
   cooldown_t* cooldown = nullptr;                        // kind == cooldown
@@ -1926,6 +1997,14 @@ slot_binding resolve_scalar_leaf( const player_t* p, const rl_leaf_desc& leaf )
     const rl_hit_provider& row = RL_HIT_PROVIDERS[ k ];
     if ( hits_dispatch_name != std::string( row.family ) + "." + row.member )
       continue;
+    // 271-10 (H-3): a generated census row is not a class plugin's provider; it binds to the action discovery census.
+    if ( std::strncmp( row.provider, "census.", 7 ) == 0 )
+    {
+      b.kind       = slot_binding_kind::direct;
+      b.direct     = direct_id::hits_census;
+      b.census_row = census_hit_row_for( const_cast<player_t*>( p ), row.provider + 7 );
+      return b;
+    }
     const rl_class_plugin& plugin = rl_class_plugin_for( p );
     const rl_class_hit_provider* provider = rl_class_hit_provider_find( plugin, row.provider );
     if ( provider == nullptr )
@@ -1943,9 +2022,6 @@ slot_binding resolve_scalar_leaf( const player_t* p, const rl_leaf_desc& leaf )
       case rl_hit_reading::voltaic_blaze_cleave:             b.direct = direct_id::hits_voltaic_blaze_cleave; break;
       case rl_hit_reading::voltaic_blaze_new_flame_shocks:   b.direct = direct_id::hits_voltaic_blaze_new_flame_shocks; break;
       case rl_hit_reading::fire_nova:                        b.direct = direct_id::hits_fire_nova; break;
-      case rl_hit_reading::warrior_cleave:                   b.direct = direct_id::hits_warrior_cleave; break;
-      case rl_hit_reading::warrior_whirlwind:                b.direct = direct_id::hits_warrior_whirlwind; break;
-      case rl_hit_reading::warrior_sweeping_strikes:         b.direct = direct_id::hits_warrior_sweeping_strikes; break;
     }
     return b;
   }
@@ -3217,10 +3293,6 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
     double voltaic_blaze_cleave           = 0.0;
     double voltaic_blaze_new_flame_shocks = 0.0;
     double fire_nova                      = 0.0;
-    // Plan 268-05 (D7): the arms providers (formulas at the computation below).
-    double warrior_cleave                 = 0.0;
-    double warrior_whirlwind              = 0.0;
-    double warrior_sweeping_strikes       = 0.0;
   };
   bool hits_values_computed = false;
   hits_values_t hits_values;
@@ -3308,74 +3380,23 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
       }
     }
 
-    // Plan 268-05 (D7, FORK-04): the arms hit-count providers. Side-effect free: only n_targets(), radius, range, distances and
-    // buff check() are read; no target_list(), no execute, no ready(), no roll, no schedule. A class without the named action
-    // reads 0 (the shaman providers' missing value). "Live enemy" is the file's own test: awake, an enemy, and
-    // rl_counts_as_enemy (not a sheet-fight hazard or an invulnerable sheet-fight boss).
-    {
-      const hits_action_handles_t& wh = resolve_hits_action_handles( p );
-      auto live_enemy = []( const player_t* t ) {
-        return t != nullptr && !t->is_sleeping() && t->is_enemy() && rl_target_select::rl_counts_as_enemy( t );
-      };
-      player_t* current_target = p->target;
-
-      // hits.cleave: live enemies within Cleave's radius of the current target, the target itself included, capped at Cleave's
-      // n_targets() when that is positive; 0 with no live target.
-      if ( wh.warrior_cleave && live_enemy( current_target ) )
-      {
-        int hits = rl_target_select::count_hits_within_radius( wh.warrior_cleave->player, current_target, wh.warrior_cleave->radius );
-        const int cap = wh.warrior_cleave->n_targets();
-        if ( cap > 0 )
-          hits = std::min( cap, hits );
-        hits_values.warrior_cleave = static_cast<double>( hits );
-      }
-
-      // hits.whirlwind: live enemies within Whirlwind's damage radius (the action's radius, else 8 yd) of the player (plus each
-      // enemy's combat reach), capped at Whirlwind's n_targets() when that is positive.
-      if ( wh.warrior_whirlwind )
-      {
-        const double radius = wh.warrior_whirlwind->radius > 0.0 ? wh.warrior_whirlwind->radius : 8.0;
-        int hits = 0;
-        for ( player_t* t : p->sim->target_non_sleeping_list )
-        {
-          if ( live_enemy( t ) && p->get_player_distance( *t ) <= radius + t->combat_reach )
-            ++hits;
-        }
-        const int cap = wh.warrior_whirlwind->n_targets();
-        if ( cap > 0 )
-          hits = std::min( cap, hits );
-        hits_values.warrior_whirlwind = static_cast<double>( hits );
-      }
-
-      // hits.sweeping_strikes: with the Sweeping Strikes buff up, the smaller of Mortal Strike's n_targets() (which the warrior
-      // module widens to 1 + the buff's extra targets while the buff is up) and the live enemies within Mortal Strike's reach
-      // (its range, 5 yd when the action has none, plus each enemy's combat reach) of the player; with the buff down, 1 when the
-      // current target is a live enemy in that reach, else 0.
-      if ( wh.warrior_mortal_strike )
-      {
-        const double reach = wh.warrior_mortal_strike->range > 0.0 ? wh.warrior_mortal_strike->range : 5.0;
-        const bool   ss_up = wh.warrior_sweeping_strikes_buff != nullptr && wh.warrior_sweeping_strikes_buff->check() > 0;
-        if ( ss_up )
-        {
-          int hits = 0;
-          for ( player_t* t : p->sim->target_non_sleeping_list )
-          {
-            if ( live_enemy( t ) && p->get_player_distance( *t ) <= reach + t->combat_reach )
-              ++hits;
-          }
-          const int cap = wh.warrior_mortal_strike->n_targets();
-          if ( cap > 0 )
-            hits = std::min( cap, hits );
-          hits_values.warrior_sweeping_strikes = static_cast<double>( hits );
-        }
-        else if ( live_enemy( current_target ) && p->get_player_distance( *current_target ) <= reach + current_target->combat_reach )
-        {
-          hits_values.warrior_sweeping_strikes = 1.0;
-        }
-      }
-    }
-
     return hits_values;
+  };
+
+  // 271-10 (H-3): the census hit columns, each computed AT MOST ONCE per build_obs() call (the same discipline as hits_values above;
+  // an `at_least_k` switch row of the same button reads the memo too).
+  double        census_hit_value[ CENSUS_HIT_ROWS_MAX ] = {};
+  std::uint32_t census_hit_done = 0;
+  auto get_census_hit = [ & ]( std::size_t row_index ) -> double
+  {
+    assert( row_index < CENSUS_HIT_ROWS_MAX );
+    const std::uint32_t bit = 1u << static_cast<std::uint32_t>( row_index );
+    if ( ( census_hit_done & bit ) == 0 )
+    {
+      census_hit_done |= bit;
+      census_hit_value[ row_index ] = census_hit_count( p, g_census_hit_actors[ p ].rows[ row_index ] );
+    }
+    return census_hit_value[ row_index ];
   };
 
   // 260923-lrc stage 1D (PLAN.md D24): the shared-snapshot cache for
@@ -3936,17 +3957,9 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
               status = lookup_status::present;
               break;
 
-            // Plan 268-05 (D7): the arms providers, read from the same per-decision memo.
-            case direct_id::hits_warrior_cleave:
-              raw = get_hits_values().warrior_cleave;
-              status = lookup_status::present;
-              break;
-            case direct_id::hits_warrior_whirlwind:
-              raw = get_hits_values().warrior_whirlwind;
-              status = lookup_status::present;
-              break;
-            case direct_id::hits_warrior_sweeping_strikes:
-              raw = get_hits_values().warrior_sweeping_strikes;
+            // 271-10 (H-3): a generated census hit column, read from its own per-decision memo.
+            case direct_id::hits_census:
+              raw = get_census_hit( b.census_row );
               status = lookup_status::present;
               break;
 
@@ -4837,6 +4850,7 @@ void clear_process_caches()
   g_capability_bits.clear();
   g_slot_table_cache.clear();
   g_enemy_handle_cache.clear();
+  g_census_hit_actors.clear();
 }
 
 // How many entries the caches above hold right now (a set aim-context-pending record counts as one).
@@ -4844,6 +4858,6 @@ std::size_t process_cache_entries()
 {
   return g_action_handle_cache.size() + g_hits_action_handle_cache.size() + g_gate_bits_cache.size() +
          ( ( g_aim_context_pending.valid || g_aim_context_pending.p != nullptr ) ? 1u : 0u ) +
-         g_capability_bits.size() + g_slot_table_cache.size() + g_enemy_handle_cache.size();
+         g_capability_bits.size() + g_slot_table_cache.size() + g_enemy_handle_cache.size() + g_census_hit_actors.size();
 }
 } // namespace rl_policy

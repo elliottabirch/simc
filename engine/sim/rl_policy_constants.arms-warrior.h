@@ -128,14 +128,14 @@ struct rl_capability
 inline constexpr const char* RL_REGISTRY_ID = "arms-warrior";
 inline constexpr const char* RL_ACTOR_NAME = "RL_Arms_Warrior";
 inline constexpr int RL_ENCODER_VERSION = 6;
-inline constexpr std::size_t RL_OBS_DIM = 398;
-inline constexpr std::size_t RL_ACTION_DIM = 20;
+inline constexpr std::size_t RL_OBS_DIM = 406;
+inline constexpr std::size_t RL_ACTION_DIM = 19;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
-inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:11cc6bb0175a44c4888944058b219b0046daf3c0f5d456713d0fb1e91b2d260a";
-inline constexpr const char* RL_MASK_RULES_SHA = "9c4798b89d65f78009fcd1f13777b146a843ac60cbc45f80a5fede7b44979fb3";
-inline constexpr const char* RL_ACTION_SPACE_SHA = "d85ab46fdbd8473d566a4065d73364885f20b6a7e418f44dc7ebc21306689277";
+inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:3d04d536917aab5e64f8b80f935aacb5e30c95613062b9c831ecfc1b4175f943";
+inline constexpr const char* RL_MASK_RULES_SHA = "403fa658aabd986da04a24ad88c6625ad5a7fba10f3f6437922af21582877da5";
+inline constexpr const char* RL_ACTION_SPACE_SHA = "b827e77ae07449536296e422d97b1384006f959145cbbc7c30aeec757783e09a";
 
 // ---- Observation name list (the materialised ordering) ----
 
@@ -373,7 +373,6 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "legality.16.flag",
   "legality.17.flag",
   "legality.18.flag",
-  "legality.19.flag",
   "fight_remains",
   "active_enemies",
   "raid_event_next_in",
@@ -397,9 +396,18 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "fight.downtime.in",
   "fight.bloodlust.in",
   "resource.rage",
+  "hits.bladestorm",
   "hits.cleave",
+  "hits.colossus_smash",
+  "hits.demolish",
+  "hits.execute",
+  "hits.heroic_strike",
+  "hits.mortal_strike",
+  "hits.overpower",
+  "hits.ravager",
+  "hits.rend",
+  "hits.slam",
   "hits.whirlwind",
-  "hits.sweeping_strikes",
   "capability.talent_fast_footwork",
   "capability.talent_war_machine",
   "capability.talent_thunder_clap",
@@ -999,9 +1007,6 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_17[] = {
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_18[] = {
     { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
 };
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_19[] = {
-    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
-};
 inline constexpr rl_obs_member RL_OBS_FAMILY_LEGALITY_MEMBERS[] = {
   { "00", "00", RL_OBS_FAMILY_LEGALITY_LEAVES_0, 1 },
   { "01", "01", RL_OBS_FAMILY_LEGALITY_LEAVES_1, 1 },
@@ -1022,7 +1027,6 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_LEGALITY_MEMBERS[] = {
   { "16", "16", RL_OBS_FAMILY_LEGALITY_LEAVES_16, 1 },
   { "17", "17", RL_OBS_FAMILY_LEGALITY_LEAVES_17, 1 },
   { "18", "18", RL_OBS_FAMILY_LEGALITY_LEAVES_18, 1 },
-  { "19", "19", RL_OBS_FAMILY_LEGALITY_LEAVES_19, 1 },
 };
 
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
@@ -1049,9 +1053,18 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "fight.downtime.in", rl_kind::k_seconds, 600.0, false, 1.0, true, 60.0, nullptr, 0, false },
     { "fight.bloodlust.in", rl_kind::k_seconds, 600.0, false, 1.0, true, 60.0, nullptr, 0, false },
     { "resource.rage", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
+    { "hits.bladestorm", rl_kind::k_int, 0.0, true, 15.0, false, 1.0, nullptr, 0, false },
     { "hits.cleave", rl_kind::k_int, 0.0, true, 15.0, false, 1.0, nullptr, 0, false },
+    { "hits.colossus_smash", rl_kind::k_int, 0.0, true, 15.0, false, 1.0, nullptr, 0, false },
+    { "hits.demolish", rl_kind::k_int, 0.0, true, 15.0, false, 1.0, nullptr, 0, false },
+    { "hits.execute", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
+    { "hits.heroic_strike", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
+    { "hits.mortal_strike", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
+    { "hits.overpower", rl_kind::k_int, 0.0, true, 15.0, false, 1.0, nullptr, 0, false },
+    { "hits.ravager", rl_kind::k_int, 0.0, true, 15.0, false, 1.0, nullptr, 0, false },
+    { "hits.rend", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
+    { "hits.slam", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
     { "hits.whirlwind", rl_kind::k_int, 0.0, true, 15.0, false, 1.0, nullptr, 0, false },
-    { "hits.sweeping_strikes", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
     { "capability.talent_fast_footwork", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "capability.talent_war_machine", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "capability.talent_thunder_clap", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -1192,7 +1205,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "capability.mode_funnel", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_obs_member RL_OBS_FAMILY_SCALARS_MEMBERS[] = {
-  { "", "", RL_OBS_FAMILY_SCALARS_LEAVES_0, 164 },
+  { "", "", RL_OBS_FAMILY_SCALARS_LEAVES_0, 173 },
 };
 
 inline constexpr std::size_t RL_OBS_FAMILY_COUNT = 8;
@@ -1204,8 +1217,8 @@ inline constexpr rl_obs_family RL_OBS_FAMILIES[RL_OBS_FAMILY_COUNT] = {
   { rl_family::stats, "stats", rl_family_kind::direct, false, RL_OBS_FAMILY_STATS_MEMBERS, 8, 193, 8 },
   { rl_family::swing_cast, "swing_cast", rl_family_kind::direct, false, RL_OBS_FAMILY_SWING_CAST_MEMBERS, 3, 201, 3 },
   { rl_family::raid_events, "raid_events", rl_family_kind::expression, false, RL_OBS_FAMILY_RAID_EVENTS_MEMBERS, 2, 204, 10 },
-  { rl_family::legality, "legality", rl_family_kind::legality, false, RL_OBS_FAMILY_LEGALITY_MEMBERS, 20, 214, 20 },
-  { rl_family::scalars, "scalars", rl_family_kind::scalar, true, RL_OBS_FAMILY_SCALARS_MEMBERS, 1, 234, 164 },
+  { rl_family::legality, "legality", rl_family_kind::legality, false, RL_OBS_FAMILY_LEGALITY_MEMBERS, 19, 214, 19 },
+  { rl_family::scalars, "scalars", rl_family_kind::scalar, true, RL_OBS_FAMILY_SCALARS_MEMBERS, 1, 233, 173 },
 };
 
 // ---- Action descriptors ----
@@ -1230,13 +1243,14 @@ inline constexpr rl_action_desc RL_ACTIONS[RL_ACTION_DIM] = {
   { 16, "wrecking_throw", rl_action_kind::cast, "wrecking_throw", nullptr, "wrecking_throw", { rl_wait_anchor_kind::none, rl_swing_hand::none }, nullptr },
   { 17, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_next_event", { rl_wait_anchor_kind::none, rl_swing_hand::none }, nullptr },
   { 18, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_swing_mh", { rl_wait_anchor_kind::swing, rl_swing_hand::mh }, nullptr },
-  { 19, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_rage", { rl_wait_anchor_kind::none, rl_swing_hand::none }, nullptr },
 };
 
 // ---- Buff-gate table ----
 
-inline constexpr rl_buff_gate RL_BUFF_GATES[] = { { "", "", false } };
-inline constexpr std::size_t RL_BUFF_GATE_COUNT = 0;
+inline constexpr rl_buff_gate RL_BUFF_GATES[] = {
+  { "heroic_strike", "master_of_warfare_proc", false },
+};
+inline constexpr std::size_t RL_BUFF_GATE_COUNT = 1;
 
 // ---- Talent-gate table ----
 
@@ -1247,144 +1261,144 @@ inline constexpr std::size_t RL_TALENT_GATE_COUNT = 0;
 
 inline constexpr std::size_t RL_CAPABILITY_COUNT = 138;
 inline constexpr rl_capability RL_CAPABILITIES[RL_CAPABILITY_COUNT] = {
-  { "talent_fast_footwork", 260, "talent", nullptr, 0, nullptr, 0, 112206, 1, 0, 0, 0, 0, 0, 0 },
-  { "talent_war_machine", 261, "talent", nullptr, 0, nullptr, 0, 112185, 1, 0, 0, 0, 0, 0, 0 },
-  { "talent_thunder_clap", 262, "talent", nullptr, 0, nullptr, 0, 112205, 1, 0, 0, 0, 0, 0, 0 },
-  { "talent_leeching_strikes", 263, "talent", nullptr, 0, nullptr, 0, 112238, 1, 0, 0, 0, 0, 0, 0 },
-  { "talent_impending_victory", 264, "talent", nullptr, 0, nullptr, 0, 112183, 1, 0, 0, 0, 0, 0, 0 },
-  { "talent_heroic_leap", 265, "talent", nullptr, 0, nullptr, 0, 112208, 1, 0, 0, 0, 0, 0, 0 },
-  { "talent_crackling_thunder", 266, "talent", nullptr, 0, nullptr, 0, 118853, 1, 0, 0, 0, 0, 0, 0 },
-  { "talent_storm_bolt", 267, "talent", nullptr, 0, nullptr, 0, 112198, 1, 0, 0, 0, 17, 0, 1 },
-  { "talent_rend", 268, "talent", nullptr, 0, nullptr, 0, 135597, 1, 0, 0, 17, 16, 1, 1 },
-  { "talent_second_wind", 269, "talent", nullptr, 0, nullptr, 0, 112190, 1, 0, 0, 33, 0, 2, 0 },
-  { "talent_frothing_berserker", 270, "talent", nullptr, 0, nullptr, 0, 112216, 1, 0, 0, 33, 0, 2, 0 },
-  { "talent_bounding_stride", 271, "talent", nullptr, 0, nullptr, 0, 112219, 1, 0, 0, 33, 0, 2, 0 },
-  { "talent_pain_and_gain", 272, "talent", nullptr, 0, nullptr, 0, 112217, 1, 0, 0, 33, 0, 2, 0 },
-  { "talent_intervene", 273, "talent", nullptr, 0, nullptr, 0, 134217, 1, 0, 0, 33, 0, 2, 0 },
-  { "talent_interpose", 274, "talent", nullptr, 0, nullptr, 0, 134216, 1, 0, 0, 33, 0, 2, 0 },
-  { "talent_shockwave", 275, "talent", nullptr, 0, nullptr, 0, 112242, 1, 0, 0, 33, 0, 2, 0 },
-  { "talent_overwhelming_rage", 276, "talent", nullptr, 0, nullptr, 0, 112245, 1, 0, 0, 33, 0, 2, 0 },
-  { "talent_rallying_cry", 277, "talent", nullptr, 0, nullptr, 0, 112188, 1, 0, 0, 33, 0, 2, 0 },
-  { "talent_field_dressing", 278, "talent", nullptr, 0, nullptr, 0, 136626, 1, 0, 0, 33, 0, 2, 0 },
-  { "talent_spell_reflection", 279, "talent", nullptr, 0, nullptr, 0, 112253, 1, 0, 0, 33, 0, 2, 0 },
-  { "talent_wrecking_throw", 280, "talent", nullptr, 0, nullptr, 0, 112215, 1, 0, 0, 33, 17, 2, 1 },
-  { "talent_shattering_throw", 281, "talent", nullptr, 0, nullptr, 0, 112214, 1, 0, 0, 50, 0, 3, 0 },
-  { "talent_rumbling_earth", 282, "talent", nullptr, 0, nullptr, 0, 112241, 1, 0, 0, 50, 0, 3, 0 },
-  { "talent_berserker_shout", 283, "talent", nullptr, 0, nullptr, 0, 112211, 1, 0, 0, 50, 0, 3, 0 },
-  { "talent_fearless", 284, "talent", nullptr, 0, nullptr, 0, 112210, 1, 0, 0, 50, 0, 3, 0 },
-  { "talent_intimidating_shout", 285, "talent", nullptr, 0, nullptr, 0, 134254, 1, 0, 0, 50, 0, 3, 0 },
-  { "talent_piercing_howl", 286, "talent", nullptr, 0, nullptr, 0, 136627, 1, 0, 0, 50, 0, 3, 0 },
-  { "talent_honed_reflexes", 287, "talent", nullptr, 0, nullptr, 0, 118850, 1, 0, 0, 50, 0, 3, 0 },
-  { "talent_armored_to_the_teeth", 288, "talent", nullptr, 0, nullptr, 0, 112233, 1, 0, 0, 50, 0, 3, 0 },
-  { "talent_armored_to_the_teeth_r2", 289, "talent", nullptr, 0, nullptr, 0, 112233, 2, 0, 1, 50, 0, 3, 0 },
-  { "talent_reinforced_plates", 290, "talent", nullptr, 0, nullptr, 0, 112235, 1, 1, 0, 50, 0, 3, 0 },
-  { "talent_reinforced_plates_r2", 291, "talent", nullptr, 0, nullptr, 0, 112235, 2, 1, 1, 50, 0, 3, 0 },
-  { "talent_double_time", 292, "talent", nullptr, 0, nullptr, 0, 112249, 1, 2, 0, 50, 0, 3, 0 },
-  { "talent_barbaric_training", 293, "talent", nullptr, 0, nullptr, 0, 112209, 1, 2, 0, 50, 0, 3, 0 },
-  { "talent_javelineer", 294, "talent", nullptr, 0, nullptr, 0, 136625, 1, 2, 0, 50, 0, 3, 0 },
-  { "talent_resonant_voice", 295, "talent", nullptr, 0, nullptr, 0, 134225, 1, 2, 0, 50, 0, 3, 0 },
-  { "talent_crushing_force", 296, "talent", nullptr, 0, nullptr, 0, 134226, 1, 2, 0, 50, 0, 3, 0 },
-  { "talent_cruel_strikes", 297, "talent", nullptr, 0, nullptr, 0, 112248, 1, 2, 0, 50, 0, 3, 0 },
-  { "talent_cruel_strikes_r2", 298, "talent", nullptr, 0, nullptr, 0, 112248, 2, 2, 1, 50, 0, 3, 0 },
-  { "talent_twohanded_weapon_specialization", 299, "talent", nullptr, 0, nullptr, 0, 112179, 1, 3, 0, 50, 0, 3, 0 },
-  { "talent_twohanded_weapon_specialization_r2", 300, "talent", nullptr, 0, nullptr, 0, 112179, 2, 3, 1, 50, 0, 3, 0 },
-  { "talent_wild_strikes", 301, "talent", nullptr, 0, nullptr, 0, 112224, 1, 4, 0, 50, 0, 3, 0 },
-  { "talent_wild_strikes_r2", 302, "talent", nullptr, 0, nullptr, 0, 112224, 2, 4, 1, 50, 0, 3, 0 },
-  { "talent_anger_management", 303, "talent", nullptr, 0, nullptr, 0, 134032, 1, 5, 0, 50, 0, 3, 0 },
-  { "talent_champions_spear", 304, "talent", nullptr, 0, nullptr, 0, 112247, 1, 5, 0, 50, 0, 3, 0 },
-  { "talent_stance_mastery", 305, "talent", nullptr, 0, nullptr, 0, 134031, 1, 5, 0, 50, 0, 3, 0 },
-  { "talent_battlefield_commander", 306, "talent", nullptr, 0, nullptr, 0, 134033, 1, 5, 0, 50, 0, 3, 0 },
-  { "talent_mortal_strike", 307, "talent", nullptr, 0, nullptr, 0, 112122, 1, 5, 0, 50, 17, 3, 1 },
-  { "talent_overpower", 308, "talent", nullptr, 0, nullptr, 0, 112123, 1, 5, 0, 67, 20, 4, 1 },
-  { "talent_sudden_death", 309, "talent", nullptr, 0, nullptr, 0, 112126, 1, 5, 0, 87, 2, 5, 0 },
-  { "talent_fueled_by_violence", 310, "talent", nullptr, 0, nullptr, 0, 112128, 1, 5, 0, 89, 0, 5, 0 },
-  { "talent_ignore_pain", 311, "talent", nullptr, 0, nullptr, 0, 136701, 1, 5, 0, 89, 0, 5, 0 },
-  { "talent_die_by_the_sword", 312, "talent", nullptr, 0, nullptr, 0, 112121, 1, 5, 0, 89, 0, 5, 0 },
-  { "talent_bloodsurge", 313, "talent", nullptr, 0, nullptr, 0, 112129, 1, 5, 0, 89, 0, 5, 0 },
-  { "talent_improved_overpower", 314, "talent", nullptr, 0, nullptr, 0, 112131, 1, 5, 0, 89, 0, 5, 0 },
-  { "talent_improved_execute", 315, "talent", nullptr, 0, nullptr, 0, 112125, 1, 5, 0, 89, 0, 5, 0 },
-  { "talent_fervor_of_battle", 316, "talent", nullptr, 0, nullptr, 0, 135932, 1, 5, 0, 89, 0, 5, 0 },
-  { "talent_tactician", 317, "talent", nullptr, 0, nullptr, 0, 112134, 1, 5, 0, 89, 0, 5, 0 },
-  { "talent_colossus_smash", 318, "talent", nullptr, 0, nullptr, 0, 112144, 1, 5, 0, 89, 17, 5, 1 },
-  { "talent_impale", 319, "talent", nullptr, 0, nullptr, 0, 112146, 1, 5, 0, 106, 0, 6, 0 },
-  { "talent_brute_force", 320, "talent", nullptr, 0, nullptr, 0, 135936, 1, 5, 0, 106, 0, 6, 0 },
-  { "talent_efficiency", 321, "talent", nullptr, 0, nullptr, 0, 135935, 1, 5, 0, 106, 0, 6, 0 },
-  { "talent_overpowering_finish", 322, "talent", nullptr, 0, nullptr, 0, 114733, 1, 5, 0, 106, 0, 6, 0 },
-  { "talent_mass_execution", 323, "talent", nullptr, 0, nullptr, 0, 137473, 1, 5, 0, 106, 0, 6, 0 },
-  { "talent_strength_of_arms", 324, "talent", nullptr, 0, nullptr, 0, 135944, 1, 5, 0, 106, 0, 6, 0 },
-  { "talent_strength_of_arms_r2", 325, "talent", nullptr, 0, nullptr, 0, 135944, 2, 5, 1, 106, 0, 6, 0 },
-  { "talent_just_warming_up", 326, "talent", nullptr, 0, nullptr, 0, 135943, 1, 6, 0, 106, 0, 6, 0 },
-  { "talent_broad_strokes", 327, "talent", nullptr, 0, nullptr, 0, 135942, 1, 6, 0, 106, 0, 6, 0 },
-  { "talent_sharpened_blades", 328, "talent", nullptr, 0, nullptr, 0, 112320, 1, 6, 0, 106, 0, 6, 0 },
-  { "talent_sharpened_blades_r2", 329, "talent", nullptr, 0, nullptr, 0, 112320, 2, 6, 1, 106, 0, 6, 0 },
-  { "talent_cleave", 330, "talent", nullptr, 0, nullptr, 0, 112147, 1, 7, 0, 106, 2, 6, 1 },
-  { "talent_powerful_momentum", 331, "talent", nullptr, 0, nullptr, 0, 114739, 1, 7, 0, 108, 0, 7, 0 },
-  { "talent_martial_prowess", 332, "talent", nullptr, 0, nullptr, 0, 135934, 1, 7, 0, 108, 0, 7, 0 },
-  { "talent_dreadnaught", 333, "talent", nullptr, 0, nullptr, 0, 112137, 1, 7, 0, 108, 0, 7, 0 },
-  { "talent_deep_wounds", 334, "talent", nullptr, 0, nullptr, 0, 135940, 1, 7, 0, 108, 0, 7, 0 },
-  { "talent_tactical_edge", 335, "talent", nullptr, 0, nullptr, 0, 135939, 1, 7, 0, 108, 0, 7, 0 },
-  { "talent_crushing_combo", 336, "talent", nullptr, 0, nullptr, 0, 135938, 1, 7, 0, 108, 0, 7, 0 },
-  { "talent_massacre", 337, "talent", nullptr, 0, nullptr, 0, 112145, 1, 7, 0, 108, 0, 7, 0 },
-  { "talent_collateral_damage", 338, "talent", nullptr, 0, nullptr, 0, 135937, 1, 7, 0, 108, 2, 7, 0 },
-  { "talent_bloodborne", 339, "talent", nullptr, 0, nullptr, 0, 112135, 1, 7, 0, 110, 0, 7, 0 },
-  { "talent_bloodborne_r2", 340, "talent", nullptr, 0, nullptr, 0, 112135, 2, 7, 1, 110, 0, 7, 0 },
-  { "talent_bladestorm", 341, "talent", nullptr, 0, nullptr, 0, 112314, 1, 8, 0, 110, 2, 7, 1 },
-  { "talent_ravager", 342, "talent", nullptr, 0, nullptr, 0, 136702, 1, 8, 0, 112, 2, 8, 1 },
-  { "talent_critical_thinking", 343, "talent", nullptr, 0, nullptr, 0, 112317, 1, 8, 0, 114, 0, 9, 0 },
-  { "talent_critical_thinking_r2", 344, "talent", nullptr, 0, nullptr, 0, 112317, 2, 8, 1, 114, 0, 9, 0 },
-  { "talent_master_tactician", 345, "talent", nullptr, 0, nullptr, 0, 114740, 1, 9, 0, 114, 0, 9, 0 },
-  { "talent_bloodletting", 346, "talent", nullptr, 0, nullptr, 0, 112310, 1, 9, 0, 114, 0, 9, 0 },
-  { "talent_executioners_precision", 347, "talent", nullptr, 0, nullptr, 0, 112318, 1, 9, 0, 114, 2, 9, 0 },
-  { "talent_fatality", 348, "talent", nullptr, 0, nullptr, 0, 112311, 1, 9, 0, 116, 0, 9, 0 },
-  { "talent_battlelord", 349, "talent", nullptr, 0, nullptr, 0, 135933, 1, 9, 0, 116, 0, 9, 0 },
-  { "talent_mortal_wounds", 350, "talent", nullptr, 0, nullptr, 0, 135941, 1, 9, 0, 116, 0, 9, 0 },
-  { "talent_avatar", 351, "talent", nullptr, 0, nullptr, 0, 136703, 1, 9, 0, 116, 2, 9, 1 },
-  { "talent_master_of_warfare", 352, "talent", nullptr, 0, nullptr, 0, 136989, 1, 9, 0, 118, 0, 10, 0 },
-  { "talent_master_of_warfare_r2", 353, "talent", nullptr, 0, nullptr, 0, 136988, 1, 9, 1, 118, 0, 10, 0 },
-  { "talent_master_of_warfare_r3", 354, "talent", nullptr, 0, nullptr, 0, 136988, 2, 10, 1, 118, 0, 10, 0 },
-  { "talent_master_of_warfare_r4", 355, "talent", nullptr, 0, nullptr, 0, 136987, 1, 11, 1, 118, 0, 10, 0 },
-  { "talent_martial_expert", 356, "talent", nullptr, 0, nullptr, 0, 117409, 1, 12, 0, 118, 0, 10, 0 },
-  { "talent_colossal_might", 357, "talent", nullptr, 0, nullptr, 0, 117416, 1, 12, 0, 118, 2, 10, 0 },
-  { "talent_boneshaker", 358, "talent", nullptr, 0, nullptr, 0, 117386, 1, 12, 0, 120, 0, 10, 0 },
-  { "talent_earthquaker", 359, "talent", nullptr, 0, nullptr, 0, 119858, 1, 12, 0, 120, 0, 10, 0 },
-  { "talent_decimator", 360, "talent", nullptr, 0, nullptr, 0, 136073, 1, 12, 0, 120, 0, 10, 0 },
-  { "talent_one_against_many", 361, "talent", nullptr, 0, nullptr, 0, 117396, 1, 12, 0, 120, 0, 10, 0 },
-  { "talent_arterial_bleed", 362, "talent", nullptr, 0, nullptr, 0, 119856, 1, 12, 0, 120, 0, 10, 0 },
-  { "talent_tide_of_battle", 363, "talent", nullptr, 0, nullptr, 0, 117408, 1, 12, 0, 120, 0, 10, 0 },
-  { "talent_no_stranger_to_pain", 364, "talent", nullptr, 0, nullptr, 0, 117412, 1, 12, 0, 120, 0, 10, 0 },
-  { "talent_veteran_vitality", 365, "talent", nullptr, 0, nullptr, 0, 119857, 1, 12, 0, 120, 0, 10, 0 },
-  { "talent_cut_to_the_bone", 366, "talent", nullptr, 0, nullptr, 0, 136072, 1, 12, 0, 120, 0, 10, 0 },
-  { "talent_practiced_strikes", 367, "talent", nullptr, 0, nullptr, 0, 117393, 1, 12, 0, 120, 0, 10, 0 },
-  { "talent_precise_might", 368, "talent", nullptr, 0, nullptr, 0, 117391, 1, 12, 0, 120, 0, 10, 0 },
-  { "talent_mountain_of_muscle_and_scars", 369, "talent", nullptr, 0, nullptr, 0, 117403, 1, 12, 0, 120, 0, 10, 0 },
-  { "talent_celeritous_conclusion", 370, "talent", nullptr, 0, nullptr, 0, 136071, 1, 12, 0, 120, 0, 10, 0 },
-  { "talent_dominance_of_the_colossus", 371, "talent", nullptr, 0, nullptr, 0, 117390, 1, 12, 0, 120, 0, 10, 0 },
-  { "talent_imminent_demise", 372, "talent", nullptr, 0, nullptr, 0, 117385, 1, 12, 0, 120, 2, 10, 0 },
-  { "talent_overwhelming_blades", 373, "talent", nullptr, 0, nullptr, 0, 117407, 1, 12, 0, 122, 0, 10, 0 },
-  { "talent_relentless_pursuit", 374, "talent", nullptr, 0, nullptr, 0, 117392, 1, 12, 0, 122, 0, 10, 0 },
-  { "talent_vicious_agility", 375, "talent", nullptr, 0, nullptr, 0, 123408, 1, 12, 0, 122, 0, 10, 0 },
-  { "talent_violent_euphoria", 376, "talent", nullptr, 0, nullptr, 0, 136076, 1, 12, 0, 122, 0, 10, 0 },
-  { "talent_death_drive", 377, "talent", nullptr, 0, nullptr, 0, 117410, 1, 12, 0, 122, 0, 10, 0 },
-  { "talent_culling_cyclone", 378, "talent", nullptr, 0, nullptr, 0, 117383, 1, 12, 0, 122, 0, 10, 0 },
-  { "talent_brutal_finish", 379, "talent", nullptr, 0, nullptr, 0, 123409, 1, 12, 0, 122, 0, 10, 0 },
-  { "talent_fierce_followthrough", 380, "talent", nullptr, 0, nullptr, 0, 117384, 1, 12, 0, 122, 0, 10, 0 },
-  { "talent_opportunist", 381, "talent", nullptr, 0, nullptr, 0, 123770, 1, 12, 0, 122, 2, 10, 0 },
-  { "talent_deadly_focus", 382, "talent", nullptr, 0, nullptr, 0, 136075, 1, 12, 0, 124, 0, 10, 0 },
-  { "talent_show_no_mercy", 383, "talent", nullptr, 0, nullptr, 0, 117381, 1, 12, 0, 124, 0, 10, 0 },
-  { "talent_reap_the_storm", 384, "talent", nullptr, 0, nullptr, 0, 117406, 1, 12, 0, 124, 0, 10, 0 },
-  { "talent_slayers_malice", 385, "talent", nullptr, 0, nullptr, 0, 117398, 1, 12, 0, 124, 0, 10, 0 },
-  { "talent_unhinged", 386, "talent", nullptr, 0, nullptr, 0, 136074, 1, 12, 0, 124, 0, 10, 0 },
-  { "talent_unrelenting_onslaught", 387, "talent", nullptr, 0, nullptr, 0, 117417, 1, 12, 0, 124, 0, 10, 0 },
-  { "hero_colossus", 388, "talent", nullptr, 0, nullptr, 0, 117415, 1, 12, 0, 124, 17, 10, 1 },
-  { "hero_slayer", 389, "talent", nullptr, 0, nullptr, 0, 117411, 1, 12, 0, 141, 0, 11, 0 },
-  { "enchant_arcane_mastery", 390, "special_effect", nullptr, 1236721, nullptr, 0, 0, 0, 12, 0, 141, 1, 11, 0 },
-  { "enchant_berserkers_rage", 391, "special_effect", nullptr, 1236728, nullptr, 0, 0, 0, 12, 0, 142, 1, 11, 0 },
-  { "embellishment_arcanoweave_lining", 392, "special_effect", nullptr, 1283697, nullptr, 0, 0, 0, 12, 0, 143, 1, 11, 0 },
-  { "embellishment_hunters_ritual_stone", 393, "special_effect", nullptr, 1297382, nullptr, 0, 0, 0, 12, 0, 144, 4, 11, 0 },
-  { "item_venomcursed_mastery", 394, "special_effect", nullptr, 1307923, nullptr, 0, 0, 0, 12, 0, 148, 1, 11, 0 },
-  { "item_venomcursed_ascendance", 395, "special_effect", nullptr, 1317582, nullptr, 0, 0, 0, 12, 0, 149, 1, 11, 0 },
-  { "set_bite_of_zuljan_2pc", 396, "set_bonus", nullptr, 0, "MID_BOZ", 2, 0, 0, 12, 0, 150, 0, 11, 0 },
-  { "mode_funnel", 397, "funnel_mode", nullptr, 0, nullptr, 0, 0, 0, 12, 0, 150, 0, 11, 0 },
+  { "talent_fast_footwork", 268, "talent", nullptr, 0, nullptr, 0, 112206, 1, 0, 0, 0, 0, 0, 0 },
+  { "talent_war_machine", 269, "talent", nullptr, 0, nullptr, 0, 112185, 1, 0, 0, 0, 0, 0, 0 },
+  { "talent_thunder_clap", 270, "talent", nullptr, 0, nullptr, 0, 112205, 1, 0, 0, 0, 0, 0, 0 },
+  { "talent_leeching_strikes", 271, "talent", nullptr, 0, nullptr, 0, 112238, 1, 0, 0, 0, 0, 0, 0 },
+  { "talent_impending_victory", 272, "talent", nullptr, 0, nullptr, 0, 112183, 1, 0, 0, 0, 0, 0, 0 },
+  { "talent_heroic_leap", 273, "talent", nullptr, 0, nullptr, 0, 112208, 1, 0, 0, 0, 0, 0, 0 },
+  { "talent_crackling_thunder", 274, "talent", nullptr, 0, nullptr, 0, 118853, 1, 0, 0, 0, 0, 0, 0 },
+  { "talent_storm_bolt", 275, "talent", nullptr, 0, nullptr, 0, 112198, 1, 0, 0, 0, 17, 0, 1 },
+  { "talent_rend", 276, "talent", nullptr, 0, nullptr, 0, 135597, 1, 0, 0, 17, 16, 1, 1 },
+  { "talent_second_wind", 277, "talent", nullptr, 0, nullptr, 0, 112190, 1, 0, 0, 33, 0, 2, 0 },
+  { "talent_frothing_berserker", 278, "talent", nullptr, 0, nullptr, 0, 112216, 1, 0, 0, 33, 0, 2, 0 },
+  { "talent_bounding_stride", 279, "talent", nullptr, 0, nullptr, 0, 112219, 1, 0, 0, 33, 0, 2, 0 },
+  { "talent_pain_and_gain", 280, "talent", nullptr, 0, nullptr, 0, 112217, 1, 0, 0, 33, 0, 2, 0 },
+  { "talent_intervene", 281, "talent", nullptr, 0, nullptr, 0, 134217, 1, 0, 0, 33, 0, 2, 0 },
+  { "talent_interpose", 282, "talent", nullptr, 0, nullptr, 0, 134216, 1, 0, 0, 33, 0, 2, 0 },
+  { "talent_shockwave", 283, "talent", nullptr, 0, nullptr, 0, 112242, 1, 0, 0, 33, 0, 2, 0 },
+  { "talent_overwhelming_rage", 284, "talent", nullptr, 0, nullptr, 0, 112245, 1, 0, 0, 33, 0, 2, 0 },
+  { "talent_rallying_cry", 285, "talent", nullptr, 0, nullptr, 0, 112188, 1, 0, 0, 33, 0, 2, 0 },
+  { "talent_field_dressing", 286, "talent", nullptr, 0, nullptr, 0, 136626, 1, 0, 0, 33, 0, 2, 0 },
+  { "talent_spell_reflection", 287, "talent", nullptr, 0, nullptr, 0, 112253, 1, 0, 0, 33, 0, 2, 0 },
+  { "talent_wrecking_throw", 288, "talent", nullptr, 0, nullptr, 0, 112215, 1, 0, 0, 33, 17, 2, 1 },
+  { "talent_shattering_throw", 289, "talent", nullptr, 0, nullptr, 0, 112214, 1, 0, 0, 50, 0, 3, 0 },
+  { "talent_rumbling_earth", 290, "talent", nullptr, 0, nullptr, 0, 112241, 1, 0, 0, 50, 0, 3, 0 },
+  { "talent_berserker_shout", 291, "talent", nullptr, 0, nullptr, 0, 112211, 1, 0, 0, 50, 0, 3, 0 },
+  { "talent_fearless", 292, "talent", nullptr, 0, nullptr, 0, 112210, 1, 0, 0, 50, 0, 3, 0 },
+  { "talent_intimidating_shout", 293, "talent", nullptr, 0, nullptr, 0, 134254, 1, 0, 0, 50, 0, 3, 0 },
+  { "talent_piercing_howl", 294, "talent", nullptr, 0, nullptr, 0, 136627, 1, 0, 0, 50, 0, 3, 0 },
+  { "talent_honed_reflexes", 295, "talent", nullptr, 0, nullptr, 0, 118850, 1, 0, 0, 50, 0, 3, 0 },
+  { "talent_armored_to_the_teeth", 296, "talent", nullptr, 0, nullptr, 0, 112233, 1, 0, 0, 50, 0, 3, 0 },
+  { "talent_armored_to_the_teeth_r2", 297, "talent", nullptr, 0, nullptr, 0, 112233, 2, 0, 1, 50, 0, 3, 0 },
+  { "talent_reinforced_plates", 298, "talent", nullptr, 0, nullptr, 0, 112235, 1, 1, 0, 50, 0, 3, 0 },
+  { "talent_reinforced_plates_r2", 299, "talent", nullptr, 0, nullptr, 0, 112235, 2, 1, 1, 50, 0, 3, 0 },
+  { "talent_double_time", 300, "talent", nullptr, 0, nullptr, 0, 112249, 1, 2, 0, 50, 0, 3, 0 },
+  { "talent_barbaric_training", 301, "talent", nullptr, 0, nullptr, 0, 112209, 1, 2, 0, 50, 0, 3, 0 },
+  { "talent_javelineer", 302, "talent", nullptr, 0, nullptr, 0, 136625, 1, 2, 0, 50, 0, 3, 0 },
+  { "talent_resonant_voice", 303, "talent", nullptr, 0, nullptr, 0, 134225, 1, 2, 0, 50, 0, 3, 0 },
+  { "talent_crushing_force", 304, "talent", nullptr, 0, nullptr, 0, 134226, 1, 2, 0, 50, 0, 3, 0 },
+  { "talent_cruel_strikes", 305, "talent", nullptr, 0, nullptr, 0, 112248, 1, 2, 0, 50, 0, 3, 0 },
+  { "talent_cruel_strikes_r2", 306, "talent", nullptr, 0, nullptr, 0, 112248, 2, 2, 1, 50, 0, 3, 0 },
+  { "talent_twohanded_weapon_specialization", 307, "talent", nullptr, 0, nullptr, 0, 112179, 1, 3, 0, 50, 0, 3, 0 },
+  { "talent_twohanded_weapon_specialization_r2", 308, "talent", nullptr, 0, nullptr, 0, 112179, 2, 3, 1, 50, 0, 3, 0 },
+  { "talent_wild_strikes", 309, "talent", nullptr, 0, nullptr, 0, 112224, 1, 4, 0, 50, 0, 3, 0 },
+  { "talent_wild_strikes_r2", 310, "talent", nullptr, 0, nullptr, 0, 112224, 2, 4, 1, 50, 0, 3, 0 },
+  { "talent_anger_management", 311, "talent", nullptr, 0, nullptr, 0, 134032, 1, 5, 0, 50, 0, 3, 0 },
+  { "talent_champions_spear", 312, "talent", nullptr, 0, nullptr, 0, 112247, 1, 5, 0, 50, 0, 3, 0 },
+  { "talent_stance_mastery", 313, "talent", nullptr, 0, nullptr, 0, 134031, 1, 5, 0, 50, 0, 3, 0 },
+  { "talent_battlefield_commander", 314, "talent", nullptr, 0, nullptr, 0, 134033, 1, 5, 0, 50, 0, 3, 0 },
+  { "talent_mortal_strike", 315, "talent", nullptr, 0, nullptr, 0, 112122, 1, 5, 0, 50, 17, 3, 1 },
+  { "talent_overpower", 316, "talent", nullptr, 0, nullptr, 0, 112123, 1, 5, 0, 67, 20, 4, 1 },
+  { "talent_sudden_death", 317, "talent", nullptr, 0, nullptr, 0, 112126, 1, 5, 0, 87, 2, 5, 0 },
+  { "talent_fueled_by_violence", 318, "talent", nullptr, 0, nullptr, 0, 112128, 1, 5, 0, 89, 0, 5, 0 },
+  { "talent_ignore_pain", 319, "talent", nullptr, 0, nullptr, 0, 136701, 1, 5, 0, 89, 0, 5, 0 },
+  { "talent_die_by_the_sword", 320, "talent", nullptr, 0, nullptr, 0, 112121, 1, 5, 0, 89, 0, 5, 0 },
+  { "talent_bloodsurge", 321, "talent", nullptr, 0, nullptr, 0, 112129, 1, 5, 0, 89, 0, 5, 0 },
+  { "talent_improved_overpower", 322, "talent", nullptr, 0, nullptr, 0, 112131, 1, 5, 0, 89, 0, 5, 0 },
+  { "talent_improved_execute", 323, "talent", nullptr, 0, nullptr, 0, 112125, 1, 5, 0, 89, 0, 5, 0 },
+  { "talent_fervor_of_battle", 324, "talent", nullptr, 0, nullptr, 0, 135932, 1, 5, 0, 89, 0, 5, 0 },
+  { "talent_tactician", 325, "talent", nullptr, 0, nullptr, 0, 112134, 1, 5, 0, 89, 0, 5, 0 },
+  { "talent_colossus_smash", 326, "talent", nullptr, 0, nullptr, 0, 112144, 1, 5, 0, 89, 17, 5, 1 },
+  { "talent_impale", 327, "talent", nullptr, 0, nullptr, 0, 112146, 1, 5, 0, 106, 0, 6, 0 },
+  { "talent_brute_force", 328, "talent", nullptr, 0, nullptr, 0, 135936, 1, 5, 0, 106, 0, 6, 0 },
+  { "talent_efficiency", 329, "talent", nullptr, 0, nullptr, 0, 135935, 1, 5, 0, 106, 0, 6, 0 },
+  { "talent_overpowering_finish", 330, "talent", nullptr, 0, nullptr, 0, 114733, 1, 5, 0, 106, 0, 6, 0 },
+  { "talent_mass_execution", 331, "talent", nullptr, 0, nullptr, 0, 137473, 1, 5, 0, 106, 0, 6, 0 },
+  { "talent_strength_of_arms", 332, "talent", nullptr, 0, nullptr, 0, 135944, 1, 5, 0, 106, 0, 6, 0 },
+  { "talent_strength_of_arms_r2", 333, "talent", nullptr, 0, nullptr, 0, 135944, 2, 5, 1, 106, 0, 6, 0 },
+  { "talent_just_warming_up", 334, "talent", nullptr, 0, nullptr, 0, 135943, 1, 6, 0, 106, 0, 6, 0 },
+  { "talent_broad_strokes", 335, "talent", nullptr, 0, nullptr, 0, 135942, 1, 6, 0, 106, 0, 6, 0 },
+  { "talent_sharpened_blades", 336, "talent", nullptr, 0, nullptr, 0, 112320, 1, 6, 0, 106, 0, 6, 0 },
+  { "talent_sharpened_blades_r2", 337, "talent", nullptr, 0, nullptr, 0, 112320, 2, 6, 1, 106, 0, 6, 0 },
+  { "talent_cleave", 338, "talent", nullptr, 0, nullptr, 0, 112147, 1, 7, 0, 106, 2, 6, 1 },
+  { "talent_powerful_momentum", 339, "talent", nullptr, 0, nullptr, 0, 114739, 1, 7, 0, 108, 0, 7, 0 },
+  { "talent_martial_prowess", 340, "talent", nullptr, 0, nullptr, 0, 135934, 1, 7, 0, 108, 0, 7, 0 },
+  { "talent_dreadnaught", 341, "talent", nullptr, 0, nullptr, 0, 112137, 1, 7, 0, 108, 0, 7, 0 },
+  { "talent_deep_wounds", 342, "talent", nullptr, 0, nullptr, 0, 135940, 1, 7, 0, 108, 0, 7, 0 },
+  { "talent_tactical_edge", 343, "talent", nullptr, 0, nullptr, 0, 135939, 1, 7, 0, 108, 0, 7, 0 },
+  { "talent_crushing_combo", 344, "talent", nullptr, 0, nullptr, 0, 135938, 1, 7, 0, 108, 0, 7, 0 },
+  { "talent_massacre", 345, "talent", nullptr, 0, nullptr, 0, 112145, 1, 7, 0, 108, 0, 7, 0 },
+  { "talent_collateral_damage", 346, "talent", nullptr, 0, nullptr, 0, 135937, 1, 7, 0, 108, 2, 7, 0 },
+  { "talent_bloodborne", 347, "talent", nullptr, 0, nullptr, 0, 112135, 1, 7, 0, 110, 0, 7, 0 },
+  { "talent_bloodborne_r2", 348, "talent", nullptr, 0, nullptr, 0, 112135, 2, 7, 1, 110, 0, 7, 0 },
+  { "talent_bladestorm", 349, "talent", nullptr, 0, nullptr, 0, 112314, 1, 8, 0, 110, 2, 7, 1 },
+  { "talent_ravager", 350, "talent", nullptr, 0, nullptr, 0, 136702, 1, 8, 0, 112, 2, 8, 1 },
+  { "talent_critical_thinking", 351, "talent", nullptr, 0, nullptr, 0, 112317, 1, 8, 0, 114, 0, 9, 0 },
+  { "talent_critical_thinking_r2", 352, "talent", nullptr, 0, nullptr, 0, 112317, 2, 8, 1, 114, 0, 9, 0 },
+  { "talent_master_tactician", 353, "talent", nullptr, 0, nullptr, 0, 114740, 1, 9, 0, 114, 0, 9, 0 },
+  { "talent_bloodletting", 354, "talent", nullptr, 0, nullptr, 0, 112310, 1, 9, 0, 114, 0, 9, 0 },
+  { "talent_executioners_precision", 355, "talent", nullptr, 0, nullptr, 0, 112318, 1, 9, 0, 114, 2, 9, 0 },
+  { "talent_fatality", 356, "talent", nullptr, 0, nullptr, 0, 112311, 1, 9, 0, 116, 0, 9, 0 },
+  { "talent_battlelord", 357, "talent", nullptr, 0, nullptr, 0, 135933, 1, 9, 0, 116, 0, 9, 0 },
+  { "talent_mortal_wounds", 358, "talent", nullptr, 0, nullptr, 0, 135941, 1, 9, 0, 116, 0, 9, 0 },
+  { "talent_avatar", 359, "talent", nullptr, 0, nullptr, 0, 136703, 1, 9, 0, 116, 2, 9, 1 },
+  { "talent_master_of_warfare", 360, "talent", nullptr, 0, nullptr, 0, 136989, 1, 9, 0, 118, 0, 10, 0 },
+  { "talent_master_of_warfare_r2", 361, "talent", nullptr, 0, nullptr, 0, 136988, 1, 9, 1, 118, 0, 10, 0 },
+  { "talent_master_of_warfare_r3", 362, "talent", nullptr, 0, nullptr, 0, 136988, 2, 10, 1, 118, 0, 10, 0 },
+  { "talent_master_of_warfare_r4", 363, "talent", nullptr, 0, nullptr, 0, 136987, 1, 11, 1, 118, 0, 10, 0 },
+  { "talent_martial_expert", 364, "talent", nullptr, 0, nullptr, 0, 117409, 1, 12, 0, 118, 0, 10, 0 },
+  { "talent_colossal_might", 365, "talent", nullptr, 0, nullptr, 0, 117416, 1, 12, 0, 118, 2, 10, 0 },
+  { "talent_boneshaker", 366, "talent", nullptr, 0, nullptr, 0, 117386, 1, 12, 0, 120, 0, 10, 0 },
+  { "talent_earthquaker", 367, "talent", nullptr, 0, nullptr, 0, 119858, 1, 12, 0, 120, 0, 10, 0 },
+  { "talent_decimator", 368, "talent", nullptr, 0, nullptr, 0, 136073, 1, 12, 0, 120, 0, 10, 0 },
+  { "talent_one_against_many", 369, "talent", nullptr, 0, nullptr, 0, 117396, 1, 12, 0, 120, 0, 10, 0 },
+  { "talent_arterial_bleed", 370, "talent", nullptr, 0, nullptr, 0, 119856, 1, 12, 0, 120, 0, 10, 0 },
+  { "talent_tide_of_battle", 371, "talent", nullptr, 0, nullptr, 0, 117408, 1, 12, 0, 120, 0, 10, 0 },
+  { "talent_no_stranger_to_pain", 372, "talent", nullptr, 0, nullptr, 0, 117412, 1, 12, 0, 120, 0, 10, 0 },
+  { "talent_veteran_vitality", 373, "talent", nullptr, 0, nullptr, 0, 119857, 1, 12, 0, 120, 0, 10, 0 },
+  { "talent_cut_to_the_bone", 374, "talent", nullptr, 0, nullptr, 0, 136072, 1, 12, 0, 120, 0, 10, 0 },
+  { "talent_practiced_strikes", 375, "talent", nullptr, 0, nullptr, 0, 117393, 1, 12, 0, 120, 0, 10, 0 },
+  { "talent_precise_might", 376, "talent", nullptr, 0, nullptr, 0, 117391, 1, 12, 0, 120, 0, 10, 0 },
+  { "talent_mountain_of_muscle_and_scars", 377, "talent", nullptr, 0, nullptr, 0, 117403, 1, 12, 0, 120, 0, 10, 0 },
+  { "talent_celeritous_conclusion", 378, "talent", nullptr, 0, nullptr, 0, 136071, 1, 12, 0, 120, 0, 10, 0 },
+  { "talent_dominance_of_the_colossus", 379, "talent", nullptr, 0, nullptr, 0, 117390, 1, 12, 0, 120, 0, 10, 0 },
+  { "talent_imminent_demise", 380, "talent", nullptr, 0, nullptr, 0, 117385, 1, 12, 0, 120, 2, 10, 0 },
+  { "talent_overwhelming_blades", 381, "talent", nullptr, 0, nullptr, 0, 117407, 1, 12, 0, 122, 0, 10, 0 },
+  { "talent_relentless_pursuit", 382, "talent", nullptr, 0, nullptr, 0, 117392, 1, 12, 0, 122, 0, 10, 0 },
+  { "talent_vicious_agility", 383, "talent", nullptr, 0, nullptr, 0, 123408, 1, 12, 0, 122, 0, 10, 0 },
+  { "talent_violent_euphoria", 384, "talent", nullptr, 0, nullptr, 0, 136076, 1, 12, 0, 122, 0, 10, 0 },
+  { "talent_death_drive", 385, "talent", nullptr, 0, nullptr, 0, 117410, 1, 12, 0, 122, 0, 10, 0 },
+  { "talent_culling_cyclone", 386, "talent", nullptr, 0, nullptr, 0, 117383, 1, 12, 0, 122, 0, 10, 0 },
+  { "talent_brutal_finish", 387, "talent", nullptr, 0, nullptr, 0, 123409, 1, 12, 0, 122, 0, 10, 0 },
+  { "talent_fierce_followthrough", 388, "talent", nullptr, 0, nullptr, 0, 117384, 1, 12, 0, 122, 0, 10, 0 },
+  { "talent_opportunist", 389, "talent", nullptr, 0, nullptr, 0, 123770, 1, 12, 0, 122, 2, 10, 0 },
+  { "talent_deadly_focus", 390, "talent", nullptr, 0, nullptr, 0, 136075, 1, 12, 0, 124, 0, 10, 0 },
+  { "talent_show_no_mercy", 391, "talent", nullptr, 0, nullptr, 0, 117381, 1, 12, 0, 124, 0, 10, 0 },
+  { "talent_reap_the_storm", 392, "talent", nullptr, 0, nullptr, 0, 117406, 1, 12, 0, 124, 0, 10, 0 },
+  { "talent_slayers_malice", 393, "talent", nullptr, 0, nullptr, 0, 117398, 1, 12, 0, 124, 0, 10, 0 },
+  { "talent_unhinged", 394, "talent", nullptr, 0, nullptr, 0, 136074, 1, 12, 0, 124, 0, 10, 0 },
+  { "talent_unrelenting_onslaught", 395, "talent", nullptr, 0, nullptr, 0, 117417, 1, 12, 0, 124, 0, 10, 0 },
+  { "hero_colossus", 396, "talent", nullptr, 0, nullptr, 0, 117415, 1, 12, 0, 124, 17, 10, 1 },
+  { "hero_slayer", 397, "talent", nullptr, 0, nullptr, 0, 117411, 1, 12, 0, 141, 0, 11, 0 },
+  { "enchant_arcane_mastery", 398, "special_effect", nullptr, 1236721, nullptr, 0, 0, 0, 12, 0, 141, 1, 11, 0 },
+  { "enchant_berserkers_rage", 399, "special_effect", nullptr, 1236728, nullptr, 0, 0, 0, 12, 0, 142, 1, 11, 0 },
+  { "embellishment_arcanoweave_lining", 400, "special_effect", nullptr, 1283697, nullptr, 0, 0, 0, 12, 0, 143, 1, 11, 0 },
+  { "embellishment_hunters_ritual_stone", 401, "special_effect", nullptr, 1297382, nullptr, 0, 0, 0, 12, 0, 144, 4, 11, 0 },
+  { "item_venomcursed_mastery", 402, "special_effect", nullptr, 1307923, nullptr, 0, 0, 0, 12, 0, 148, 1, 11, 0 },
+  { "item_venomcursed_ascendance", 403, "special_effect", nullptr, 1317582, nullptr, 0, 0, 0, 12, 0, 149, 1, 11, 0 },
+  { "set_bite_of_zuljan_2pc", 404, "set_bonus", nullptr, 0, "MID_BOZ", 2, 0, 0, 12, 0, 150, 0, 11, 0 },
+  { "mode_funnel", 405, "funnel_mode", nullptr, 0, nullptr, 0, 0, 0, 12, 0, 150, 0, 11, 0 },
 };
 
 inline constexpr std::size_t RL_CAPABILITY_REQUIRES_COUNT = 12;
@@ -1573,7 +1587,7 @@ inline constexpr const char* RL_CAPABILITY_GOVERNED_ACTIONS[RL_CAPABILITY_GOVERN
 };
 
 inline constexpr double RL_CAPABILITY_FIXED_VALUE = 0.0;
-inline constexpr const char* RL_NET_LAYOUT_SHA = "rl-layout-v1:74941d630c25e923dabd7f3a7e26bedcd43d199899b1d3fec11ea21ecabf925e";
+inline constexpr const char* RL_NET_LAYOUT_SHA = "rl-layout-v1:e004ca500673be079dcc3983da5d663b52b7a1f0e6328161323e8a0336d00994";
 
 // ---- Target scorer feature list (Phase 230-02, SCOR-01) ----
 
@@ -1648,7 +1662,7 @@ inline constexpr rl_aim_fact_desc RL_AIM_FACT_DESCS[RL_TARGET_FEATURES] = {
 };
 
 inline constexpr std::size_t RL_AIM_CONTEXT_COUNT = 1;
-inline constexpr std::size_t RL_AIM_CONTEXT_OBS_SLOTS[RL_AIM_CONTEXT_COUNT] = { 397 };
+inline constexpr std::size_t RL_AIM_CONTEXT_OBS_SLOTS[RL_AIM_CONTEXT_COUNT] = { 405 };
 inline constexpr const char* RL_AIM_CONTEXT_NAMES[RL_AIM_CONTEXT_COUNT] = {
   "capability.mode_funnel",
 };
@@ -1726,8 +1740,8 @@ inline constexpr const char* RL_TARGETED_TOKENS[RL_TARGETED_TOKEN_COUNT] = {
   "wrecking_throw",
   "storm_bolt",
 };
-inline constexpr const char* RL_CHOOSER_PROBE_ACTION = "wrecking_throw";
-inline constexpr const char* RL_CHOOSER_MELEE_ACTION = "mortal_strike";
+inline constexpr double RL_AIMED_SPELL_RANGE_YARDS[RL_TARGETED_TOKEN_COUNT] = {5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 0.0, 5.0, 30.0, 25.0};
+inline constexpr const char* RL_TAG_MELEE_ACTION = "mortal_strike";
 
 inline constexpr std::size_t RL_RULE_PREF_COUNT = 10;
 inline constexpr rl_rule_pref RL_RULE_PREFS[RL_RULE_PREF_COUNT] = {
@@ -1752,11 +1766,10 @@ inline constexpr rl_declared_fact RL_DECLARED_FACTS[RL_DECLARED_FACT_COUNT] = {
 
 inline constexpr const char* RL_RESOURCE_NAME = "rage";
 
-inline constexpr std::size_t RL_WAIT_DEF_COUNT = 3;
+inline constexpr std::size_t RL_WAIT_DEF_COUNT = 2;
 inline constexpr rl_wait_def RL_WAIT_DEFS[RL_WAIT_DEF_COUNT] = {
   { "wait_next_event", rl_wait_kind::next_event, 0.0 },
   { "wait_swing_mh", rl_wait_kind::swing_mh, 0.0 },
-  { "wait_rage", rl_wait_kind::resource_threshold, 30.0 },
 };
 
 inline constexpr std::size_t RL_COOLDOWN_ROW_ACTION_COUNT = 0;
@@ -1788,9 +1801,18 @@ inline constexpr const char* RL_PROC_NAMES[RL_PROC_NAME_COUNT] = {
   "spare_19",
 };
 
-inline constexpr std::size_t RL_HIT_PROVIDER_COUNT = 3;
+inline constexpr std::size_t RL_HIT_PROVIDER_COUNT = 12;
 inline constexpr rl_hit_provider RL_HIT_PROVIDERS[RL_HIT_PROVIDER_COUNT] = {
-  { "hits", "cleave", "warrior.cleave" },
-  { "hits", "whirlwind", "warrior.whirlwind" },
-  { "hits", "sweeping_strikes", "warrior.sweeping_strikes" },
+  { "hits", "bladestorm", "census.bladestorm" },
+  { "hits", "cleave", "census.cleave" },
+  { "hits", "colossus_smash", "census.colossus_smash" },
+  { "hits", "demolish", "census.demolish" },
+  { "hits", "execute", "census.execute" },
+  { "hits", "heroic_strike", "census.heroic_strike" },
+  { "hits", "mortal_strike", "census.mortal_strike" },
+  { "hits", "overpower", "census.overpower" },
+  { "hits", "ravager", "census.ravager" },
+  { "hits", "rend", "census.rend" },
+  { "hits", "slam", "census.slam" },
+  { "hits", "whirlwind", "census.whirlwind" },
 };

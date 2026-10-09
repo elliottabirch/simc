@@ -122,8 +122,12 @@ static_assert( RL_HEADER_CA_VERSION == 1, "C-A: the header must carry RL_HEADER_
 static_assert( rl_contract::scalar_of_v<decltype( RL_TARGETED_TOKEN_COUNT ), std::size_t>, "C-A: RL_TARGETED_TOKEN_COUNT is std::size_t" );
 static_assert( rl_contract::array_of_v<decltype( RL_TARGETED_TOKENS ), const char*>, "C-A: RL_TARGETED_TOKENS is an array of const char*" );
 static_assert( std::extent_v<decltype( RL_TARGETED_TOKENS )> == rl_contract::table_extent( RL_TARGETED_TOKEN_COUNT ), "C-A: RL_TARGETED_TOKENS extent" );
-static_assert( rl_contract::scalar_of_v<decltype( RL_CHOOSER_PROBE_ACTION ), const char*>, "C-A: RL_CHOOSER_PROBE_ACTION is const char*" );
-static_assert( rl_contract::scalar_of_v<decltype( RL_CHOOSER_MELEE_ACTION ), const char*>, "C-A: RL_CHOOSER_MELEE_ACTION is const char*" );
+// 271-10 (owner decisions T-2, T-3, the C-A field change): the two chooser strings left the header; the aimed-range table and the
+// optional tag melee action replaced them.
+static_assert( rl_contract::array_of_v<decltype( RL_AIMED_SPELL_RANGE_YARDS ), double>, "C-A: RL_AIMED_SPELL_RANGE_YARDS is an array of double" );
+static_assert( std::extent_v<decltype( RL_AIMED_SPELL_RANGE_YARDS )> == rl_contract::table_extent( RL_TARGETED_TOKEN_COUNT ),
+               "C-A: RL_AIMED_SPELL_RANGE_YARDS has one entry per targeted token (RL_TARGETED_TOKEN_COUNT)" );
+static_assert( rl_contract::scalar_of_v<decltype( RL_TAG_MELEE_ACTION ), const char*>, "C-A: RL_TAG_MELEE_ACTION is const char* (nullptr when the spec has no override)" );
 static_assert( rl_contract::scalar_of_v<decltype( RL_RULE_PREF_COUNT ), std::size_t>, "C-A: RL_RULE_PREF_COUNT is std::size_t" );
 static_assert( rl_contract::array_of_v<decltype( RL_RULE_PREFS ), rl_rule_pref>, "C-A: RL_RULE_PREFS is an array of rl_rule_pref" );
 static_assert( std::extent_v<decltype( RL_RULE_PREFS )> == rl_contract::table_extent( RL_RULE_PREF_COUNT ), "C-A: RL_RULE_PREFS extent" );
@@ -156,7 +160,6 @@ static_assert( rl_contract::declared_fact_slots_in_range(), "C-A: every RL_DECLA
 static_assert( rl_contract::declared_slots_unique(), "C-A: every RL_DECLARED_FACTS slot must be unique (a shared slot leaves the second row unreachable)" );
 static_assert( rl_contract::every_targeted_token_has_one_rule(), "C-A: every RL_TARGETED_TOKENS token must have exactly one RL_RULE_PREFS row (no row would silently aim with current_target)" );
 static_assert( rl_contract::wait_labels_are_wait_rows(), "C-A: every RL_WAIT_DEFS label must be the label of a wait row of RL_ACTIONS" );
-static_assert( RL_CHOOSER_PROBE_ACTION != nullptr, "C-A: the chooser's probe action is required" );
 
 // ---- enhancement value pins (only the enhancement build: no RL_SPEC_HEADER) ----
 #ifndef RL_SPEC_HEADER
@@ -273,6 +276,17 @@ constexpr bool enhancement_hit_providers_unchanged()
   return true;
 }
 
+// 271-10 (T-2): the seven aiming spells' ranges are the hand table the generated one replaced; the generator's table must keep
+// them. The first seven tokens are stormstrike, lightning_bolt, chain_lightning, tempest, windstrike, lava_lash, voltaic_blaze.
+constexpr bool enhancement_aimed_ranges_unchanged()
+{
+  constexpr double today[ 7 ] = { 5.0, 40.0, 40.0, 40.0, 30.0, 5.0, 40.0 };
+  for ( std::size_t k = 0; k < 7; ++k )
+    if ( RL_AIMED_SPELL_RANGE_YARDS[ k ] != today[ k ] )
+      return false;
+  return true;
+}
+
 } // namespace rl_contract
 
 static_assert( rl_contract::proc_names_equal_enum_names(), "enhancement: RL_PROC_NAMES must equal rl_proc::NAMES (P1 compares the sidecar that carries them)" );
@@ -285,6 +299,6 @@ static_assert( rl_contract::streq( RL_RESOURCE_NAME, "maelstrom" ), "enhancement
 static_assert( RL_COOLDOWN_ROW_ACTION_COUNT == 1 && rl_contract::streq( RL_COOLDOWN_ROW_ACTION[ 0 ].cooldown_row, "strike" ) &&
                    rl_contract::streq( RL_COOLDOWN_ROW_ACTION[ 0 ].action_token, "stormstrike" ),
                "enhancement: the cooldown-row alias is strike -> stormstrike" );
-static_assert( rl_contract::streq( RL_CHOOSER_PROBE_ACTION, "lightning_bolt" ) && rl_contract::streq( RL_CHOOSER_MELEE_ACTION, "stormstrike" ),
-               "enhancement: chooser probe lightning_bolt, melee stormstrike" );
+static_assert( RL_TAG_MELEE_ACTION == nullptr, "enhancement: no tag melee action override (melee reach is the shortest aimed range)" );
+static_assert( rl_contract::enhancement_aimed_ranges_unchanged(), "enhancement: the aimed ranges, in token order (5, 40, 40, 40, 30, 5, 40 for the seven aiming spells)" );
 #endif
