@@ -380,6 +380,10 @@ void mark_proc_children( token_t& t )
   {
     if ( n.via != "child" || !n.action || !n.action->stats || n.action->stats == root->stats )
       continue;
+    // A dual action never adds to its stats' execute count (action_t::execute), and the Demolish and
+    // Bladestorm strikes are dual: a zero count there says nothing, so they stay counted.
+    if ( n.action->dual )
+      continue;
     if ( n.action->stats->iteration_num_executes + 1 < root_exec )  // at most one strike can still be pending
       n.proc_only = true;
   }
