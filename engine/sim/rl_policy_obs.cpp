@@ -53,6 +53,7 @@
 #include <memory>
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace rl_policy
@@ -1043,8 +1044,6 @@ void rl_capability_assert_no_governed_action_legal( const player_t* p,
                                                      const std::uint8_t out_resolvable[ RL_ACTION_DIM ],
                                                      const std::uint8_t out_ready[ RL_ACTION_DIM ] )
 {
-  std::array<int, RL_CAPABILITY_COUNT> memo;
-  memo.fill( -1 );
   player_t* mutable_p = const_cast<player_t*>( p );
   for ( std::size_t ci = 0; ci < RL_CAPABILITY_COUNT; ++ci )
   {
@@ -1058,7 +1057,14 @@ void rl_capability_assert_no_governed_action_legal( const player_t* p,
     // here at every decision like the gear and racial ones.
     if ( RL_CAPABILITIES[ ci ].governed_actions_count == 0 )
       continue;
-    if ( rl_capability_effective_value( mutable_p, ci, memo ) )
+    // 261009-spd: the EFFECTIVE bit comes from the per-actor cache capability_effective_bit() keeps
+    // (g_capability_bits, emptied by clear_process_caches() between fight-list entries). The detectors
+    // read talents, gear, set bonuses and the profile -- all fixed once the actor is initialised -- so
+    // the value cannot change between decisions. Before this, every decision rebuilt a fresh local memo
+    // and re-ran the two linear trait-table scans of the governed talent detectors (12 % of every fight
+    // in the 2026-10-09 engine census). The bit is the same value; only its cost moved. The throw below
+    // is unchanged and is pinned by rl_capability_selftest (see rl_capability_selftest_run).
+    if ( capability_effective_bit( mutable_p, ci ) )
       continue;
     const rl_capability& cap = RL_CAPABILITIES[ ci ];
     for ( std::size_t gi = 0; gi < cap.governed_actions_count; ++gi )
@@ -1080,6 +1086,73 @@ void rl_capability_assert_no_governed_action_legal( const player_t* p,
       }
     }
   }
+}
+
+// 261009-spd: rl_capability_selftest=1 (sim option, default off, zero cost when off). Called once per
+// actor from read_action_gate_bits on its first freshly computed gate bits. It proves two things the
+// 12 %-of-a-fight cache change relies on, in the real engine, on the real actor:
+//   (1) EQUIVALENCE: for every capability, the cached effective bit equals the value the old code
+//       computed (a fresh local memo walk through rl_capability_effective_value);
+//   (2) THE THROW STILL FIRES: with every action forced "resolvable and ready", the assert must throw
+//       exactly when some zero-bit capability governs a cast action in RL_ACTIONS, and must stay
+//       silent otherwise. The expected answer is derived here independently from fresh bits, never
+//       from the cached ones the code under test reads.
+// It reports one stderr line per actor and throws by name on any mismatch.
+void rl_capability_selftest_run( const player_t* p )
+{
+  static std::unordered_set<const player_t*> done;
+  if ( !done.insert( p ).second )
+    return;
+  player_t* mutable_p = const_cast<player_t*>( p );
+  std::array<int, RL_CAPABILITY_COUNT> memo;
+  memo.fill( -1 );
+  std::size_t zero_bits = 0, zero_governing = 0, mismatches = 0;
+  bool expect_throw = false;
+  std::string first_zero_governing;
+  for ( std::size_t ci = 0; ci < RL_CAPABILITY_COUNT; ++ci )
+  {
+    const bool fresh = rl_capability_effective_value( mutable_p, ci, memo );
+    if ( fresh != capability_effective_bit( mutable_p, ci ) )
+      ++mismatches;
+    if ( !fresh )
+      ++zero_bits;
+    const rl_capability& cap = RL_CAPABILITIES[ ci ];
+    if ( !fresh && cap.governed_actions_count > 0 )
+    {
+      ++zero_governing;
+      for ( std::size_t gi = 0; gi < cap.governed_actions_count; ++gi )
+        for ( std::size_t ai = 0; ai < RL_ACTION_DIM; ++ai )
+          if ( RL_ACTIONS[ ai ].kind == rl_action_kind::cast &&
+               std::strcmp( RL_ACTIONS[ ai ].token, RL_CAPABILITY_GOVERNED_ACTIONS[ cap.governed_actions_offset + gi ] ) == 0 )
+          {
+            if ( !expect_throw )
+              first_zero_governing = cap.id;
+            expect_throw = true;
+          }
+    }
+  }
+  std::uint8_t all_one[ RL_ACTION_DIM ];
+  std::memset( all_one, 1, sizeof( all_one ) );
+  bool threw = false;
+  std::string what;
+  try
+  {
+    rl_capability_assert_no_governed_action_legal( p, all_one, all_one );
+  }
+  catch ( const sc_runtime_error& e )
+  {
+    threw = true;
+    what = e.what();
+  }
+  fmt::print( stderr,
+              "[RL_CAPABILITY_SELFTEST] actor={} capabilities={} zero_bits={} zero_governing_a_cast={} "
+              "cached_vs_fresh_mismatches={} expect_throw={} threw={} first_zero_governing={}\n",
+              p->name(), RL_CAPABILITY_COUNT, zero_bits, zero_governing, mismatches, expect_throw ? 1 : 0,
+              threw ? 1 : 0, first_zero_governing.empty() ? "-" : first_zero_governing );
+  if ( mismatches != 0 || threw != expect_throw )
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::rl_capability_selftest: FAILED for actor '{}': cached_vs_fresh_mismatches={} expect_throw={} "
+        "threw={} ({})", p->name(), mismatches, expect_throw, threw, what ) );
 }
 
 // ---------------------------------------------------------------------------
@@ -1385,6 +1458,8 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
   // which already passed this check the time it was computed) -- named abort, not a silent
   // default, the instant a zero capability's governed action would otherwise read legal.
   rl_capability_assert_no_governed_action_legal( p, out_resolvable, out_ready );
+  if ( p->sim->rl_capability_selftest )
+    rl_capability_selftest_run( p );
 
   // 240-05 Task 2 (D1(a)): the target head re-aims every targeted spell BEFORE the observation is
   // built, immediately after the fill_pick loop above has stamped the rules' own picks and

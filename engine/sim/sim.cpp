@@ -4657,6 +4657,8 @@ void sim_t::create_options()
   // Phase 271.4 (271.4-03): names the preserved stock list the recorder walks dry at each net decision; turns the `.apl`
   // sidecar to format 2. The name lives in rl_stock_eval (a sim_t member would rebuild every file). Default empty: off.
   add_option( opt_string( "solver_apl_stock_list", rl_stock_eval::list_name_storage() ) );
+  // 261009-spd: see sim.hpp's rl_capability_selftest doc comment.
+  add_option( opt_bool( "rl_capability_selftest", rl_capability_selftest ) );
   add_option( opt_bool( "sequence_soft_fail", sequence_soft_fail ) );
   add_option( opt_bool( "sequence_queue_delay", sequence_queue_delay ) );
   // Deterministic proc-roll option (simc-offline-evaluation-pipeline phase

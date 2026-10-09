@@ -1003,6 +1003,10 @@ struct sim_t : private sc_thread_t
   // streams (sim_t::combat_end(), beside the translog close row). Pure observer: the only state it
   // adds is a per-player map filled while this flag is on. Default off prints and counts nothing.
   bool rl_credit_census = false;
+  // 261009-spd: rl_capability_selftest=1 runs rl_capability_selftest_run() (rl_policy_obs.cpp) once per
+  // actor: cached capability bits == freshly computed bits, and the "governed action marked legal while
+  // its capability is 0" throw still fires. Default off, zero cost.
+  bool rl_capability_selftest = false;
   // P3b fork hook (simc-offline-evaluation-pipeline phase 116, 116-01) -
   // solver_control=<prefix> opens an additive request/reply FIFO pair at the
   // same execute_action() decision boundary as decision_dump=. Empty string
