@@ -4659,6 +4659,8 @@ void sim_t::create_options()
   add_option( opt_string( "solver_apl_stock_list", rl_stock_eval::list_name_storage() ) );
   // 261009-spd: see sim.hpp's rl_capability_selftest doc comment.
   add_option( opt_bool( "rl_capability_selftest", rl_capability_selftest ) );
+  // 261009-spd (T3): see sim.hpp's rl_huge_pages doc comment.
+  add_option( opt_bool( "rl_huge_pages", rl_huge_pages ) );
   add_option( opt_bool( "sequence_soft_fail", sequence_soft_fail ) );
   add_option( opt_bool( "sequence_queue_delay", sequence_queue_delay ) );
   // Deterministic proc-roll option (simc-offline-evaluation-pipeline phase

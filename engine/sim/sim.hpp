@@ -1007,6 +1007,11 @@ struct sim_t : private sc_thread_t
   // actor: cached capability bits == freshly computed bits, and the "governed action marked legal while
   // its capability is 0" throw still fires. Default off, zero cost.
   bool rl_capability_selftest = false;
+  // 261009-spd (T3): rl_huge_pages=0|1 (default 1). A PROCESS-level switch -- main() (sc_main.cpp,
+  // huge_pages_start) moves the static data segments onto 2 MB pages before any sim_t exists, so it reads the
+  // option by scanning the command line and the named profile files itself. This member only makes the option
+  // a legal profile line for the ordinary parser; its parsed value is not consulted afterwards.
+  bool rl_huge_pages = true;
   // P3b fork hook (simc-offline-evaluation-pipeline phase 116, 116-01) -
   // solver_control=<prefix> opens an additive request/reply FIFO pair at the
   // same execute_action() decision boundary as decision_dump=. Empty string
