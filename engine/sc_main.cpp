@@ -43,6 +43,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -55,6 +56,12 @@
 #ifdef SC_SIGACTION
 #include <csignal>
 #include <utility>
+#endif
+
+// 261009-spd (T3): rl_huge_pages -- the in-process port of the 2026-10-09 census' thp_remap preload.
+#if defined( __linux__ )
+#include <link.h>
+#include <sys/mman.h>
 #endif
 
 namespace { // anonymous namespace ==========================================
@@ -568,6 +575,10 @@ int run_fight_list( const std::vector<std::string>& args )
         list_path = arg.substr( std::strlen( FIGHT_LIST_ARG_PREFIX ) );
         have_list = true;
       }
+      else if ( arg.compare( 0, std::strlen( "rl_huge_pages=" ), "rl_huge_pages=" ) == 0 )
+      {
+        // 261009-spd (T3): acted on at the top of main() (huge_pages_start); nothing to do here.
+      }
       else
       {
         fight_list_refuse( fmt::format( "the only argument allowed with rl_fight_list= is the list itself (got '{}')",
@@ -719,6 +730,285 @@ int run_fight_list( const std::vector<std::string>& args )
 
   return exit_code;
 }
+
+
+// ==========================================================================
+// 261009-spd (T3): the static data segments onto 2 MB transparent huge pages (Linux only)
+// ==========================================================================
+//
+// Why. The engine's own static data -- the relocated pointer tables (.data.rel.ro, 38 MB) and the spell
+// tables dbc::init links into (.data, 45 MB) -- is about 84 MB of private, copy-on-write memory. fork() copies
+// one page-table entry per 4 KB page of it (about 23,000 per fork), and the kernel tears the same entries
+// down again when each child exits. On 2 MB pages that is about 500 times fewer entries. Measured in the
+// 2026-10-09 census with the LD_PRELOAD prototype this function ports: parent fork 2.2-2.7 ms -> 0.36-0.57 ms,
+// fixed cost per forked child 4.7 -> 2.4 ms; seeded results and teacher labels identical.
+//
+// What it does. Before any sim_t exists (top of main()), for every writable PT_LOAD segment of the main
+// executable, and for every mapping (VMA) inside it, the part of that mapping that lies on whole 2 MB
+// boundaries is copied into a fresh 2 MB-aligned anonymous region marked MADV_HUGEPAGE, which is then moved
+// ONTO the original address with mremap(MREMAP_FIXED). The bytes, the address and the protection (the
+// RELRO part stays read-only) are unchanged; only the page size behind them changes. The unaligned head and
+// tail of each mapping stay as they were.
+//
+// Why it is safe to do at this point: the process is single-threaded, the function keeps everything on its
+// own stack and heap (no function-local statics and no globals of this file are written between the copy
+// and the remap, which is the one way a write could be lost), and nothing about the result depends on
+// whether the kernel actually hands out huge pages -- if it does not, the memory simply stays 4 KB pages.
+// Every failure path leaves the original mapping untouched and the run goes on; the start-up line says why.
+//
+// Heap. glibc's "glibc.malloc.hugetlb=1" tunable (huge pages for the malloc heap; census: another -5 % on a
+// 10 s future) is read by the dynamic loader from the environment before main() and has no mallopt() or
+// other in-process switch, so it is NOT done here. A launcher that wants it sets, in the worker's
+// environment:   GLIBC_TUNABLES=glibc.malloc.hugetlb=1
+//
+// Off switch. rl_huge_pages=0 as a command-line argument or as a line of a profile file named on the command
+// line (input= includes are followed, up to 4 levels), or RL_HUGE_PAGES=0 in the environment (the only way
+// to switch it off for an rl_fight_list= worker, whose entry files are parsed after start-up). Last one wins.
+// The same option is also registered with the ordinary parser (sim.hpp) so a profile line is not an error.
+
+#if defined( __linux__ )
+struct huge_pages_report_t
+{
+  std::size_t moved_bytes = 0;
+  int regions = 0;
+  long anon_huge_kb = -1;  // AnonHugePages of the whole process after the remap, -1 if unreadable
+  std::string note;        // why nothing (or not everything) was moved; empty when all went through
+};
+
+bool huge_pages_parse_flag( const std::string& v, bool fallback )
+{
+  if ( v == "0" || v == "false" || v == "off" || v == "no" )
+    return false;
+  if ( v == "1" || v == "true" || v == "on" || v == "yes" )
+    return true;
+  return fallback;
+}
+
+void huge_pages_scan_file( const std::string& path, int depth, bool& value )
+{
+  if ( depth > 4 )
+    return;
+  std::ifstream in( path );
+  if ( !in )
+    return;
+  const std::string flag_prefix = "rl_huge_pages=";  // not static: no static of this file may be written once the remap starts
+  const std::string input_prefix = "input=";
+  std::string line;
+  while ( std::getline( in, line ) )
+  {
+    std::size_t b = line.find_first_not_of( " \t" );
+    if ( b == std::string::npos || line[ b ] == '#' )
+      continue;
+    while ( !line.empty() && ( line.back() == '\r' || line.back() == ' ' || line.back() == '\t' ) )
+      line.pop_back();
+    if ( line.compare( b, flag_prefix.size(), flag_prefix ) == 0 )
+      value = huge_pages_parse_flag( line.substr( b + flag_prefix.size() ), value );
+    else if ( line.compare( b, input_prefix.size(), input_prefix ) == 0 )
+      huge_pages_scan_file( line.substr( b + input_prefix.size() ), depth + 1, value );
+  }
+}
+
+// Default on. Environment first, then the arguments in order (a bare argument is a profile file, as in
+// simc's own parser), so the last assignment wins like an ordinary option.
+bool huge_pages_requested( const std::vector<std::string>& args )
+{
+  bool value = true;
+  if ( const char* env = std::getenv( "RL_HUGE_PAGES" ) )
+    value = huge_pages_parse_flag( env, value );
+  for ( const std::string& arg : args )
+  {
+    const std::size_t eq = arg.find( '=' );
+    if ( eq == std::string::npos )
+      huge_pages_scan_file( arg, 0, value );
+    else if ( arg.compare( 0, eq, "rl_huge_pages" ) == 0 )
+      value = huge_pages_parse_flag( arg.substr( eq + 1 ), value );
+    else if ( arg.compare( 0, eq, "input" ) == 0 )
+      huge_pages_scan_file( arg.substr( eq + 1 ), 0, value );
+  }
+  return value;
+}
+
+struct huge_pages_job_t
+{
+  std::uintptr_t start;
+  std::size_t length;
+  int prot;
+};
+
+int huge_pages_collect_phdr( struct dl_phdr_info* info, std::size_t, void* data )
+{
+  // The first entry is the main executable (empty name).
+  if ( info->dlpi_name != nullptr && info->dlpi_name[ 0 ] != '\0' )
+    return 0;
+  auto* ranges = static_cast<std::vector<std::pair<std::uintptr_t, std::uintptr_t>>*>( data );
+  for ( int i = 0; i < info->dlpi_phnum; ++i )
+  {
+    const ElfW( Phdr )& ph = info->dlpi_phdr[ i ];
+    if ( ph.p_type == PT_LOAD && ( ph.p_flags & PF_W ) != 0 )
+    {
+      const std::uintptr_t lo = info->dlpi_addr + ph.p_vaddr;
+      ranges->emplace_back( lo, lo + ph.p_memsz );
+    }
+  }
+  return 1;
+}
+
+huge_pages_report_t huge_pages_remap_static_data()
+{
+  constexpr std::size_t HP = std::size_t( 2 ) << 20;
+  huge_pages_report_t report;
+
+  // 1. THP must be allowed at all (madvise or always).
+  {
+    std::ifstream in( "/sys/kernel/mm/transparent_hugepage/enabled" );
+    std::string mode;
+    if ( !in || !std::getline( in, mode ) )
+    {
+      report.note = "transparent huge pages are not available (no /sys/kernel/mm/transparent_hugepage/enabled)";
+      return report;
+    }
+    if ( mode.find( "[never]" ) != std::string::npos )
+    {
+      report.note = "transparent huge pages are disabled on this host (enabled = never)";
+      return report;
+    }
+  }
+
+  // 2. The writable load segments of this executable, and the mappings inside them.
+  std::vector<std::pair<std::uintptr_t, std::uintptr_t>> ranges;
+  dl_iterate_phdr( huge_pages_collect_phdr, &ranges );
+  if ( ranges.empty() )
+  {
+    report.note = "no writable load segment found";
+    return report;
+  }
+  std::vector<huge_pages_job_t> jobs;
+  {
+    std::ifstream maps( "/proc/self/maps" );
+    std::string line;
+    while ( std::getline( maps, line ) )
+    {
+      unsigned long lo = 0, hi = 0;
+      char perms[ 8 ] = { 0 };
+      if ( std::sscanf( line.c_str(), "%lx-%lx %7s", &lo, &hi, perms ) != 3 )
+        continue;
+      if ( perms[ 0 ] != 'r' || perms[ 3 ] != 'p' )  // readable private mappings only
+        continue;
+      const int prot = PROT_READ | ( perms[ 1 ] == 'w' ? PROT_WRITE : 0 ) | ( perms[ 2 ] == 'x' ? PROT_EXEC : 0 );
+      if ( ( prot & PROT_EXEC ) != 0 )
+        continue;
+      for ( const auto& r : ranges )
+      {
+        const std::uintptr_t a = std::max<std::uintptr_t>( lo, r.first );
+        const std::uintptr_t b = std::min<std::uintptr_t>( hi, r.second );
+        if ( b <= a )
+          continue;
+        const std::uintptr_t s = ( a + HP - 1 ) & ~( HP - 1 );  // first 2 MB boundary inside
+        const std::uintptr_t e = b & ~( HP - 1 );               // last 2 MB boundary inside
+        if ( e > s )
+          jobs.push_back( { s, static_cast<std::size_t>( e - s ), prot } );
+      }
+    }
+  }
+  if ( jobs.empty() )
+  {
+    report.note = "no 2 MB-aligned stretch inside the writable segments";
+    return report;
+  }
+
+  // 3. Move each stretch onto huge-page memory at the same address.
+  for ( const huge_pages_job_t& job : jobs )
+  {
+    const std::size_t n = job.length;
+    char* raw = static_cast<char*>(
+        mmap( nullptr, n + HP, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0 ) );
+    if ( raw == MAP_FAILED )
+    {
+      report.note = "mmap of the staging region failed";
+      continue;
+    }
+    char* tmp = reinterpret_cast<char*>( ( reinterpret_cast<std::uintptr_t>( raw ) + HP - 1 ) & ~( HP - 1 ) );
+    bool moved = false;
+    if ( madvise( tmp, n, MADV_HUGEPAGE ) != 0 )
+    {
+      report.note = "madvise(MADV_HUGEPAGE) failed";
+    }
+    else
+    {
+      std::memcpy( tmp, reinterpret_cast<void*>( job.start ), n );
+      void* r = mremap( tmp, n, n, MREMAP_MAYMOVE | MREMAP_FIXED, reinterpret_cast<void*>( job.start ) );
+      if ( r == MAP_FAILED )
+      {
+        report.note = "mremap onto the original address failed (original mapping left untouched)";
+      }
+      else
+      {
+        moved = true;
+        if ( job.prot != ( PROT_READ | PROT_WRITE ) )
+          mprotect( reinterpret_cast<void*>( job.start ), n, job.prot );  // RELRO stays read-only
+      }
+    }
+    if ( moved )
+    {
+      // The staging region's unused head and tail (the moved part is gone from it).
+      if ( tmp > raw )
+        munmap( raw, static_cast<std::size_t>( tmp - raw ) );
+      char* tail = tmp + n;
+      char* raw_end = raw + n + HP;
+      if ( raw_end > tail )
+        munmap( tail, static_cast<std::size_t>( raw_end - tail ) );
+      report.moved_bytes += n;
+      ++report.regions;
+    }
+    else
+    {
+      munmap( raw, n + HP );
+    }
+  }
+
+  // 4. Make a silent fallback to 4 KB pages visible: how much of the process is on huge pages now.
+  {
+    std::ifstream in( "/proc/self/smaps_rollup" );
+    std::string line;
+    while ( std::getline( in, line ) )
+    {
+      long kb = 0;
+      if ( std::sscanf( line.c_str(), "AnonHugePages: %ld kB", &kb ) == 1 )
+      {
+        report.anon_huge_kb = kb;
+        break;
+      }
+    }
+  }
+  return report;
+}
+
+// Called once at the top of main(), before any sim_t. Prints exactly one line to stderr.
+void huge_pages_start( const std::vector<std::string>& args )
+{
+  if ( !huge_pages_requested( args ) )
+  {
+    fmt::print( stderr, "[RL_HUGE_PAGES] off (rl_huge_pages=0)\n" );
+    return;
+  }
+  const huge_pages_report_t r = huge_pages_remap_static_data();
+  if ( r.moved_bytes == 0 )
+  {
+    fmt::print( stderr, "[RL_HUGE_PAGES] not remapped: {}\n", r.note.empty() ? "nothing to move" : r.note );
+    return;
+  }
+  fmt::print( stderr, "[RL_HUGE_PAGES] remapped {} MB of static data in {} region(s) onto 2 MB pages (process AnonHugePages {} kB){}{}\n",
+              r.moved_bytes >> 20, r.regions, r.anon_huge_kb,
+              ( r.anon_huge_kb >= 0 && static_cast<std::size_t>( r.anon_huge_kb ) * 1024 < r.moved_bytes / 2 )
+                  ? " -- the kernel gave mostly 4 KB pages (no free 2 MB pages); speed-up will be small"
+                  : "",
+              r.note.empty() ? "" : ( std::string( "; partial: " ) + r.note ).c_str() );
+}
+#else
+void huge_pages_start( const std::vector<std::string>& )
+{
+}
+#endif
 
 } // anonymous namespace ====================================================
 
@@ -1060,6 +1350,9 @@ int main( int argc, char** argv )
   std::locale::global( std::locale( "C" ) );
 
   const io::utf8_args args( argc, argv );
+
+  // 261009-spd (T3): static data onto 2 MB pages, before any sim_t exists. See huge_pages_start().
+  huge_pages_start( args );
 
   // 261005-fight-list (quick 261005-mix, plan 02): `rl_fight_list=<list>` runs one fight per entry file in one
   // process (see run_fight_list). Any other invocation falls through to the unchanged single-sim path.
