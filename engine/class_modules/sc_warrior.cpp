@@ -7,6 +7,7 @@
 #include "simulationcraft.hpp"
 #include "class_modules/apl/apl_warrior.hpp"
 #include "action/parse_effects.hpp"
+#include "sim/rl_action_census.hpp"
 
 namespace
 {  // UNNAMED NAMESPACE
@@ -1001,7 +1002,7 @@ inline rl_cause_t warrior_rl_capture_cause( const player_t* p )
 
 // Template for common warrior action code. See priest_action_t.
 template <class Base>
-struct warrior_action_t : public parse_action_effects_t<Base>
+struct warrior_action_t : public parse_action_effects_t<Base>, public rl_action_census::shape_provider_t
 {
   struct affected_by_t
   {
@@ -1271,6 +1272,43 @@ public:
     }
 
     return ab::n_targets();
+  }
+
+  // PROVISIONAL (owner decision H-4, 2026-10-07): Sweeping Strikes' extra targets come from enemies within the
+  // buff tooltip's 8 yards of the player (spell 260708: "hit 1 additional target within 8 yds"), not from each
+  // action's own melee reach (Mortal Strike 5 yards, Rend / Slam / Heroic Strike 5 yards round the target).
+  // ASSUMPTION: the tooltip's 8 yards is measured from the player plus each enemy's own reach, the same
+  // convention as the engine's "within reach of the player" rule. Unproven in game; see
+  // .planning/todos/pending/2026-10-07-aoe-shape-verification-system-and-live-mismatch-census.md.
+  // The list is cached by the engine and does not follow the buff, so it is always the wide list for an
+  // affected action; the live n_targets() cap (1 without the buff) still keeps single-target play unchanged.
+  static constexpr double RL_SWEEPING_STRIKES_REACH_YARDS = 8.0;
+
+  bool rl_census_distance_override( rl_action_census::distance_override_t& o ) const override
+  {
+    if ( !affected_by.sweeping_strikes )
+      return false;
+    o.active = true;
+    o.shape  = rl_action_census::shape_t::REACH;
+    o.radius = 0.0;
+    o.range  = RL_SWEEPING_STRIKES_REACH_YARDS;
+    return true;
+  }
+
+  std::vector<player_t*>& check_distance_targeting( std::vector<player_t*>& tl ) const override
+  {
+    if ( !affected_by.sweeping_strikes || !ab::sim->distance_targeting_enabled )
+      return ab::check_distance_targeting( tl );
+
+    size_t i = tl.size();
+    while ( i > 0 )
+    {
+      --i;
+      player_t* t = tl[ i ];
+      if ( t != ab::target && t->get_player_distance( *ab::player ) > RL_SWEEPING_STRIKES_REACH_YARDS + t->combat_reach )
+        tl.erase( tl.begin() + i );
+    }
+    return tl;
   }
 
   double composite_da_multiplier( const action_state_t* s ) const override
@@ -3640,6 +3678,12 @@ struct cleave_t : public warrior_attack_t
   double rage_from_frothing_berserker;
   action_t* reap_the_storm;
   warrior_attack_t* rend;
+  rl_action_census::filter_descriptor_t rl_cone;  // Phase 271 (271-04): the census explains the filter above
+  bool rl_census_filter( rl_action_census::filter_descriptor_t& f ) const override
+  {
+    f = rl_cone;
+    return rl_cone.kind != rl_action_census::filter_kind_t::NONE;
+  }
   cleave_t( warrior_t* p, util::string_view options_str )
     : warrior_attack_t( "cleave", p, p->talents.arms.cleave ),
     fervor_slam( nullptr ),
@@ -3652,6 +3696,27 @@ struct cleave_t : public warrior_attack_t
     weapon = &( player->main_hand_weapon );
     aoe = -1;
     reduced_aoe_targets = p->talents.arms.cleave->effectN( 2 ).base_value();
+
+    // PROVISIONAL (owner decision H-4, 2026-10-07): Cleave is a cone from the player toward its target, not a circle
+    // round the target. ASSUMPTION: spell 845's "Cone Angle : 102 degrees" and effect target "Enemies in Cone to
+    // Targeted Enemy (104)" mean a 102 degree cone centred on the player-to-target direction, out to the effect
+    // radius (8 yards) plus each enemy's own reach ("Add Target (Dest) Combat Reach to AOE"). Unproven in game; see
+    // .planning/todos/pending/2026-10-07-aoe-shape-verification-system-and-live-mismatch-census.md.
+    // Same filter-callback mechanism as the Crash Lightning cone. The engine's own around-the-target limit
+    // (radius 8, no reach) still applies on top; the census lists that as a remaining disagreement.
+    const double cone_degrees = std::fabs( data().cone_degrees() );
+    if ( cone_degrees > 0.0 )
+    {
+      rl_cone.kind           = rl_action_census::filter_kind_t::CONE;
+      rl_cone.axis           = rl_action_census::filter_axis_t::TOWARD_TARGET;
+      rl_cone.cos_half_angle = std::cos( 0.5 * cone_degrees * 3.14159265358979323846 / 180.0 );
+      rl_cone.radius         = radius;
+      target_filter_callback = [ this ]( const action_t*, player_t* candidate ) {
+        if ( !sim->distance_targeting_enabled || candidate == target )
+          return true;
+        return rl_action_census::filter_contains( rl_cone, player, target, candidate );
+      };
+    }
 
     proc_slayers_strike = true;
     proc_slayers_strike_per_target = true;
@@ -3762,6 +3827,29 @@ struct colossus_smash_t : public warrior_attack_t
     weapon = &( player->main_hand_weapon );
     aoe = -1;
     reduced_aoe_targets = p->talents.arms.colossus_smash->effectN( 3 ).base_value();
+
+    // PROVISIONAL (owner decision H-4, 2026-10-07): Colossus Smash hits an area in FRONT of the player, not a full
+    // circle round the player. ASSUMPTION: spell 167105's effect target "Front of Self (47) -> at Enemy in Area (16)"
+    // with "Radius: 1.5 - 10 yards" means the half circle ahead of the player (the side facing its target) out to
+    // the maximum radius (10 yards, the action's own radius) plus each enemy's reach; the 1.5 yard minimum is the
+    // near edge of the area and is NOT modelled (an enemy closer than that, in front, is still hit). Unproven in
+    // game; see .planning/todos/pending/2026-10-07-aoe-shape-verification-system-and-live-mismatch-census.md.
+    rl_front.kind           = rl_action_census::filter_kind_t::CONE;
+    rl_front.axis           = rl_action_census::filter_axis_t::TOWARD_TARGET;
+    rl_front.cos_half_angle = 0.0;  // 90 degrees either side of the player-to-target direction: the front half plane
+    rl_front.radius         = radius;
+    target_filter_callback  = [ this ]( const action_t*, player_t* candidate ) {
+      if ( !sim->distance_targeting_enabled || candidate == target )
+        return true;
+      return rl_action_census::filter_contains( rl_front, player, target, candidate );
+    };
+  }
+
+  rl_action_census::filter_descriptor_t rl_front;  // Phase 271 (271-04): the census explains the filter above
+  bool rl_census_filter( rl_action_census::filter_descriptor_t& f ) const override
+  {
+    f = rl_front;
+    return rl_front.kind != rl_action_census::filter_kind_t::NONE;
   }
 
   void impact( action_state_t* s ) override
@@ -5849,6 +5937,54 @@ struct ravager_tick_t : public warrior_attack_t
   // stack). One slot per tick action: a new press replaces it, and Ravager's duration is shorter than
   // its cooldown, so pulses of two presses never overlap.
   rl_cause_t rl_captured_cause;
+
+  // PROVISIONAL (owner decision H-4, 2026-10-07): the arms Ravager's pulses hit enemies around the GROUND POINT where it
+  // was placed (the target's position at the press), not around whichever target the pulse is aimed at.
+  // ASSUMPTION: spell 156287's effect target "at Area (87) -> at Enemy in Area (16)" with radius 0 - 8 yards means an
+  // 8 yard circle (plus each enemy's reach) round a fixed point. The in-game Ravager also "chases nearby enemies"
+  // (spell 228920 text); that movement is NOT modelled. Unproven in game; see
+  // .planning/todos/pending/2026-10-07-aoe-shape-verification-system-and-live-mismatch-census.md.
+  // Only the arms Ravager button turns this on (rl_ground_enabled); the Whirling Blade copy keeps the stock rule.
+  bool   rl_ground_enabled = false;
+  bool   rl_has_ground     = false;
+  double rl_ground_x       = 0.0;
+  double rl_ground_y       = 0.0;
+
+  void rl_place_ground( double x, double y )
+  {
+    rl_ground_x   = x;
+    rl_ground_y   = y;
+    rl_has_ground = true;
+    target_cache.is_valid = false;  // a new press places a new point: the cached hit list is stale
+  }
+
+  bool rl_census_distance_override( rl_action_census::distance_override_t& o ) const override
+  {
+    if ( !rl_ground_enabled )
+      return warrior_attack_t::rl_census_distance_override( o );
+    o.active = true;
+    o.shape  = rl_action_census::shape_t::GROUND;
+    o.radius = radius;
+    o.range  = range;
+    return true;
+  }
+
+  std::vector<player_t*>& check_distance_targeting( std::vector<player_t*>& tl ) const override
+  {
+    if ( !rl_ground_enabled || !rl_has_ground || !sim->distance_targeting_enabled )
+      return warrior_attack_t::check_distance_targeting( tl );
+
+    size_t i = tl.size();
+    while ( i > 0 )
+    {
+      --i;
+      player_t* t = tl[ i ];
+      if ( t != target && t->get_position_distance( rl_ground_x, rl_ground_y ) > radius + t->combat_reach )
+        tl.erase( tl.begin() + i );
+    }
+    return tl;
+  }
+
   ravager_tick_t( warrior_t* p, util::string_view name, timespan_t ravaged_debuff_duration )
     : warrior_attack_t( name, p, p->find_spell( 156287 ) ),
       rage_from_ravager( p->specialization() == WARRIOR_PROTECTION ? p->find_spell( 334934 )->effectN( 1 ).resource( RESOURCE_RAGE ) : 0 ),
@@ -5922,6 +6058,7 @@ struct ravager_t : public warrior_attack_t
     }
 
     add_child( ravager );
+    ravager->rl_ground_enabled = true;  // PROVISIONAL (owner decision H-4, 2026-10-07): see ravager_tick_t
   }
 
   // This background version is strictly for use with whirling blade talent
@@ -5978,6 +6115,8 @@ struct ravager_t : public warrior_attack_t
 
     // Phase 268 (268-05, G268-8): this press's dispatch frame is still on the cause stack here.
     ravager->rl_captured_cause = warrior_rl_capture_cause( p() );
+    if ( ravager->rl_ground_enabled )
+      ravager->rl_place_ground( target->x_position, target->y_position );  // the point the pulses below are placed at
 
     if ( sim->dbc->wowv() < wowv_t( 12, 1, 0 ) )
     {
@@ -6755,16 +6894,25 @@ struct arms_whirlwind_parent_t : public warrior_attack_t
       first_attack->weapon = &( p->main_hand_weapon );
       first_attack->radius = radius;
       add_child( first_attack );
+      // PROVISIONAL (owner decision H-4, 2026-10-07): the three strikes are centred on the PLAYER. add_child copied the
+      // button's range (100 yards) onto the strike, which made the engine count round the TARGET; a range of 0 with
+      // a radius makes it count round the player plus each enemy's reach. ASSUMPTION: spell 199658's effect target
+      // "at Self (18) -> at Enemy in Area (16)" with radius 0 - 8 yards means the 8 yard circle round the player.
+      // Unproven in game; see
+      // .planning/todos/pending/2026-10-07-aoe-shape-verification-system-and-live-mismatch-census.md.
+      first_attack->range = 0.0;
 
       second_attack         = new whirlwind_arms_damage_t( "whirlwind_2", p, data().effectN( 2 ).trigger() );
       second_attack->weapon = &( p->main_hand_weapon );
       second_attack->radius = radius;
       add_child( second_attack );
+      second_attack->range = 0.0;  // PROVISIONAL (owner decision H-4, 2026-10-07): centred on the player, see first strike
 
       third_attack         = new whirlwind_arms_damage_t( "whirlwind_3", p, data().effectN( 3 ).trigger() );
       third_attack->weapon = &( p->main_hand_weapon );
       third_attack->radius = radius;
       add_child( third_attack );
+      third_attack->range = 0.0;  // PROVISIONAL (owner decision H-4, 2026-10-07): centred on the player, see first strike
 
       if ( p->talents.arms.fervor_of_battle->ok() )
       {
