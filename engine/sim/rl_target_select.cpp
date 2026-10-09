@@ -22,6 +22,7 @@
 #include <array>
 #include <cassert>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <tuple>
@@ -222,6 +223,115 @@ struct actor_cache_key_hash_t
 // reset( sim_t* ) below (ME-1, Task 2c) -- see actor_cache_key_t's own comment for the keying.
 std::unordered_map<actor_cache_key_t, vb_lava_lash_geometry_t, actor_cache_key_hash_t>
     g_vb_lava_lash_geometry_cache;
+
+// 261009-spd: handles for the six per-enemy debuff/dot lookups build_enemy_fact() makes for every candidate
+// of every decision (about 72 build_enemy_fact calls per decision, each 3 x buff_t::find + 3 x find_dot --
+// string compares across the candidate's whole buff_list / dot_list; about 11 % of a fight in the 2026-10-09
+// engine census). One entry per (candidate, source) pair, indexed by the candidate's actor_index.
+//
+// WHEN A HANDLE IS TRUSTED. The lists these lookups scan only ever GROW during a fight (grep: no erase/remove
+// on player_t::dot_list or buff_list; dots and debuffs are created lazily, e.g. the first time the actor is
+// targeted). A lookup is therefore repeated only when something it reads changed: dot_list.size(),
+// buff_list.size() or fallback_buff_names.size() (buff_t::find(player_t*...) answers from the fallback list
+// first). With all three sizes unchanged the scan would return exactly what it returned last time -- a still
+// null answer stays null, a found handle stays the first match -- so the cached handle IS the answer. When a
+// size changed, the three lookups of that kind are simply re-run through the same find_dot / buff_t::find
+// calls the old code made, so the semantics are those calls' own. Handles are never trusted across
+// candidate or source identity (checked on every use) and the whole table is emptied by reset( sim_t* ) every
+// iteration and by clear_process_caches() between fight-list entries (the same rule every cache of this file
+// follows; process_cache_entries() counts it so the driver's "empty at entry start" check covers it).
+struct enemy_debuff_lookup_t
+{
+  const player_t* candidate = nullptr;
+  const player_t* source = nullptr;
+  std::size_t dot_count = static_cast<std::size_t>( -1 );
+  std::size_t buff_count = static_cast<std::size_t>( -1 );
+  std::size_t fallback_count = static_cast<std::size_t>( -1 );
+  dot_t* flame_shock = nullptr;
+  dot_t* venomfang = nullptr;
+  dot_t* rune_of_unleashed_fire_lingering = nullptr;
+  buff_t* burning_core = nullptr;
+  buff_t* lightning_rod = nullptr;
+  buff_t* venomfang_debuff = nullptr;
+};
+std::vector<enemy_debuff_lookup_t> g_enemy_debuff_lookup;  // indexed by candidate->actor_index
+
+// rl_capability_selftest=1 also cross-checks this cache on EVERY call: each cached handle must equal what the
+// old code's direct find_dot / buff_t::find returns right now (a mismatch throws by name), and the totals --
+// including how many handles were non-null, so a run where all six stay null cannot pass as proof -- print
+// once at process exit.
+struct enemy_debuff_selftest_totals_t
+{
+  unsigned long long calls = 0, nonnull_flame_shock = 0, nonnull_venomfang = 0, nonnull_rune = 0,
+                     nonnull_burning_core = 0, nonnull_lightning_rod = 0, nonnull_venomfang_debuff = 0;
+  ~enemy_debuff_selftest_totals_t()
+  {
+    if ( calls == 0 )
+      return;
+    fmt::print( stderr,
+                "[RL_ENEMY_LOOKUP_SELFTEST] calls={} mismatches=0 nonnull: flame_shock={} venomfang={} "
+                "rune_of_unleashed_fire_lingering={} burning_core={} lightning_rod={} venomfang_debuff={}\n",
+                calls, nonnull_flame_shock, nonnull_venomfang, nonnull_rune, nonnull_burning_core,
+                nonnull_lightning_rod, nonnull_venomfang_debuff );
+  }
+};
+enemy_debuff_selftest_totals_t g_enemy_debuff_selftest_totals;
+
+void selftest_enemy_debuff_lookup( const enemy_debuff_lookup_t& e, player_t* candidate, player_t* source )
+{
+  const bool ok = e.flame_shock == candidate->find_dot( "flame_shock", source ) &&
+                  e.venomfang == candidate->find_dot( "venomfang", source ) &&
+                  e.rune_of_unleashed_fire_lingering ==
+                      candidate->find_dot( "rune_of_unleashed_fire_lingering", source ) &&
+                  e.burning_core == buff_t::find( candidate, "burning_core", source ) &&
+                  e.lightning_rod == buff_t::find( candidate, "lightning_rod", source ) &&
+                  e.venomfang_debuff == buff_t::find( candidate, "venomfang_debuff", source );
+  if ( !ok )
+    throw sc_runtime_error( fmt::format(
+        "rl_target_select::resolve_enemy_debuff_lookup: cached handle differs from a fresh lookup for candidate "
+        "'{}' (actor_index {}) at time {}", candidate->name(), candidate->actor_index,
+        candidate->sim->current_time().total_seconds() ) );
+  auto& t = g_enemy_debuff_selftest_totals;
+  ++t.calls;
+  t.nonnull_flame_shock += e.flame_shock != nullptr;
+  t.nonnull_venomfang += e.venomfang != nullptr;
+  t.nonnull_rune += e.rune_of_unleashed_fire_lingering != nullptr;
+  t.nonnull_burning_core += e.burning_core != nullptr;
+  t.nonnull_lightning_rod += e.lightning_rod != nullptr;
+  t.nonnull_venomfang_debuff += e.venomfang_debuff != nullptr;
+}
+
+enemy_debuff_lookup_t& resolve_enemy_debuff_lookup( player_t* candidate, player_t* source )
+{
+  const std::size_t idx = candidate->actor_index;
+  if ( idx >= g_enemy_debuff_lookup.size() )
+    g_enemy_debuff_lookup.resize( idx + 1 );
+  enemy_debuff_lookup_t& e = g_enemy_debuff_lookup[ idx ];
+  if ( e.candidate != candidate || e.source != source )
+  {
+    e = enemy_debuff_lookup_t{};
+    e.candidate = candidate;
+    e.source = source;
+  }
+  if ( e.dot_count != candidate->dot_list.size() )
+  {
+    e.flame_shock = candidate->find_dot( "flame_shock", source );
+    e.venomfang = candidate->find_dot( "venomfang", source );
+    e.rune_of_unleashed_fire_lingering = candidate->find_dot( "rune_of_unleashed_fire_lingering", source );
+    e.dot_count = candidate->dot_list.size();
+  }
+  if ( e.buff_count != candidate->buff_list.size() || e.fallback_count != candidate->fallback_buff_names.size() )
+  {
+    e.burning_core = buff_t::find( candidate, "burning_core", source );
+    e.lightning_rod = buff_t::find( candidate, "lightning_rod", source );
+    e.venomfang_debuff = buff_t::find( candidate, "venomfang_debuff", source );
+    e.buff_count = candidate->buff_list.size();
+    e.fallback_count = candidate->fallback_buff_names.size();
+  }
+  if ( candidate->sim->rl_capability_selftest )
+    selftest_enemy_debuff_lookup( e, candidate, source );
+  return e;
+}
 
 } // anonymous namespace
 
@@ -629,7 +739,10 @@ enemy_fact build_enemy_fact( const action_t* a, player_t* candidate )
   // instead of `get_dot`, which CREATES a dot_t on every candidate that has never been Flame
   // Shocked, growing `dot_list` on what this function's own callers treat as a read-only query.
   // Flame Shock on an ARBITRARY enemy, not only the current target (P-5's fix point).
-  dot_t* fs = candidate->find_dot( "flame_shock", a->player );
+  // 261009-spd: the six handle lookups of this function (this one and the five below) come from
+  // resolve_enemy_debuff_lookup()'s per-(candidate, source) cache; every remains()/check() read stays live.
+  const enemy_debuff_lookup_t& lookup = resolve_enemy_debuff_lookup( candidate, a->player );
+  dot_t* fs = lookup.flame_shock;
   f.flame_shock_remaining = fs ? fs->remains().total_seconds() : 0.0;
 
   // OBS-03/R-U (tstl-sylvanas 232-02): deterministic geometry, never a target-cache read --
@@ -662,21 +775,21 @@ enemy_fact build_enemy_fact( const action_t* a, player_t* candidate )
   // buff_list without creating; player_t::find_dot() scans dot_list without creating. `source`
   // is always `a->player` -- these are debuffs THIS actor puts on the candidate, mirroring
   // flame_shock_remaining's own `a->player` source above.
-  if ( buff_t* bc = buff_t::find( candidate, "burning_core", a->player ) )
+  if ( buff_t* bc = lookup.burning_core )
     f.burning_core_remaining = bc->remains().total_seconds();
-  if ( buff_t* lr = buff_t::find( candidate, "lightning_rod", a->player ) )
+  if ( buff_t* lr = lookup.lightning_rod )
   {
     f.lightning_rod_stacks    = lr->check();
     f.lightning_rod_remaining = lr->remains().total_seconds();
   }
-  if ( dot_t* vf = candidate->find_dot( "venomfang", a->player ) )
+  if ( dot_t* vf = lookup.venomfang )
     f.venomfang_remaining = vf->remains().total_seconds();
-  if ( buff_t* vfd = buff_t::find( candidate, "venomfang_debuff", a->player ) )
+  if ( buff_t* vfd = lookup.venomfang_debuff )
   {
     f.venomfang_debuff_stacks    = vfd->check();
     f.venomfang_debuff_remaining = vfd->remains().total_seconds();
   }
-  if ( dot_t* ruf = candidate->find_dot( "rune_of_unleashed_fire_lingering", a->player ) )
+  if ( dot_t* ruf = lookup.rune_of_unleashed_fire_lingering )
     f.rune_of_unleashed_fire_lingering_remaining = ruf->remains().total_seconds();
 
   // 260914-rbp Task 1 Step 6 (R15, rulings Q16): the targeting-lens fields -- see enemy_fact's
@@ -1578,6 +1691,7 @@ void reset( sim_t* )
   // read a STALE geometry from an unrelated earlier actor. Cleared every iteration, same as the
   // five tables above.
   g_vb_lava_lash_geometry_cache.clear();
+  g_enemy_debuff_lookup.clear();  // 261009-spd
   // 260914-rbp Task 2c (ADD-2): the sibling per-actor find_action() handle cache
   // rl_policy_obs.cpp owns (a DIFFERENT translation unit) -- same stale-address hazard, same
   // per-iteration clear, routed through this file's own reset() since sim.cpp's sim_t::reset()
@@ -1606,7 +1720,7 @@ std::size_t process_cache_entries()
 {
   return g_decision_stamp.size() + g_pick_table.size() + g_candidate_block_table.size() +
          g_target_fact_snapshot_table.size() + g_chain_hop_stash.size() + g_vb_lava_lash_geometry_cache.size() +
-         g_aim_fact_gate_cache.size() + g_candidate_buffer.size() + g_unpruned_candidate_buffer.size() +
+         g_enemy_debuff_lookup.size() + g_aim_fact_gate_cache.size() + g_candidate_buffer.size() + g_unpruned_candidate_buffer.size() +
          g_rules_feature_scratch.size() +
          ( ( g_reresolution_counts.kept_the_pick != 0 || g_reresolution_counts.fell_back_to_player_target != 0 ||
              g_reresolution_counts.left_no_op_boundary != 0 )
