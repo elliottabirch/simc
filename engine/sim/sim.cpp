@@ -32,6 +32,7 @@
 #include "sim/option.hpp"
 #include "sim/profileset.hpp"
 #include "sim/rl_policy.hpp"
+#include "sim/rl_action_census.hpp"
 #include "sim/rl_target_select.hpp"
 #include "sim/rl_translog.hpp"
 #include "sim/rl_rng_record.hpp"
@@ -2468,6 +2469,9 @@ void sim_t::combat_end()
                   by_action_json( p->rl_background_damage_by_action ) );
     }
   }
+  // Phase 271 (271-04, H-3): rewrite the action discovery census with the fight's own evidence
+  // (initMatchesEnd, proc-only children). No-op unless rl_action_census=<path>; reads actions only.
+  rl_action_census::on_combat_end( this );
   // 261005-branch-teacher: a branch child closes its window here (no-op otherwise).
   solver_branch::on_combat_end( this );
 
@@ -3466,6 +3470,10 @@ void sim_t::init()
         "Disable this warning by adding 'use_item' actions into the action priority list for the actor(s), or set "
         "'use_item_verification=0' in your SimulationCraft input." );
     }
+
+    // Phase 271 (271-04, H-3): opt-in action discovery census, written once every actor is initialised.
+    // No-op unless rl_action_census=<path>; reads actions only.
+    rl_action_census::on_init_finished( this );
   }
 
   // If save= option is used, don't bother initializing profilesets or plots as the main thread is going to
@@ -4623,6 +4631,9 @@ void sim_t::create_options()
   add_option( opt_bool( "rl_obs_timing", rl_obs_timing ) );
   // Phase 268 (268-05, G268-8): see sim.hpp's rl_credit_census doc comment. Default off.
   add_option( opt_bool( "rl_credit_census", rl_credit_census ) );
+  // Phase 271 (271-04, H-3): see rl_action_census.hpp. The path lives in that module (a sim_t member would
+  // rebuild every file); the RL rigs run one sim per process. Default empty: nothing is read or written.
+  add_option( opt_string( "rl_action_census", rl_action_census::path_storage() ) );
   add_option( opt_bool( "sequence_soft_fail", sequence_soft_fail ) );
   add_option( opt_bool( "sequence_queue_delay", sequence_queue_delay ) );
   // Deterministic proc-roll option (simc-offline-evaluation-pipeline phase
