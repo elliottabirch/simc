@@ -4580,6 +4580,8 @@ void sim_t::create_options()
   // sim.hpp's rl_obs_timing/rl_obs_ns doc comment. Default false, zero
   // overhead when omitted.
   add_option( opt_bool( "rl_obs_timing", rl_obs_timing ) );
+  // 261009-spd: see sim.hpp's rl_capability_selftest doc comment.
+  add_option( opt_bool( "rl_capability_selftest", rl_capability_selftest ) );
   add_option( opt_bool( "sequence_soft_fail", sequence_soft_fail ) );
   add_option( opt_bool( "sequence_queue_delay", sequence_queue_delay ) );
   // Deterministic proc-roll option (simc-offline-evaluation-pipeline phase

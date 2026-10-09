@@ -997,6 +997,10 @@ struct sim_t : private sc_thread_t
   // exactly one writer for the lifetime of the vector.
   bool rl_obs_timing = false;
   std::vector<long long> rl_obs_ns;
+  // 261009-spd: rl_capability_selftest=1 runs rl_capability_selftest_run() (rl_policy_obs.cpp) once per
+  // actor: cached capability bits == freshly computed bits, and the "governed action marked legal while
+  // its capability is 0" throw still fires. Default off, zero cost.
+  bool rl_capability_selftest = false;
   // P3b fork hook (simc-offline-evaluation-pipeline phase 116, 116-01) -
   // solver_control=<prefix> opens an additive request/reply FIFO pair at the
   // same execute_action() decision boundary as decision_dump=. Empty string
