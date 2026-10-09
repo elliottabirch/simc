@@ -4532,6 +4532,10 @@ void sim_t::create_options()
     add_option( opt_string( "solver_teacher_press", sb.teacher_press ) );
     // Window cut (261005-tch2): decision (default, today) | exact; refused by name in validate().
     add_option( opt_string( "solver_branch_cut", sb.branch_cut ) );
+    // 261009-spd (T4): independent futures. See solver_branch.hpp's config_t comment.
+    add_option( opt_bool( "solver_branch_independent_dice", sb.independent_dice ) );
+    add_option( opt_bool( "solver_branch_redeal", sb.redeal ) );
+    add_option( opt_string( "solver_branch_redeal_trace", sb.redeal_trace ) );
   }
   // S1 (260927-s1-spend-timing): forbids lightning_bolt/tempest (and, 261002-8rs, primordial_storm
   // when the action table offers it; the third Lightning-family spender is untouched) below n stacks

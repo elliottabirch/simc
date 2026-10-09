@@ -207,6 +207,28 @@ int shuffled_rng_t::trigger( action_state_t* )
   return *position++;
 }
 
+void shuffled_rng_t::redeal_undrawn()
+{
+  // position == end: nothing undrawn (the next trigger() refills through reset()).
+  if ( position == entries.end() )
+    return;
+  rng().shuffle( position, entries.end() );
+}
+
+std::string shuffled_rng_t::trace_string() const
+{
+  std::string out = fmt::format( "{}/{}:", position - entries.begin(), entries.size() );
+  for ( auto it = entries.begin(); it != entries.end(); ++it )
+  {
+    if ( it == position )
+      out += '|';
+    out += *it == SUCCESS ? 'S' : *it == FAIL ? '.' : static_cast<char>( '0' + ( *it % 10 ) );
+  }
+  if ( position == entries.end() )
+    out += '|';
+  return out;
+}
+
 int shuffled_rng_t::count_remains( int key )
 {
   return as<int>( std::count( position, entries.end(), key ) );

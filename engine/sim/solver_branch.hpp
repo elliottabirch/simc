@@ -82,6 +82,24 @@ struct config_t
   // Window cut (261005-tch2).
   std::string branch_cut = "decision";       // "decision" (today) | "exact"
   bool cut_exact = false;                    // set by validate()
+
+  // Independent futures (261009-spd, T4; owner directive 2026-10-09: no paired dice anywhere). Both default ON.
+  //   solver_branch_independent_dice=1  a child re-salts with a key built from BOTH its salt and its button
+  //                                     (and its exploration stream is re-seeded from it), so no two children
+  //                                     of one decision -- same salt, different button included -- share a
+  //                                     dice stream. 0 = the old key (the salt alone): children of different
+  //                                     buttons with the same salt roll the same dice.
+  //   solver_branch_redeal=1            in every child, the UNDRAWN part of every shuffled deck
+  //                                     (proc_rng_t entries that are shuffled_rng_t, dre_deck_rng_t included)
+  //                                     is dealt again from the child's own stream: same cards left, fresh
+  //                                     order, same gap guarantee. 0 = decks stay as the parent dealt them
+  //                                     (every child knows the parent's upcoming cards).
+  // Both exist only so the proof can show the difference; neither touches the parent.
+  bool independent_dice = true;
+  bool redeal = true;
+  // Proof output: when non-empty, the parent appends its decks' state before and after every batch and each
+  // child appends its own decks' state after its re-deal (one JSON line per deck). Off by default.
+  std::string redeal_trace;
 };
 
 config_t& cfg();

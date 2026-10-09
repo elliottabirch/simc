@@ -564,6 +564,7 @@ private:
   size_t  m_success,   // Number of successes
           m_high_idx;  // Index of the highest successful draw
   int     m_max_draw;  // Maximum number of cards to draw per proc event
+  size_t  m_end_distance = 0U;  // 261009-spd: reset()'s end_distance for the CURRENT deck (see redeal_undrawn)
 public:
   dre_deck_rng_t( std::string_view n, player_t* p, initializer data ) = delete;
 
@@ -571,6 +572,81 @@ public:
     shuffled_rng_t( n, p, success_entries, total_entries ), m_success( success_entries ),
     m_high_idx( 0U ), m_max_draw( max_draw )
   { }
+
+  int min_success_spacing() const override
+  { return m_max_draw + 1; }
+
+  // 261009-spd (T4): re-deal the UNDRAWN part of this deck under the SAME gap guarantee reset() enforces.
+  //
+  // reset() deals m_success successes so that (1) any two are more than m_max_draw cards apart and (2) the
+  // first one is more than m_max_draw cards after the previous deck's highest success (end_distance +
+  // index > m_max_draw; m_end_distance remembers the end_distance of this deck's own reset). Given the
+  // cards already drawn (entries before `position`, kept exactly), the s successes still in the deck are
+  // re-placed uniformly among all arrangements inside [position, end) that keep (1) against each other and
+  // against the last already-drawn success, and (2) when none has been drawn yet. "Uniformly" is exact:
+  // writing q_i = p_i - (i - 1) * m_max_draw turns "spaced more than m_max_draw apart" into "strictly
+  // increasing", so a uniform s-subset of the q range (Knuth's selection sampling, one draw per candidate)
+  // is a uniform valid arrangement. reset()'s own sampler is sequential rejection, whose law over
+  // arrangements is only close to uniform; the re-deal does not copy that quirk. The number of successes
+  // and failures left, and the draw position, are unchanged. m_high_idx follows the new last success
+  // (the next refill's end_distance reads it). A deck that cannot be re-dealt (the current arrangement
+  // always is a valid one, so this only means a bug) throws by name.
+  void redeal_undrawn() override
+  {
+    const size_t n = entries.size();
+    const size_t pos = static_cast<size_t>( position - entries.begin() );
+    if ( pos >= n )
+      return;
+    size_t s = 0U;
+    for ( size_t i = pos; i < n; ++i )
+      if ( entries[ i ] == SUCCESS )
+        ++s;
+    if ( s == 0U )
+      return;
+
+    const size_t gap = static_cast<size_t>( m_max_draw ) + 1U;  // successes' indices differ by at least this
+    size_t lo = pos;
+    bool drawn_success = false;
+    size_t last_drawn = 0U;
+    for ( size_t i = 0; i < pos; ++i )
+      if ( entries[ i ] == SUCCESS )
+      {
+        drawn_success = true;
+        last_drawn = i;
+      }
+    if ( drawn_success )
+      lo = std::max( lo, last_drawn + gap );
+    else if ( m_end_distance < gap )
+      lo = std::max( lo, gap - m_end_distance );
+
+    // q_i = p_i - (i - 1) * m_max_draw ranges over [lo, n - 1 - (s - 1) * m_max_draw].
+    const size_t slack = ( s - 1U ) * static_cast<size_t>( m_max_draw );
+    if ( n < 1U + slack || lo > n - 1U - slack || ( n - slack - lo ) < s )
+      throw sc_runtime_error( fmt::format(
+          "{} dre_deck_rng_t::redeal_undrawn: cannot place {} undrawn successes in [{}, {}) with spacing {}",
+          *player, s, lo, n, gap ) );
+    const size_t qhi = n - 1U - slack;  // inclusive
+    std::vector<size_t> placed;
+    placed.reserve( s );
+    size_t needed = s;
+    for ( size_t q = lo; q <= qhi && needed > 0U; ++q )
+    {
+      const size_t candidates_left = qhi - q + 1U;
+      if ( candidates_left == needed || rng().roll( static_cast<double>( needed ) / static_cast<double>( candidates_left ) ) )
+      {
+        placed.push_back( q + placed.size() * static_cast<size_t>( m_max_draw ) );
+        --needed;
+      }
+    }
+    if ( placed.size() != s )
+      throw sc_runtime_error( fmt::format( "{} dre_deck_rng_t::redeal_undrawn: placed {} of {} successes", *player,
+                                           placed.size(), s ) );
+    for ( size_t i = pos; i < n; ++i )
+      entries[ i ] = FAIL;
+    for ( size_t idx : placed )
+      entries[ idx ] = SUCCESS;
+    m_high_idx = std::max( drawn_success ? last_drawn : size_t( 0 ), placed.back() );
+  }
 
   void reset( reset_type_e reset_type ) override
   {
@@ -583,6 +659,7 @@ public:
       ? m_max_draw + 1
       : entries.size() - m_high_idx;
 
+    m_end_distance = end_distance;
     m_high_idx = 0U;
     // Generate randomized m_success number of draws, that honor:
     // 1) The draw must be at least max_draw number of draws away from the previous deck's

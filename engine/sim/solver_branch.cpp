@@ -34,6 +34,7 @@
 #include "action/action.hpp"
 #include "player/player.hpp"
 #include "sim/event.hpp"
+#include "sim/proc_rng.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_policy_constants.h"
 #include "sim/rl_translog.hpp"
@@ -309,6 +310,52 @@ button_stats_t stats_for( const batch_result_t& br, int button )
 }
 
 #if defined( __linux__ )
+// 261009-spd (T4): splitmix64 finaliser -- the child's dice key is mix(salt, button), and its exploration stream
+// seed is mix of that again, so neighbouring (salt, button) pairs land far apart and no pair repeats.
+std::uint64_t mix64( std::uint64_t x )
+{
+  x += 0x9E3779B97F4A7C15ull;
+  x = ( x ^ ( x >> 30 ) ) * 0xBF58476D1CE4E5B9ull;
+  x = ( x ^ ( x >> 27 ) ) * 0x94D049BB133111EBull;
+  return x ^ ( x >> 31 );
+}
+
+std::uint64_t child_dice_key( std::uint64_t salt, int button )
+{
+  const std::uint64_t k = mix64( mix64( salt ) ^ ( static_cast<std::uint64_t>( button ) + 0xD1B54A32D192ED03ull ) );
+  return k != 0 ? k : 0x2545F4914F6CDD1Dull;  // 0 would re-seed to the parent's own stream
+}
+
+// Appends one JSON line per shuffled deck of every actor to solver_branch_redeal_trace=. One write() per line
+// (O_APPEND), so concurrent children cannot interleave inside a line.
+void trace_decks( sim_t* sim, const char* role, const char* when, std::int64_t k, int button, std::uint64_t salt )
+{
+  const std::string& path = g_cfg.redeal_trace;
+  if ( path.empty() )
+    return;
+  const int fd = ::open( path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644 );
+  if ( fd < 0 )
+    return;
+  for ( player_t* a : sim->actor_list )
+  {
+    if ( !a )
+      continue;
+    for ( proc_rng_t* r : a->proc_rng_list )
+    {
+      auto* deck = dynamic_cast<shuffled_rng_t*>( r );
+      if ( !deck )
+        continue;
+      const std::string line = fmt::format(
+          "{{\"role\":\"{}\",\"when\":\"{}\",\"k\":{},\"button\":{},\"salt\":{},\"actor\":\"{}\","
+          "\"deck\":\"{}\",\"spacing\":{},\"cards\":\"{}\"}}\n",
+          role, when, k, button, salt, a->name_str, deck->name(), deck->min_success_spacing(), deck->trace_string() );
+      if ( ::write( fd, line.data(), line.size() ) < 0 )
+        break;
+    }
+  }
+  ::close( fd );
+}
+
 // 261005-tch2: the exact window cut. Created by become_child() at fork time, at exactly t_k + W.
 struct window_cut_event_t final : public event_t
 {
@@ -421,7 +468,27 @@ void become_child( sim_t* sim, player_t* p, std::uint64_t seq, int button, std::
   c.branch_at = -1;
   c.resalt_at_decision = -1;
 
-  sim->resalt_source_rngs( salt );
+  // 261009-spd (T4): (a) the dice key folds in the button, so children of different buttons never share a
+  // stream; the exploration stream (copied from the parent, not touched by the re-salt) is re-seeded from it
+  // too, so no two children play on with the same exploration draws. (b) the undrawn remainder of every
+  // shuffled deck is dealt again from the child's own, just re-salted, stream. Parent untouched: all of this
+  // runs in the child only.
+  const std::uint64_t dice_key = c.independent_dice ? child_dice_key( salt, button ) : salt;
+  sim->resalt_source_rngs( dice_key );
+  if ( c.independent_dice )
+    sim->solver_explore_rng.seed( mix64( dice_key ^ 0xE5910BEull ) );
+  if ( c.redeal )
+  {
+    for ( player_t* a : sim->actor_list )
+    {
+      if ( !a )
+        continue;
+      for ( proc_rng_t* r : a->proc_rng_list )
+        if ( auto* deck = dynamic_cast<shuffled_rng_t*>( r ) )
+          deck->redeal_undrawn();
+    }
+  }
+  trace_decks( sim, "child", "after_redeal", static_cast<std::int64_t>( g_child.k ), button, salt );
 
   g_child.last_t = g_child.t_k;
   g_child.last_D = g_child.D_k;
@@ -462,6 +529,9 @@ bool run_batch( sim_t* sim, player_t* p, std::uint64_t seq, const std::vector<in
     g_branch_out->flush();
   if ( g_teacher_log )
     g_teacher_log->flush();
+
+  // 261009-spd (T4) proof output, off unless solver_branch_redeal_trace= is set (before the clocks start).
+  trace_decks( sim, "parent", "pre_fork", static_cast<std::int64_t>( seq ) - 1, -1, 0 );
 
   // 3. clocks
   const double self0 = rusage_cpu_s( RUSAGE_SELF );
@@ -627,6 +697,7 @@ bool run_batch( sim_t* sim, player_t* p, std::uint64_t seq, const std::vector<in
   g_count.wall_branch_s += br.wall_s;
   g_count.rss_kb_last = read_vmrss_kb();
   g_count.fd_last = count_dir_entries( "/proc/self/fd" );
+  trace_decks( sim, "parent", "post_batch", static_cast<std::int64_t>( seq ) - 1, -1, 0 );
   return false;
 #else
   (void)sim; (void)p; (void)seq; (void)buttons; (void)salts; (void)window; (void)translog_dir; (void)br;
@@ -1078,29 +1149,30 @@ void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
     }
     auto score = [ & ]( std::size_t i ) { return c.teacher_bootstrap ? st[ i ].mean_RB : st[ i ].mean_R; };
 
-    // paired difference (net's pick minus runner-up) over salts where both are OK
-    std::vector<double> diffs;
+    // UNPAIRED difference (net's pick minus runner-up), 261009-spd T4: every child rolls its own dice (no two
+    // children share a stream), so the two buttons' children are independent samples and the difference is the
+    // difference of the two buttons' means, with SE = sqrt(se_a^2 + se_b^2). `n_pair` keeps its field name for
+    // branch_labels.py but now means min(n_ok_a, n_ok_b), the smaller sample the difference rests on. The score
+    // is the same one the pick uses (bootstrap: R + boot).
+    double diff_mean = std::numeric_limits<double>::quiet_NaN();
+    double diff_se = std::numeric_limits<double>::quiet_NaN();
+    int n_pair = 0;
     if ( cands.size() >= 2 )
     {
-      for ( std::uint64_t s0 : salts )
+      const button_stats_t& sa = st[ 0 ];
+      const button_stats_t& sb = st[ 1 ];
+      n_pair = std::min( sa.n_ok, sb.n_ok );
+      const double ma = c.teacher_bootstrap ? sa.mean_RB : sa.mean_R;
+      const double mb = c.teacher_bootstrap ? sb.mean_RB : sb.mean_R;
+      const double ea = c.teacher_bootstrap ? sa.se_RB : sa.se_R;
+      const double eb = c.teacher_bootstrap ? sb.se_RB : sb.se_R;
+      if ( sa.n_ok >= 1 && sb.n_ok >= 1 )
       {
-        const child_result_t* a = nullptr;
-        const child_result_t* b = nullptr;
-        for ( const auto& r : br.res )
-        {
-          if ( r.salt != s0 || !r.ok )
-            continue;
-          if ( r.button == cands[ 0 ] )
-            a = &r;
-          else if ( r.button == cands[ 1 ] )
-            b = &r;
-        }
-        if ( a && b )
-          diffs.push_back( c.teacher_bootstrap ? ( a->R + a->boot ) - ( b->R + b->boot ) : a->R - b->R );
+        diff_mean = ma - mb;
+        if ( sa.n_ok >= 2 && sb.n_ok >= 2 )
+          diff_se = std::sqrt( ea * ea + eb * eb );
       }
     }
-    double diff_mean, diff_se;
-    mean_se( diffs, diff_mean, diff_se );
 
     const int net = idx;
     int pick = net;
@@ -1173,7 +1245,7 @@ void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
           "\"end_t\":[{}],\"end_t_span\":[{}],\"cut_busy\":[{}]}}\n",
           seq, jnum( t_float32( sim ) ), net, jc, jq, jnum( static_cast<double>( q_margin ) ), c.teacher_n, jok, jmR, jsR,
           jmRB, jsRB, jnum( diff_mean ), jnum( diff_se ), pick, pick != net ? 1 : 0, fail ? 1 : 0, br.res.size(),
-          br.child_fail, jnum( br.child_cpu_s ), jnum( br.fork_cpu_s ), jnum( br.wall_s ), diffs.size(), jend, jet,
+          br.child_fail, jnum( br.child_cpu_s ), jnum( br.fork_cpu_s ), jnum( br.wall_s ), n_pair, jend, jet,
           jspan, jbusy );
     }
   }
@@ -1240,14 +1312,15 @@ void write_summary( sim_t* sim )
       "\"wall_branch_s\":{},\"self_cpu_s\":{},\"children_cpu_total_s\":{},\"rss_kb_first\":{},\"rss_kb_last\":{},"
       "\"fd_first\":{},\"fd_last\":{},\"listed\":{},\"listed_reached\":{},\"listed_skipped\":{},\"press\":\"{}\","
       "\"config\":{{\"margin\":{},\"n\":{},\"window\":{},\"topk\":{},"
-      "\"bootstrap\":{},\"divisor\":{},\"gamma\":{},\"jobs\":{},\"salt_base\":{},\"fd_isolation\":{},\"cut\":\"{}\"}}}}",
+      "\"bootstrap\":{},\"divisor\":{},\"gamma\":{},\"jobs\":{},\"salt_base\":{},\"fd_isolation\":{},\"cut\":\"{}\","
+      "\"independent_dice\":{},\"redeal\":{}}}}}",
       g_count.decisions, g_count.near_ties, g_count.branched, g_count.overrides, g_count.skipped_fail, g_count.children,
       g_count.children_reaped, g_count.child_fail, jnum( g_count.child_cpu_s ), jnum( g_count.fork_cpu_s ),
       jnum( g_count.wall_branch_s ), jnum( self_cpu ), jnum( kids_cpu ), g_count.rss_kb_first, g_count.rss_kb_last,
       g_count.fd_first, g_count.fd_last, c.teacher_at_list.size(), g_count.listed_reached, g_count.listed_skipped,
       c.teacher_press_net ? "net" : "best", jnum( c.teacher_margin ), c.teacher_n, jnum( c.teacher_window ), c.teacher_topk,
       c.teacher_bootstrap ? 1 : 0, jnum( c.value_divisor ), jnum( c.gamma ), c.branch_jobs, c.branch_salt_base,
-      c.child_fd_isolation ? 1 : 0, c.cut_exact ? "exact" : "decision" );
+      c.child_fd_isolation ? 1 : 0, c.cut_exact ? "exact" : "decision", c.independent_dice ? 1 : 0, c.redeal ? 1 : 0 );
   if ( g_teacher_log )
   {
     *g_teacher_log << js << "\n";

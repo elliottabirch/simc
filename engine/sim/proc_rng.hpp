@@ -212,6 +212,26 @@ public:
   int count_remains( int key );
   int entry_remains();
 
+  /// 261009-spd (T4): give the UNDRAWN remainder of this deck a fresh order, keeping the number of cards
+  /// already drawn and the multiset of cards still in the deck (so every count_remains()/entry_remains()
+  /// reading is unchanged). Called ONLY in a solver_branch child, right after its streams were re-salted
+  /// (solver_branch.cpp, become_child): the deck is dealt once per fight (reset()), so without this every
+  /// child -- and the parent's real continuation -- would share the same upcoming cards, and a search
+  /// would "know" which presses proc. Draws from this deck's own rng(). The base implementation is a
+  /// uniform shuffle of [position, end), the exact conditional law of reset()'s uniform shuffle given the
+  /// cards already drawn. A subclass whose reset() deals under a constraint overrides it to re-establish
+  /// that constraint (dre_deck_rng_t, sc_shaman.cpp). Throws by name if it cannot.
+  virtual void redeal_undrawn();
+
+  /// 0 for an ordinary deck; for a deck whose successes must stay at least this many cards apart (the
+  /// pity/gap guarantee of dre_deck_rng_t), that spacing. Read by the redeal trace/proof only.
+  virtual int min_success_spacing() const
+  { return 0; }
+
+  /// Debug/proof: "<drawn>/<size>:" then one character per card (S success, . fail, digit otherwise),
+  /// with '|' marking the draw position. Never draws or moves anything.
+  std::string trace_string() const;
+
   // Phase 259 (plan 259-11): read-only WHOLE-deck totals (cards of `key` / all cards, regardless of
   // the draw position), so the deck-draw pricing can read the deck's own parameters instead of
   // hard-coding them. Never draws, shuffles or moves the position.
