@@ -28,6 +28,13 @@
 //   solver_search_press=net|best           net (default) never changes the parent's press, so the parent plays the
 //                                          net's own fight; best presses the search's pick
 //   solver_search_log=<file>               JSON lines: one per search, a final {"summary":1,...} line
+//   solver_search_splits=0..4              (280-04) the split budget S: the most chance splits on one path (default 2).
+//                                          Inside a copy, at a roll on a split-eligible proc generator (or a draw on
+//                                          a deck whose exact next-card chance is strictly between 0 and 1) the copy
+//                                          forks so BOTH outcomes are played, each weighted by its exact chance
+//   solver_search_split_site=<site key>    (280-04, proof only) make exactly this one site split-eligible; needs
+//                                          solver_search_splits >= 1; refused by name when the key is unknown or names
+//                                          a row that can never split (a threshold generator)
 //
 // Read, not registered here: solver_branch_value_divisor (> 0), solver_branch_gamma, solver_branch_salt_base,
 // solver_branch_independent_dice and solver_branch_redeal (both must stay 1: paired futures are refused).
@@ -55,6 +62,8 @@ struct config_t
   std::string press = "net";          // solver_search_press, "net" | "best"
   double margin = 0.0;                // solver_search_margin, > 0 searches near ties when `at` is empty
   std::string log;                    // solver_search_log
+  int splits = 2;                     // solver_search_splits, 0..4 (280-04)
+  std::string split_site;             // solver_search_split_site (280-04, proof only)
   // set by validate()
   std::vector<std::int64_t> at_list;  // parsed from `at`
   bool press_best = false;

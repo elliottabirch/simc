@@ -4563,6 +4563,9 @@ void sim_t::create_options()
     add_option( opt_string( "solver_search_press", ss.press ) );
     add_option( opt_float( "solver_search_margin", ss.margin ) );
     add_option( opt_string( "solver_search_log", ss.log ) );
+    // tstl-sylvanas 280-04: the chance-split budget per path (0..4, default 2) and the proof-only single split site.
+    add_option( opt_int( "solver_search_splits", ss.splits ) );
+    add_option( opt_string( "solver_search_split_site", ss.split_site ) );
   }
   // S1 (260927-s1-spend-timing): forbids lightning_bolt/tempest (and, 261002-8rs, primordial_storm
   // when the action table offers it; the third Lightning-family spender is untouched) below n stacks

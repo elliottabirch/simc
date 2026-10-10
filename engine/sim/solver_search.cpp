@@ -27,6 +27,19 @@
 // and counted (n_fail). Means and standard errors are taken over COPIES (copies of one search are independent:
 // owner rule D1), never over leaves.
 //
+// CHANCE SPLITS (280-04, SRCH-03; the weights of SRCH-01 and SRCH-02). Inside a copy a sink is attached to
+// rng::rl_draw_sink (never in the parent). At a roll on a split-eligible proc generator, or a draw on a split-eligible
+// deck whose exact next-card chance p is strictly between 0 and 1, with split budget left on this path, the copy forks:
+// the NEW process takes the no / FAIL outcome (path weight x (1 - p)) and re-salts every stream, re-seeds the
+// exploration stream and re-deals every deck so the two branches never share dice (owner rule D1); the forking process
+// waits for it to finish (DFS-wait: one running process per copy, every descendant reaped by its own forker) and then
+// takes the yes / SUCCESS outcome (path weight x p). The site of a roll is the proc generator's stream, tagged
+// SEARCH_SITE_BASE + row index in the copy; a roll on any other stream (crit, damage range, swing timer, player,
+// action and buff streams) has no tag and is never split. Every process writes its own lines:
+//     LEAF ... <path> <splits>        (path = the outcome digits along the way, '-' when empty; splits = row:p:outcome;...)
+//     STATS <copy> <path> <fork_fail> <row>:<n>:<sum_p>:<sum_pq>:<n_yes>;...   (rows with n > 0, '-' when none)
+//     FAIL <copy> <code> <path> <msg>
+//
 // PASS RUNNER. NOT solver_branch's run_batch (whose blocking waitpid() can deadlock against a full pipe): the read
 // end is non-blocking and 1 MiB, the parent poll()s and drains the pipe and reaps with waitpid( WNOHANG ) in one
 // loop, with at most `jobs` copies alive.
@@ -87,9 +100,19 @@ constexpr int PASS1_PER_CAND = 8;
 constexpr std::size_t LINE_MAX_BYTES = 4096;
 
 // ---- copy state ------------------------------------------------------------------------------
+// One split taken on the way to a leaf: the site row, the exact chance of the yes / SUCCESS outcome, and the outcome
+// this process took (1 = yes, 0 = no). (280-04)
+struct split_rec_t
+{
+  int row = 0;
+  double p = 0.0;
+  int outcome = 0;
+};
+
 struct child_state_t
 {
   bool active = false;
+  sim_t* sim = nullptr;
   player_t* p = nullptr;
   int pass = 0;
   int copy = 0;
@@ -111,8 +134,43 @@ struct child_state_t
   int n_dec = 0;
   bool cutting = false;   // set by the cut event right before p->execute_action(); on_decision cuts on it
   int cut_state = -1;     // recorded by the event at T
+  // 280-04: the chance-split state of THIS process
+  std::uint64_t key = 0;               // the dice key this process holds (a new branch gets a key of its own)
+  double pw = 1.0;                     // path weight: the product of the split probabilities on the way here
+  std::string path;                    // outcome digits along the way ('0' = no / FAIL, '1' = yes / SUCCESS)
+  std::vector<split_rec_t> splits;     // the splits on the way here, in order
+  bool sub_failed = false;             // a branch this process forked and waited for did not leave cleanly
+  long fork_fail = 0;                  // fork() refusals met on the way (the roll was then sampled normally)
 };
 child_state_t g_child;
+
+// ---- split sites (280-04) ----------------------------------------------------------------------------
+// One row per proc generator, built once in the PARENT at its first search by a read-only walk. Children share it
+// through fork() and tag each row's stream with SEARCH_SITE_BASE + index.
+constexpr std::uint32_t SEARCH_SITE_BASE = 0x53000000u;  // far from the recorder's small ids and RL_ROLLER_UNREGISTERED
+
+struct site_row_t
+{
+  std::string key;
+  int type = 0;                 // rng_type_e as an int: 1 simple, 2 real-PPM, 3 deck, 4 accumulated, 5 threshold, 6 custom
+  proc_rng_t* ptr = nullptr;
+  bool eligible = false;        // types 1, 2, 3, 4; threshold (5) never calls roll(), custom (6) is not eligible
+  bool deck = false;
+};
+std::vector<site_row_t> g_sites;
+bool g_sites_built = false;
+int g_proof_row = -1;           // solver_search_split_site resolved to a row, or -1
+
+// A copy's own per-path counts (the parent never counts). n and sum_p cover rolls with 0 < p < 1 on a roll row and
+// informative draws (0 < p < 1) on a deck row; sum_pq is p x (1 - p); n_yes the yes / SUCCESS outcomes.
+struct site_count_t
+{
+  std::uint64_t n = 0;
+  double sum_p = 0.0;
+  double sum_pq = 0.0;
+  std::uint64_t n_yes = 0;
+};
+std::vector<site_count_t> g_counts;
 
 // ---- parent stream and counters ---------------------------------------------------------------
 std::unique_ptr<std::ofstream> g_log;
@@ -293,6 +351,11 @@ std::uint64_t copy_key( std::uint64_t salt_base, std::uint64_t seq, int pass, in
 #endif
 }
 
+std::string path_token()
+{
+  return g_child.path.empty() ? std::string( "-" ) : g_child.path;
+}
+
 std::string make_fail_line( int code, const std::string& msg )
 {
   std::string m = msg;
@@ -303,7 +366,52 @@ std::string make_fail_line( int code, const std::string& msg )
     m.resize( 160 );
   if ( m.empty() )
     m = "-";
-  return fmt::format( "FAIL {} {} {}\n", g_child.copy, code, m );
+  return fmt::format( "FAIL {} {} {} {}\n", g_child.copy, code, path_token(), m );
+}
+
+// One write() of one line without leaving (the STATS line goes first, then the LEAF line).
+void child_write_only( const std::string& line )
+{
+#if defined( __linux__ )
+  if ( g_child.fd >= 0 )
+  {
+    const ssize_t w = ::write( g_child.fd, line.data(), line.size() );
+    (void)w;
+  }
+#else
+  (void)line;
+#endif
+}
+
+std::string split_list_token()
+{
+  if ( g_child.splits.empty() )
+    return "-";
+  std::string out;
+  for ( const split_rec_t& sp : g_child.splits )
+  {
+    if ( !out.empty() )
+      out += ';';
+    out += fmt::format( "{}:{:.17g}:{}", sp.row, sp.p, sp.outcome );
+  }
+  return out;
+}
+
+std::string stats_line()
+{
+  std::string items;
+  for ( std::size_t i = 0; i < g_counts.size(); ++i )
+  {
+    const site_count_t& c = g_counts[ i ];
+    if ( c.n == 0 )
+      continue;
+    if ( !items.empty() )
+      items += ';';
+    items += fmt::format( "{}:{}:{:.17g}:{:.17g}:{}", i, c.n, c.sum_p, c.sum_pq, c.n_yes );
+  }
+  if ( items.empty() )
+    items = "-";
+  return fmt::format( "STATS {} {} {} {}\n", g_child.copy, path_token(), g_child.fork_fail, items );
 }
 
 // A leaf line (this plan: one per copy, rank 0, weight 1). An oversize line is replaced by a FAIL (code 76).
@@ -320,12 +428,19 @@ std::string make_fail_line( int code, const std::string& msg )
   const long hwm = 0;
   const double cpu = 0.0;
 #endif
-  const std::string line =
-      fmt::format( "LEAF {} {} {} {} {:.17g} {:.17g} {:.17g} {:.17g} {:.17g} {:.9g} {} {} {} {} {:.9g}\n", g_child.copy,
-                   g_child.pass, g_child.cand, 0, 1.0, R, R_undisc, R_real, boot_q, t_end, ended, g_child.n_dec,
-                   cut_state, hwm, cpu );
+  // a branch this process forked and waited for did not leave cleanly: this copy has no complete answer
+  if ( g_child.sub_failed )
+    child_write_and_exit( make_fail_line( 78, "split_branch_failed" ), 78 );
+  const std::string line = fmt::format(
+      "LEAF {} {} {} {} {:.17g} {:.17g} {:.17g} {:.17g} {:.17g} {:.9g} {} {} {} {} {:.9g} {} {}\n", g_child.copy,
+      g_child.pass, g_child.cand, 0, g_child.pw, R, R_undisc, R_real, boot_q, t_end, ended, g_child.n_dec, cut_state,
+      hwm, cpu, path_token(), split_list_token() );
+  const std::string stats = stats_line();
   if ( line.size() > LINE_MAX_BYTES )
     child_write_and_exit( make_fail_line( 76, "line_too_long" ), 76 );
+  if ( stats.size() > LINE_MAX_BYTES )
+    child_write_and_exit( make_fail_line( 76, "stats_line_too_long" ), 76 );
+  child_write_only( stats );
   child_write_and_exit( line, 0 );
 }
 
@@ -372,6 +487,181 @@ struct search_cut_event_t final : public event_t
 double scored_total( const player_t* p )
 {
   return g_cfg.expected_crit ? p->solver_damage_expected_so_far : p->solver_damage_so_far;
+}
+
+
+// ---- the search sink and the split (280-04) --------------------------------------------------------------
+// Re-deal every shuffled deck's undrawn remainder from its own (just re-salted) stream. Used by a copy's setup and by
+// the new branch of a split.
+void redeal_every_deck( sim_t* sim )
+{
+  for ( player_t* a : sim->actor_list )
+  {
+    if ( !a )
+      continue;
+    for ( proc_rng_t* r : a->proc_rng_list )
+      if ( auto* deck = dynamic_cast<shuffled_rng_t*>( r ) )
+        deck->redeal_undrawn();
+  }
+}
+
+struct search_sink_t;
+int split_here( search_sink_t& sink, int row, double p );
+
+// The sink a copy attaches to rng::rl_draw_sink (never the parent). A slot outside [SEARCH_SITE_BASE, +rows) belongs to
+// no proc generator (crit, damage ranges, swing timers, player, action and buff streams) and is never touched: this is
+// what keeps those rolls out of the search, structurally.
+struct search_sink_t final : public rng::rl_draw_sink_t
+{
+  bool busy = false;      // true while a new branch re-salts and re-deals: every hook then answers 0
+  int pending_deck = 0;   // the answer given to the deck draw in progress (checked against the card dealt)
+
+  double on_draw( std::uint32_t&, const std::uint64_t&, std::uint32_t, double raw ) override
+  {
+    return raw;
+  }
+  void on_no_draw_roll( std::uint32_t&, const std::uint64_t& ) override
+  {
+  }
+
+  static int row_of( std::uint32_t slot )
+  {
+    if ( slot < SEARCH_SITE_BASE )
+      return -1;
+    const std::uint32_t idx = slot - SEARCH_SITE_BASE;
+    return idx < g_sites.size() ? static_cast<int>( idx ) : -1;
+  }
+
+  // The cold-start rule (G280-5) with no ranking file: the first S eligible chances met on a path are split. With
+  // solver_search_split_site (proof only) exactly that one site is eligible.
+  bool may_split( int row, double p ) const
+  {
+    if ( !( p > 0.0 && p < 1.0 ) )
+      return false;
+    if ( static_cast<int>( g_child.splits.size() ) >= g_cfg.splits )
+      return false;
+    if ( g_proof_row >= 0 )
+      return row == g_proof_row;
+    return g_sites[ static_cast<std::size_t>( row ) ].eligible;
+  }
+
+  void count( int row, double p, bool yes )
+  {
+    site_count_t& c = g_counts[ static_cast<std::size_t>( row ) ];
+    ++c.n;
+    c.sum_p += p;
+    c.sum_pq += p * ( 1.0 - p );
+    if ( yes )
+      ++c.n_yes;
+  }
+
+  int pre_roll( std::uint32_t& roller_slot, double chance ) override
+  {
+    if ( busy )
+      return rng::RL_PRE_DRAW_NORMAL;
+    const int row = row_of( roller_slot );
+    // a deck's own stream (the spaced re-deal rolls on it) is never split from the roll hook (Pitfall 3)
+    if ( row < 0 || g_sites[ static_cast<std::size_t>( row ) ].deck )
+      return rng::RL_PRE_DRAW_NORMAL;
+    if ( !may_split( row, chance ) )
+      return rng::RL_PRE_DRAW_NORMAL;
+    return split_here( *this, row, chance );
+  }
+
+  void on_roll_outcome( std::uint32_t roller, std::uint64_t, double chance, bool outcome ) override
+  {
+    if ( busy )
+      return;
+    const int row = row_of( roller );
+    if ( row < 0 || g_sites[ static_cast<std::size_t>( row ) ].deck )
+      return;
+    count( row, chance, outcome );
+  }
+
+  int pre_deck_draw( std::uint32_t& roller_slot, double p_success ) override
+  {
+    pending_deck = 0;
+    if ( busy )
+      return rng::RL_PRE_DRAW_NORMAL;
+    const int row = row_of( roller_slot );
+    if ( row < 0 || !g_sites[ static_cast<std::size_t>( row ) ].deck )
+      return rng::RL_PRE_DRAW_NORMAL;
+    if ( !may_split( row, p_success ) )
+      return rng::RL_PRE_DRAW_NORMAL;
+    const int answer = split_here( *this, row, p_success );
+    pending_deck = answer;
+    return answer;
+  }
+
+  void on_deck_draw_outcome( std::uint32_t& roller_slot, double p_success, bool success ) override
+  {
+    if ( busy )
+      return;
+    // a forced card that was not the card dealt would put a wrong weight on this branch: this copy is dropped whole
+    if ( pending_deck != 0 )
+    {
+      const bool wanted = pending_deck == rng::RL_PRE_FORCE_YES;
+      pending_deck = 0;
+      if ( wanted != success )
+        child_write_and_exit( make_fail_line( 79, "forced_card_not_dealt" ), 79 );
+    }
+    const int row = row_of( roller_slot );
+    if ( row < 0 || !g_sites[ static_cast<std::size_t>( row ) ].deck )
+      return;
+    if ( p_success > 0.0 && p_success < 1.0 )
+      count( row, p_success, success );
+  }
+};
+search_sink_t g_sink;
+
+// DFS-wait split (research lines 591-608). Returns 0 when the fork failed (the chance is then sampled normally),
+// RL_PRE_FORCE_NO in the NEW process (path weight x (1 - p)), RL_PRE_FORCE_YES in the forking process after the new
+// branch has finished (path weight x p). The forced outcome consumes no draw.
+int split_here( search_sink_t& sink, int row, double p )
+{
+  sim_t* sim = g_child.sim;
+  const std::size_t ordinal = g_child.splits.size();
+  sink.busy = true;
+  const pid_t pid = ::fork();
+  if ( pid < 0 )
+  {
+    ++g_child.fork_fail;
+    sink.busy = false;
+    return rng::RL_PRE_DRAW_NORMAL;
+  }
+  if ( pid == 0 )
+  {
+    // the NEW branch: outcome no / FAIL. Its own dice (owner rule D1): a key mixed from this process's key, the split
+    // ordinal on this path and the outcome; every stream re-salted, the exploration stream re-seeded, every deck
+    // re-dealt. Without this the two branches would draw the same numbers after the split.
+    g_child.pw *= ( 1.0 - p );
+    g_child.splits.push_back( split_rec_t{ row, p, 0 } );
+    g_child.path.push_back( '0' );
+    std::uint64_t k = mix64( g_child.key ^ ( static_cast<std::uint64_t>( ordinal ) + 0x51ED270B0B45FFFBull ) );
+    k = mix64( k ^ 0x6A09E667F3BCC909ull );  // outcome 0
+    if ( k == 0 )
+      k = 0x2545F4914F6CDD1Dull;
+    g_child.key = k;
+    sim->resalt_source_rngs( k );
+    sim->solver_explore_rng.seed( mix64( k ^ 0xE5910BEull ) );
+    redeal_every_deck( sim );
+    sink.busy = false;
+    return rng::RL_PRE_FORCE_NO;
+  }
+  // the FORKING process: wait for the new branch to finish, then take outcome yes / SUCCESS on its own dice
+  int st = 0;
+  pid_t w;
+  do
+  {
+    w = ::waitpid( pid, &st, 0 );
+  } while ( w < 0 && errno == EINTR );
+  if ( w != pid || !WIFEXITED( st ) || WEXITSTATUS( st ) != 0 )
+    g_child.sub_failed = true;
+  g_child.pw *= p;
+  g_child.splits.push_back( split_rec_t{ row, p, 1 } );
+  g_child.path.push_back( '1' );
+  sink.busy = false;
+  return rng::RL_PRE_FORCE_YES;
 }
 
 // Mirrors solver_branch.cpp's become_child (396-506) step for step, for one search copy.
@@ -441,14 +731,25 @@ void become_search_child( sim_t* sim, player_t* p, std::uint64_t seq, int pass, 
   // copy's own, just re-salted, stream. Parent untouched: all of this runs in the copy only.
   sim->resalt_source_rngs( key );
   sim->solver_explore_rng.seed( mix64( key ^ 0xE5910BEull ) );
-  for ( player_t* a : sim->actor_list )
-  {
-    if ( !a )
-      continue;
-    for ( proc_rng_t* r : a->proc_rng_list )
-      if ( auto* deck = dynamic_cast<shuffled_rng_t*>( r ) )
-        deck->redeal_undrawn();
-  }
+  redeal_every_deck( sim );
+
+  // 280-04: the chance-split state of this copy, the site tags, and the sink (in the copy ONLY: this is the one place
+  // rng::rl_draw_sink is ever assigned). The tags survive every later re-salt (seed() leaves the roller identity alone).
+  g_child.sim = sim;
+  g_child.key = key;
+  g_child.pw = 1.0;
+  g_child.path.clear();
+  g_child.splits.clear();
+  g_child.sub_failed = false;
+  g_child.fork_fail = 0;
+  g_counts.assign( g_sites.size(), site_count_t{} );
+  for ( std::size_t i = 0; i < g_sites.size(); ++i )
+    g_sites[ i ].ptr->rl_tag_source_roller( SEARCH_SITE_BASE + static_cast<std::uint32_t>( i ) );
+  if ( rng::rl_draw_sink != nullptr )
+    child_write_and_exit( make_fail_line( 80, "a_draw_sink_is_already_attached" ), 80 );
+  g_sink.busy = false;
+  g_sink.pending_deck = 0;
+  rng::rl_draw_sink = &g_sink;
 
   g_child.last_t = g_child.t_k;
   g_child.last_E = g_child.E_k;
@@ -462,8 +763,28 @@ void become_search_child( sim_t* sim, player_t* p, std::uint64_t seq, int pass, 
 }
 
 // ---- pass runner ---------------------------------------------------------------------------------
+// One site's counts on one leaf's path (STATS line item).
+struct site_item_t
+{
+  int row = 0;
+  double n = 0.0;
+  double sum_p = 0.0;
+  double sum_pq = 0.0;
+  double n_yes = 0.0;
+};
+
+struct stats_t
+{
+  long fork_fail = 0;
+  std::vector<site_item_t> items;
+};
+
 struct leaf_t
 {
+  std::string path;                // outcome digits along the way ('' for a leaf that never split)
+  std::vector<split_rec_t> splits;
+  bool has_stats = false;
+  stats_t stats;
   int rank = 0;
   double w = 1.0;
   double R = 0.0;
@@ -489,6 +810,7 @@ struct copy_result_t
   int cand = 0;
   int button = 0;
   std::vector<leaf_t> leaves;
+  std::map<std::string, stats_t> stats;  // by leaf path (STATS lines)
   bool failed = false;  // a FAIL line, a malformed or duplicate leaf
   std::string fail;
   int exit_code = -1;
@@ -542,8 +864,47 @@ void parse_line( const std::string& line, int pass, std::vector<copy_result_t>& 
   copy_result_t& r = res[ static_cast<std::size_t>( copy ) ];
   if ( tok[ 0 ] == "FAIL" )
   {
+    // FAIL <copy> <code> <path> <msg>
     r.failed = true;
-    r.fail = tok.size() >= 4 ? tok[ 2 ] + " " + tok[ 3 ] : "malformed_fail";
+    r.fail = tok.size() >= 5 ? tok[ 2 ] + " " + tok[ 4 ] + " path=" + tok[ 3 ] : "malformed_fail";
+    return;
+  }
+  if ( tok[ 0 ] == "STATS" )
+  {
+    // STATS <copy> <path> <fork_fail> <row>:<n>:<sum_p>:<sum_pq>:<n_yes>;... ('-' when none)
+    stats_t st;
+    bool okline = tok.size() == 5 && parse_long( tok[ 3 ], st.fork_fail ) && st.fork_fail >= 0;
+    if ( okline && tok[ 4 ] != "-" )
+    {
+      std::stringstream is( tok[ 4 ] );
+      std::string item;
+      while ( okline && std::getline( is, item, ';' ) )
+      {
+        std::vector<std::string> f;
+        std::stringstream fs( item );
+        std::string x;
+        while ( std::getline( fs, x, ':' ) )
+          f.push_back( x );
+        long row = -1;
+        site_item_t si;
+        okline = f.size() == 5 && parse_long( f[ 0 ], row ) && row >= 0 &&
+                 row < static_cast<long>( g_sites.size() ) && parse_double( f[ 1 ], si.n ) &&
+                 parse_double( f[ 2 ], si.sum_p ) && parse_double( f[ 3 ], si.sum_pq ) &&
+                 parse_double( f[ 4 ], si.n_yes ) && si.n >= 0.0 && si.n_yes >= 0.0 && si.n_yes <= si.n;
+        si.row = static_cast<int>( row );
+        if ( okline )
+          st.items.push_back( si );
+      }
+    }
+    const std::string path = okline && tok[ 2 ] != "-" ? tok[ 2 ] : std::string();
+    if ( !okline || r.stats.count( path ) )
+    {
+      r.failed = true;
+      r.fail = okline ? "duplicate_stats_line" : "bad_stats_line";
+      ++g_count.unknown_lines;
+      return;
+    }
+    r.stats[ path ] = st;
     return;
   }
   if ( tok[ 0 ] != "LEAF" )
@@ -552,10 +913,10 @@ void parse_line( const std::string& line, int pass, std::vector<copy_result_t>& 
     return;
   }
   // LEAF <copy> <pass> <cand> <rank> <w> <R> <R_undisc> <R_real> <boot_q> <t_end> <ended> <n_dec> <cut_state>
-  //      <vmhwm_kb> <cpu_s>
+  //      <vmhwm_kb> <cpu_s> <path> <splits>
   leaf_t lf;
   long fpass = 0, fcand = 0, frank = 0, fended = 0, fndec = 0, fcut = 0, fhwm = 0;
-  bool good = tok.size() == 16 && parse_long( tok[ 2 ], fpass ) && parse_long( tok[ 3 ], fcand ) &&
+  bool good = tok.size() == 18 && parse_long( tok[ 2 ], fpass ) && parse_long( tok[ 3 ], fcand ) &&
               parse_long( tok[ 4 ], frank ) && parse_double( tok[ 5 ], lf.w ) && parse_double( tok[ 6 ], lf.R ) &&
               parse_double( tok[ 7 ], lf.R_undisc ) && parse_double( tok[ 8 ], lf.R_real ) &&
               parse_double( tok[ 9 ], lf.boot_q ) && parse_double( tok[ 10 ], lf.t_end ) &&
@@ -563,6 +924,49 @@ void parse_line( const std::string& line, int pass, std::vector<copy_result_t>& 
               parse_long( tok[ 14 ], fhwm ) && parse_double( tok[ 15 ], lf.cpu_s );
   good = good && fpass == pass && fcand == r.cand && frank >= 0 && lf.w > 0.0 && lf.w <= 1.0 + 1e-9 &&
          ( fended == 0 || fended == 1 ) && fndec >= 0 && fcut >= -1 && fcut <= 4 && fhwm >= 0;
+  // the path and the split list: the outcome digits must equal the split list's outcomes, every row must exist, every
+  // chance must be strictly between 0 and 1, and the weight must equal the product of the split probabilities (a
+  // weight that does not follow from its own splits is a wrong leaf, never averaged in)
+  if ( good )
+  {
+    lf.path = tok[ 16 ] == "-" ? std::string() : tok[ 16 ];
+    double prod = 1.0;
+    if ( tok[ 17 ] != "-" )
+    {
+      std::stringstream is( tok[ 17 ] );
+      std::string item;
+      while ( good && std::getline( is, item, ';' ) )
+      {
+        std::vector<std::string> f;
+        std::stringstream fs( item );
+        std::string x;
+        while ( std::getline( fs, x, ':' ) )
+          f.push_back( x );
+        long row = -1, outcome = -1;
+        split_rec_t sp;
+        good = f.size() == 3 && parse_long( f[ 0 ], row ) && row >= 0 && row < static_cast<long>( g_sites.size() ) &&
+               parse_double( f[ 1 ], sp.p ) && sp.p > 0.0 && sp.p < 1.0 && parse_long( f[ 2 ], outcome ) &&
+               ( outcome == 0 || outcome == 1 );
+        if ( good )
+        {
+          sp.row = static_cast<int>( row );
+          sp.outcome = static_cast<int>( outcome );
+          prod *= outcome == 1 ? sp.p : 1.0 - sp.p;
+          lf.splits.push_back( sp );
+        }
+      }
+    }
+    if ( good )
+    {
+      std::string digits;
+      for ( const split_rec_t& sp : lf.splits )
+        digits.push_back( sp.outcome == 1 ? '1' : '0' );
+      good = digits == lf.path && std::fabs( prod - lf.w ) <= 1e-9;
+    }
+    for ( const leaf_t& other : r.leaves )
+      if ( good && other.path == lf.path )
+        good = false;  // two leaves on one path
+  }
   if ( !good )
   {
     r.failed = true;
@@ -575,7 +979,7 @@ void parse_line( const std::string& line, int pass, std::vector<copy_result_t>& 
   lf.n_dec = static_cast<int>( fndec );
   lf.cut_state = static_cast<int>( fcut );
   lf.vmhwm_kb = fhwm;
-  // This plan's copies have exactly one leaf. (Plans 04 and 06 let a copy carry several; the weights then sum to 1.)
+  // A copy carries one leaf per path; the weights of a complete copy sum to 1 (finalise() checks).
   r.leaves.push_back( lf );
 }
 
@@ -584,10 +988,16 @@ void finalise( copy_result_t& r )
 {
   r.w_sum = 0.0;
   r.value = 0.0;
-  for ( const leaf_t& lf : r.leaves )
+  for ( leaf_t& lf : r.leaves )
   {
     r.w_sum += lf.w;
     r.value += lf.w * lf.R;
+    auto it = r.stats.find( lf.path );
+    if ( it != r.stats.end() )
+    {
+      lf.stats = it->second;
+      lf.has_stats = true;
+    }
   }
   r.ok = !r.failed && !r.leaves.empty() && r.exited && r.exit_code == 0 && r.signal == 0 &&
          std::fabs( r.w_sum - 1.0 ) < 1e-9;
@@ -767,22 +1177,131 @@ struct cell_t
   double max_t_end_span = 0.0;
 };
 
-void add_pass_to_cells( const std::vector<copy_result_t>& res, std::vector<cell_t>& cells )
+// What the chance splits of one search add up to (280-04), over the copies of every pass.
+struct site_total_t
 {
+  double n = 0.0;
+  double sum_p = 0.0;
+  double sum_pq = 0.0;
+  double n_yes = 0.0;
+};
+
+struct split_agg_t
+{
+  std::vector<site_total_t> rows;  // per site row, each leaf's counts weighted by its path weight, usable copies only
+  long splits_total = 0;           // splits taken: leaves minus copies, over usable copies
+  long leaves_total = 0;
+  long copies_split = 0;           // usable copies with at least one split
+  long fork_fail = 0;              // fork() refusals reported by the leaves (a shared prefix is counted once per leaf)
+  double max_abs_wsum_err = 0.0;   // largest |sum of leaf weights - 1| over copies that returned leaves cleanly
+};
+
+void add_pass_to_cells( const std::vector<copy_result_t>& res, std::vector<cell_t>& cells, split_agg_t& agg )
+{
+  if ( agg.rows.size() != g_sites.size() )
+    agg.rows.assign( g_sites.size(), site_total_t{} );
   for ( const copy_result_t& r : res )
   {
     cell_t& c = cells[ static_cast<std::size_t>( r.cand ) ];
     ++c.n_assigned;
+    if ( !r.failed && !r.leaves.empty() )
+      agg.max_abs_wsum_err = std::max( agg.max_abs_wsum_err, std::fabs( r.w_sum - 1.0 ) );
+    for ( const leaf_t& lf : r.leaves )
+      agg.fork_fail += lf.stats.fork_fail;
     if ( r.ok )
     {
       ++c.n_ok;
       c.w_sum += r.w_sum;
       c.vals.push_back( r.value );
+      const long nl = static_cast<long>( r.leaves.size() );
+      agg.leaves_total += nl;
+      agg.splits_total += nl - 1;
+      if ( nl > 1 )
+        ++agg.copies_split;
+      for ( const leaf_t& lf : r.leaves )
+        for ( const site_item_t& it : lf.stats.items )
+        {
+          site_total_t& t = agg.rows[ static_cast<std::size_t>( it.row ) ];
+          t.n += lf.w * it.n;
+          t.sum_p += lf.w * it.sum_p;
+          t.sum_pq += lf.w * it.sum_pq;
+          t.n_yes += lf.w * it.n_yes;
+        }
     }
     else
     {
       ++c.n_fail;
     }
+  }
+}
+
+// A JSON string body: backslash and quote escaped (site keys are player and generator names).
+std::string jstr( const std::string& v )
+{
+  std::string o;
+  for ( char ch : v )
+  {
+    if ( ch == '\\' || ch == '"' )
+      o += '\\';
+    o += ch;
+  }
+  return o;
+}
+
+// The site table, built ONCE in the parent at its first search by a read-only walk of every player's proc_rng_list
+// (no tag, no state change). Keys: the stream key proc_rng.cpp builds for a generator ("<player>|procrng|<index>|<type>|
+// <name>"), and "<player>|deck|<name>" for a deck (G280-4). Eligible: simple, real-PPM, accumulated and deck. A
+// threshold generator is registered but never eligible: it draws through range(), never roll(), so this hook cannot
+// split it (recorded deviation from G280-4); a custom generator is not eligible either.
+void ensure_sites( sim_t* sim )
+{
+  if ( g_sites_built )
+    return;
+  for ( player_t* a : sim->actor_list )
+  {
+    if ( !a )
+      continue;
+    for ( std::size_t i = 0; i < a->proc_rng_list.size(); ++i )
+    {
+      proc_rng_t* r = a->proc_rng_list[ i ];
+      if ( !r )
+        continue;
+      site_row_t row;
+      row.type = static_cast<int>( r->type() );
+      row.ptr = r;
+      row.deck = row.type == static_cast<int>( RNG_SHUFFLE );
+      row.eligible = row.type == static_cast<int>( RNG_SIMPLE ) || row.type == static_cast<int>( RNG_RPPM ) ||
+                     row.type == static_cast<int>( RNG_SHUFFLE ) || row.type == static_cast<int>( RNG_ACCUMULATE );
+      row.key = row.deck ? fmt::format( "{}|deck|{}", a->name_str, r->name() )
+                         : fmt::format( "{}|procrng|{}|{}|{}", a->name_str, i, row.type, r->name() );
+      g_sites.push_back( row );
+    }
+  }
+  g_sites_built = true;
+  if ( !g_cfg.split_site.empty() )
+  {
+    for ( std::size_t i = 0; i < g_sites.size(); ++i )
+      if ( g_sites[ i ].key == g_cfg.split_site )
+      {
+        if ( !g_sites[ i ].eligible )
+          refuse( fmt::format( "solver_search_split_site='{}' names a site that can never split (type {}: a threshold "
+                               "or custom generator does not call roll()).",
+                               g_cfg.split_site, g_sites[ i ].type ) );
+        g_proof_row = static_cast<int>( i );
+        break;
+      }
+    if ( g_proof_row < 0 )
+      refuse( fmt::format( "solver_search_split_site='{}' is not a site of this fight ({} sites in the table).",
+                           g_cfg.split_site, g_sites.size() ) );
+  }
+  if ( g_log )
+  {
+    std::string rows;
+    for ( std::size_t i = 0; i < g_sites.size(); ++i )
+      rows += fmt::format( "{}{{\"row\":{},\"key\":\"{}\",\"type\":{},\"eligible\":{}}}", i ? "," : "", i,
+                           jstr( g_sites[ i ].key ), g_sites[ i ].type, g_sites[ i ].eligible ? 1 : 0 );
+    *g_log << fmt::format( "{{\"sites\":1,\"count\":{},\"rows\":[{}]}}\n", g_sites.size(), rows );
+    g_log->flush();
   }
 }
 
@@ -836,6 +1355,8 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
   const double t_k = t_float32( sim );
   g_count.search_vmhwm_kb_max = 0;
 
+  split_agg_t agg;
+  agg.rows.assign( g_sites.size(), site_total_t{} );
   std::vector<cell_t> cells( static_cast<std::size_t>( C ) );
   for ( int i = 0; i < C; ++i )
   {
@@ -855,7 +1376,24 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
     idx = child_button;
     return true;
   }
-  add_pass_to_cells( r1, cells );
+  add_pass_to_cells( r1, cells, agg );
+  // the sites split on the first copy of pass 1 (the log receipt of the cold-start rule, SRCH-04)
+  std::string first_copy_sites;
+  if ( !r1.empty() )
+  {
+    std::vector<int> seen;
+    for ( const leaf_t& lf : r1[ 0 ].leaves )
+      for ( const split_rec_t& sp : lf.splits )
+        if ( std::find( seen.begin(), seen.end(), sp.row ) == seen.end() )
+        {
+          seen.push_back( sp.row );
+          if ( !first_copy_sites.empty() )
+            first_copy_sites += ',';
+          first_copy_sites += g_sites[ static_cast<std::size_t>( sp.row ) ].key;
+        }
+  }
+  if ( first_copy_sites.empty() )
+    first_copy_sites = "-";
   for ( cell_t& cl : cells )
   {
     double se_unused = 0.0;
@@ -900,7 +1438,7 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
       idx = child_button;
       return true;
     }
-    add_pass_to_cells( r2, cells );
+    add_pass_to_cells( r2, cells, agg );
   }
 
   // ---- per-candidate cells over COPIES (never over leaves) ----
@@ -972,6 +1510,11 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
   g_count.rss_kb_last = read_vmrss_kb();
   g_count.fd_last = count_dir_entries( "/proc/self/fd" );
 
+  // the SRCH-04 log receipt: one stderr line per search naming the sites split on the first copy
+  std::fprintf( stderr, "[RL_SEARCH_SPLIT] seq=%llu mode=%s sites=%s\n", static_cast<unsigned long long>( seq ),
+                c.split_site.empty() ? "cold_start" : "proof_site", first_copy_sites.c_str() );
+  std::fflush( stderr );
+
   // ---- log ----
   if ( g_log )
   {
@@ -988,13 +1531,28 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
           cl.n_fail, jnum( cl.w_sum ), jnum( cl.mean ), jnum( cl.se ), jnum( cl.pass1_mean ) );
     }
     const long hwm_max = g_count.search_vmhwm_kb_max;
+    std::string site_stats_json;
+    for ( std::size_t i = 0; i < agg.rows.size(); ++i )
+    {
+      const site_total_t& t = agg.rows[ i ];
+      if ( !( t.n > 0.0 ) )
+        continue;
+      if ( !site_stats_json.empty() )
+        site_stats_json += ",";
+      site_stats_json += fmt::format( "{{\"key\":\"{}\",\"n\":{},\"sum_p\":{},\"sum_pq\":{},\"n_yes\":{}}}",
+                                      jstr( g_sites[ i ].key ), jnum( t.n ), jnum( t.sum_p ), jnum( t.sum_pq ),
+                                      jnum( t.n_yes ) );
+    }
     *g_log << fmt::format(
         "{{\"seq\":{},\"k\":{},\"t\":{},\"net_press\":{},\"pick\":{},\"press\":{},\"listed\":{},\"cands\":[{}],"
         "\"dropped\":{},\"margin\":{},\"margin_se\":{},\"copies\":{},\"skipped_fail\":{},\"cpu_s\":{},"
-        "\"fork_cpu_s\":{},\"child_cpu_s\":{},\"wall_s\":{},\"leaf_vmhwm_kb_max\":{}}}\n",
+        "\"fork_cpu_s\":{},\"child_cpu_s\":{},\"wall_s\":{},\"leaf_vmhwm_kb_max\":{},"
+        "\"split_mode\":\"{}\",\"splits_total\":{},\"leaves_total\":{},\"copies_split\":{},\"fork_fail\":{},"
+        "\"max_abs_wsum_err\":{},\"site_stats\":[{}]}}\n",
         seq, k, jnum( t_k ), net, pick, idx, listed ? 1 : 0, jc, dropped >= 0 ? cells[ static_cast<std::size_t>( dropped ) ].button : -1,
         jnum( margin ), jnum( margin_se ), n_total, fail ? 1 : 0, jnum( fork_cpu + child_cpu ), jnum( fork_cpu ),
-        jnum( child_cpu ), jnum( wall ), hwm_max );
+        jnum( child_cpu ), jnum( wall ), hwm_max, c.split_site.empty() ? "cold_start" : "proof_site", agg.splits_total,
+        agg.leaves_total, agg.copies_split, agg.fork_fail, jnum( agg.max_abs_wsum_err ), site_stats_json );
     g_log->flush();
   }
   return false;
@@ -1112,6 +1670,10 @@ void validate( sim_t* sim )
     refuse( fmt::format( "solver_search_copies must be at most 4096 (got {}).", c.copies ) );
   if ( c.jobs < 1 || c.jobs > 12 )
     refuse( fmt::format( "solver_search_jobs must be 1..12 (got {}).", c.jobs ) );
+  if ( c.splits < 0 || c.splits > 4 )
+    refuse( fmt::format( "solver_search_splits must be 0..4 (got {}).", c.splits ) );
+  if ( !c.split_site.empty() && c.splits < 1 )
+    refuse( "solver_search_split_site needs solver_search_splits >= 1 (a split site with no splits allowed)." );
   if ( c.press != "net" && c.press != "best" )
     refuse( fmt::format( "solver_search_press='{}' is not 'net' or 'best'.", c.press ) );
   c.press_best = c.press == "best";
@@ -1152,9 +1714,10 @@ void validate( sim_t* sim )
 
   g_any = true;
   fmt::print( "[RL_SEARCH] candidates={} window={:.17g} copies={} jobs={} at={} margin={:.17g} press={} expected_crit={} "
-              "divisor={:.17g} gamma={:.17g} salt_base={} log={}\n",
+              "divisor={:.17g} gamma={:.17g} salt_base={} splits={} split_site={} log={}\n",
               c.candidates, c.window, c.copies, c.jobs, c.at_list.size(), c.margin, c.press, c.expected_crit ? 1 : 0,
-              sb.value_divisor, sb.gamma, sb.branch_salt_base, c.log );
+              sb.value_divisor, sb.gamma, sb.branch_salt_base, c.splits, c.split_site.empty() ? "-" : c.split_site,
+              c.log );
   std::fflush( stdout );
 }
 
@@ -1235,6 +1798,7 @@ void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* obs, 
         "search from a press the net did not choose",
         idx, cands.empty() ? -1 : cands[ 0 ], k ) );
 
+  ensure_sites( sim );
   search_here( sim, p, seq, q, cands, idx, listed_mode );
 }
 
@@ -1294,7 +1858,7 @@ void write_summary( sim_t* sim )
       "\"children_reaped\":{},\"searches\":{},\"unknown_lines\":{},\"self_cpu_s\":{},\"children_cpu_total_s\":{},"
       "\"rss_kb_first\":{},\"rss_kb_last\":{},\"fd_first\":{},\"fd_last\":{},\"leaf_vmhwm_kb_max\":{},"
       "\"listed\":{},\"listed_reached\":{},\"listed_skipped\":{},"
-      "\"config\":{{\"margin\":{},\"copies\":{},\"window\":{},\"candidates\":{},\"depth\":1,\"second\":0,\"splits\":0,"
+      "\"config\":{{\"margin\":{},\"copies\":{},\"window\":{},\"candidates\":{},\"depth\":1,\"second\":0,\"splits\":{},"
       "\"holds\":0,\"bootstrap\":0,\"gamma\":{},\"jobs\":{},\"salt_base\":{},\"press_best\":{},\"expected_crit\":{},"
       "\"divisor\":{}}}}}",
       g_count.decisions, g_count.near_ties, g_count.branched, g_count.overrides, g_count.skipped_fail, g_count.children,
@@ -1302,8 +1866,8 @@ void write_summary( sim_t* sim )
       g_count.children_reaped, g_count.searches, g_count.unknown_lines, jnum( self_cpu ), jnum( kids_cpu ),
       g_count.rss_kb_first, g_count.rss_kb_last, g_count.fd_first, g_count.fd_last, g_count.leaf_vmhwm_kb_max,
       c.at_list.size(), g_count.listed_reached, g_count.listed_skipped, jnum( c.margin ), c.copies, jnum( c.window ),
-      c.candidates, jnum( sb.gamma ), c.jobs, sb.branch_salt_base, c.press_best ? 1 : 0, c.expected_crit ? 1 : 0,
-      jnum( sb.value_divisor ) );
+      c.candidates, c.splits, jnum( sb.gamma ), c.jobs, sb.branch_salt_base, c.press_best ? 1 : 0,
+      c.expected_crit ? 1 : 0, jnum( sb.value_divisor ) );
   if ( g_log )
   {
     *g_log << js << "\n";
