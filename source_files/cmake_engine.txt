@@ -163,6 +163,7 @@ sim/sheet_fight.hpp
 sim/rl_buff_credit.hpp
 sim/rl_buff_ledger.hpp
 sim/solver_branch.hpp
+sim/solver_search.hpp
 sim/expressions.hpp
 sim/gain.hpp
 sim/iteration_data_entry.hpp
@@ -368,6 +369,7 @@ sim/sheet_fight.cpp
 sim/rl_buff_credit.cpp
 sim/rl_buff_ledger.cpp
 sim/solver_branch.cpp
+sim/solver_search.cpp
 sim/expressions.cpp
 sim/gear_stats.cpp
 sim/option.cpp

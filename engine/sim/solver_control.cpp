@@ -15,6 +15,7 @@
 #include "sim/rl_target_select.hpp"
 #include "sim/rl_translog.hpp"
 #include "sim/solver_branch.hpp"
+#include "sim/solver_search.hpp"  // tstl-sylvanas 280-03
 #include "sim/sim.hpp"
 #include "util/io.hpp"
 
@@ -1235,6 +1236,11 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // `action` is bound AFTER this call (it used to be bound right after the force loop above; the
     // lines in between read only mask/q/sim fields, never `action`).
     solver_branch::on_decision( sim, p, seq, q, mask, select_mask, legal_count, q_margin, top_q, exploratory,
+                                forced_here, idx );
+    // tstl-sylvanas 280-03 (sim/solver_search.hpp): the horizon search. One bool test and a return when
+    // solver_search is 0. `obs` is the observation the net just read (the translog's inputs); the call may change
+    // `idx` (a search copy's candidate button, or with solver_search_press=best the parent's pick).
+    solver_search::on_decision( sim, p, seq, obs, q, mask, select_mask, legal_count, q_margin, top_q, exploratory,
                                 forced_here, idx );
     const rl_action_desc& action = RL_ACTIONS[ idx ];
 

@@ -39,6 +39,7 @@
 #include "sim/rl_buff_credit.hpp"
 #include "sim/rl_buff_ledger.hpp"
 #include "sim/solver_branch.hpp"
+#include "sim/solver_search.hpp"  // tstl-sylvanas 280-03: the horizon search module
 
 #include <filesystem>
 #include "sim/scale_factor_control.hpp"
@@ -2429,6 +2430,8 @@ void sim_t::combat_end()
   rl_translog::record_close( this );
   // 261005-branch-teacher: a branch child closes its window here (no-op otherwise).
   solver_branch::on_combat_end( this );
+  // tstl-sylvanas 280-03: a search copy closes its window here (no-op otherwise).
+  solver_search::on_combat_end( this );
 
   // Random-roll recorder fight-end hook (phase 250, plan 250-01, REC-01/02/03). No-op when
   // rl_rng_record= is unset. Writes this fight's per-roller COUNTER entries and a FIGHT_END
@@ -3724,6 +3727,9 @@ bool sim_t::iterate()
     // 261005-branch-teacher: a branch child reports FAIL and _exit()s (never returns).
     if ( solver_branch::is_child() )
       solver_branch::on_child_exception( this, e.what() );
+    // tstl-sylvanas 280-03: a search copy reports FAIL and _exit()s too.
+    if ( solver_search::is_child() )
+      solver_search::on_child_exception( this, e.what() );
     std::throw_with_nested( sc_runtime_error( fmt::format( "Iteration ({})", current_iteration ) ) );
   }
 
@@ -4044,6 +4050,9 @@ bool sim_t::execute()
     // parent's teacher summary follows.
     solver_branch::on_after_footer( this );
     solver_branch::write_summary( this );
+    // tstl-sylvanas 280-03: the search's own footer hook and summary (each returns at once when the search is off).
+    solver_search::on_after_footer( this );
+    solver_search::write_summary( this );
 
     // Random-roll recorder footer (phase 250, plan 250-01, REC-01/02/03). No-op when
     // rl_rng_record= is unset. Writes the FOOTER entry, flushes and closes the stream, writes
@@ -4095,6 +4104,8 @@ bool sim_t::execute()
   // 261005-branch-teacher: a branch child that reaches this point has no result (the run failed
   // without an exception reaching iterate()) -- FAIL and _exit(), never on to the parent's reports.
   solver_branch::on_execute_end( this );
+  // tstl-sylvanas 280-03: a search copy that reaches here has no result either.
+  solver_search::on_execute_end( this );
 
   elapsed_cpu  = chrono::elapsed( start_cpu_time );
   elapsed_time = chrono::elapsed( start_wall_time );
@@ -4536,6 +4547,22 @@ void sim_t::create_options()
     add_option( opt_bool( "solver_branch_independent_dice", sb.independent_dice ) );
     add_option( opt_bool( "solver_branch_redeal", sb.redeal ) );
     add_option( opt_string( "solver_branch_redeal_trace", sb.redeal_trace ) );
+  }
+  // tstl-sylvanas 280-03: the horizon search (solver_search.hpp). Bound to solver_search::cfg() (module-level, like
+  // solver_branch's); every range and every refusal is checked by name in solver_search::validate(), called once at
+  // the end of setup(). A solver_search_* option set without solver_search=1 is refused there too.
+  {
+    solver_search::config_t& ss = solver_search::cfg();
+    add_option( opt_bool( "solver_search", ss.search ) );
+    add_option( opt_int( "solver_search_candidates", ss.candidates ) );
+    add_option( opt_float( "solver_search_window", ss.window ) );
+    add_option( opt_int( "solver_search_copies", ss.copies ) );
+    add_option( opt_string( "solver_search_at", ss.at ) );
+    add_option( opt_int( "solver_search_jobs", ss.jobs ) );
+    add_option( opt_bool( "solver_search_expected_crit", ss.expected_crit ) );
+    add_option( opt_string( "solver_search_press", ss.press ) );
+    add_option( opt_float( "solver_search_margin", ss.margin ) );
+    add_option( opt_string( "solver_search_log", ss.log ) );
   }
   // S1 (260927-s1-spend-timing): forbids lightning_bolt/tempest (and, 261002-8rs, primordial_storm
   // when the action table offers it; the third Lightning-family spender is untouched) below n stacks
@@ -6284,6 +6311,9 @@ void sim_t::setup( sim_control_t* c )
   // 261005-branch-teacher: refusals and the [RL_TEACHER]/[RL_BRANCH]/[RL_RESALT_AT_DECISION] line.
   // Returns at once when no mode is on.
   solver_branch::validate( this );
+  // tstl-sylvanas 280-03: the search's refusals (it runs after solver_branch's so a mode clash is named by the
+  // search; each returns at once when the search is off, after refusing a stray solver_search_* option).
+  solver_search::validate( this );
 }
 
 // sim_t::progress ==========================================================
