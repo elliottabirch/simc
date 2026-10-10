@@ -628,6 +628,13 @@ actor_binding_t& actor_binding_for( const player_t* p )
     const action_t* a        = p->find_action( RL_TARGETED_TOKENS[ k ] );
     if ( a == nullptr )
       continue;
+    // 2026-10-10 arms run: a deal without the Colossus Smash talent still carries the base action (range 5), because the
+    // action is built from an untaken talent whose spell data is not_found, so it is flagged background and can never be
+    // pressed (the legality mask reads !background), while the generated table reads the talented spell's range 0. That
+    // refused 221 of 9,600 fights at bind time. An action whose spell data is not enabled for this player is skipped here,
+    // before the range comparison, exactly like an aimed token with no action at all.
+    if ( !a->data().ok() )
+      continue;
     if ( std::fabs( a->range - table_range ) > 1.0e-6 )
     {
       throw sc_runtime_error( fmt::format(
