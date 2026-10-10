@@ -965,6 +965,8 @@ struct copy_task_t
 
 // The bootstrap mode of the window label (280-06 task 2): 0 none, 1 q, 2 value. Task 1 keeps it at 0.
 int g_boot_mode = 0;
+// The value blob (solver_search_value), loaded once at validate; a copy shares it through fork().
+std::shared_ptr<rl_policy::rl_weights_t> g_value_w;
 
 // The label of a leaf: the window return plus the chosen bootstrap term (SRCH-07).
 double leaf_boot( const leaf_t& lf )
@@ -2272,6 +2274,29 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
   }
   ++g_count.searches;
   const bool hold_won = !fail && RL_ACTIONS[ pick ].kind == rl_action_kind::wait;
+  // 280-06 (SRCH-07): what the pick's best cell says about the window: the mean window return R (no bootstrap), the
+  // undiscounted expected and the realised damage over it, and the bootstrap term's share of the whole label
+  // (null in mode none, and when there is no pick or the label's mean is zero).
+  double window_return = std::numeric_limits<double>::quiet_NaN();
+  double R_und_mean = std::numeric_limits<double>::quiet_NaN();
+  double R_real_mean = std::numeric_limits<double>::quiet_NaN();
+  double boot_share = std::numeric_limits<double>::quiet_NaN();
+  if ( !fail && pick_i >= 0 )
+  {
+    const cell_t& bc = cands[ static_cast<std::size_t>( pick_i ) ].cell[ cands[ static_cast<std::size_t>( pick_i ) ].best_rank ];
+    auto mean_of = []( const std::vector<double>& v ) {
+      double sum = 0.0;
+      for ( double x : v )
+        sum += x;
+      return v.empty() ? std::numeric_limits<double>::quiet_NaN() : sum / static_cast<double>( v.size() );
+    };
+    window_return = mean_of( bc.Rs );
+    R_und_mean = mean_of( bc.Rund );
+    R_real_mean = mean_of( bc.Rreal );
+    if ( g_boot_mode != 0 && bc.mean != 0.0 )
+      boot_share = mean_of( bc.boots ) / bc.mean;
+  }
+  const char* boot_mode_name = g_boot_mode == 0 ? "none" : g_boot_mode == 1 ? "q" : "value";
 
   // ---- clocks ----
   const double fork_cpu = rusage_cpu_s( RUSAGE_SELF ) - self0;
@@ -2359,6 +2384,7 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
         "\"depth\":{},\"second_pick\":{},\"second_level_changed\":{},\"pairs\":{},\"pair_forks\":{},"
         "\"pair_cut_first\":{},\"pair_failed\":{},\"pair_mixed\":{},\"samples\":{},\"leaves_per_copy\":{{{}}},"
         "\"hold_candidate\":{},\"hold_added\":{},\"hold_won\":{},\"pair_half_pairs\":{},\"pair_half_ties\":{},"
+        "\"boot_mode\":\"{}\",\"bootstrap_share\":{},\"window_return\":{},\"R_undisc_mean\":{},\"R_real_mean\":{},"
         "\"site_stats\":[{}]}}\n",
         seq, k, jnum( t_k ), net, pick, idx, listed ? 1 : 0, jc,
         dropped >= 0 ? cands[ static_cast<std::size_t>( dropped ) ].button : -1, jnum( margin ), jnum( margin_se ),
@@ -2368,7 +2394,8 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
         second_pick >= 0 ? std::to_string( second_pick ) : std::string( "null" ),
         d2 ? ( second_changed ? "1" : "0" ) : "null", pairs_total, pairs_total - pairs_cut - pairs_failed, pairs_cut,
         pairs_failed, pairs_mixed, samples_total, hist_json, hold_any ? 1 : 0, hold_added ? 1 : 0, hold_won ? 1 : 0, ph.pairs,
-        ph.ties, site_stats_json );
+        ph.ties, boot_mode_name, g_boot_mode == 0 ? std::string( "null" ) : jnum( boot_share ), jnum( window_return ),
+        jnum( R_und_mean ), jnum( R_real_mean ), site_stats_json );
     g_log->flush();
   }
   return false;
@@ -2557,14 +2584,42 @@ void validate( sim_t* sim )
     std::remove( probe.c_str() );
   }
 
+  // 280-06: the window-end value blob and the bootstrap mode
+  if ( !c.value.empty() )
+  {
+    try
+    {
+      g_value_w = std::make_shared<rl_policy::rl_weights_t>( rl_policy::load_rlw1( c.value ) );
+    }
+    catch ( const std::exception& e )
+    {
+      refuse( fmt::format( "solver_search_value='{}' cannot be loaded: {}", c.value, e.what() ) );
+    }
+    if ( g_value_w->body != rl_policy::rl_body_type::chooser_value || !g_value_w->has_value_head )
+      refuse( fmt::format( "solver_search_value='{}' is not a version-7 chooser-value weights file with a value head "
+                           "(body '{}').",
+                           c.value, rl_policy::body_name( g_value_w->body ) ) );
+  }
+  {
+    std::string bm = c.bootstrap;
+    if ( bm.empty() )
+      bm = g_value_w ? "value" : "none";
+    if ( bm != "none" && bm != "q" && bm != "value" )
+      refuse( fmt::format( "solver_search_bootstrap='{}' is not 'none', 'q' or 'value'.", c.bootstrap ) );
+    if ( bm == "value" && !g_value_w )
+      refuse( "solver_search_bootstrap=value needs solver_search_value=<v7 blob> (there is no window-end value to add)." );
+    g_boot_mode = bm == "none" ? 0 : bm == "q" ? 1 : 2;
+  }
+
   g_any = true;
   fmt::print( "[RL_SEARCH] candidates={} window={:.17g} copies={} jobs={} at={} margin={:.17g} press={} expected_crit={} "
               "divisor={:.17g} gamma={:.17g} salt_base={} splits={} split_site={} audit_nosplit={} sites_in={} sites_out={} "
-              "depth={} second={} holds={} log={}\n",
+              "depth={} second={} holds={} value={} bootstrap={} log={}\n",
               c.candidates, c.window, c.copies, c.jobs, c.at_list.size(), c.margin, c.press, c.expected_crit ? 1 : 0,
               sb.value_divisor, sb.gamma, sb.branch_salt_base, c.splits, c.split_site.empty() ? "-" : c.split_site,
               c.nosplit_audit ? 1 : 0, c.sites_in.empty() ? "-" : c.sites_in, c.sites_out.empty() ? "-" : c.sites_out,
-              c.depth, c.depth == 2 ? c.second : 0, c.holds ? 1 : 0, c.log );
+              c.depth, c.depth == 2 ? c.second : 0, c.holds ? 1 : 0, c.value.empty() ? "-" : c.value,
+              g_boot_mode == 0 ? "none" : g_boot_mode == 1 ? "q" : "value", c.log );
   std::fflush( stdout );
 }
 
@@ -2574,7 +2629,6 @@ void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* obs, 
 {
   if ( !g_any )
     return;
-  (void)obs;
   (void)mask;
 
   // 1. a copy: window accounting, and the exact cut
@@ -2587,9 +2641,14 @@ void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* obs, 
     // Only the search_cut_event_t ends the window (t is then T, in float32).
     if ( g_child.cutting )
     {
-      const double boot_q = std::pow( g_child.gamma, t - g_child.t_k ) * static_cast<double>( top_q );
+      const double disc = std::pow( g_child.gamma, t - g_child.t_k );
+      const double boot_q = disc * static_cast<double>( top_q );
+      // 280-06: the window-end value on the observation built at the exact cut (rl_policy::value_forward returns the mean
+      // of the quantiles x value_scale in raw damage units; divided by the shape's divisor it is in the reward units of R).
+      const double boot_v =
+          g_value_w ? disc * rl_policy::value_forward( *g_value_w, obs ) / g_child.divisor : 0.0;
       write_leaf_and_exit( g_child.acc, p->solver_damage_expected_so_far - g_child.Eexp_k,
-                           p->solver_damage_so_far - g_child.D_k, boot_q, 0.0, t, 0, g_child.cut_state );
+                           p->solver_damage_so_far - g_child.D_k, boot_q, boot_v, t, 0, g_child.cut_state );
     }
     g_child.last_t = t;
     g_child.last_E = E;

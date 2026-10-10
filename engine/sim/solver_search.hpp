@@ -49,6 +49,12 @@
 //   solver_search_second=2                 (280-06) the second level's width; only 2 is accepted
 //   solver_search_holds=0|1                (280-06) 1 (default) adds the legal wait button with the highest value as one
 //                                          more root candidate when no wait button is among the top candidates
+//   solver_search_value=<v7 blob>          (280-06) an RLW1 version-7 weights file (body chooser-value, with a value head); the
+//                                          window-end value is read from it at the exact cut (refused by name otherwise)
+//   solver_search_bootstrap=none|q|value   (280-06) what is added to the window return R at the cut: nothing; gamma^(T - t_k)
+//                                          x the net's top value there (q, the depth-one teacher's own treatment); or gamma^(T
+//                                          - t_k) x value_forward(end observation) / solver_branch_value_divisor (value).
+//                                          Default: value when solver_search_value is given, else none
 //
 // Read, not registered here: solver_branch_value_divisor (> 0), solver_branch_gamma, solver_branch_salt_base,
 // solver_branch_independent_dice and solver_branch_redeal (both must stay 1: paired futures are refused).
@@ -84,6 +90,8 @@ struct config_t
   int depth = 2;                      // solver_search_depth, 1 or 2 (280-06)
   int second = 2;                     // solver_search_second, only 2 (280-06)
   bool holds = true;                  // solver_search_holds (280-06)
+  std::string value;                  // solver_search_value (280-06)
+  std::string bootstrap;              // solver_search_bootstrap (280-06): "", none, q or value
   // set by validate()
   std::vector<std::int64_t> at_list;  // parsed from `at`
   bool press_best = false;
