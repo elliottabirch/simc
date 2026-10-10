@@ -128,14 +128,14 @@ struct rl_capability
 inline constexpr const char* RL_REGISTRY_ID = "arms-warrior";
 inline constexpr const char* RL_ACTOR_NAME = "RL_Arms_Warrior";
 inline constexpr int RL_ENCODER_VERSION = 6;
-inline constexpr std::size_t RL_OBS_DIM = 421;
-inline constexpr std::size_t RL_ACTION_DIM = 19;
+inline constexpr std::size_t RL_OBS_DIM = 426;
+inline constexpr std::size_t RL_ACTION_DIM = 20;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
-inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:9650f6a907ed3d74442bf884c969dfc196d9290d170c9d93ea030674ad211312";
+inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:3e73c16c7114941fb5343e1716c074e826adf7a354aadc2cd5ed5f401a8d99b4";
 inline constexpr const char* RL_MASK_RULES_SHA = "403fa658aabd986da04a24ad88c6625ad5a7fba10f3f6437922af21582877da5";
-inline constexpr const char* RL_ACTION_SPACE_SHA = "b827e77ae07449536296e422d97b1384006f959145cbbc7c30aeec757783e09a";
+inline constexpr const char* RL_ACTION_SPACE_SHA = "1d345157e4a79800f6a40d57b9b4817d54509930dcdc5de4121ddf23417f3b52";
 
 // ---- Observation name list (the materialised ordering) ----
 
@@ -149,6 +149,8 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "player_buffs.colossal_might.stacks",
   "player_buffs.colossal_might.remains",
   "player_buffs.critical_ritual.remains",
+  "player_buffs.devoured_strength.stacks",
+  "player_buffs.devoured_strength.remains",
   "player_buffs.executioner.stacks",
   "player_buffs.executioner.remains",
   "player_buffs.executioners_precision.stacks",
@@ -182,6 +184,7 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "cooldowns.ravager.remains",
   "cooldowns.storm_bolt.remains",
   "cooldowns.sweeping_strikes.remains",
+  "cooldowns.voracious_heart_of_ulatek_1297761.remains",
   "cooldowns.wrecking_throw.remains",
   "target_facts.cleave.distance",
   "target_facts.cleave.in_reach",
@@ -388,6 +391,7 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "legality.16.flag",
   "legality.17.flag",
   "legality.18.flag",
+  "legality.19.flag",
   "fight_remains",
   "active_enemies",
   "raid_event_next_in",
@@ -553,6 +557,7 @@ inline constexpr const char* RL_OBS_NAMES[RL_OBS_DIM] = {
   "capability.talent_unrelenting_onslaught",
   "capability.hero_colossus",
   "capability.hero_slayer",
+  "capability.trinket_voracious_heart_of_ulatek",
   "capability.enchant_arcane_mastery",
   "capability.enchant_berserkers_rage",
   "capability.embellishment_arcanoweave_lining",
@@ -572,35 +577,36 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_1[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_2[] = {
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 8.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_3[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 40.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_4[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 3.0, false, 1.0, nullptr, 0, false },
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 12.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_5[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 10.0, false, 1.0, nullptr, 0, false },
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 24.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_6[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_7[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 3.0, false, 1.0, nullptr, 0, false },
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
+    { "stacks", rl_kind::k_int, 0.0, true, 25.0, false, 1.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_8[] = {
+    { "stacks", rl_kind::k_int, 0.0, true, 5.0, false, 1.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_9[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
-inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_9[] = {
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 600.0, nullptr, 0, false },
-};
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_10[] = {
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 600.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_11[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
@@ -609,22 +615,22 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_12[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_13[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 3.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_14[] = {
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
+    { "stacks", rl_kind::k_int, 0.0, true, 3.0, false, 1.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_15[] = {
-    { "stacks", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_16[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 8.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_17[] = {
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
+    { "stacks", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 12.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_18[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
@@ -635,6 +641,9 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_19[] = {
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_20[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_21[] = {
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
+};
 inline constexpr rl_obs_member RL_OBS_FAMILY_PLAYER_BUFFS_MEMBERS[] = {
   { "arcanoweave_insight", "arcanoweave_insight", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_0, 1 },
   { "avatar", "avatar", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_1, 1 },
@@ -643,42 +652,43 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_PLAYER_BUFFS_MEMBERS[] = {
   { "collateral_damage", "collateral_damage", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_4, 2 },
   { "colossal_might", "colossal_might", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_5, 2 },
   { "critical_ritual", "critical_ritual", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_6, 1 },
-  { "executioner", "executioner", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_7, 2 },
-  { "executioners_precision", "executioners_precision", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_8, 2 },
-  { "exhaustion", "exhaustion", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_9, 1 },
-  { "frenzied_focus", "frenzied_focus", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_10, 1 },
-  { "genius_insight", "genius_insight", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_11, 1 },
-  { "hasty_ritual", "hasty_ritual", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_12, 1 },
-  { "imminent_demise", "imminent_demise", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_13, 2 },
-  { "masterful_ritual", "masterful_ritual", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_14, 1 },
-  { "opportunist", "opportunist", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_15, 2 },
-  { "sudden_death", "sudden_death", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_16, 2 },
-  { "sweeping_strikes", "sweeping_strikes", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_17, 1 },
-  { "venomcursed_ascendance", "venomcursed_ascendance", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_18, 1 },
-  { "venomcursed_mastery", "venomcursed_mastery", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_19, 1 },
-  { "versatile_ritual", "versatile_ritual", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_20, 1 },
+  { "devoured_strength", "devoured_strength", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_7, 2 },
+  { "executioner", "executioner", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_8, 2 },
+  { "executioners_precision", "executioners_precision", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_9, 2 },
+  { "exhaustion", "exhaustion", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_10, 1 },
+  { "frenzied_focus", "frenzied_focus", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_11, 1 },
+  { "genius_insight", "genius_insight", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_12, 1 },
+  { "hasty_ritual", "hasty_ritual", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_13, 1 },
+  { "imminent_demise", "imminent_demise", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_14, 2 },
+  { "masterful_ritual", "masterful_ritual", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_15, 1 },
+  { "opportunist", "opportunist", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_16, 2 },
+  { "sudden_death", "sudden_death", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_17, 2 },
+  { "sweeping_strikes", "sweeping_strikes", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_18, 1 },
+  { "venomcursed_ascendance", "venomcursed_ascendance", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_19, 1 },
+  { "venomcursed_mastery", "venomcursed_mastery", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_20, 1 },
+  { "versatile_ritual", "versatile_ritual", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_21, 1 },
 };
 
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_0[] = {
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 100.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 90.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_1[] = {
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 100.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 90.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_2[] = {
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_3[] = {
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_4[] = {
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 45.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_5[] = {
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_6[] = {
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_7[] = {
     { "charges_fractional", rl_kind::k_float, 2.0, true, 2.0, false, 1.0, nullptr, 0, false },
@@ -687,16 +697,19 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_7[] = {
     { "full_recharge_time", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_8[] = {
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 100.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 90.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_9[] = {
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_10[] = {
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_11[] = {
-    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 90.0, nullptr, 0, false },
+};
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_COOLDOWNS_LEAVES_12[] = {
+    { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 45.0, nullptr, 0, false },
 };
 inline constexpr rl_obs_member RL_OBS_FAMILY_COOLDOWNS_MEMBERS[] = {
   { "avatar", "avatar", RL_OBS_FAMILY_COOLDOWNS_LEAVES_0, 1 },
@@ -710,7 +723,8 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_COOLDOWNS_MEMBERS[] = {
   { "ravager", "ravager", RL_OBS_FAMILY_COOLDOWNS_LEAVES_8, 1 },
   { "storm_bolt", "storm_bolt", RL_OBS_FAMILY_COOLDOWNS_LEAVES_9, 1 },
   { "sweeping_strikes", "sweeping_strikes", RL_OBS_FAMILY_COOLDOWNS_LEAVES_10, 1 },
-  { "wrecking_throw", "wrecking_throw", RL_OBS_FAMILY_COOLDOWNS_LEAVES_11, 1 },
+  { "voracious_heart_of_ulatek_1297761", "voracious_heart_of_ulatek_1297761", RL_OBS_FAMILY_COOLDOWNS_LEAVES_11, 1 },
+  { "wrecking_throw", "wrecking_throw", RL_OBS_FAMILY_COOLDOWNS_LEAVES_12, 1 },
 };
 
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_0[] = {
@@ -726,9 +740,9 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_0[] = {
     { "is_boss", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 16.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "rend_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 25.0, nullptr, 0, false },
-    { "deep_wounds_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
-    { "colossus_smash_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
+    { "rend_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "deep_wounds_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
+    { "colossus_smash_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_1[] = {
     { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
@@ -743,9 +757,9 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_1[] = {
     { "is_boss", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 16.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "rend_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 25.0, nullptr, 0, false },
-    { "deep_wounds_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
-    { "colossus_smash_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
+    { "rend_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "deep_wounds_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
+    { "colossus_smash_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_2[] = {
     { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
@@ -760,9 +774,9 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_2[] = {
     { "is_boss", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 16.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "rend_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 25.0, nullptr, 0, false },
-    { "deep_wounds_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
-    { "colossus_smash_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
+    { "rend_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "deep_wounds_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
+    { "colossus_smash_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_3[] = {
     { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
@@ -777,9 +791,9 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_3[] = {
     { "is_boss", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 16.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "rend_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 25.0, nullptr, 0, false },
-    { "deep_wounds_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
-    { "colossus_smash_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
+    { "rend_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "deep_wounds_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
+    { "colossus_smash_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_4[] = {
     { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
@@ -794,9 +808,9 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_4[] = {
     { "is_boss", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 16.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "rend_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 25.0, nullptr, 0, false },
-    { "deep_wounds_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
-    { "colossus_smash_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
+    { "rend_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "deep_wounds_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
+    { "colossus_smash_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_5[] = {
     { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
@@ -811,9 +825,9 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_5[] = {
     { "is_boss", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 16.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "rend_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 25.0, nullptr, 0, false },
-    { "deep_wounds_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
-    { "colossus_smash_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
+    { "rend_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "deep_wounds_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
+    { "colossus_smash_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_6[] = {
     { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
@@ -828,9 +842,9 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_6[] = {
     { "is_boss", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 16.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "rend_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 25.0, nullptr, 0, false },
-    { "deep_wounds_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
-    { "colossus_smash_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
+    { "rend_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "deep_wounds_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
+    { "colossus_smash_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_7[] = {
     { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
@@ -845,9 +859,9 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_7[] = {
     { "is_boss", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 16.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "rend_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 25.0, nullptr, 0, false },
-    { "deep_wounds_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
-    { "colossus_smash_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
+    { "rend_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "deep_wounds_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
+    { "colossus_smash_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_8[] = {
     { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
@@ -862,9 +876,9 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_8[] = {
     { "is_boss", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 16.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "rend_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 25.0, nullptr, 0, false },
-    { "deep_wounds_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
-    { "colossus_smash_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
+    { "rend_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "deep_wounds_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
+    { "colossus_smash_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_9[] = {
     { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
@@ -879,9 +893,9 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_9[] = {
     { "is_boss", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 16.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "rend_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 25.0, nullptr, 0, false },
-    { "deep_wounds_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
-    { "colossus_smash_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
+    { "rend_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "deep_wounds_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
+    { "colossus_smash_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_10[] = {
     { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
@@ -896,9 +910,9 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_10[] = {
     { "is_boss", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 16.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "rend_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 25.0, nullptr, 0, false },
-    { "deep_wounds_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
-    { "colossus_smash_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
+    { "rend_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
+    { "deep_wounds_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
+    { "colossus_smash_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
 };
 inline constexpr rl_obs_member RL_OBS_FAMILY_TARGET_FACTS_MEMBERS[] = {
   { "cleave", "cleave", RL_OBS_FAMILY_TARGET_FACTS_LEAVES_0, 15 },
@@ -1040,6 +1054,9 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_17[] = {
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_18[] = {
     { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
 };
+inline constexpr rl_leaf_desc RL_OBS_FAMILY_LEGALITY_LEAVES_19[] = {
+    { "flag", rl_kind::k_int, 0.0, false, 1.0, false, 1.0, nullptr, 0, false },
+};
 inline constexpr rl_obs_member RL_OBS_FAMILY_LEGALITY_MEMBERS[] = {
   { "00", "00", RL_OBS_FAMILY_LEGALITY_LEAVES_0, 1 },
   { "01", "01", RL_OBS_FAMILY_LEGALITY_LEAVES_1, 1 },
@@ -1060,6 +1077,7 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_LEGALITY_MEMBERS[] = {
   { "16", "16", RL_OBS_FAMILY_LEGALITY_LEAVES_16, 1 },
   { "17", "17", RL_OBS_FAMILY_LEGALITY_LEAVES_17, 1 },
   { "18", "18", RL_OBS_FAMILY_LEGALITY_LEAVES_18, 1 },
+  { "19", "19", RL_OBS_FAMILY_LEGALITY_LEAVES_19, 1 },
 };
 
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
@@ -1085,7 +1103,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "fight.next_phase.boss_pct_now", rl_kind::k_seconds, 0.0, false, 1.0, true, 100.0, nullptr, 0, false },
     { "fight.downtime.in", rl_kind::k_seconds, 600.0, false, 1.0, true, 60.0, nullptr, 0, false },
     { "fight.bloodlust.in", rl_kind::k_seconds, 600.0, false, 1.0, true, 60.0, nullptr, 0, false },
-    { "resource.rage", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
+    { "resource.rage", rl_kind::k_float, 0.0, true, 150.0, false, 1.0, nullptr, 0, false },
     { "hits.bladestorm", rl_kind::k_int, 0.0, true, 15.0, false, 1.0, nullptr, 0, false },
     { "hits.cleave", rl_kind::k_int, 0.0, true, 15.0, false, 1.0, nullptr, 0, false },
     { "hits.colossus_smash", rl_kind::k_int, 0.0, true, 15.0, false, 1.0, nullptr, 0, false },
@@ -1228,6 +1246,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "capability.talent_unrelenting_onslaught", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "capability.hero_colossus", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "capability.hero_slayer", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
+    { "capability.trinket_voracious_heart_of_ulatek", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "capability.enchant_arcane_mastery", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "capability.enchant_berserkers_rage", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "capability.embellishment_arcanoweave_lining", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -1238,20 +1257,20 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "capability.mode_funnel", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_obs_member RL_OBS_FAMILY_SCALARS_MEMBERS[] = {
-  { "", "", RL_OBS_FAMILY_SCALARS_LEAVES_0, 173 },
+  { "", "", RL_OBS_FAMILY_SCALARS_LEAVES_0, 174 },
 };
 
 inline constexpr std::size_t RL_OBS_FAMILY_COUNT = 8;
 
 inline constexpr rl_obs_family RL_OBS_FAMILIES[RL_OBS_FAMILY_COUNT] = {
-  { rl_family::player_buffs, "player_buffs", rl_family_kind::buff, false, RL_OBS_FAMILY_PLAYER_BUFFS_MEMBERS, 21, 0, 28 },
-  { rl_family::cooldowns, "cooldowns", rl_family_kind::cooldown, false, RL_OBS_FAMILY_COOLDOWNS_MEMBERS, 12, 28, 15 },
-  { rl_family::target_facts, "target_facts", rl_family_kind::target_fact, false, RL_OBS_FAMILY_TARGET_FACTS_MEMBERS, 11, 43, 165 },
-  { rl_family::stats, "stats", rl_family_kind::direct, false, RL_OBS_FAMILY_STATS_MEMBERS, 8, 208, 8 },
-  { rl_family::swing_cast, "swing_cast", rl_family_kind::direct, false, RL_OBS_FAMILY_SWING_CAST_MEMBERS, 3, 216, 3 },
-  { rl_family::raid_events, "raid_events", rl_family_kind::expression, false, RL_OBS_FAMILY_RAID_EVENTS_MEMBERS, 2, 219, 10 },
-  { rl_family::legality, "legality", rl_family_kind::legality, false, RL_OBS_FAMILY_LEGALITY_MEMBERS, 19, 229, 19 },
-  { rl_family::scalars, "scalars", rl_family_kind::scalar, true, RL_OBS_FAMILY_SCALARS_MEMBERS, 1, 248, 173 },
+  { rl_family::player_buffs, "player_buffs", rl_family_kind::buff, false, RL_OBS_FAMILY_PLAYER_BUFFS_MEMBERS, 22, 0, 30 },
+  { rl_family::cooldowns, "cooldowns", rl_family_kind::cooldown, false, RL_OBS_FAMILY_COOLDOWNS_MEMBERS, 13, 30, 16 },
+  { rl_family::target_facts, "target_facts", rl_family_kind::target_fact, false, RL_OBS_FAMILY_TARGET_FACTS_MEMBERS, 11, 46, 165 },
+  { rl_family::stats, "stats", rl_family_kind::direct, false, RL_OBS_FAMILY_STATS_MEMBERS, 8, 211, 8 },
+  { rl_family::swing_cast, "swing_cast", rl_family_kind::direct, false, RL_OBS_FAMILY_SWING_CAST_MEMBERS, 3, 219, 3 },
+  { rl_family::raid_events, "raid_events", rl_family_kind::expression, false, RL_OBS_FAMILY_RAID_EVENTS_MEMBERS, 2, 222, 10 },
+  { rl_family::legality, "legality", rl_family_kind::legality, false, RL_OBS_FAMILY_LEGALITY_MEMBERS, 20, 232, 20 },
+  { rl_family::scalars, "scalars", rl_family_kind::scalar, true, RL_OBS_FAMILY_SCALARS_MEMBERS, 1, 252, 174 },
 };
 
 // ---- Action descriptors ----
@@ -1276,6 +1295,7 @@ inline constexpr rl_action_desc RL_ACTIONS[RL_ACTION_DIM] = {
   { 16, "wrecking_throw", rl_action_kind::cast, "wrecking_throw", nullptr, "wrecking_throw", { rl_wait_anchor_kind::none, rl_swing_hand::none }, nullptr },
   { 17, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_next_event", { rl_wait_anchor_kind::none, rl_swing_hand::none }, nullptr },
   { 18, nullptr, rl_action_kind::wait, nullptr, nullptr, "wait_swing_mh", { rl_wait_anchor_kind::swing, rl_swing_hand::mh }, nullptr },
+  { 19, "use_item_voracious_heart_of_ulatek", rl_action_kind::cast, "voracious_heart_of_ulatek_1297761", "item_cd_1141", "use_item_voracious_heart_of_ulatek", { rl_wait_anchor_kind::none, rl_swing_hand::none }, nullptr },
 };
 
 // ---- Buff-gate table ----
@@ -1292,146 +1312,147 @@ inline constexpr std::size_t RL_TALENT_GATE_COUNT = 0;
 
 // ---- Capability table (246.1-02, CAP-01/CAP-02) ----
 
-inline constexpr std::size_t RL_CAPABILITY_COUNT = 138;
+inline constexpr std::size_t RL_CAPABILITY_COUNT = 139;
 inline constexpr rl_capability RL_CAPABILITIES[RL_CAPABILITY_COUNT] = {
-  { "talent_fast_footwork", 283, "talent", nullptr, 0, nullptr, 0, 112206, 1, 0, 0, 0, 0, 0, 0 },
-  { "talent_war_machine", 284, "talent", nullptr, 0, nullptr, 0, 112185, 1, 0, 0, 0, 0, 0, 0 },
-  { "talent_thunder_clap", 285, "talent", nullptr, 0, nullptr, 0, 112205, 1, 0, 0, 0, 0, 0, 0 },
-  { "talent_leeching_strikes", 286, "talent", nullptr, 0, nullptr, 0, 112238, 1, 0, 0, 0, 0, 0, 0 },
-  { "talent_impending_victory", 287, "talent", nullptr, 0, nullptr, 0, 112183, 1, 0, 0, 0, 0, 0, 0 },
-  { "talent_heroic_leap", 288, "talent", nullptr, 0, nullptr, 0, 112208, 1, 0, 0, 0, 0, 0, 0 },
-  { "talent_crackling_thunder", 289, "talent", nullptr, 0, nullptr, 0, 118853, 1, 0, 0, 0, 0, 0, 0 },
-  { "talent_storm_bolt", 290, "talent", nullptr, 0, nullptr, 0, 112198, 1, 0, 0, 0, 17, 0, 1 },
-  { "talent_rend", 291, "talent", nullptr, 0, nullptr, 0, 135597, 1, 0, 0, 17, 16, 1, 1 },
-  { "talent_second_wind", 292, "talent", nullptr, 0, nullptr, 0, 112190, 1, 0, 0, 33, 0, 2, 0 },
-  { "talent_frothing_berserker", 293, "talent", nullptr, 0, nullptr, 0, 112216, 1, 0, 0, 33, 0, 2, 0 },
-  { "talent_bounding_stride", 294, "talent", nullptr, 0, nullptr, 0, 112219, 1, 0, 0, 33, 0, 2, 0 },
-  { "talent_pain_and_gain", 295, "talent", nullptr, 0, nullptr, 0, 112217, 1, 0, 0, 33, 0, 2, 0 },
-  { "talent_intervene", 296, "talent", nullptr, 0, nullptr, 0, 134217, 1, 0, 0, 33, 0, 2, 0 },
-  { "talent_interpose", 297, "talent", nullptr, 0, nullptr, 0, 134216, 1, 0, 0, 33, 0, 2, 0 },
-  { "talent_shockwave", 298, "talent", nullptr, 0, nullptr, 0, 112242, 1, 0, 0, 33, 0, 2, 0 },
-  { "talent_overwhelming_rage", 299, "talent", nullptr, 0, nullptr, 0, 112245, 1, 0, 0, 33, 0, 2, 0 },
-  { "talent_rallying_cry", 300, "talent", nullptr, 0, nullptr, 0, 112188, 1, 0, 0, 33, 0, 2, 0 },
-  { "talent_field_dressing", 301, "talent", nullptr, 0, nullptr, 0, 136626, 1, 0, 0, 33, 0, 2, 0 },
-  { "talent_spell_reflection", 302, "talent", nullptr, 0, nullptr, 0, 112253, 1, 0, 0, 33, 0, 2, 0 },
-  { "talent_wrecking_throw", 303, "talent", nullptr, 0, nullptr, 0, 112215, 1, 0, 0, 33, 17, 2, 1 },
-  { "talent_shattering_throw", 304, "talent", nullptr, 0, nullptr, 0, 112214, 1, 0, 0, 50, 0, 3, 0 },
-  { "talent_rumbling_earth", 305, "talent", nullptr, 0, nullptr, 0, 112241, 1, 0, 0, 50, 0, 3, 0 },
-  { "talent_berserker_shout", 306, "talent", nullptr, 0, nullptr, 0, 112211, 1, 0, 0, 50, 0, 3, 0 },
-  { "talent_fearless", 307, "talent", nullptr, 0, nullptr, 0, 112210, 1, 0, 0, 50, 0, 3, 0 },
-  { "talent_intimidating_shout", 308, "talent", nullptr, 0, nullptr, 0, 134254, 1, 0, 0, 50, 0, 3, 0 },
-  { "talent_piercing_howl", 309, "talent", nullptr, 0, nullptr, 0, 136627, 1, 0, 0, 50, 0, 3, 0 },
-  { "talent_honed_reflexes", 310, "talent", nullptr, 0, nullptr, 0, 118850, 1, 0, 0, 50, 0, 3, 0 },
-  { "talent_armored_to_the_teeth", 311, "talent", nullptr, 0, nullptr, 0, 112233, 1, 0, 0, 50, 0, 3, 0 },
-  { "talent_armored_to_the_teeth_r2", 312, "talent", nullptr, 0, nullptr, 0, 112233, 2, 0, 1, 50, 0, 3, 0 },
-  { "talent_reinforced_plates", 313, "talent", nullptr, 0, nullptr, 0, 112235, 1, 1, 0, 50, 0, 3, 0 },
-  { "talent_reinforced_plates_r2", 314, "talent", nullptr, 0, nullptr, 0, 112235, 2, 1, 1, 50, 0, 3, 0 },
-  { "talent_double_time", 315, "talent", nullptr, 0, nullptr, 0, 112249, 1, 2, 0, 50, 0, 3, 0 },
-  { "talent_barbaric_training", 316, "talent", nullptr, 0, nullptr, 0, 112209, 1, 2, 0, 50, 0, 3, 0 },
-  { "talent_javelineer", 317, "talent", nullptr, 0, nullptr, 0, 136625, 1, 2, 0, 50, 0, 3, 0 },
-  { "talent_resonant_voice", 318, "talent", nullptr, 0, nullptr, 0, 134225, 1, 2, 0, 50, 0, 3, 0 },
-  { "talent_crushing_force", 319, "talent", nullptr, 0, nullptr, 0, 134226, 1, 2, 0, 50, 0, 3, 0 },
-  { "talent_cruel_strikes", 320, "talent", nullptr, 0, nullptr, 0, 112248, 1, 2, 0, 50, 0, 3, 0 },
-  { "talent_cruel_strikes_r2", 321, "talent", nullptr, 0, nullptr, 0, 112248, 2, 2, 1, 50, 0, 3, 0 },
-  { "talent_twohanded_weapon_specialization", 322, "talent", nullptr, 0, nullptr, 0, 112179, 1, 3, 0, 50, 0, 3, 0 },
-  { "talent_twohanded_weapon_specialization_r2", 323, "talent", nullptr, 0, nullptr, 0, 112179, 2, 3, 1, 50, 0, 3, 0 },
-  { "talent_wild_strikes", 324, "talent", nullptr, 0, nullptr, 0, 112224, 1, 4, 0, 50, 0, 3, 0 },
-  { "talent_wild_strikes_r2", 325, "talent", nullptr, 0, nullptr, 0, 112224, 2, 4, 1, 50, 0, 3, 0 },
-  { "talent_anger_management", 326, "talent", nullptr, 0, nullptr, 0, 134032, 1, 5, 0, 50, 0, 3, 0 },
-  { "talent_champions_spear", 327, "talent", nullptr, 0, nullptr, 0, 112247, 1, 5, 0, 50, 0, 3, 0 },
-  { "talent_stance_mastery", 328, "talent", nullptr, 0, nullptr, 0, 134031, 1, 5, 0, 50, 0, 3, 0 },
-  { "talent_battlefield_commander", 329, "talent", nullptr, 0, nullptr, 0, 134033, 1, 5, 0, 50, 0, 3, 0 },
-  { "talent_mortal_strike", 330, "talent", nullptr, 0, nullptr, 0, 112122, 1, 5, 0, 50, 17, 3, 1 },
-  { "talent_overpower", 331, "talent", nullptr, 0, nullptr, 0, 112123, 1, 5, 0, 67, 20, 4, 1 },
-  { "talent_sudden_death", 332, "talent", nullptr, 0, nullptr, 0, 112126, 1, 5, 0, 87, 2, 5, 0 },
-  { "talent_fueled_by_violence", 333, "talent", nullptr, 0, nullptr, 0, 112128, 1, 5, 0, 89, 0, 5, 0 },
-  { "talent_ignore_pain", 334, "talent", nullptr, 0, nullptr, 0, 136701, 1, 5, 0, 89, 0, 5, 0 },
-  { "talent_die_by_the_sword", 335, "talent", nullptr, 0, nullptr, 0, 112121, 1, 5, 0, 89, 0, 5, 0 },
-  { "talent_bloodsurge", 336, "talent", nullptr, 0, nullptr, 0, 112129, 1, 5, 0, 89, 0, 5, 0 },
-  { "talent_improved_overpower", 337, "talent", nullptr, 0, nullptr, 0, 112131, 1, 5, 0, 89, 0, 5, 0 },
-  { "talent_improved_execute", 338, "talent", nullptr, 0, nullptr, 0, 112125, 1, 5, 0, 89, 0, 5, 0 },
-  { "talent_fervor_of_battle", 339, "talent", nullptr, 0, nullptr, 0, 135932, 1, 5, 0, 89, 0, 5, 0 },
-  { "talent_tactician", 340, "talent", nullptr, 0, nullptr, 0, 112134, 1, 5, 0, 89, 0, 5, 0 },
-  { "talent_colossus_smash", 341, "talent", nullptr, 0, nullptr, 0, 112144, 1, 5, 0, 89, 17, 5, 1 },
-  { "talent_impale", 342, "talent", nullptr, 0, nullptr, 0, 112146, 1, 5, 0, 106, 0, 6, 0 },
-  { "talent_brute_force", 343, "talent", nullptr, 0, nullptr, 0, 135936, 1, 5, 0, 106, 0, 6, 0 },
-  { "talent_efficiency", 344, "talent", nullptr, 0, nullptr, 0, 135935, 1, 5, 0, 106, 0, 6, 0 },
-  { "talent_overpowering_finish", 345, "talent", nullptr, 0, nullptr, 0, 114733, 1, 5, 0, 106, 0, 6, 0 },
-  { "talent_mass_execution", 346, "talent", nullptr, 0, nullptr, 0, 137473, 1, 5, 0, 106, 0, 6, 0 },
-  { "talent_strength_of_arms", 347, "talent", nullptr, 0, nullptr, 0, 135944, 1, 5, 0, 106, 0, 6, 0 },
-  { "talent_strength_of_arms_r2", 348, "talent", nullptr, 0, nullptr, 0, 135944, 2, 5, 1, 106, 0, 6, 0 },
-  { "talent_just_warming_up", 349, "talent", nullptr, 0, nullptr, 0, 135943, 1, 6, 0, 106, 0, 6, 0 },
-  { "talent_broad_strokes", 350, "talent", nullptr, 0, nullptr, 0, 135942, 1, 6, 0, 106, 0, 6, 0 },
-  { "talent_sharpened_blades", 351, "talent", nullptr, 0, nullptr, 0, 112320, 1, 6, 0, 106, 0, 6, 0 },
-  { "talent_sharpened_blades_r2", 352, "talent", nullptr, 0, nullptr, 0, 112320, 2, 6, 1, 106, 0, 6, 0 },
-  { "talent_cleave", 353, "talent", nullptr, 0, nullptr, 0, 112147, 1, 7, 0, 106, 17, 6, 1 },
-  { "talent_powerful_momentum", 354, "talent", nullptr, 0, nullptr, 0, 114739, 1, 7, 0, 123, 0, 7, 0 },
-  { "talent_martial_prowess", 355, "talent", nullptr, 0, nullptr, 0, 135934, 1, 7, 0, 123, 0, 7, 0 },
-  { "talent_dreadnaught", 356, "talent", nullptr, 0, nullptr, 0, 112137, 1, 7, 0, 123, 0, 7, 0 },
-  { "talent_deep_wounds", 357, "talent", nullptr, 0, nullptr, 0, 135940, 1, 7, 0, 123, 0, 7, 0 },
-  { "talent_tactical_edge", 358, "talent", nullptr, 0, nullptr, 0, 135939, 1, 7, 0, 123, 0, 7, 0 },
-  { "talent_crushing_combo", 359, "talent", nullptr, 0, nullptr, 0, 135938, 1, 7, 0, 123, 0, 7, 0 },
-  { "talent_massacre", 360, "talent", nullptr, 0, nullptr, 0, 112145, 1, 7, 0, 123, 0, 7, 0 },
-  { "talent_collateral_damage", 361, "talent", nullptr, 0, nullptr, 0, 135937, 1, 7, 0, 123, 2, 7, 0 },
-  { "talent_bloodborne", 362, "talent", nullptr, 0, nullptr, 0, 112135, 1, 7, 0, 125, 0, 7, 0 },
-  { "talent_bloodborne_r2", 363, "talent", nullptr, 0, nullptr, 0, 112135, 2, 7, 1, 125, 0, 7, 0 },
-  { "talent_bladestorm", 364, "talent", nullptr, 0, nullptr, 0, 112314, 1, 8, 0, 125, 2, 7, 1 },
-  { "talent_ravager", 365, "talent", nullptr, 0, nullptr, 0, 136702, 1, 8, 0, 127, 2, 8, 1 },
-  { "talent_critical_thinking", 366, "talent", nullptr, 0, nullptr, 0, 112317, 1, 8, 0, 129, 0, 9, 0 },
-  { "talent_critical_thinking_r2", 367, "talent", nullptr, 0, nullptr, 0, 112317, 2, 8, 1, 129, 0, 9, 0 },
-  { "talent_master_tactician", 368, "talent", nullptr, 0, nullptr, 0, 114740, 1, 9, 0, 129, 0, 9, 0 },
-  { "talent_bloodletting", 369, "talent", nullptr, 0, nullptr, 0, 112310, 1, 9, 0, 129, 0, 9, 0 },
-  { "talent_executioners_precision", 370, "talent", nullptr, 0, nullptr, 0, 112318, 1, 9, 0, 129, 2, 9, 0 },
-  { "talent_fatality", 371, "talent", nullptr, 0, nullptr, 0, 112311, 1, 9, 0, 131, 0, 9, 0 },
-  { "talent_battlelord", 372, "talent", nullptr, 0, nullptr, 0, 135933, 1, 9, 0, 131, 0, 9, 0 },
-  { "talent_mortal_wounds", 373, "talent", nullptr, 0, nullptr, 0, 135941, 1, 9, 0, 131, 0, 9, 0 },
-  { "talent_avatar", 374, "talent", nullptr, 0, nullptr, 0, 136703, 1, 9, 0, 131, 2, 9, 1 },
-  { "talent_master_of_warfare", 375, "talent", nullptr, 0, nullptr, 0, 136989, 1, 9, 0, 133, 0, 10, 0 },
-  { "talent_master_of_warfare_r2", 376, "talent", nullptr, 0, nullptr, 0, 136988, 1, 9, 1, 133, 0, 10, 0 },
-  { "talent_master_of_warfare_r3", 377, "talent", nullptr, 0, nullptr, 0, 136988, 2, 10, 1, 133, 0, 10, 0 },
-  { "talent_master_of_warfare_r4", 378, "talent", nullptr, 0, nullptr, 0, 136987, 1, 11, 1, 133, 0, 10, 0 },
-  { "talent_martial_expert", 379, "talent", nullptr, 0, nullptr, 0, 117409, 1, 12, 0, 133, 0, 10, 0 },
-  { "talent_colossal_might", 380, "talent", nullptr, 0, nullptr, 0, 117416, 1, 12, 0, 133, 2, 10, 0 },
-  { "talent_boneshaker", 381, "talent", nullptr, 0, nullptr, 0, 117386, 1, 12, 0, 135, 0, 10, 0 },
-  { "talent_earthquaker", 382, "talent", nullptr, 0, nullptr, 0, 119858, 1, 12, 0, 135, 0, 10, 0 },
-  { "talent_decimator", 383, "talent", nullptr, 0, nullptr, 0, 136073, 1, 12, 0, 135, 0, 10, 0 },
-  { "talent_one_against_many", 384, "talent", nullptr, 0, nullptr, 0, 117396, 1, 12, 0, 135, 0, 10, 0 },
-  { "talent_arterial_bleed", 385, "talent", nullptr, 0, nullptr, 0, 119856, 1, 12, 0, 135, 0, 10, 0 },
-  { "talent_tide_of_battle", 386, "talent", nullptr, 0, nullptr, 0, 117408, 1, 12, 0, 135, 0, 10, 0 },
-  { "talent_no_stranger_to_pain", 387, "talent", nullptr, 0, nullptr, 0, 117412, 1, 12, 0, 135, 0, 10, 0 },
-  { "talent_veteran_vitality", 388, "talent", nullptr, 0, nullptr, 0, 119857, 1, 12, 0, 135, 0, 10, 0 },
-  { "talent_cut_to_the_bone", 389, "talent", nullptr, 0, nullptr, 0, 136072, 1, 12, 0, 135, 0, 10, 0 },
-  { "talent_practiced_strikes", 390, "talent", nullptr, 0, nullptr, 0, 117393, 1, 12, 0, 135, 0, 10, 0 },
-  { "talent_precise_might", 391, "talent", nullptr, 0, nullptr, 0, 117391, 1, 12, 0, 135, 0, 10, 0 },
-  { "talent_mountain_of_muscle_and_scars", 392, "talent", nullptr, 0, nullptr, 0, 117403, 1, 12, 0, 135, 0, 10, 0 },
-  { "talent_celeritous_conclusion", 393, "talent", nullptr, 0, nullptr, 0, 136071, 1, 12, 0, 135, 0, 10, 0 },
-  { "talent_dominance_of_the_colossus", 394, "talent", nullptr, 0, nullptr, 0, 117390, 1, 12, 0, 135, 0, 10, 0 },
-  { "talent_imminent_demise", 395, "talent", nullptr, 0, nullptr, 0, 117385, 1, 12, 0, 135, 2, 10, 0 },
-  { "talent_overwhelming_blades", 396, "talent", nullptr, 0, nullptr, 0, 117407, 1, 12, 0, 137, 0, 10, 0 },
-  { "talent_relentless_pursuit", 397, "talent", nullptr, 0, nullptr, 0, 117392, 1, 12, 0, 137, 0, 10, 0 },
-  { "talent_vicious_agility", 398, "talent", nullptr, 0, nullptr, 0, 123408, 1, 12, 0, 137, 0, 10, 0 },
-  { "talent_violent_euphoria", 399, "talent", nullptr, 0, nullptr, 0, 136076, 1, 12, 0, 137, 0, 10, 0 },
-  { "talent_death_drive", 400, "talent", nullptr, 0, nullptr, 0, 117410, 1, 12, 0, 137, 0, 10, 0 },
-  { "talent_culling_cyclone", 401, "talent", nullptr, 0, nullptr, 0, 117383, 1, 12, 0, 137, 0, 10, 0 },
-  { "talent_brutal_finish", 402, "talent", nullptr, 0, nullptr, 0, 123409, 1, 12, 0, 137, 0, 10, 0 },
-  { "talent_fierce_followthrough", 403, "talent", nullptr, 0, nullptr, 0, 117384, 1, 12, 0, 137, 0, 10, 0 },
-  { "talent_opportunist", 404, "talent", nullptr, 0, nullptr, 0, 123770, 1, 12, 0, 137, 2, 10, 0 },
-  { "talent_deadly_focus", 405, "talent", nullptr, 0, nullptr, 0, 136075, 1, 12, 0, 139, 0, 10, 0 },
-  { "talent_show_no_mercy", 406, "talent", nullptr, 0, nullptr, 0, 117381, 1, 12, 0, 139, 0, 10, 0 },
-  { "talent_reap_the_storm", 407, "talent", nullptr, 0, nullptr, 0, 117406, 1, 12, 0, 139, 0, 10, 0 },
-  { "talent_slayers_malice", 408, "talent", nullptr, 0, nullptr, 0, 117398, 1, 12, 0, 139, 0, 10, 0 },
-  { "talent_unhinged", 409, "talent", nullptr, 0, nullptr, 0, 136074, 1, 12, 0, 139, 0, 10, 0 },
-  { "talent_unrelenting_onslaught", 410, "talent", nullptr, 0, nullptr, 0, 117417, 1, 12, 0, 139, 0, 10, 0 },
-  { "hero_colossus", 411, "talent", nullptr, 0, nullptr, 0, 117415, 1, 12, 0, 139, 17, 10, 1 },
-  { "hero_slayer", 412, "talent", nullptr, 0, nullptr, 0, 117411, 1, 12, 0, 156, 0, 11, 0 },
-  { "enchant_arcane_mastery", 413, "special_effect", nullptr, 1236721, nullptr, 0, 0, 0, 12, 0, 156, 1, 11, 0 },
-  { "enchant_berserkers_rage", 414, "special_effect", nullptr, 1236728, nullptr, 0, 0, 0, 12, 0, 157, 1, 11, 0 },
-  { "embellishment_arcanoweave_lining", 415, "special_effect", nullptr, 1283697, nullptr, 0, 0, 0, 12, 0, 158, 1, 11, 0 },
-  { "embellishment_hunters_ritual_stone", 416, "special_effect", nullptr, 1297382, nullptr, 0, 0, 0, 12, 0, 159, 4, 11, 0 },
-  { "item_venomcursed_mastery", 417, "special_effect", nullptr, 1307923, nullptr, 0, 0, 0, 12, 0, 163, 1, 11, 0 },
-  { "item_venomcursed_ascendance", 418, "special_effect", nullptr, 1317582, nullptr, 0, 0, 0, 12, 0, 164, 1, 11, 0 },
-  { "set_bite_of_zuljan_2pc", 419, "set_bonus", nullptr, 0, "MID_BOZ", 2, 0, 0, 12, 0, 165, 0, 11, 0 },
-  { "mode_funnel", 420, "funnel_mode", nullptr, 0, nullptr, 0, 0, 0, 12, 0, 165, 0, 11, 0 },
+  { "talent_fast_footwork", 287, "talent", nullptr, 0, nullptr, 0, 112206, 1, 0, 0, 0, 0, 0, 0 },
+  { "talent_war_machine", 288, "talent", nullptr, 0, nullptr, 0, 112185, 1, 0, 0, 0, 0, 0, 0 },
+  { "talent_thunder_clap", 289, "talent", nullptr, 0, nullptr, 0, 112205, 1, 0, 0, 0, 0, 0, 0 },
+  { "talent_leeching_strikes", 290, "talent", nullptr, 0, nullptr, 0, 112238, 1, 0, 0, 0, 0, 0, 0 },
+  { "talent_impending_victory", 291, "talent", nullptr, 0, nullptr, 0, 112183, 1, 0, 0, 0, 0, 0, 0 },
+  { "talent_heroic_leap", 292, "talent", nullptr, 0, nullptr, 0, 112208, 1, 0, 0, 0, 0, 0, 0 },
+  { "talent_crackling_thunder", 293, "talent", nullptr, 0, nullptr, 0, 118853, 1, 0, 0, 0, 0, 0, 0 },
+  { "talent_storm_bolt", 294, "talent", nullptr, 0, nullptr, 0, 112198, 1, 0, 0, 0, 17, 0, 1 },
+  { "talent_rend", 295, "talent", nullptr, 0, nullptr, 0, 135597, 1, 0, 0, 17, 16, 1, 1 },
+  { "talent_second_wind", 296, "talent", nullptr, 0, nullptr, 0, 112190, 1, 0, 0, 33, 0, 2, 0 },
+  { "talent_frothing_berserker", 297, "talent", nullptr, 0, nullptr, 0, 112216, 1, 0, 0, 33, 0, 2, 0 },
+  { "talent_bounding_stride", 298, "talent", nullptr, 0, nullptr, 0, 112219, 1, 0, 0, 33, 0, 2, 0 },
+  { "talent_pain_and_gain", 299, "talent", nullptr, 0, nullptr, 0, 112217, 1, 0, 0, 33, 0, 2, 0 },
+  { "talent_intervene", 300, "talent", nullptr, 0, nullptr, 0, 134217, 1, 0, 0, 33, 0, 2, 0 },
+  { "talent_interpose", 301, "talent", nullptr, 0, nullptr, 0, 134216, 1, 0, 0, 33, 0, 2, 0 },
+  { "talent_shockwave", 302, "talent", nullptr, 0, nullptr, 0, 112242, 1, 0, 0, 33, 0, 2, 0 },
+  { "talent_overwhelming_rage", 303, "talent", nullptr, 0, nullptr, 0, 112245, 1, 0, 0, 33, 0, 2, 0 },
+  { "talent_rallying_cry", 304, "talent", nullptr, 0, nullptr, 0, 112188, 1, 0, 0, 33, 0, 2, 0 },
+  { "talent_field_dressing", 305, "talent", nullptr, 0, nullptr, 0, 136626, 1, 0, 0, 33, 0, 2, 0 },
+  { "talent_spell_reflection", 306, "talent", nullptr, 0, nullptr, 0, 112253, 1, 0, 0, 33, 0, 2, 0 },
+  { "talent_wrecking_throw", 307, "talent", nullptr, 0, nullptr, 0, 112215, 1, 0, 0, 33, 17, 2, 1 },
+  { "talent_shattering_throw", 308, "talent", nullptr, 0, nullptr, 0, 112214, 1, 0, 0, 50, 0, 3, 0 },
+  { "talent_rumbling_earth", 309, "talent", nullptr, 0, nullptr, 0, 112241, 1, 0, 0, 50, 0, 3, 0 },
+  { "talent_berserker_shout", 310, "talent", nullptr, 0, nullptr, 0, 112211, 1, 0, 0, 50, 0, 3, 0 },
+  { "talent_fearless", 311, "talent", nullptr, 0, nullptr, 0, 112210, 1, 0, 0, 50, 0, 3, 0 },
+  { "talent_intimidating_shout", 312, "talent", nullptr, 0, nullptr, 0, 134254, 1, 0, 0, 50, 0, 3, 0 },
+  { "talent_piercing_howl", 313, "talent", nullptr, 0, nullptr, 0, 136627, 1, 0, 0, 50, 0, 3, 0 },
+  { "talent_honed_reflexes", 314, "talent", nullptr, 0, nullptr, 0, 118850, 1, 0, 0, 50, 0, 3, 0 },
+  { "talent_armored_to_the_teeth", 315, "talent", nullptr, 0, nullptr, 0, 112233, 1, 0, 0, 50, 0, 3, 0 },
+  { "talent_armored_to_the_teeth_r2", 316, "talent", nullptr, 0, nullptr, 0, 112233, 2, 0, 1, 50, 0, 3, 0 },
+  { "talent_reinforced_plates", 317, "talent", nullptr, 0, nullptr, 0, 112235, 1, 1, 0, 50, 0, 3, 0 },
+  { "talent_reinforced_plates_r2", 318, "talent", nullptr, 0, nullptr, 0, 112235, 2, 1, 1, 50, 0, 3, 0 },
+  { "talent_double_time", 319, "talent", nullptr, 0, nullptr, 0, 112249, 1, 2, 0, 50, 0, 3, 0 },
+  { "talent_barbaric_training", 320, "talent", nullptr, 0, nullptr, 0, 112209, 1, 2, 0, 50, 0, 3, 0 },
+  { "talent_javelineer", 321, "talent", nullptr, 0, nullptr, 0, 136625, 1, 2, 0, 50, 0, 3, 0 },
+  { "talent_resonant_voice", 322, "talent", nullptr, 0, nullptr, 0, 134225, 1, 2, 0, 50, 0, 3, 0 },
+  { "talent_crushing_force", 323, "talent", nullptr, 0, nullptr, 0, 134226, 1, 2, 0, 50, 0, 3, 0 },
+  { "talent_cruel_strikes", 324, "talent", nullptr, 0, nullptr, 0, 112248, 1, 2, 0, 50, 0, 3, 0 },
+  { "talent_cruel_strikes_r2", 325, "talent", nullptr, 0, nullptr, 0, 112248, 2, 2, 1, 50, 0, 3, 0 },
+  { "talent_twohanded_weapon_specialization", 326, "talent", nullptr, 0, nullptr, 0, 112179, 1, 3, 0, 50, 0, 3, 0 },
+  { "talent_twohanded_weapon_specialization_r2", 327, "talent", nullptr, 0, nullptr, 0, 112179, 2, 3, 1, 50, 0, 3, 0 },
+  { "talent_wild_strikes", 328, "talent", nullptr, 0, nullptr, 0, 112224, 1, 4, 0, 50, 0, 3, 0 },
+  { "talent_wild_strikes_r2", 329, "talent", nullptr, 0, nullptr, 0, 112224, 2, 4, 1, 50, 0, 3, 0 },
+  { "talent_anger_management", 330, "talent", nullptr, 0, nullptr, 0, 134032, 1, 5, 0, 50, 0, 3, 0 },
+  { "talent_champions_spear", 331, "talent", nullptr, 0, nullptr, 0, 112247, 1, 5, 0, 50, 0, 3, 0 },
+  { "talent_stance_mastery", 332, "talent", nullptr, 0, nullptr, 0, 134031, 1, 5, 0, 50, 0, 3, 0 },
+  { "talent_battlefield_commander", 333, "talent", nullptr, 0, nullptr, 0, 134033, 1, 5, 0, 50, 0, 3, 0 },
+  { "talent_mortal_strike", 334, "talent", nullptr, 0, nullptr, 0, 112122, 1, 5, 0, 50, 17, 3, 1 },
+  { "talent_overpower", 335, "talent", nullptr, 0, nullptr, 0, 112123, 1, 5, 0, 67, 20, 4, 1 },
+  { "talent_sudden_death", 336, "talent", nullptr, 0, nullptr, 0, 112126, 1, 5, 0, 87, 2, 5, 0 },
+  { "talent_fueled_by_violence", 337, "talent", nullptr, 0, nullptr, 0, 112128, 1, 5, 0, 89, 0, 5, 0 },
+  { "talent_ignore_pain", 338, "talent", nullptr, 0, nullptr, 0, 136701, 1, 5, 0, 89, 0, 5, 0 },
+  { "talent_die_by_the_sword", 339, "talent", nullptr, 0, nullptr, 0, 112121, 1, 5, 0, 89, 0, 5, 0 },
+  { "talent_bloodsurge", 340, "talent", nullptr, 0, nullptr, 0, 112129, 1, 5, 0, 89, 0, 5, 0 },
+  { "talent_improved_overpower", 341, "talent", nullptr, 0, nullptr, 0, 112131, 1, 5, 0, 89, 0, 5, 0 },
+  { "talent_improved_execute", 342, "talent", nullptr, 0, nullptr, 0, 112125, 1, 5, 0, 89, 0, 5, 0 },
+  { "talent_fervor_of_battle", 343, "talent", nullptr, 0, nullptr, 0, 135932, 1, 5, 0, 89, 0, 5, 0 },
+  { "talent_tactician", 344, "talent", nullptr, 0, nullptr, 0, 112134, 1, 5, 0, 89, 0, 5, 0 },
+  { "talent_colossus_smash", 345, "talent", nullptr, 0, nullptr, 0, 112144, 1, 5, 0, 89, 17, 5, 1 },
+  { "talent_impale", 346, "talent", nullptr, 0, nullptr, 0, 112146, 1, 5, 0, 106, 0, 6, 0 },
+  { "talent_brute_force", 347, "talent", nullptr, 0, nullptr, 0, 135936, 1, 5, 0, 106, 0, 6, 0 },
+  { "talent_efficiency", 348, "talent", nullptr, 0, nullptr, 0, 135935, 1, 5, 0, 106, 0, 6, 0 },
+  { "talent_overpowering_finish", 349, "talent", nullptr, 0, nullptr, 0, 114733, 1, 5, 0, 106, 0, 6, 0 },
+  { "talent_mass_execution", 350, "talent", nullptr, 0, nullptr, 0, 137473, 1, 5, 0, 106, 0, 6, 0 },
+  { "talent_strength_of_arms", 351, "talent", nullptr, 0, nullptr, 0, 135944, 1, 5, 0, 106, 0, 6, 0 },
+  { "talent_strength_of_arms_r2", 352, "talent", nullptr, 0, nullptr, 0, 135944, 2, 5, 1, 106, 0, 6, 0 },
+  { "talent_just_warming_up", 353, "talent", nullptr, 0, nullptr, 0, 135943, 1, 6, 0, 106, 0, 6, 0 },
+  { "talent_broad_strokes", 354, "talent", nullptr, 0, nullptr, 0, 135942, 1, 6, 0, 106, 0, 6, 0 },
+  { "talent_sharpened_blades", 355, "talent", nullptr, 0, nullptr, 0, 112320, 1, 6, 0, 106, 0, 6, 0 },
+  { "talent_sharpened_blades_r2", 356, "talent", nullptr, 0, nullptr, 0, 112320, 2, 6, 1, 106, 0, 6, 0 },
+  { "talent_cleave", 357, "talent", nullptr, 0, nullptr, 0, 112147, 1, 7, 0, 106, 17, 6, 1 },
+  { "talent_powerful_momentum", 358, "talent", nullptr, 0, nullptr, 0, 114739, 1, 7, 0, 123, 0, 7, 0 },
+  { "talent_martial_prowess", 359, "talent", nullptr, 0, nullptr, 0, 135934, 1, 7, 0, 123, 0, 7, 0 },
+  { "talent_dreadnaught", 360, "talent", nullptr, 0, nullptr, 0, 112137, 1, 7, 0, 123, 0, 7, 0 },
+  { "talent_deep_wounds", 361, "talent", nullptr, 0, nullptr, 0, 135940, 1, 7, 0, 123, 0, 7, 0 },
+  { "talent_tactical_edge", 362, "talent", nullptr, 0, nullptr, 0, 135939, 1, 7, 0, 123, 0, 7, 0 },
+  { "talent_crushing_combo", 363, "talent", nullptr, 0, nullptr, 0, 135938, 1, 7, 0, 123, 0, 7, 0 },
+  { "talent_massacre", 364, "talent", nullptr, 0, nullptr, 0, 112145, 1, 7, 0, 123, 0, 7, 0 },
+  { "talent_collateral_damage", 365, "talent", nullptr, 0, nullptr, 0, 135937, 1, 7, 0, 123, 2, 7, 0 },
+  { "talent_bloodborne", 366, "talent", nullptr, 0, nullptr, 0, 112135, 1, 7, 0, 125, 0, 7, 0 },
+  { "talent_bloodborne_r2", 367, "talent", nullptr, 0, nullptr, 0, 112135, 2, 7, 1, 125, 0, 7, 0 },
+  { "talent_bladestorm", 368, "talent", nullptr, 0, nullptr, 0, 112314, 1, 8, 0, 125, 2, 7, 1 },
+  { "talent_ravager", 369, "talent", nullptr, 0, nullptr, 0, 136702, 1, 8, 0, 127, 2, 8, 1 },
+  { "talent_critical_thinking", 370, "talent", nullptr, 0, nullptr, 0, 112317, 1, 8, 0, 129, 0, 9, 0 },
+  { "talent_critical_thinking_r2", 371, "talent", nullptr, 0, nullptr, 0, 112317, 2, 8, 1, 129, 0, 9, 0 },
+  { "talent_master_tactician", 372, "talent", nullptr, 0, nullptr, 0, 114740, 1, 9, 0, 129, 0, 9, 0 },
+  { "talent_bloodletting", 373, "talent", nullptr, 0, nullptr, 0, 112310, 1, 9, 0, 129, 0, 9, 0 },
+  { "talent_executioners_precision", 374, "talent", nullptr, 0, nullptr, 0, 112318, 1, 9, 0, 129, 2, 9, 0 },
+  { "talent_fatality", 375, "talent", nullptr, 0, nullptr, 0, 112311, 1, 9, 0, 131, 0, 9, 0 },
+  { "talent_battlelord", 376, "talent", nullptr, 0, nullptr, 0, 135933, 1, 9, 0, 131, 0, 9, 0 },
+  { "talent_mortal_wounds", 377, "talent", nullptr, 0, nullptr, 0, 135941, 1, 9, 0, 131, 0, 9, 0 },
+  { "talent_avatar", 378, "talent", nullptr, 0, nullptr, 0, 136703, 1, 9, 0, 131, 2, 9, 1 },
+  { "talent_master_of_warfare", 379, "talent", nullptr, 0, nullptr, 0, 136989, 1, 9, 0, 133, 0, 10, 0 },
+  { "talent_master_of_warfare_r2", 380, "talent", nullptr, 0, nullptr, 0, 136988, 1, 9, 1, 133, 0, 10, 0 },
+  { "talent_master_of_warfare_r3", 381, "talent", nullptr, 0, nullptr, 0, 136988, 2, 10, 1, 133, 0, 10, 0 },
+  { "talent_master_of_warfare_r4", 382, "talent", nullptr, 0, nullptr, 0, 136987, 1, 11, 1, 133, 0, 10, 0 },
+  { "talent_martial_expert", 383, "talent", nullptr, 0, nullptr, 0, 117409, 1, 12, 0, 133, 0, 10, 0 },
+  { "talent_colossal_might", 384, "talent", nullptr, 0, nullptr, 0, 117416, 1, 12, 0, 133, 2, 10, 0 },
+  { "talent_boneshaker", 385, "talent", nullptr, 0, nullptr, 0, 117386, 1, 12, 0, 135, 0, 10, 0 },
+  { "talent_earthquaker", 386, "talent", nullptr, 0, nullptr, 0, 119858, 1, 12, 0, 135, 0, 10, 0 },
+  { "talent_decimator", 387, "talent", nullptr, 0, nullptr, 0, 136073, 1, 12, 0, 135, 0, 10, 0 },
+  { "talent_one_against_many", 388, "talent", nullptr, 0, nullptr, 0, 117396, 1, 12, 0, 135, 0, 10, 0 },
+  { "talent_arterial_bleed", 389, "talent", nullptr, 0, nullptr, 0, 119856, 1, 12, 0, 135, 0, 10, 0 },
+  { "talent_tide_of_battle", 390, "talent", nullptr, 0, nullptr, 0, 117408, 1, 12, 0, 135, 0, 10, 0 },
+  { "talent_no_stranger_to_pain", 391, "talent", nullptr, 0, nullptr, 0, 117412, 1, 12, 0, 135, 0, 10, 0 },
+  { "talent_veteran_vitality", 392, "talent", nullptr, 0, nullptr, 0, 119857, 1, 12, 0, 135, 0, 10, 0 },
+  { "talent_cut_to_the_bone", 393, "talent", nullptr, 0, nullptr, 0, 136072, 1, 12, 0, 135, 0, 10, 0 },
+  { "talent_practiced_strikes", 394, "talent", nullptr, 0, nullptr, 0, 117393, 1, 12, 0, 135, 0, 10, 0 },
+  { "talent_precise_might", 395, "talent", nullptr, 0, nullptr, 0, 117391, 1, 12, 0, 135, 0, 10, 0 },
+  { "talent_mountain_of_muscle_and_scars", 396, "talent", nullptr, 0, nullptr, 0, 117403, 1, 12, 0, 135, 0, 10, 0 },
+  { "talent_celeritous_conclusion", 397, "talent", nullptr, 0, nullptr, 0, 136071, 1, 12, 0, 135, 0, 10, 0 },
+  { "talent_dominance_of_the_colossus", 398, "talent", nullptr, 0, nullptr, 0, 117390, 1, 12, 0, 135, 0, 10, 0 },
+  { "talent_imminent_demise", 399, "talent", nullptr, 0, nullptr, 0, 117385, 1, 12, 0, 135, 2, 10, 0 },
+  { "talent_overwhelming_blades", 400, "talent", nullptr, 0, nullptr, 0, 117407, 1, 12, 0, 137, 0, 10, 0 },
+  { "talent_relentless_pursuit", 401, "talent", nullptr, 0, nullptr, 0, 117392, 1, 12, 0, 137, 0, 10, 0 },
+  { "talent_vicious_agility", 402, "talent", nullptr, 0, nullptr, 0, 123408, 1, 12, 0, 137, 0, 10, 0 },
+  { "talent_violent_euphoria", 403, "talent", nullptr, 0, nullptr, 0, 136076, 1, 12, 0, 137, 0, 10, 0 },
+  { "talent_death_drive", 404, "talent", nullptr, 0, nullptr, 0, 117410, 1, 12, 0, 137, 0, 10, 0 },
+  { "talent_culling_cyclone", 405, "talent", nullptr, 0, nullptr, 0, 117383, 1, 12, 0, 137, 0, 10, 0 },
+  { "talent_brutal_finish", 406, "talent", nullptr, 0, nullptr, 0, 123409, 1, 12, 0, 137, 0, 10, 0 },
+  { "talent_fierce_followthrough", 407, "talent", nullptr, 0, nullptr, 0, 117384, 1, 12, 0, 137, 0, 10, 0 },
+  { "talent_opportunist", 408, "talent", nullptr, 0, nullptr, 0, 123770, 1, 12, 0, 137, 2, 10, 0 },
+  { "talent_deadly_focus", 409, "talent", nullptr, 0, nullptr, 0, 136075, 1, 12, 0, 139, 0, 10, 0 },
+  { "talent_show_no_mercy", 410, "talent", nullptr, 0, nullptr, 0, 117381, 1, 12, 0, 139, 0, 10, 0 },
+  { "talent_reap_the_storm", 411, "talent", nullptr, 0, nullptr, 0, 117406, 1, 12, 0, 139, 0, 10, 0 },
+  { "talent_slayers_malice", 412, "talent", nullptr, 0, nullptr, 0, 117398, 1, 12, 0, 139, 0, 10, 0 },
+  { "talent_unhinged", 413, "talent", nullptr, 0, nullptr, 0, 136074, 1, 12, 0, 139, 0, 10, 0 },
+  { "talent_unrelenting_onslaught", 414, "talent", nullptr, 0, nullptr, 0, 117417, 1, 12, 0, 139, 0, 10, 0 },
+  { "hero_colossus", 415, "talent", nullptr, 0, nullptr, 0, 117415, 1, 12, 0, 139, 17, 10, 1 },
+  { "hero_slayer", 416, "talent", nullptr, 0, nullptr, 0, 117411, 1, 12, 0, 156, 0, 11, 0 },
+  { "trinket_voracious_heart_of_ulatek", 417, "special_effect", nullptr, 1297761, nullptr, 0, 0, 0, 12, 0, 156, 4, 11, 1 },
+  { "enchant_arcane_mastery", 418, "special_effect", nullptr, 1236721, nullptr, 0, 0, 0, 12, 0, 160, 1, 12, 0 },
+  { "enchant_berserkers_rage", 419, "special_effect", nullptr, 1236728, nullptr, 0, 0, 0, 12, 0, 161, 1, 12, 0 },
+  { "embellishment_arcanoweave_lining", 420, "special_effect", nullptr, 1283697, nullptr, 0, 0, 0, 12, 0, 162, 1, 12, 0 },
+  { "embellishment_hunters_ritual_stone", 421, "special_effect", nullptr, 1297382, nullptr, 0, 0, 0, 12, 0, 163, 4, 12, 0 },
+  { "item_venomcursed_mastery", 422, "special_effect", nullptr, 1307923, nullptr, 0, 0, 0, 12, 0, 167, 1, 12, 0 },
+  { "item_venomcursed_ascendance", 423, "special_effect", nullptr, 1317582, nullptr, 0, 0, 0, 12, 0, 168, 1, 12, 0 },
+  { "set_bite_of_zuljan_2pc", 424, "set_bonus", nullptr, 0, "MID_BOZ", 2, 0, 0, 12, 0, 169, 0, 12, 0 },
+  { "mode_funnel", 425, "funnel_mode", nullptr, 0, nullptr, 0, 0, 0, 12, 0, 169, 0, 12, 0 },
 };
 
 inline constexpr std::size_t RL_CAPABILITY_REQUIRES_COUNT = 12;
@@ -1450,13 +1471,10 @@ inline constexpr const char* RL_CAPABILITY_REQUIRES[RL_CAPABILITY_REQUIRES_COUNT
   "talent_master_of_warfare_r3",
 };
 
-inline constexpr std::size_t RL_CAPABILITY_GOVERNED_SLOTS_COUNT = 165;
+inline constexpr std::size_t RL_CAPABILITY_GOVERNED_SLOTS_COUNT = 169;
 inline constexpr std::size_t RL_CAPABILITY_GOVERNED_SLOTS[RL_CAPABILITY_GOVERNED_SLOTS_COUNT] = {
-  40,
-  242,
-  178,
-  179,
-  180,
+  42,
+  245,
   181,
   182,
   183,
@@ -1469,10 +1487,10 @@ inline constexpr std::size_t RL_CAPABILITY_GOVERNED_SLOTS[RL_CAPABILITY_GOVERNED
   190,
   191,
   192,
-  240,
-  148,
-  149,
-  150,
+  193,
+  194,
+  195,
+  243,
   151,
   152,
   153,
@@ -1485,11 +1503,11 @@ inline constexpr std::size_t RL_CAPABILITY_GOVERNED_SLOTS[RL_CAPABILITY_GOVERNED
   160,
   161,
   162,
-  42,
-  245,
-  193,
-  194,
-  195,
+  163,
+  164,
+  165,
+  45,
+  248,
   196,
   197,
   198,
@@ -1502,11 +1520,11 @@ inline constexpr std::size_t RL_CAPABILITY_GOVERNED_SLOTS[RL_CAPABILITY_GOVERNED
   205,
   206,
   207,
-  34,
-  237,
-  118,
-  119,
-  120,
+  208,
+  209,
+  210,
+  36,
+  240,
   121,
   122,
   123,
@@ -1519,14 +1537,14 @@ inline constexpr std::size_t RL_CAPABILITY_GOVERNED_SLOTS[RL_CAPABILITY_GOVERNED
   130,
   131,
   132,
-  35,
-  36,
-  37,
-  38,
-  238,
   133,
   134,
   135,
+  37,
+  38,
+  39,
+  40,
+  241,
   136,
   137,
   138,
@@ -1539,13 +1557,13 @@ inline constexpr std::size_t RL_CAPABILITY_GOVERNED_SLOTS[RL_CAPABILITY_GOVERNED
   145,
   146,
   147,
-  22,
-  23,
-  32,
-  233,
-  58,
-  59,
-  60,
+  148,
+  149,
+  150,
+  24,
+  25,
+  34,
+  236,
   61,
   62,
   63,
@@ -1558,11 +1576,11 @@ inline constexpr std::size_t RL_CAPABILITY_GOVERNED_SLOTS[RL_CAPABILITY_GOVERNED
   70,
   71,
   72,
-  31,
-  232,
-  43,
-  44,
-  45,
+  73,
+  74,
+  75,
+  33,
+  235,
   46,
   47,
   48,
@@ -1575,27 +1593,27 @@ inline constexpr std::size_t RL_CAPABILITY_GOVERNED_SLOTS[RL_CAPABILITY_GOVERNED
   55,
   56,
   57,
+  58,
+  59,
+  60,
   4,
   5,
-  29,
-  230,
-  39,
-  239,
-  11,
-  12,
-  28,
-  229,
+  31,
+  233,
+  41,
+  242,
+  13,
+  14,
+  30,
+  232,
   6,
   7,
-  17,
-  18,
+  19,
   20,
-  21,
-  33,
-  234,
-  73,
-  74,
-  75,
+  22,
+  23,
+  35,
+  237,
   76,
   77,
   78,
@@ -1608,18 +1626,25 @@ inline constexpr std::size_t RL_CAPABILITY_GOVERNED_SLOTS[RL_CAPABILITY_GOVERNED
   85,
   86,
   87,
-  15,
-  14,
+  88,
+  89,
+  90,
+  9,
+  10,
+  44,
+  251,
+  17,
+  16,
   0,
   8,
-  16,
-  19,
+  18,
+  21,
+  29,
+  28,
   27,
-  26,
-  25,
 };
 
-inline constexpr std::size_t RL_CAPABILITY_GOVERNED_ACTIONS_COUNT = 11;
+inline constexpr std::size_t RL_CAPABILITY_GOVERNED_ACTIONS_COUNT = 12;
 inline constexpr const char* RL_CAPABILITY_GOVERNED_ACTIONS[RL_CAPABILITY_GOVERNED_ACTIONS_COUNT] = {
   "storm_bolt",
   "rend",
@@ -1632,10 +1657,11 @@ inline constexpr const char* RL_CAPABILITY_GOVERNED_ACTIONS[RL_CAPABILITY_GOVERN
   "ravager",
   "avatar",
   "demolish",
+  "use_item_voracious_heart_of_ulatek",
 };
 
 inline constexpr double RL_CAPABILITY_FIXED_VALUE = 0.0;
-inline constexpr const char* RL_NET_LAYOUT_SHA = "rl-layout-v1:a6c1ff2733ffd56d3ff666a15786da15a32b8a0910ecab71566e6fd69c95c47f";
+inline constexpr const char* RL_NET_LAYOUT_SHA = "rl-layout-v1:4bc2e2d45665f0a9e388abf9a8140c3c3101a5f634be42228bca084b73b93598";
 
 // ---- Target scorer feature list (Phase 230-02, SCOR-01) ----
 
@@ -1710,7 +1736,7 @@ inline constexpr rl_aim_fact_desc RL_AIM_FACT_DESCS[RL_TARGET_FEATURES] = {
 };
 
 inline constexpr std::size_t RL_AIM_CONTEXT_COUNT = 1;
-inline constexpr std::size_t RL_AIM_CONTEXT_OBS_SLOTS[RL_AIM_CONTEXT_COUNT] = { 420 };
+inline constexpr std::size_t RL_AIM_CONTEXT_OBS_SLOTS[RL_AIM_CONTEXT_COUNT] = { 425 };
 inline constexpr const char* RL_AIM_CONTEXT_NAMES[RL_AIM_CONTEXT_COUNT] = {
   "capability.mode_funnel",
 };
