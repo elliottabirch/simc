@@ -65,6 +65,9 @@
 //                                          know them); exactly two non-empty parts
 //   solver_search_chance_rows=0..64        (280-07) the most chance rows one search writes (default 16); second and root
 //                                          rows are never capped
+//   solver_search_pass1=1..256             (280-10) copies per candidate in the first pass (default 8, the value before
+//                                          this option); pass1 x (candidates + 1 hold when holds=1) (+ 2 at depth 2) must
+//                                          not exceed solver_search_copies
 //
 // Read, not registered here: solver_branch_value_divisor (> 0), solver_branch_gamma, solver_branch_salt_base,
 // solver_branch_independent_dice and solver_branch_redeal (both must stay 1: paired futures are refused).
@@ -106,6 +109,7 @@ struct config_t
   std::string summary;                // solver_search_summary (280-07)
   std::string fight;                  // solver_search_fight (280-07): "<shape>,<setup>"
   int chance_rows = 16;               // solver_search_chance_rows (280-07), 0..64
+  int pass1 = 8;                      // solver_search_pass1 (280-10): copies per candidate in the first pass, 1..256 (default 8)
   // set by validate()
   std::vector<std::int64_t> at_list;  // parsed from `at`
   bool press_best = false;

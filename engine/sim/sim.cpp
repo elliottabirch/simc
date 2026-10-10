@@ -4582,6 +4582,8 @@ void sim_t::create_options()
     add_option( opt_string( "solver_search_summary", ss.summary ) );
     add_option( opt_string( "solver_search_fight", ss.fight ) );
     add_option( opt_int( "solver_search_chance_rows", ss.chance_rows ) );
+    // tstl-sylvanas 280-10: copies per candidate in the first pass (default 8); range and the copies check in validate()
+    add_option( opt_int( "solver_search_pass1", ss.pass1 ) );
   }
   // S1 (260927-s1-spend-timing): forbids lightning_bolt/tempest (and, 261002-8rs, primordial_storm
   // when the action table offers it; the third Lightning-family spender is untouched) below n stacks

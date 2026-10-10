@@ -131,8 +131,8 @@ int g_boot_mode = 0;
 // The value blob (solver_search_value), loaded once at validate; a copy shares it through fork().
 std::shared_ptr<rl_policy::rl_weights_t> g_value_w;
 
-// The depth-one reading of G280-7: 8 copies per candidate first.
-constexpr int PASS1_PER_CAND = 8;
+// The depth-one reading of G280-7: 8 copies per candidate first. 280-10 makes it an option (solver_search_pass1, config_t
+// default 8); with the option absent the search is byte for byte what it was.
 // Linux guarantees a write() of at most PIPE_BUF bytes to a pipe is atomic against other writers.
 constexpr std::size_t LINE_MAX_BYTES = 4096;
 
@@ -2629,10 +2629,10 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* obs, 
   std::map<int, int> leaves_hist;
   pair_half_t ph;
 
-  // ---- pass 1: 8 copies per candidate (candidate-major), no second-level override: the (candidate, rank 0) cell ----
+  // ---- pass 1: solver_search_pass1 copies per candidate (default 8; candidate-major), no second-level override: the (candidate, rank 0) cell ----
   std::vector<copy_task_t> t1;
   for ( int i = 0; i < C; ++i )
-    for ( int j = 0; j < PASS1_PER_CAND; ++j )
+    for ( int j = 0; j < c.pass1; ++j )
       t1.push_back( copy_task_t{ i, cands[ static_cast<std::size_t>( i ) ].button, false } );
   std::vector<copy_result_t> r1, raw1, raw2;
   int child_button = -1;
@@ -2642,7 +2642,7 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* obs, 
     return true;
   }
   for ( cand_t& cd : cands )
-    cd.spent = PASS1_PER_CAND;
+    cd.spent = c.pass1;
   add_samples( r1, cands, agg, leaves_hist );
   std::vector<gap_obs_t> gap_obs;  // 280-05: one observation per completed split node, pass 1 then pass 2
   collect_gaps( r1, gap_obs );
@@ -2670,7 +2670,7 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* obs, 
   }
 
   // ---- halving: drop the worst candidate by its pass-1 mean (a tie drops the lower-ranked one) ----
-  const int R2 = K - PASS1_PER_CAND * C;
+  const int R2 = K - c.pass1 * C;
   int dropped = -1;
   std::vector<int> order;  // candidate indices, best pass-1 mean first (ties: higher rank first)
   for ( int i = 0; i < C; ++i )
@@ -3268,14 +3268,20 @@ void validate( sim_t* sim )
   if ( c.second != 2 )
     refuse( fmt::format( "solver_search_second must be 2 (the second level is fixed at two buttons; got {}).", c.second ) );
   {
-    // pass 1 needs 8 copies per candidate; the hold candidate is one more; depth two needs at least one pair after it
+    // pass 1 needs solver_search_pass1 copies per candidate (default 8); the hold candidate is one more; depth two needs at
+    // least one pair after it
+    if ( c.pass1 < 1 )
+      refuse( fmt::format( "solver_search_pass1 must be at least 1 (got {}): the first pass needs at least one copy per "
+                           "candidate.", c.pass1 ) );
+    if ( c.pass1 > 256 )
+      refuse( fmt::format( "solver_search_pass1 must be at most 256 (got {}).", c.pass1 ) );
     const int n_cands_max = c.candidates + ( c.holds ? 1 : 0 );
-    const int need = PASS1_PER_CAND * n_cands_max + ( c.depth == 2 ? 2 : 0 );
+    const int need = c.pass1 * n_cands_max + ( c.depth == 2 ? 2 : 0 );
     if ( c.copies < need )
-      refuse( fmt::format( "solver_search_copies={} is below {} = 8 x ({} candidates{}){} (pass 1 alone needs 8 copies "
+      refuse( fmt::format( "solver_search_copies={} is below {} = {} x ({} candidates{}){} (pass 1 alone needs {} copies "
                            "per candidate; solver_search_copies must cover them).",
-                           c.copies, need, c.candidates, c.holds ? " + 1 hold" : "",
-                           c.depth == 2 ? " + 2 for one pair at depth 2" : "" ) );
+                           c.copies, need, c.pass1, c.candidates, c.holds ? " + 1 hold" : "",
+                           c.depth == 2 ? " + 2 for one pair at depth 2" : "", c.pass1 ) );
   }
   if ( c.copies > 4096 )
     refuse( fmt::format( "solver_search_copies must be at most 4096 (got {}).", c.copies ) );
@@ -3422,13 +3428,13 @@ void validate( sim_t* sim )
   g_any = true;
   fmt::print( "[RL_SEARCH] candidates={} window={:.17g} copies={} jobs={} at={} margin={:.17g} press={} expected_crit={} "
               "divisor={:.17g} gamma={:.17g} salt_base={} splits={} split_site={} audit_nosplit={} sites_in={} sites_out={} "
-              "depth={} second={} holds={} value={} bootstrap={} record={} summary={} fight={} chance_rows={} log={}\n",
+              "depth={} second={} holds={} value={} bootstrap={} record={} summary={} fight={} chance_rows={} pass1={} log={}\n",
               c.candidates, c.window, c.copies, c.jobs, c.at_list.size(), c.margin, c.press, c.expected_crit ? 1 : 0,
               sb.value_divisor, sb.gamma, sb.branch_salt_base, c.splits, c.split_site.empty() ? "-" : c.split_site,
               c.nosplit_audit ? 1 : 0, c.sites_in.empty() ? "-" : c.sites_in, c.sites_out.empty() ? "-" : c.sites_out,
               c.depth, c.depth == 2 ? c.second : 0, c.holds ? 1 : 0, c.value.empty() ? "-" : c.value,
               g_boot_mode == 0 ? "none" : g_boot_mode == 1 ? "q" : "value", c.record.empty() ? "-" : c.record,
-              c.summary.empty() ? "-" : c.summary, c.fight.empty() ? "-" : c.fight, c.chance_rows, c.log );
+              c.summary.empty() ? "-" : c.summary, c.fight.empty() ? "-" : c.fight, c.chance_rows, c.pass1, c.log );
   std::fflush( stdout );
 }
 
@@ -3648,14 +3654,14 @@ void write_summary( sim_t* sim )
       "\"listed\":{},\"listed_reached\":{},\"listed_skipped\":{},"
       "\"config\":{{\"margin\":{},\"copies\":{},\"window\":{},\"candidates\":{},\"depth\":{},\"second\":{},\"splits\":{},"
       "\"holds\":{},\"bootstrap\":{},\"gamma\":{},\"jobs\":{},\"salt_base\":{},\"press_best\":{},\"expected_crit\":{},"
-      "\"divisor\":{}}}}}",
+      "\"divisor\":{},\"pass1\":{}}}}}",
       g_count.decisions, g_count.near_ties, g_count.branched, g_count.overrides, g_count.skipped_fail, g_count.children,
       g_count.child_fail, jnum( g_count.child_cpu_s ), jnum( g_count.fork_cpu_s ), jnum( g_count.wall_branch_s ),
       g_count.children_reaped, g_count.searches, g_count.unknown_lines, jnum( self_cpu ), jnum( kids_cpu ),
       g_count.rss_kb_first, g_count.rss_kb_last, g_count.fd_first, g_count.fd_last, g_count.leaf_vmhwm_kb_max,
       c.at_list.size(), g_count.listed_reached, g_count.listed_skipped, jnum( c.margin ), c.copies, jnum( c.window ),
       c.candidates, c.depth, c.depth == 2 ? c.second : 0, c.splits, c.holds ? 1 : 0, g_boot_mode, jnum( sb.gamma ), c.jobs, sb.branch_salt_base, c.press_best ? 1 : 0,
-      c.expected_crit ? 1 : 0, jnum( sb.value_divisor ) );
+      c.expected_crit ? 1 : 0, jnum( sb.value_divisor ), c.pass1 );
   if ( g_log )
   {
     *g_log << js << "\n";
