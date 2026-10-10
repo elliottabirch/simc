@@ -433,12 +433,17 @@ wait_result build_wait( const rl_state_t& s, const rl_wait_anchor& anchor );
 // column) before five named blocks + a shared per-spell layer + the pass-through capability
 // columns feed the SAME trunk + dueling combine `ln_dueling` already uses -- see
 // rl_grouped_layout_t below for the split and rl_policy_net.cpp's grouped forward branch.
+// tstl-sylvanas 280-01: `chooser_value` is body index 4 on the wire (RLW1 format 7, contract C-B): the
+// SAME grouped trunk as grouped_ln_dueling, then ONE final linear layer (the chooser row, one score per
+// button, read by the unchanged masked_argmax with no dueling combine). The value head lives in the
+// separate CHVL section (rl_weights_t::value_*), reached through value_forward().
 enum class rl_body_type
 {
   mlp,
   dueling,
   ln_dueling,
-  grouped_ln_dueling
+  grouped_ln_dueling,
+  chooser_value
 };
 
 // NET-01 (Phase 222): the ONE derived layer-split rule this language uses --
@@ -624,12 +629,29 @@ struct rl_weights_t
   // empty otherwise). `layers` above holds ONLY the trunk + v_head/a_head remainder for a grouped
   // blob -- see rl_grouped_layout_t's own doc comment for the load-time split.
   rl_grouped_layout_t grouped;
+
+  // tstl-sylvanas 280-01 (SRCH-09, contract C-B): the RLW1 v7 CHVL section -- the value head, a
+  // linear layer [last hidden width -> value_n_quantiles] (row-major weights then bias, float32) and
+  // `value_scale` (the reward divisor the value is expressed in). Present only when body ==
+  // chooser_value (format 7). value_forward() applies it; every other body leaves these defaults.
+  bool          has_value_head   = false;
+  std::uint32_t value_n_quantiles = 0;
+  std::vector<float> value_w;     // [value_n_quantiles][last hidden width], row-major
+  std::vector<float> value_b;     // [value_n_quantiles]
+  float         value_scale      = 1.0f;
 };
 
 rl_weights_t load_rlw1( const std::string& path );   // throws sc_runtime_error, named per refusal
 void         forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ],
                        const std::uint8_t mask[ RL_ACTION_DIM ], float out_q[ RL_ACTION_DIM ] );
 int          masked_argmax( const float q[ RL_ACTION_DIM ], const std::uint8_t mask[ RL_ACTION_DIM ] );
+
+// tstl-sylvanas 280-01 (SRCH-09): the v7 value head's estimate for one observation -- the mean over the
+// head's quantiles of (value weights x the trunk's last hidden activation + value bias), multiplied by
+// `value_scale` (G280-11). Runs the trunk through forward() (an all-legal mask; the chooser row it
+// produces is discarded) and reads the hidden activation forward() leaves in hidden_scratch.
+// Throws a named sc_runtime_error when the weights carry no value head (has_value_head false).
+double       value_forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ] );
 
 // Phase 259 (plan 259-05b): the aim head's own forward pass -- one hidden-layer stack (ReLU, the
 // SAME activation forward()'s mlp branch uses -- no second activation formula) then a single

@@ -82,7 +82,9 @@ namespace rl_policy
 // independently re-derived copy (222-RESEARCH.md "Anti-Patterns to Avoid").
 std::size_t hidden_layer_count( rl_body_type body, std::size_t n_layers )
 {
-  return body == rl_body_type::mlp ? n_layers - 1 : n_layers - 2;
+  // tstl-sylvanas 280-01: chooser_value is mlp-shaped past the trunk (hidden layers, then ONE final
+  // chooser layer), so it hides n_layers - 1 layers like mlp; the dueling bodies hide n_layers - 2.
+  return ( body == rl_body_type::mlp || body == rl_body_type::chooser_value ) ? n_layers - 1 : n_layers - 2;
 }
 
 const char* body_name( rl_body_type body )
@@ -93,6 +95,7 @@ const char* body_name( rl_body_type body )
     case rl_body_type::dueling: return "dueling";
     case rl_body_type::ln_dueling: return "ln-dueling";
     case rl_body_type::grouped_ln_dueling: return "grouped-ln-dueling";
+    case rl_body_type::chooser_value: return "chooser-value";   // tstl-sylvanas 280-01
   }
   return "unknown";
 }
@@ -120,7 +123,14 @@ constexpr std::uint32_t RLW1_MIN_SUPPORTED_FORMAT_VERSION = 2;
 // section) stays INSIDE the contiguous range 2..6 but is refused by name below: a contiguous
 // range cannot express "all but 4", so the refusal is an explicit check at the version gate.
 // Format 6 = format 5's STRUCTURE section (body 3 only) followed by the AIM section.
-constexpr std::uint32_t RLW1_MAX_SUPPORTED_FORMAT_VERSION = 6;
+// tstl-sylvanas 280-01 (SRCH-09, G280-13, contract C-B): 6 -> 7 -- widening the accepted SET again.
+// Format 7 = format 6's sections (STRUCTURE, AIM) followed by the CHVL value-head section, body 4
+// ('chooser-value') ONLY; format 8 and above stay refused by the range message below.
+constexpr std::uint32_t RLW1_MAX_SUPPORTED_FORMAT_VERSION = 7;
+constexpr std::uint32_t RLW1_CHOOSER_VALUE_FORMAT_VERSION = 7;
+// CHVL section bounds: n_quantiles in [1, 256] (the value head is a linear layer, one row per quantile).
+constexpr std::uint32_t RLW1_MIN_VALUE_QUANTILES = 1;
+constexpr std::uint32_t RLW1_MAX_VALUE_QUANTILES = 256;
 constexpr std::uint32_t RLW1_RETIRED_SCORER_FORMAT_VERSION = 4;
 constexpr std::uint32_t RLW1_AIM_FORMAT_VERSION = 6;
 constexpr std::uint32_t RLW1_STRUCTURE_FORMAT_VERSION = 5;
@@ -173,10 +183,11 @@ rl_body_type decode_body_type( std::uint32_t raw, const std::string& path )
     case 1: return rl_body_type::dueling;
     case 2: return rl_body_type::ln_dueling;
     case 3: return rl_body_type::grouped_ln_dueling;
+    case 4: return rl_body_type::chooser_value;   // tstl-sylvanas 280-01
     default:
       throw sc_runtime_error( fmt::format(
           "rl_policy::load_rlw1: file '{}' declares body_type={}, must be 0 (mlp), 1 (dueling), 2 "
-          "(ln-dueling), or 3 (grouped-ln-dueling)",
+          "(ln-dueling), 3 (grouped-ln-dueling), or 4 (chooser-value)",
           path, raw ) );
   }
 }
@@ -189,7 +200,8 @@ rl_body_type decode_body_type( std::uint32_t raw, const std::string& path )
 // depth-2 special case, so every pre-222 blob stays readable.
 std::size_t expected_layer_count( rl_body_type body )
 {
-  return body == rl_body_type::mlp ? 2 : 3;
+  // tstl-sylvanas 280-01: chooser_value needs one hidden layer and the chooser layer, like mlp.
+  return ( body == rl_body_type::mlp || body == rl_body_type::chooser_value ) ? 2 : 3;
 }
 
 // Phase 230-02 (SCOR-01, T-230-01-01), reused by the v6 aim section (259-05b): an auxiliary
@@ -511,7 +523,7 @@ rl_weights_t load_rlw1( const std::string& path )
   {
     throw sc_runtime_error( fmt::format(
         "rl_policy::load_rlw1: file '{}' has format_version=4, whose scorer section is retired; "
-        "its successor is the v6 aim section (this loader reads format_version 2, 3, 5 and 6)",
+        "its successor is the v6 aim section (this loader reads format_version 2, 3, 5, 6 and 7)",
         path ) );
   }
 
@@ -523,7 +535,28 @@ rl_weights_t load_rlw1( const std::string& path )
   std::uint32_t body_raw = 0;
   std::memcpy( &body_raw, data.data() + 16, 4 );
   w.body = decode_body_type( body_raw, path );
-  const bool is_grouped = w.body == rl_body_type::grouped_ln_dueling;
+  // tstl-sylvanas 280-01: body 4 (chooser-value) shares body 3's grouped trunk, so every check below
+  // keyed on `is_grouped` (STRUCTURE pairing, identity v3 subset, the block/shared/trunk split, the
+  // skipped first-layer width check, the grouped scratch) applies to both.
+  const bool is_grouped = w.body == rl_body_type::grouped_ln_dueling || w.body == rl_body_type::chooser_value;
+
+  // tstl-sylvanas 280-01 (contract C-B): body 4 requires format 7 and format 7 requires body 4 -- the
+  // same two-way pairing the STRUCTURE section has with the grouped bodies, each refused by a message
+  // naming the body and the version.
+  if ( w.body == rl_body_type::chooser_value && format_version != RLW1_CHOOSER_VALUE_FORMAT_VERSION )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' declares body='chooser-value' at format_version={}, but "
+        "that body exists only at format_version {} (its CHVL value-head section)",
+        path, format_version, RLW1_CHOOSER_VALUE_FORMAT_VERSION ) );
+  }
+  if ( format_version == RLW1_CHOOSER_VALUE_FORMAT_VERSION && w.body != rl_body_type::chooser_value )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' declares format_version={} but body='{}' is not "
+        "'chooser-value' -- format_version {} is the chooser-value body only",
+        path, format_version, body_name( w.body ), RLW1_CHOOSER_VALUE_FORMAT_VERSION ) );
+  }
 
   // 246.1-05 (CAP-01/CAP-02): body 3 requires v5 (its STRUCTURE section has no byte layout
   // below it); v5 requires body 3 (no other body has a STRUCTURE section to parse) -- mirrors
@@ -934,6 +967,80 @@ rl_weights_t load_rlw1( const std::string& path )
     }
   }
 
+  // tstl-sylvanas 280-01 (SRCH-09, G280-13, contract C-B): the v7 CHVL section, after the AIM section.
+  // Layout (little-endian, packed): 4 ASCII bytes 'CHVL', n_quantiles (uint32), the value weights
+  // [n_quantiles][hidden] float32 row-major, the bias [n_quantiles] float32, value_scale (float32,
+  // finite and > 0). `hidden` is the last HIDDEN layer's out_features (the layer before the chooser
+  // layer); there is no in_features field in the section. Every read is length-checked first
+  // (T-210-04 / T-280-01); the trailing-byte refusal below still runs after it.
+  if ( format_version >= RLW1_CHOOSER_VALUE_FORMAT_VERSION )
+  {
+    if ( raw_layers.size() < 2 )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' body='chooser-value' declares {} layer(s), needs at least 2 "
+          "(a hidden layer and the chooser layer) before the CHVL section can be sized",
+          path, raw_layers.size() ) );
+    }
+    if ( offset + 8 > data.size() )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' truncated -- the v7 CHVL section's tag and n_quantiles need "
+          "8 bytes at offset {}, only {} remain",
+          path, offset, data.size() - offset ) );
+    }
+    if ( std::memcmp( data.data() + offset, "CHVL", 4 ) != 0 )
+    {
+      std::string found;
+      for ( std::size_t bi = 0; bi < 4; ++bi )
+      {
+        const unsigned char ch = data[ offset + bi ];
+        found += ( ch >= 0x20 && ch < 0x7f ) ? std::string( 1, static_cast<char>( ch ) )
+                                              : fmt::format( "\\x{:02x}", static_cast<unsigned>( ch ) );
+      }
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' has bad CHVL section tag '{}' at offset {} (expected 'CHVL')",
+          path, found, offset ) );
+    }
+    offset += 4;
+    std::uint32_t n_quantiles = 0;
+    std::memcpy( &n_quantiles, data.data() + offset, 4 );
+    offset += 4;
+    if ( n_quantiles < RLW1_MIN_VALUE_QUANTILES || n_quantiles > RLW1_MAX_VALUE_QUANTILES )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' declares CHVL n_quantiles={}, must be {}..{}",
+          path, n_quantiles, RLW1_MIN_VALUE_QUANTILES, RLW1_MAX_VALUE_QUANTILES ) );
+    }
+    const std::uint64_t value_hidden = raw_layers[ raw_layers.size() - 2 ].out_features;
+    const std::uint64_t value_weight_count = static_cast<std::uint64_t>( n_quantiles ) * value_hidden;
+    const std::uint64_t value_needed = ( value_weight_count + n_quantiles + 1 ) * 4;
+    if ( offset + value_needed > data.size() )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' truncated mid-CHVL-section -- {} quantile row(s) of {} "
+          "weights, {} bias(es) and value_scale need {} bytes at offset {}, file is short by {} bytes",
+          path, n_quantiles, value_hidden, n_quantiles, value_needed, offset,
+          ( offset + value_needed ) - data.size() ) );
+    }
+    w.value_n_quantiles = n_quantiles;
+    w.value_w.resize( static_cast<std::size_t>( value_weight_count ) );
+    std::memcpy( w.value_w.data(), data.data() + offset, static_cast<std::size_t>( value_weight_count ) * 4 );
+    offset += static_cast<std::size_t>( value_weight_count ) * 4;
+    w.value_b.resize( n_quantiles );
+    std::memcpy( w.value_b.data(), data.data() + offset, static_cast<std::size_t>( n_quantiles ) * 4 );
+    offset += static_cast<std::size_t>( n_quantiles ) * 4;
+    std::memcpy( &w.value_scale, data.data() + offset, 4 );
+    offset += 4;
+    if ( !std::isfinite( w.value_scale ) || !( w.value_scale > 0.0f ) )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' declares CHVL value_scale={}, must be finite and greater than 0",
+          path, w.value_scale ) );
+    }
+    w.has_value_head = true;
+  }
+
   // Pitfall 14: read_rlw1 (and this loader, pre-222) never compared `offset`
   // to `data.size()` after the layer/section walk -- trailing bytes were
   // silently ignored. Strengthens v2 parsing too: closes it for every
@@ -1116,8 +1223,10 @@ rl_weights_t load_rlw1( const std::string& path )
   // w.layers (trunk + heads only, post-split above) follows the SAME convention -- every trunk
   // layer carries has_ln=true, exactly like ln-dueling's hidden layers.
   {
-    const bool expect_ln_hidden =
-        w.body == rl_body_type::ln_dueling || w.body == rl_body_type::grouped_ln_dueling;
+    // tstl-sylvanas 280-01: chooser_value's trunk layers carry has_ln=1, its final chooser layer 0.
+    const bool expect_ln_hidden = w.body == rl_body_type::ln_dueling ||
+                                  w.body == rl_body_type::grouped_ln_dueling ||
+                                  w.body == rl_body_type::chooser_value;
     const std::size_t n_hidden_for_ln =
         expect_ln_hidden ? hidden_layer_count( w.body, w.layers.size() ) : 0;
     for ( std::size_t i = 0; i < w.layers.size(); ++i )
@@ -1132,7 +1241,9 @@ rl_weights_t load_rlw1( const std::string& path )
     }
   }
 
-  if ( w.body == rl_body_type::mlp )
+  // tstl-sylvanas 280-01: chooser_value's w.layers (the trunk then the chooser layer) is a straight
+  // chain exactly like mlp's, so it shares this chain check.
+  if ( w.body == rl_body_type::mlp || w.body == rl_body_type::chooser_value )
   {
     // A straight chain: in -> hidden[0] -> hidden[1] -> ... -> out. Interior
     // dimensions must chain -- forward() indexes each hidden scratch entry
@@ -1562,7 +1673,7 @@ void forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ], const std::u
   // w.layers for a grouped blob is already [trunk_0 .. trunk_{T-1}, v_head, a_head] (the load-time
   // split in load_rlw1), identically shaped to ln-dueling's own layer list.
   const float* x = obs;
-  if ( w.body == rl_body_type::grouped_ln_dueling )
+  if ( w.body == rl_body_type::grouped_ln_dueling || w.body == rl_body_type::chooser_value )   // tstl-sylvanas 280-01
   {
     compute_grouped_input( w, obs );
     x = w.grouped.concat_scratch.data();
@@ -1609,7 +1720,9 @@ void forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ], const std::u
     layer_in = h.data();
   }
 
-  if ( w.body == rl_body_type::mlp )
+  // tstl-sylvanas 280-01: chooser_value writes its final (chooser) layer straight into out_q with NO
+  // dueling combine, so masked_argmax reads the chooser row exactly where it read the dueling output.
+  if ( w.body == rl_body_type::mlp || w.body == rl_body_type::chooser_value )
   {
     const rl_layer& out_layer = w.layers[ n_hidden ];  // the single output layer
     for ( std::uint32_t o = 0; o < out_layer.out_features; ++o )
@@ -1663,6 +1776,38 @@ void forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ], const std::u
   const float a_mean = a_sum / static_cast<float>( a_count );
   for ( std::uint32_t o = 0; o < a_head.out_features; ++o )
     out_q[ o ] = v + out_q[ o ] - a_mean;
+}
+
+// ---------------------------------------------------------------------------
+// value_forward -- tstl-sylvanas 280-01 (SRCH-09, G280-11). The v7 value head: mean over the CHVL
+// quantiles of (weights x the trunk's last hidden activation + bias), times value_scale. The trunk
+// is run by forward() itself (an all-legal mask; its chooser row is discarded), so there is ONE
+// copy of the trunk code; forward() leaves the last hidden layer's post-ReLU activations in
+// hidden_scratch, which is read here. threads=1 scratch reuse as in forward().
+// ---------------------------------------------------------------------------
+
+double value_forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ] )
+{
+  if ( !w.has_value_head )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::value_forward: these weights (body='{}', format_version={}) carry no CHVL value "
+        "head; only an RLW1 format 7 'chooser-value' blob does",
+        body_name( w.body ), w.format_version ) );
+  }
+  std::uint8_t all_legal[ RL_ACTION_DIM ];
+  for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+    all_legal[ i ] = 1;
+  float q[ RL_ACTION_DIM ];
+  forward( w, obs, all_legal, q );
+
+  const std::vector<float>& h = w.hidden_scratch.back();
+  const std::size_t hidden = h.size();
+  double sum = 0.0;
+  for ( std::uint32_t qi = 0; qi < w.value_n_quantiles; ++qi )
+    sum += static_cast<double>( w.value_b[ qi ] ) +
+           static_cast<double>( dot_fn( &w.value_w[ static_cast<std::size_t>( qi ) * hidden ], h.data(), static_cast<std::uint32_t>( hidden ) ) );
+  return ( sum / static_cast<double>( w.value_n_quantiles ) ) * static_cast<double>( w.value_scale );
 }
 
 // ---------------------------------------------------------------------------

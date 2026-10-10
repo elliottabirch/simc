@@ -1258,14 +1258,20 @@ int sim_t::main( const std::vector<std::string>& args )
         }
         q_json += "]";
 
+        // tstl-sylvanas 280-01 (SRCH-09): a chooser-value blob also reports its value head's answer
+        // through rl_policy::value_forward; every other body's output bytes are unchanged.
+        std::string value_json;
+        if ( solver_policy_weights->body == rl_policy::rl_body_type::chooser_value )
+          value_json = fmt::format( ",\"value\":{:.9g}", rl_policy::value_forward( *solver_policy_weights, probe_obs ) );
+
         const std::string out_json = fmt::format(
             "{{\"obs_dim\":{},\"action_dim\":{},\"body\":\"{}\",\"n_layers\":{},"
             "\"hidden_sizes\":{},\"n_input_slots\":{},\"allowed_actions\":{},\"q\":{},"
-            "\"argmax\":{}}}\n",
+            "\"argmax\":{}{}}}\n",
             RL_OBS_DIM, RL_ACTION_DIM, rl_policy::body_name( solver_policy_weights->body ),
             solver_policy_weights->layers.size(), hidden_sizes_json,
             solver_policy_weights->input_slots.size(), solver_policy_weights->allowed_actions,
-            q_json, probe_argmax );
+            q_json, probe_argmax, value_json );
 
         io::ofstream probe_out;
         probe_out.open( rl_forward_probe_out_str );
