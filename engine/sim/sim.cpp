@@ -33,6 +33,7 @@
 #include "sim/profileset.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_action_census.hpp"
+#include "sim/rl_button_bind.hpp"
 #include "sim/rl_target_select.hpp"
 #include "sim/rl_translog.hpp"
 #include "sim/rl_rng_record.hpp"
@@ -3474,6 +3475,9 @@ void sim_t::init()
     // Phase 271 (271-04, H-3): opt-in action discovery census, written once every actor is initialised.
     // No-op unless rl_action_census=<path>; reads actions only.
     rl_action_census::on_init_finished( this );
+    // Phase 271.3 (271.3-01, BIND-01/BIND-02): bind every cast button to its catalog line in the default list
+    // (identity of list and line, never a name); refuses by name when a decision-maker is attached and the bind fails.
+    rl_button_bind::on_init_finished( this );
   }
 
   // If save= option is used, don't bother initializing profilesets or plots as the main thread is going to
@@ -4634,6 +4638,9 @@ void sim_t::create_options()
   // Phase 271 (271-04, H-3): see rl_action_census.hpp. The path lives in that module (a sim_t member would
   // rebuild every file); the RL rigs run one sim per process. Default empty: nothing is read or written.
   add_option( opt_string( "rl_action_census", rl_action_census::path_storage() ) );
+  // Phase 271.3 (271.3-01): see rl_button_bind.hpp. The bind report path lives in that module for the same reason
+  // (a sim_t member would rebuild every file). Default empty: no report is written.
+  add_option( opt_string( "rl_bind_report", rl_button_bind::report_path_storage() ) );
   add_option( opt_bool( "sequence_soft_fail", sequence_soft_fail ) );
   add_option( opt_bool( "sequence_queue_delay", sequence_queue_delay ) );
   // Deterministic proc-roll option (simc-offline-evaluation-pipeline phase

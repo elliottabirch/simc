@@ -36,6 +36,7 @@
 #include "sim/expressions.hpp"
 #include "sim/raid_event.hpp"
 #include "sim/rl_action_census.hpp"
+#include "sim/rl_button_bind.hpp"
 #include "sim/rl_class_plugins.hpp"
 #include "sim/rl_target_select.hpp"
 #include "sim/sheet_fight.hpp"  // tstl-sylvanas 262-04: sheet_fight_forecast
@@ -986,7 +987,10 @@ void rl_capability_assert_no_governed_action_legal( const player_t* p,
 // ---------------------------------------------------------------------------
 // read_action_gate_bits -- 221-01 (ACT-02, Pattern 1/2). Resolves each
 // `kind == cast` action's token to an action_t* through
-// solver_control::resolve_action (the SAME resolver accept_cast uses, via a
+// solver_control::resolve_action (the SAME resolver accept_cast uses; Phase
+// 271.3: it reads the bound table rl_button_bind fixed at sim init, the action
+// whose list is the default list and whose recorded line declares the token,
+// never a name scan), via a
 // handle table cached ONCE per actor -- g_action_handle_cache above, filled
 // lazily on first use, never during actor init) and computes two bits per
 // action: `resolvable` (`!background` ALONE -- see the comment on that line
@@ -4569,7 +4573,9 @@ void build_mask( const rl_state_t& s, std::uint8_t out_mask[ RL_ACTION_DIM ] )
     // the prior 221-01 AND). `s.action_resolvable`/`s.action_ready` were
     // computed ONCE in read_state() via read_action_gate_bits(), through
     // the SAME resolver (solver_control::resolve_action) that
-    // accept_cast() uses before its own not-ready FATAL. `build_mask`
+    // accept_cast() uses before its own not-ready FATAL (Phase 271.3: that resolver
+    // returns the action bound by identity of list and line, never a same-name stock
+    // line). `build_mask`
     // stays PURE over the rl_state_t POD (no player_t* parameter,
     // unchanged) -- these bits are READ from the POD, never computed here.
     //
@@ -4843,6 +4849,7 @@ wait_result build_wait( const rl_state_t& s, const rl_wait_anchor& anchor )
 // may not set rl_obs_names_out (the driver refuses it).
 void clear_process_caches()
 {
+  rl_button_bind::clear();  // Phase 271.3: the bound table is pointer-keyed like the caches below
   g_action_handle_cache.clear();
   g_hits_action_handle_cache.clear();
   g_gate_bits_cache.clear();
@@ -4856,7 +4863,7 @@ void clear_process_caches()
 // How many entries the caches above hold right now (a set aim-context-pending record counts as one).
 std::size_t process_cache_entries()
 {
-  return g_action_handle_cache.size() + g_hits_action_handle_cache.size() + g_gate_bits_cache.size() +
+  return rl_button_bind::entries() + g_action_handle_cache.size() + g_hits_action_handle_cache.size() + g_gate_bits_cache.size() +
          ( ( g_aim_context_pending.valid || g_aim_context_pending.p != nullptr ) ? 1u : 0u ) +
          g_capability_bits.size() + g_slot_table_cache.size() + g_enemy_handle_cache.size() + g_census_hit_actors.size();
 }

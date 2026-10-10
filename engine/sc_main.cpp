@@ -345,8 +345,9 @@ const char* const FIGHT_LIST_PROCESS_OPTIONS[] = {
 const char* const FIGHT_LIST_REFUSED_PREFIXES[] = {
     "solver_branch", "solver_teacher", "rl_buff_", "rl_rng_", "rl_forward_probe", "rl_obs_names_out", "rl_fight_list" };
 
-// Options refused in any entry, by exact name.
-const char* const FIGHT_LIST_REFUSED_NAMES[] = { "solver_control", "decision_dump" };
+// Options refused in any entry, by exact name. rl_bind_report (Phase 271.3) is a one-shot per-process report, like
+// rl_obs_names_out: one path, rewritten by each entry's init, would keep only the last fight's bind.
+const char* const FIGHT_LIST_REFUSED_NAMES[] = { "solver_control", "decision_dump", "rl_bind_report" };
 
 // The LAST value an entry's options give `name` (later options win in sim_t, as here), or nullptr when absent.
 const std::string* fight_list_option( const sim_control_t& control, const std::string& name )

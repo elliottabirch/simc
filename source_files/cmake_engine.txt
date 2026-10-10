@@ -161,6 +161,7 @@ sim/rl_proc_counters.hpp
 sim/rl_credit.hpp
 sim/rl_class_plugins.hpp
 sim/rl_action_census.hpp
+sim/rl_button_bind.hpp
 sim/rl_target_select.hpp
 sim/rl_translog.hpp
 sim/rl_rng_record.hpp
@@ -368,6 +369,7 @@ sim/rl_policy_obs.cpp
 sim/rl_policy_net.cpp
 sim/rl_class_plugins.cpp
 sim/rl_action_census.cpp
+sim/rl_button_bind.cpp
 sim/rl_target_select.cpp
 sim/rl_translog.cpp
 sim/rl_rng_record.cpp
