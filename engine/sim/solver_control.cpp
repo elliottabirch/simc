@@ -85,18 +85,38 @@ constexpr double WAIT_END_OF_FIGHT_EPSILON_SECONDS = 0.001;
 // preference is deliberately general (no spell special-case): ANY class
 // module with a background/foreground name_str collision hits the same
 // fix.
+//
+// 271.2-12: among same-name non-background actions, prefer the one whose
+// APL line carries no `if=` (option.if_expr_str empty). Some actions'
+// plain ready() evaluates the line's own `if=` (a use_item_t does: it runs
+// if_expr inside ready()), so when a hand-written action list already holds
+// a same-name line WITH a condition and the registry appends its own bare
+// line after it, "first match" would hand the mask and the cast gate the
+// hand-written line's condition. The registry's line is the one the policy
+// is meant to press; the first conditioned match is only the fallback. No
+// spell, item or spec is named: this is purely "condition-free beats
+// conditioned among same-name castable actions".
 action_t* resolve_action_prefer_castable( player_t* p, const std::string& name )
 {
+  action_t* castable_match = nullptr;
   action_t* background_match = nullptr;
   for ( action_t* a : p->action_list )
   {
     if ( a->name_str != name )
       continue;
     if ( !a->background )
-      return a;
-    if ( !background_match )
+    {
+      // A condition-free same-name action wins at once (see the comment block above).
+      if ( a->option.if_expr_str.empty() )
+        return a;
+      if ( !castable_match )
+        castable_match = a;
+    }
+    else if ( !background_match )
       background_match = a;
   }
+  if ( castable_match )
+    return castable_match;
   // No player-castable match under this exact name -- fall back to a
   // same-name background action rather than reporting unresolvable, in case
   // some class module legitimately has no foreground counterpart for this
