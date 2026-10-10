@@ -35,6 +35,14 @@
 //   solver_search_split_site=<site key>    (280-04, proof only) make exactly this one site split-eligible; needs
 //                                          solver_search_splits >= 1; refused by name when the key is unknown or names
 //                                          a row that can never split (a threshold generator)
+//   solver_search_sites_in=<sites.json>    (280-05) the ranking of earlier runs: a JSON array of sites with the C-A
+//                                          fields; the top S eligible rows by var_share are split-eligible for the
+//                                          whole run, the cold-start rule fills a short set; refused by name when the
+//                                          file or one of its elements is malformed
+//   solver_search_sites_out=<sites.json>   (280-05) written by the parent at exit (temp file, then rename): the merged
+//                                          table ranked by var_share, C-A fields first, cumulative fields appended
+//   solver_search_nosplit_audit=0|1        (280-05) 1 runs every search of the process with no splits and marks it, so
+//                                          the label's standard error without splits can be set beside the one with
 //
 // Read, not registered here: solver_branch_value_divisor (> 0), solver_branch_gamma, solver_branch_salt_base,
 // solver_branch_independent_dice and solver_branch_redeal (both must stay 1: paired futures are refused).
@@ -64,6 +72,9 @@ struct config_t
   std::string log;                    // solver_search_log
   int splits = 2;                     // solver_search_splits, 0..4 (280-04)
   std::string split_site;             // solver_search_split_site (280-04, proof only)
+  std::string sites_in;               // solver_search_sites_in (280-05)
+  std::string sites_out;              // solver_search_sites_out (280-05)
+  bool nosplit_audit = false;         // solver_search_nosplit_audit (280-05)
   // set by validate()
   std::vector<std::int64_t> at_list;  // parsed from `at`
   bool press_best = false;

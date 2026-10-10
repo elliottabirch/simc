@@ -40,6 +40,15 @@
 //     STATS <copy> <path> <fork_fail> <row>:<n>:<sum_p>:<sum_pq>:<n_yes>;...   (rows with n > 0, '-' when none)
 //     FAIL <copy> <code> <path> <msg>
 //
+// SITE RANKING (280-05, SRCH-04). The parent keeps, per site, over every search of the run: rolls (the path-weighted
+// roll count per copy, summed over copies), copies, the path-weighted chance sum, the completed split nodes, and per
+// completed split node one GAP observation |V_yes - V_no| (each side's value is the weight-normalised mean of the leaf
+// returns under that side; the same R the search scores). gap_mean is an exponentially weighted mean with alpha 0.1
+// (the first observation seeds it). var_share = p(1 - p) x gap_mean^2 x occurrences per window, divided by the sum over
+// sites. solver_search_sites_in ranks: the top S eligible rows by its var_share (among rows with gap_n > 0) are the
+// run's split-eligible set; the cold-start rule fills a short set (a path keeps S - R splits for non-ranked sites).
+// solver_search_sites_out writes the merged table at exit. The audit option runs every search with S = 0.
+//
 // PASS RUNNER. NOT solver_branch's run_batch (whose blocking waitpid() can deadlock against a full pipe): the read
 // end is non-blocking and 1 MiB, the parent poll()s and drains the pipe and reaps with waitpid( WNOHANG ) in one
 // loop, with at most `jobs` copies alive.
@@ -59,6 +68,7 @@
 #include "util/util.hpp"
 
 #include "fmt/format.h"
+#include "rapidjson/document.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -72,8 +82,10 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -160,6 +172,64 @@ struct site_row_t
 std::vector<site_row_t> g_sites;
 bool g_sites_built = false;
 int g_proof_row = -1;           // solver_search_split_site resolved to a row, or -1
+bool g_audit = false;           // solver_search_nosplit_audit (280-05): every search runs with no splits
+std::vector<char> g_ranked_flag;  // 280-05: per site row, 1 when sites_in put the row in the run's ranked set
+int g_ranked_count = 0;
+std::vector<std::string> g_ranked_top;  // "<key>:<in-file var_share>" of the ranked rows, best first
+
+int effective_splits()
+{
+  return g_audit ? 0 : g_cfg.splits;
+}
+
+// ---- site statistics (280-05) -------------------------------------------------------------------------
+// One row of the ranking table: read from solver_search_sites_in, updated by this run's searches, written to
+// solver_search_sites_out. "Absent means 0" for the appended cumulative fields (the in-file gap_mean still seeds the
+// exponentially weighted mean).
+constexpr double GAP_ALPHA = 0.1;  // weight of the newest gap observation in gap_mean
+
+struct stat_row_t
+{
+  std::string key;
+  int type = 0;
+  bool eligible = false;
+  bool has_eligible = false;
+  bool has_window = false;
+  bool has_gap_n = false;
+  double window_s = 0.0;
+  // as read (shown for a row with no observations yet, and used for ranking)
+  double in_occ = 0.0;
+  double in_p = 0.0;
+  double in_gap_mean = 0.0;
+  double in_var_share = 0.0;
+  long long splits = 0;          // completed split nodes at this site, cumulative
+  // cumulative
+  double rolls = 0.0;
+  double copies = 0.0;
+  double chance_sum = 0.0;
+  double gap_abs_sum = 0.0;
+  double gap_n = 0.0;
+  double gap2_corr_sum = 0.0;    // sum over observations of (gap^2 - 2 x pooled within-cell variance): a diagnostic
+  double gap_ewma = 0.0;
+  bool gap_seeded = false;
+  double occ() const
+  {
+    return copies > 0.0 ? rolls / copies : in_occ;
+  }
+  double p_mean() const
+  {
+    return rolls > 0.0 ? chance_sum / rolls : in_p;
+  }
+  double gap_mean() const
+  {
+    return gap_seeded ? gap_ewma : 0.0;
+  }
+};
+std::vector<stat_row_t> g_in_rows;   // read at validate, in file order
+std::vector<stat_row_t> g_stats;     // parallel to g_sites, built at the first search
+std::vector<stat_row_t> g_carried;   // file rows whose key is not in this run's site table: written back unchanged
+bool g_stats_bound = false;
+long long g_gap_obs_total = 0;
 
 // A copy's own per-path counts (the parent never counts). n and sum_p cover rolls with 0 < p < 1 on a roll row and
 // informative draws (0 < p < 1) on a deck row; sum_pq is p x (1 - p); n_yes the yes / SUCCESS outcomes.
@@ -532,17 +602,30 @@ struct search_sink_t final : public rng::rl_draw_sink_t
     return idx < g_sites.size() ? static_cast<int>( idx ) : -1;
   }
 
-  // The cold-start rule (G280-5) with no ranking file: the first S eligible chances met on a path are split. With
-  // solver_search_split_site (proof only) exactly that one site is eligible.
+  // The eligibility rule at a chance (G280-5, 280-05). A path may split at most effective_splits() times (0 under the
+  // no-split audit). With solver_search_split_site (proof only) exactly that one site is eligible. Otherwise a row in the
+  // ranked set (solver_search_sites_in: the top S eligible rows by var_share) is always eligible while the path has
+  // budget; the cold-start rule fills the rest: a non-ranked eligible row may split while the path's non-ranked splits
+  // are fewer than S - R (R = the ranked count), so the ranked rows keep their share of the budget. With no file R = 0 and
+  // this is plan 280-04's rule: the first S eligible chances met on a path.
   bool may_split( int row, double p ) const
   {
     if ( !( p > 0.0 && p < 1.0 ) )
       return false;
-    if ( static_cast<int>( g_child.splits.size() ) >= g_cfg.splits )
+    const int budget = effective_splits();
+    if ( static_cast<int>( g_child.splits.size() ) >= budget )
       return false;
     if ( g_proof_row >= 0 )
       return row == g_proof_row;
-    return g_sites[ static_cast<std::size_t>( row ) ].eligible;
+    if ( !g_sites[ static_cast<std::size_t>( row ) ].eligible )
+      return false;
+    if ( g_ranked_flag[ static_cast<std::size_t>( row ) ] )
+      return true;
+    int cold_used = 0;
+    for ( const split_rec_t& sp : g_child.splits )
+      if ( !g_ranked_flag[ static_cast<std::size_t>( sp.row ) ] )
+        ++cold_used;
+    return cold_used < budget - g_ranked_count;
   }
 
   void count( int row, double p, bool yes )
@@ -1265,6 +1348,344 @@ std::string jstr( const std::string& v )
   return o;
 }
 
+
+// ---- the ranking file: reading, binding to the site table, observing, writing (280-05) ------------------------
+// Reads solver_search_sites_in with the vendored rapidjson. The top level is a JSON array (the literal reading of C-A);
+// every element is an object with site_key (string), type (integer 0..6), occurrences_per_window, p_mean (0..1),
+// gap_mean, var_share (finite, not negative) and splits (integer, not negative); the appended cumulative fields
+// (window_s, rolls, copies, chance_sum, gap_abs_sum, gap_n, gap2_corrected, eligible) are optional, absent meaning 0;
+// unknown keys are ignored. Any violation is refused naming the file, the element index and the field (T-280-12).
+void read_sites_in( const std::string& file, double window )
+{
+  g_in_rows.clear();
+  std::ifstream in( file, std::ios::in | std::ios::binary );
+  if ( !in.is_open() )
+    refuse( fmt::format( "solver_search_sites_in='{}' cannot be opened for reading.", file ) );
+  const std::string text( ( std::istreambuf_iterator<char>( in ) ), std::istreambuf_iterator<char>() );
+  if ( text.size() > ( 64u << 20 ) )
+    refuse( fmt::format( "solver_search_sites_in='{}' is larger than 64 MiB.", file ) );
+  rapidjson::Document doc;
+  doc.Parse( text.c_str() );
+  if ( doc.HasParseError() )
+    refuse( fmt::format( "solver_search_sites_in='{}' is not parseable JSON (rapidjson error {} at byte {}).", file,
+                         static_cast<int>( doc.GetParseError() ), doc.GetErrorOffset() ) );
+  if ( !doc.IsArray() )
+    refuse( fmt::format( "solver_search_sites_in='{}' must hold a JSON array of sites at the top level.", file ) );
+
+  auto bad = [ & ]( std::size_t i, const char* field, const char* why ) {
+    refuse( fmt::format( "solver_search_sites_in='{}': element {} field '{}' {}.", file, i, field, why ) );
+  };
+  auto get_num = [ & ]( const rapidjson::Value& e, std::size_t i, const char* f, bool required, bool nonneg,
+                        bool& present ) -> double {
+    present = false;
+    if ( !e.HasMember( f ) )
+    {
+      if ( required )
+        bad( i, f, "is missing" );
+      return 0.0;
+    }
+    const rapidjson::Value& v = e[ f ];
+    if ( !v.IsNumber() )
+      bad( i, f, "is not a number" );
+    const double d = v.GetDouble();
+    if ( !std::isfinite( d ) )
+      bad( i, f, "is not finite" );
+    if ( nonneg && d < 0.0 )
+      bad( i, f, "is negative" );
+    present = true;
+    return d;
+  };
+
+  std::set<std::string> seen;
+  std::size_t i = 0;
+  for ( const rapidjson::Value& e : doc.GetArray() )
+  {
+    if ( !e.IsObject() )
+      bad( i, "(element)", "is not a JSON object" );
+    stat_row_t r;
+    if ( !e.HasMember( "site_key" ) )
+      bad( i, "site_key", "is missing" );
+    if ( !e[ "site_key" ].IsString() || e[ "site_key" ].GetStringLength() == 0 )
+      bad( i, "site_key", "is not a non-empty string" );
+    r.key = e[ "site_key" ].GetString();
+    if ( !seen.insert( r.key ).second )
+      bad( i, "site_key", "repeats an earlier element's key" );
+    if ( !e.HasMember( "type" ) )
+      bad( i, "type", "is missing" );
+    if ( !e[ "type" ].IsInt() || e[ "type" ].GetInt() < 0 || e[ "type" ].GetInt() > 6 )
+      bad( i, "type", "is not an integer 0..6" );
+    r.type = e[ "type" ].GetInt();
+    bool pr = false;
+    r.in_occ = get_num( e, i, "occurrences_per_window", true, true, pr );
+    r.in_p = get_num( e, i, "p_mean", true, true, pr );
+    if ( r.in_p > 1.0 )
+      bad( i, "p_mean", "is above 1" );
+    r.in_gap_mean = get_num( e, i, "gap_mean", true, true, pr );
+    r.in_var_share = get_num( e, i, "var_share", true, true, pr );
+    if ( !e.HasMember( "splits" ) )
+      bad( i, "splits", "is missing" );
+    if ( !e[ "splits" ].IsInt64() || e[ "splits" ].GetInt64() < 0 )
+      bad( i, "splits", "is not a non-negative integer" );
+    r.splits = e[ "splits" ].GetInt64();
+    // the appended cumulative fields (optional)
+    r.window_s = get_num( e, i, "window_s", false, true, r.has_window );
+    if ( r.has_window && std::fabs( r.window_s - window ) > 1e-9 )
+      bad( i, "window_s", "differs from solver_search_window (the cumulative counts are per window)" );
+    bool b = false;
+    r.rolls = get_num( e, i, "rolls", false, true, b );
+    r.copies = get_num( e, i, "copies", false, true, b );
+    r.chance_sum = get_num( e, i, "chance_sum", false, true, b );
+    r.gap_abs_sum = get_num( e, i, "gap_abs_sum", false, true, b );
+    r.gap_n = get_num( e, i, "gap_n", false, true, r.has_gap_n );
+    double g2 = get_num( e, i, "gap2_corrected", false, false, b );
+    r.gap2_corr_sum = g2 * r.gap_n;
+    if ( e.HasMember( "eligible" ) )
+    {
+      if ( !e[ "eligible" ].IsBool() )
+        bad( i, "eligible", "is not true or false" );
+      r.has_eligible = true;
+      r.eligible = e[ "eligible" ].GetBool();
+    }
+    // the exponentially weighted mean continues from the in-file value when the file says it has observations
+    r.gap_ewma = r.in_gap_mean;
+    r.gap_seeded = r.has_gap_n ? r.gap_n > 0.0 : r.in_gap_mean > 0.0;
+    g_in_rows.push_back( r );
+    ++i;
+  }
+}
+
+// The in-file row's part in ranking: it counts when it has gap observations (gap_n > 0; with no gap_n field, a gap_mean
+// above 0).
+bool in_row_ranks( const stat_row_t& r )
+{
+  return r.has_gap_n ? r.gap_n > 0.0 : r.in_gap_mean > 0.0;
+}
+
+// Joins the site table with the file rows (matching keys), carries the rest, and picks the run's ranked set. Run once
+// by ensure_sites() right after the table is built.
+void bind_site_stats()
+{
+  g_stats.assign( g_sites.size(), stat_row_t{} );
+  g_carried.clear();
+  g_ranked_flag.assign( g_sites.size(), 0 );
+  g_ranked_count = 0;
+  g_ranked_top.clear();
+  std::unordered_map<std::string, std::size_t> by_key;
+  for ( std::size_t i = 0; i < g_in_rows.size(); ++i )
+    by_key[ g_in_rows[ i ].key ] = i;
+  std::vector<char> used( g_in_rows.size(), 0 );
+  for ( std::size_t i = 0; i < g_sites.size(); ++i )
+  {
+    auto it = by_key.find( g_sites[ i ].key );
+    if ( it != by_key.end() )
+    {
+      if ( g_in_rows[ it->second ].type != g_sites[ i ].type )
+        refuse( fmt::format( "solver_search_sites_in='{}': site '{}' has type {} in the file but type {} in this fight.",
+                             g_cfg.sites_in, g_sites[ i ].key, g_in_rows[ it->second ].type, g_sites[ i ].type ) );
+      g_stats[ i ] = g_in_rows[ it->second ];
+      used[ it->second ] = 1;
+    }
+    g_stats[ i ].key = g_sites[ i ].key;
+    g_stats[ i ].type = g_sites[ i ].type;
+    g_stats[ i ].eligible = g_sites[ i ].eligible;
+    g_stats[ i ].has_eligible = true;
+  }
+  for ( std::size_t i = 0; i < g_in_rows.size(); ++i )
+    if ( !used[ i ] )
+      g_carried.push_back( g_in_rows[ i ] );
+
+  // the ranked set: the top S eligible rows of THIS fight's table by in-file var_share among rows that have gap
+  // observations, ties by key; fixed for the whole run (nothing this run observes changes it)
+  std::vector<std::size_t> cand;
+  for ( std::size_t i = 0; i < g_sites.size(); ++i )
+    if ( g_sites[ i ].eligible && by_key.count( g_sites[ i ].key ) && in_row_ranks( g_stats[ i ] ) )
+      cand.push_back( i );
+  std::sort( cand.begin(), cand.end(), [ & ]( std::size_t a, std::size_t b ) {
+    if ( g_stats[ a ].in_var_share != g_stats[ b ].in_var_share )
+      return g_stats[ a ].in_var_share > g_stats[ b ].in_var_share;
+    return g_sites[ a ].key < g_sites[ b ].key;
+  } );
+  const std::size_t S = static_cast<std::size_t>( effective_splits() );
+  for ( std::size_t j = 0; j < cand.size() && j < S; ++j )
+  {
+    g_ranked_flag[ cand[ j ] ] = 1;
+    ++g_ranked_count;
+    g_ranked_top.push_back( fmt::format( "{}:{:.6g}", g_sites[ cand[ j ] ].key, g_stats[ cand[ j ] ].in_var_share ) );
+  }
+  g_stats_bound = true;
+}
+
+// The mode the search log and the stderr receipt name.
+const char* split_mode_name()
+{
+  if ( g_audit )
+    return "nosplit_audit";
+  if ( !g_cfg.split_site.empty() )
+    return "proof_site";
+  const int S = effective_splits();
+  if ( g_ranked_count == 0 )
+    return "cold_start";
+  return g_ranked_count >= S ? "ranked" : "ranked+cold_start";
+}
+
+// One completed split node's gap, in observation order.
+struct gap_obs_t
+{
+  int row = 0;
+  double gap = 0.0;
+};
+
+// The gap observations of one pass, in copy order and, inside a copy, in lexicographic order of the node's path prefix
+// (a fixed order). A copy's split tree: a node is a path prefix; its two sides are the prefix plus '0' and plus '1'; a side's
+// value is the weight-normalised mean of the leaf returns under it. A node counts only in a usable copy and only when
+// both sides have leaves; the gap is |V_yes - V_no| of that one copy.
+void collect_gaps( const std::vector<copy_result_t>& res, std::vector<gap_obs_t>& out )
+{
+  struct node_t
+  {
+    double w[ 2 ] = { 0.0, 0.0 };
+    double wr[ 2 ] = { 0.0, 0.0 };
+    int row = -1;
+    bool inconsistent = false;
+  };
+  for ( const copy_result_t& r : res )
+  {
+    if ( !r.ok )
+      continue;
+    std::map<std::string, node_t> nodes;
+    for ( const leaf_t& lf : r.leaves )
+      for ( std::size_t i = 0; i < lf.path.size() && i < lf.splits.size(); ++i )
+      {
+        node_t& nd = nodes[ lf.path.substr( 0, i ) ];
+        const int d = lf.path[ i ] == '1' ? 1 : 0;
+        const int row = lf.splits[ i ].row;
+        if ( nd.row < 0 )
+          nd.row = row;
+        else if ( nd.row != row )
+          nd.inconsistent = true;
+        nd.w[ d ] += lf.w;
+        nd.wr[ d ] += lf.w * lf.R;
+      }
+    for ( const auto& kv : nodes )
+    {
+      const node_t& nd = kv.second;
+      if ( nd.inconsistent || nd.row < 0 || !( nd.w[ 0 ] > 0.0 ) || !( nd.w[ 1 ] > 0.0 ) )
+        continue;
+      out.push_back( gap_obs_t{ nd.row, std::fabs( nd.wr[ 1 ] / nd.w[ 1 ] - nd.wr[ 0 ] / nd.w[ 0 ] ) } );
+    }
+  }
+}
+
+// Adds one finished search to the run's statistics: every table row sees every usable copy; its rolls and chance sum are
+// the path-weighted totals of agg; each gap observation updates its site (the exponentially weighted mean seeds on the
+// first one). pooled_var is the search's pooled within-cell variance of copy values (diagnostic only).
+void apply_search_stats( const split_agg_t& agg, long copies_ok, const std::vector<gap_obs_t>& obs, double pooled_var )
+{
+  if ( !g_stats_bound )
+    return;
+  for ( std::size_t i = 0; i < g_stats.size() && i < agg.rows.size(); ++i )
+  {
+    g_stats[ i ].copies += static_cast<double>( copies_ok );
+    g_stats[ i ].rolls += agg.rows[ i ].n;
+    g_stats[ i ].chance_sum += agg.rows[ i ].sum_p;
+  }
+  for ( const gap_obs_t& o : obs )
+  {
+    stat_row_t& s = g_stats[ static_cast<std::size_t>( o.row ) ];
+    ++s.splits;
+    s.gap_n += 1.0;
+    s.has_gap_n = true;
+    s.gap_abs_sum += o.gap;
+    s.gap2_corr_sum += o.gap * o.gap - 2.0 * pooled_var;
+    s.gap_ewma = s.gap_seeded ? ( 1.0 - GAP_ALPHA ) * s.gap_ewma + GAP_ALPHA * o.gap : o.gap;
+    s.gap_seeded = true;
+    ++g_gap_obs_total;
+  }
+}
+
+// The merged table as the JSON array solver_search_sites_out holds: every row of this fight's table (in-file statistics
+// plus this run's) and every carried row, var_share recomputed over the union (so it sums to 1), ranked by var_share
+// descending with ties by key; the C-A fields first and in that order, the cumulative fields after them.
+std::string sites_table_json( double window )
+{
+  std::vector<const stat_row_t*> rows;
+  if ( g_stats_bound )
+  {
+    for ( const stat_row_t& r : g_stats )
+      rows.push_back( &r );
+    for ( const stat_row_t& r : g_carried )
+      rows.push_back( &r );
+  }
+  else
+  {
+    // no search ran: nothing was observed, the file's rows go back as they came
+    for ( const stat_row_t& r : g_in_rows )
+      rows.push_back( &r );
+  }
+  std::vector<double> raw( rows.size(), 0.0 );
+  double total = 0.0;
+  for ( std::size_t i = 0; i < rows.size(); ++i )
+  {
+    const stat_row_t& r = *rows[ i ];
+    const double p = r.p_mean();
+    raw[ i ] = p * ( 1.0 - p ) * r.gap_mean() * r.gap_mean() * r.occ();
+    total += raw[ i ];
+  }
+  std::vector<std::size_t> order( rows.size() );
+  for ( std::size_t i = 0; i < order.size(); ++i )
+    order[ i ] = i;
+  std::stable_sort( order.begin(), order.end(), [ & ]( std::size_t a, std::size_t b ) {
+    if ( raw[ a ] != raw[ b ] )
+      return raw[ a ] > raw[ b ];
+    return rows[ a ]->key < rows[ b ]->key;
+  } );
+  std::string out = "[";
+  bool first = true;
+  for ( std::size_t oi : order )
+  {
+    const stat_row_t& r = *rows[ oi ];
+    const bool elig = r.has_eligible ? r.eligible : ( r.type >= 1 && r.type <= 4 );
+    const double share = total > 0.0 ? raw[ oi ] / total : 0.0;
+    out += first ? "\n  " : ",\n  ";
+    first = false;
+    out += fmt::format(
+        "{{\"site_key\":\"{}\",\"type\":{},\"occurrences_per_window\":{},\"p_mean\":{},\"gap_mean\":{},"
+        "\"var_share\":{},\"splits\":{},\"window_s\":{},\"rolls\":{},\"copies\":{},\"chance_sum\":{},"
+        "\"gap_abs_sum\":{},\"gap_n\":{},\"gap2_corrected\":{},\"eligible\":{}}}",
+        jstr( r.key ), r.type, jnum( r.occ() ), jnum( r.p_mean() ), jnum( r.gap_mean() ), jnum( share ), r.splits,
+        jnum( window ),  // read_sites_in() refused any file row whose window_s differs from this run's window
+        jnum( r.rolls ), jnum( r.copies ), jnum( r.chance_sum ), jnum( r.gap_abs_sum ), jnum( r.gap_n ),
+        jnum( r.gap_n > 0.0 ? r.gap2_corr_sum / r.gap_n : 0.0 ), elig ? "true" : "false" );
+  }
+  out += first ? "]\n" : "\n]\n";
+  return out;
+}
+
+// Written once by the parent at exit: a temp file beside the target, then rename (T-280-13).
+void write_sites_out( const std::string& file, double window )
+{
+  const std::string tmp = fmt::format( "{}.tmp.{}", file, static_cast<long>( ::getpid() ) );
+  {
+    std::ofstream o( tmp, std::ios::out | std::ios::trunc | std::ios::binary );
+    if ( !o.is_open() )
+      throw sc_runtime_error( fmt::format( "solver_search_sites_out='{}': cannot write the temporary file '{}'.", file, tmp ) );
+    o << sites_table_json( window );
+    o.flush();
+    if ( !o.good() )
+    {
+      o.close();
+      std::remove( tmp.c_str() );
+      throw sc_runtime_error( fmt::format( "solver_search_sites_out='{}': writing '{}' failed.", file, tmp ) );
+    }
+  }
+  if ( std::rename( tmp.c_str(), file.c_str() ) != 0 )
+  {
+    std::remove( tmp.c_str() );
+    throw sc_runtime_error( fmt::format( "solver_search_sites_out='{}': renaming '{}' failed: {}.", file, tmp,
+                                         std::strerror( errno ) ) );
+  }
+}
+
 // The site table, built ONCE in the parent at its first search by a read-only walk of every player's proc_rng_list
 // (no tag, no state change). Keys: the stream key proc_rng.cpp builds for a generator ("<player>|procrng|<index>|<type>|
 // <name>"), and "<player>|deck|<name>" for a deck (G280-4). Eligible: simple, real-PPM, accumulated and deck. A
@@ -1295,6 +1716,7 @@ void ensure_sites( sim_t* sim )
     }
   }
   g_sites_built = true;
+  bind_site_stats();  // 280-05: the file's rows joined to the table, the ranked set fixed for the run
   if ( !g_cfg.split_site.empty() )
   {
     for ( std::size_t i = 0; i < g_sites.size(); ++i )
@@ -1394,6 +1816,8 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
     return true;
   }
   add_pass_to_cells( r1, cells, agg );
+  std::vector<gap_obs_t> gap_obs;  // 280-05: one observation per completed split node, pass 1 then pass 2
+  collect_gaps( r1, gap_obs );
   // the sites split on the first copy of pass 1 (the log receipt of the cold-start rule, SRCH-04)
   std::string first_copy_sites;
   if ( !r1.empty() )
@@ -1456,11 +1880,33 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
       return true;
     }
     add_pass_to_cells( r2, cells, agg );
+    collect_gaps( r2, gap_obs );
   }
 
   // ---- per-candidate cells over COPIES (never over leaves) ----
   for ( cell_t& cl : cells )
     mean_se( cl.vals, cl.mean, cl.se );
+
+  // ---- 280-05: this search's statistics join the run's. The pooled within-cell variance of copy values (the
+  // noise-correction diagnostic of Pitfall 16): the cells' sums of squares over the sum of their degrees of freedom. ----
+  {
+    double ss_all = 0.0, df_all = 0.0;
+    long copies_ok = 0;
+    for ( const cell_t& cl : cells )
+    {
+      copies_ok += static_cast<long>( cl.vals.size() );
+      if ( cl.vals.size() < 2 )
+        continue;
+      double m = 0.0;
+      for ( double v : cl.vals )
+        m += v;
+      m /= static_cast<double>( cl.vals.size() );
+      for ( double v : cl.vals )
+        ss_all += ( v - m ) * ( v - m );
+      df_all += static_cast<double>( cl.vals.size() - 1 );
+    }
+    apply_search_stats( agg, copies_ok, gap_obs, df_all > 0.0 ? ss_all / df_all : 0.0 );
+  }
 
   // ---- the fail rule: a candidate with fewer than half its copies usable marks the search skipped_fail ----
   bool fail = false;
@@ -1528,8 +1974,13 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
   g_count.fd_last = count_dir_entries( "/proc/self/fd" );
 
   // the SRCH-04 log receipt: one stderr line per search naming the sites split on the first copy
-  std::fprintf( stderr, "[RL_SEARCH_SPLIT] seq=%llu mode=%s sites=%s\n", static_cast<unsigned long long>( seq ),
-                c.split_site.empty() ? "cold_start" : "proof_site", first_copy_sites.c_str() );
+  std::string top_list;
+  for ( const std::string& t : g_ranked_top )
+    top_list += ( top_list.empty() ? "" : "," ) + t;
+  if ( top_list.empty() )
+    top_list = "-";
+  std::fprintf( stderr, "[RL_SEARCH_SPLIT] seq=%llu mode=%s top=%s sites=%s\n", static_cast<unsigned long long>( seq ),
+                split_mode_name(), top_list.c_str(), first_copy_sites.c_str() );
   std::fflush( stderr );
 
   // ---- log ----
@@ -1565,12 +2016,13 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
         "\"dropped\":{},\"margin\":{},\"margin_se\":{},\"copies\":{},\"skipped_fail\":{},\"cpu_s\":{},"
         "\"fork_cpu_s\":{},\"child_cpu_s\":{},\"wall_s\":{},\"leaf_vmhwm_kb_max\":{},"
         "\"split_mode\":\"{}\",\"splits_total\":{},\"leaves_total\":{},\"copies_split\":{},\"fork_fail\":{},"
-        "\"max_abs_wsum_err\":{},\"sibling_pairs\":{},\"sibling_ties\":{},\"site_stats\":[{}]}}\n",
+        "\"max_abs_wsum_err\":{},\"sibling_pairs\":{},\"sibling_ties\":{},\"audit_nosplit\":{},\"gap_obs\":{},"
+        "\"site_stats\":[{}]}}\n",
         seq, k, jnum( t_k ), net, pick, idx, listed ? 1 : 0, jc, dropped >= 0 ? cells[ static_cast<std::size_t>( dropped ) ].button : -1,
         jnum( margin ), jnum( margin_se ), n_total, fail ? 1 : 0, jnum( fork_cpu + child_cpu ), jnum( fork_cpu ),
-        jnum( child_cpu ), jnum( wall ), hwm_max, c.split_site.empty() ? "cold_start" : "proof_site", agg.splits_total,
+        jnum( child_cpu ), jnum( wall ), hwm_max, split_mode_name(), agg.splits_total,
         agg.leaves_total, agg.copies_split, agg.fork_fail, jnum( agg.max_abs_wsum_err ), agg.sibling_pairs,
-        agg.sibling_ties, site_stats_json );
+        agg.sibling_ties, g_audit ? 1 : 0, gap_obs.size(), site_stats_json );
     g_log->flush();
   }
   return false;
@@ -1692,6 +2144,8 @@ void validate( sim_t* sim )
     refuse( fmt::format( "solver_search_splits must be 0..4 (got {}).", c.splits ) );
   if ( !c.split_site.empty() && c.splits < 1 )
     refuse( "solver_search_split_site needs solver_search_splits >= 1 (a split site with no splits allowed)." );
+  if ( c.nosplit_audit && !c.split_site.empty() )
+    refuse( "solver_search_nosplit_audit=1 cannot be combined with solver_search_split_site (an audit search never splits)." );
   if ( c.press != "net" && c.press != "best" )
     refuse( fmt::format( "solver_search_press='{}' is not 'net' or 'best'.", c.press ) );
   c.press_best = c.press == "best";
@@ -1730,11 +2184,29 @@ void validate( sim_t* sim )
       refuse( fmt::format( "solver_search_log='{}' cannot be opened for writing.", c.log ) );
   }
 
+  // 280-05: the ranking file in, a writable place for the ranking file out, the audit switch
+  g_audit = c.nosplit_audit;
+  if ( !c.sites_in.empty() )
+    read_sites_in( c.sites_in, c.window );
+  if ( !c.sites_out.empty() )
+  {
+    // refuse now, not at exit, when the output place cannot be written (the probe file is removed at once)
+    const std::string probe = fmt::format( "{}.probe.{}", c.sites_out, static_cast<long>( ::getpid() ) );
+    {
+      std::ofstream o( probe, std::ios::out | std::ios::trunc );
+      if ( !o.is_open() )
+        refuse( fmt::format( "solver_search_sites_out='{}' cannot be written (probe file '{}' did not open).", c.sites_out,
+                             probe ) );
+    }
+    std::remove( probe.c_str() );
+  }
+
   g_any = true;
   fmt::print( "[RL_SEARCH] candidates={} window={:.17g} copies={} jobs={} at={} margin={:.17g} press={} expected_crit={} "
-              "divisor={:.17g} gamma={:.17g} salt_base={} splits={} split_site={} log={}\n",
+              "divisor={:.17g} gamma={:.17g} salt_base={} splits={} split_site={} audit_nosplit={} sites_in={} sites_out={} log={}\n",
               c.candidates, c.window, c.copies, c.jobs, c.at_list.size(), c.margin, c.press, c.expected_crit ? 1 : 0,
               sb.value_divisor, sb.gamma, sb.branch_salt_base, c.splits, c.split_site.empty() ? "-" : c.split_site,
+              c.nosplit_audit ? 1 : 0, c.sites_in.empty() ? "-" : c.sites_in, c.sites_out.empty() ? "-" : c.sites_out,
               c.log );
   std::fflush( stdout );
 }
@@ -1893,5 +2365,8 @@ void write_summary( sim_t* sim )
   }
   fmt::print( "[RL_SEARCH_SUMMARY] {}\n", js );
   std::fflush( stdout );
+  // 280-05: the ranking table, once, at exit
+  if ( !c.sites_out.empty() )
+    write_sites_out( c.sites_out, c.window );
 }
 }  // namespace solver_search
