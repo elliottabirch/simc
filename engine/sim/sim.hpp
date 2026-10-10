@@ -1126,6 +1126,13 @@ struct sim_t : private sc_thread_t
   // conversion refusal, sim.cpp's add_option call) -- no separate hand-rolled parse block needed,
   // unlike solver_force_decision_str's comma-separated shape above.
   int solver_min_maelstrom_spend = 0;
+  // tstl-sylvanas 284-06 (G284-7): softmax exploration for the chooser-and-value net. With share s > 0, one draw from
+  // solver_explore_rng per decision decides whether to explore; an exploring decision draws one more value and presses
+  // a legal button with probability softmax(score / temperature) over the buttons the greedy pick reads (select_mask).
+  // Share 0 (default) takes NO draw: seeded play is byte-identical to a build without the options. Both options are
+  // set together or neither; refused with solver_search=1 and with a blob whose header carries exploration (sim.cpp).
+  double solver_explore_softmax_temperature = 0.0;
+  double solver_explore_softmax_share = 0.0;
   // Resolved ONCE in setup() from RL_ACTIONS by token name -- NEVER a hard-coded index, so a
   // future registry regeneration that reorders RL_ACTIONS cannot silently point this at the wrong
   // action. -1 means "unresolved" (either the feature is off, so resolution never ran, or -- had

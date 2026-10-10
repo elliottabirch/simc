@@ -5,6 +5,8 @@
 
 #include "solver_control.hpp"
 
+#include <cmath>
+
 #include "action/action.hpp"
 #include "action/attack.hpp"
 #include "buff/buff.hpp"
@@ -1107,6 +1109,52 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // above): the refusal upstream already protocol_abort()s on an all-illegal natural `mask`,
     // and the fail-safe above falls back to that same natural mask whenever holding it empty
     // would leave nothing selectable -- so select_mask always has at least one legal entry.
+    // tstl-sylvanas 284-06 (G284-7): softmax exploration. Tested against zero BEFORE touching the generator -- at a
+    // share of exactly zero the engine takes ZERO draws (byte-identical play). Refused with a blob header dial and
+    // with a search in sim.cpp, so this block and the header-dial block below never both run. One draw decides
+    // whether to explore; an exploring decision draws one more value and picks a legal button (select_mask, the set
+    // the greedy pick reads) by inverse CDF over softmax(q / temperature), maximum subtracted for stability.
+    if ( sim->solver_explore_softmax_share > 0.0 && greedy_idx >= 0 )
+    {
+      if ( sim->solver_explore_rng.real() < sim->solver_explore_softmax_share )
+      {
+        const double inv_t = 1.0 / sim->solver_explore_softmax_temperature;
+        const double q_top = static_cast<double>( q[ greedy_idx ] );
+        double weight[ RL_ACTION_DIM ];
+        double total = 0.0;
+        int last_legal = -1;
+        for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+        {
+          weight[ i ] = 0.0;
+          if ( !select_mask[ i ] )
+            continue;
+          weight[ i ] = std::exp( ( static_cast<double>( q[ i ] ) - q_top ) * inv_t );
+          total += weight[ i ];
+          last_legal = static_cast<int>( i );
+        }
+        if ( last_legal >= 0 && total > 0.0 )
+        {
+          const double u = sim->solver_explore_rng.real() * total;
+          double running = 0.0;
+          int pick = last_legal;  // clamp: rounding at the top edge lands on the last legal button
+          for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+          {
+            if ( !select_mask[ i ] )
+              continue;
+            running += weight[ i ];
+            if ( u < running )
+            {
+              pick = static_cast<int>( i );
+              break;
+            }
+          }
+          idx = pick;
+          // Set whenever the draw fired, even when the drawn button equals the greedy one (same reading as the dial).
+          exploratory = true;
+        }
+      }
+    }
+
     const float exploration = sim->solver_policy_weights->exploration;
     if ( exploration > 0.0f )
     {

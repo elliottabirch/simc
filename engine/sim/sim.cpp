@@ -4593,6 +4593,10 @@ void sim_t::create_options()
   // why no separate hand-rolled parse block is needed (unlike solver_force_decision_str above).
   // Name resolution against RL_ACTIONS happens below, in its own fail-closed block.
   add_option( opt_int( "solver_min_maelstrom_spend", solver_min_maelstrom_spend, 0, 10 ) );
+  // tstl-sylvanas 284-06 (G284-7): softmax exploration; see sim.hpp's doc comment. Ranges and refusals are checked by
+  // name in the block after solver_policy_str's own below.
+  add_option( opt_float( "solver_explore_softmax_temperature", solver_explore_softmax_temperature ) );
+  add_option( opt_float( "solver_explore_softmax_share", solver_explore_softmax_share ) );
   // 261005-tch2 (owner 2026-10-05): every non-wait button masked while no enemy can be attacked. See
   // sim.hpp's solver_mask_no_enemy doc comment; in-process transport only, refused by name below.
   add_option( opt_bool( "solver_mask_no_enemy", solver_mask_no_enemy ) );
@@ -5343,6 +5347,53 @@ void sim_t::setup( sim_control_t* c )
     else
       solver_policy_weights =
           std::make_shared<rl_policy::rl_weights_t>( rl_policy::load_rlw1( solver_policy_str ) );
+  }
+
+  // tstl-sylvanas 284-06 (G284-7): softmax exploration refusals, every one by name. Placed right after the weights
+  // load so the blob header's own exploration is known; with neither option set nothing here fires.
+  if ( solver_explore_softmax_share != 0.0 || solver_explore_softmax_temperature != 0.0 )
+  {
+    if ( !std::isfinite( solver_explore_softmax_share ) || solver_explore_softmax_share < 0.0 ||
+         solver_explore_softmax_share > 1.0 )
+    {
+      throw sc_runtime_error( fmt::format(
+          "solver_explore_softmax_share={} must be finite and within [0, 1].", solver_explore_softmax_share ) );
+    }
+    if ( !std::isfinite( solver_explore_softmax_temperature ) || solver_explore_softmax_temperature < 0.0 ||
+         solver_explore_softmax_temperature > 100.0 )
+    {
+      throw sc_runtime_error( fmt::format(
+          "solver_explore_softmax_temperature={} must be finite and within [0, 100].",
+          solver_explore_softmax_temperature ) );
+    }
+    if ( solver_explore_softmax_share > 0.0 && solver_explore_softmax_temperature == 0.0 )
+    {
+      throw sc_runtime_error( fmt::format(
+          "solver_explore_softmax_share={} needs solver_explore_softmax_temperature > 0: set both or neither.",
+          solver_explore_softmax_share ) );
+    }
+    if ( solver_explore_softmax_temperature > 0.0 && solver_explore_softmax_share == 0.0 )
+    {
+      throw sc_runtime_error( fmt::format(
+          "solver_explore_softmax_temperature={} needs solver_explore_softmax_share > 0: set both or neither.",
+          solver_explore_softmax_temperature ) );
+    }
+    if ( solver_policy_str.empty() )
+    {
+      throw sc_runtime_error(
+          "solver_explore_softmax_share requires solver_policy= (the draw is over the in-process net's own scores)." );
+    }
+    if ( solver_search::cfg().search )
+    {
+      throw sc_runtime_error( fmt::format( "solver_search requires greedy play: solver_explore_softmax_share={}.",
+                                           solver_explore_softmax_share ) );
+    }
+    if ( solver_policy_weights && solver_policy_weights->exploration > 0.0f )
+    {
+      throw sc_runtime_error( fmt::format(
+          "two exploration dials at once: solver_explore_softmax_share={} with a blob header exploration={}.",
+          solver_explore_softmax_share, solver_policy_weights->exploration ) );
+    }
   }
 
   // 260922-mfh (D5): replaces tj1's solver_hold_until= block (deleted entirely, not kept as a
