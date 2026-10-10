@@ -4570,6 +4570,10 @@ void sim_t::create_options()
     add_option( opt_string( "solver_search_sites_in", ss.sites_in ) );
     add_option( opt_string( "solver_search_sites_out", ss.sites_out ) );
     add_option( opt_bool( "solver_search_nosplit_audit", ss.nosplit_audit ) );
+    // tstl-sylvanas 280-06: the depth-two tree (second level, hold candidates); ranges checked in validate()
+    add_option( opt_int( "solver_search_depth", ss.depth ) );
+    add_option( opt_int( "solver_search_second", ss.second ) );
+    add_option( opt_bool( "solver_search_holds", ss.holds ) );
   }
   // S1 (260927-s1-spend-timing): forbids lightning_bolt/tempest (and, 261002-8rs, primordial_storm
   // when the action table offers it; the third Lightning-family spender is untouched) below n stacks

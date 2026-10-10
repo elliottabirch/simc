@@ -18,11 +18,12 @@
 //
 // PIPE PROTOCOL. One pipe per PASS. Each copy writes exactly one line with one write() of at most PIPE_BUF (4096)
 // bytes and leaves only through _exit():
-//     LEAF <copy> <pass> <cand> <rank> <w> <R> <R_undisc> <R_real> <boot_q> <t_end> <ended> <n_dec> <cut_state>
-//          <vmhwm_kb> <cpu_s>
+//     LEAF <copy> <pass> <cand> <rank> <w> <R> <R_undisc> <R_real> <boot_q> <boot_v> <t_end> <ended> <n_dec> <cut_state>
+//          <vmhwm_kb> <cpu_s> <path> <splits> <sec>
 //     FAIL <copy> <code> <msg>
-// <copy> is the copy's index within its pass; <cand> the index of its root candidate (0 = the net's own press);
-// <rank> and <w> are 0 and 1 until the later plans (second level, chance splits) use them. A copy's value is the
+// <copy> is the copy's index within its pass (a pair is one copy index); <cand> the index of its root candidate (0 = the
+// net's own press); <rank> is the second-level rank of the leaf (0, 1, or 2 = no second-level decision arose); <sec> the
+// second-level button the leaf's lineage pressed (-1 when none); <boot_v> the window-end value term (0 until it is used). A copy's value is the
 // sum over its leaves of w x R; a copy with a FAIL, a missing or malformed leaf, or a bad exit is dropped whole
 // and counted (n_fail). Means and standard errors are taken over COPIES (copies of one search are independent:
 // owner rule D1), never over leaves.
@@ -37,7 +38,7 @@
 // SEARCH_SITE_BASE + row index in the copy; a roll on any other stream (crit, damage range, swing timer, player,
 // action and buff streams) has no tag and is never split. Every process writes its own lines:
 //     LEAF ... <path> <splits>        (path = the outcome digits along the way, '-' when empty; splits = row:p:outcome;...)
-//     STATS <copy> <path> <fork_fail> <row>:<n>:<sum_p>:<sum_pq>:<n_yes>;...   (rows with n > 0, '-' when none)
+//     STATS <copy> <rank> <path> <fork_fail> <row>:<n>:<sum_p>:<sum_pq>:<n_yes>;...   (rows with n > 0, '-' when none)
 //     FAIL <copy> <code> <path> <msg>
 //
 // SITE RANKING (280-05, SRCH-04). The parent keeps, per site, over every search of the run: rolls (the path-weighted
@@ -48,6 +49,18 @@
 // sites. solver_search_sites_in ranks: the top S eligible rows by its var_share (among rows with gap_n > 0) are the
 // run's split-eligible set; the cold-start rule fills a short set (a path keeps S - R splits for non-ranked sites).
 // solver_search_sites_out writes the merged table at exit. The audit option runs every search with S = 0.
+//
+// DEPTH TWO (280-06, SRCH-05 to SRCH-07). With solver_search_depth=2 (the default) pass 1 is the depth-one pass (8
+// copies per root candidate, no second-level override: the cell (candidate, rank 0)); pass 2 spends the remaining copies as
+// PAIRS. A pair is ONE process that plays the root press and, at the first decision with at least two selectable buttons
+// that is neither forced nor exploratory (the SECOND LEVEL), forks DFS-wait: the new process re-salts, re-seeds and re-deals
+// and presses the net's rank-1 button, the forker then presses the net's own rank-0 button. Both halves count as one copy
+// each (two copies spent per pair). A lineage whose window ends before any second-level decision never forks and writes its
+// leaves with rank 2 (no second-level decision arose); a pair none of whose lineages forked is two copies spent but ONE
+// rank-0 sample (one play is one independent sample), a pair some of whose lineages forked gives a rank-0 sample (rank-0
+// and rank-2 leaves) and a rank-1 sample (rank-1 and rank-2 leaves), each with leaf weights summing to 1. The odd copy
+// left over goes, as a plain copy, to the best survivor's rank-0 cell. Pairs are dealt round-robin to the survivors, best
+// pass-1 mean first. value(candidate) = its best cell's mean; pick = the best value among the survivors.
 //
 // PASS RUNNER. NOT solver_branch's run_batch (whose blocking waitpid() can deadlock against a full pipe): the read
 // end is non-blocking and 1 MiB, the parent poll()s and drains the pipe and reaps with waitpid( WNOHANG ) in one
@@ -153,6 +166,10 @@ struct child_state_t
   std::vector<split_rec_t> splits;     // the splits on the way here, in order
   bool sub_failed = false;             // a branch this process forked and waited for did not leave cleanly
   long fork_fail = 0;                  // fork() refusals met on the way (the roll was then sampled normally)
+  // 280-06: the second level
+  bool pair_pending = false;           // a pair process that has not yet forked at its second-level decision
+  int rank = 0;                        // 0 = the net's own second-level button, 1 = the runner-up (after a pair fork)
+  int sec = -1;                        // the second-level button this lineage pressed, -1 when none
 };
 child_state_t g_child;
 
@@ -421,6 +438,14 @@ std::uint64_t copy_key( std::uint64_t salt_base, std::uint64_t seq, int pass, in
 #endif
 }
 
+// The rank a leaf is written with: 2 when this pair lineage never reached a second-level decision (280-06).
+int out_rank()
+{
+  return g_child.pair_pending ? 2 : g_child.rank;
+}
+
+constexpr std::uint64_t PAIR_SALT = 0x3C6EF372FE94F82Bull;  // mixed into the key of a pair's rank-1 half
+
 std::string path_token()
 {
   return g_child.path.empty() ? std::string( "-" ) : g_child.path;
@@ -481,15 +506,15 @@ std::string stats_line()
   }
   if ( items.empty() )
     items = "-";
-  return fmt::format( "STATS {} {} {} {}\n", g_child.copy, path_token(), g_child.fork_fail, items );
+  return fmt::format( "STATS {} {} {} {} {}\n", g_child.copy, out_rank(), path_token(), g_child.fork_fail, items );
 }
 
 // A leaf line (this plan: one per copy, rank 0, weight 1). An oversize line is replaced by a FAIL (code 76).
-[[noreturn]] void write_leaf_and_exit( double R, double R_undisc, double R_real, double boot_q, double t_end, int ended,
-                                       int cut_state )
+[[noreturn]] void write_leaf_and_exit( double R, double R_undisc, double R_real, double boot_q, double boot_v,
+                                       double t_end, int ended, int cut_state )
 {
   if ( !std::isfinite( R ) || !std::isfinite( R_undisc ) || !std::isfinite( R_real ) || !std::isfinite( boot_q ) ||
-       !std::isfinite( t_end ) )
+       !std::isfinite( boot_v ) || !std::isfinite( t_end ) )
     child_write_and_exit( make_fail_line( 77, "nonfinite_leaf_value" ), 77 );
 #if defined( __linux__ )
   const long hwm = read_vmhwm_kb();
@@ -502,9 +527,9 @@ std::string stats_line()
   if ( g_child.sub_failed )
     child_write_and_exit( make_fail_line( 78, "split_branch_failed" ), 78 );
   const std::string line = fmt::format(
-      "LEAF {} {} {} {} {:.17g} {:.17g} {:.17g} {:.17g} {:.17g} {:.9g} {} {} {} {} {:.9g} {} {}\n", g_child.copy,
-      g_child.pass, g_child.cand, 0, g_child.pw, R, R_undisc, R_real, boot_q, t_end, ended, g_child.n_dec, cut_state,
-      hwm, cpu, path_token(), split_list_token() );
+      "LEAF {} {} {} {} {:.17g} {:.17g} {:.17g} {:.17g} {:.17g} {:.17g} {:.9g} {} {} {} {} {:.9g} {} {} {}\n",
+      g_child.copy, g_child.pass, g_child.cand, out_rank(), g_child.pw, R, R_undisc, R_real, boot_q, boot_v, t_end, ended,
+      g_child.n_dec, cut_state, hwm, cpu, path_token(), split_list_token(), g_child.sec );
   const std::string stats = stats_line();
   if ( line.size() > LINE_MAX_BYTES )
     child_write_and_exit( make_fail_line( 76, "line_too_long" ), 76 );
@@ -747,9 +772,53 @@ int split_here( search_sink_t& sink, int row, double p )
   return rng::RL_PRE_FORCE_YES;
 }
 
+// The second-level pair fork (280-06, SRCH-05), DFS-wait like a chance split: the NEW process is the rank-1 half (own
+// dice: a key mixed from this lineage's key, the pair constant and the half; every stream re-salted, the exploration stream
+// re-seeded, every deck re-dealt) and presses the net's runner-up button; the FORKING process waits for it to finish and
+// then presses the net's own best button as the rank-0 half. A lineage that never reaches this call writes its leaves
+// with rank 2. `idx` is the net's best selectable button; `runner_up` the second best.
+void pair_fork_here( sim_t* sim, int best, int runner_up, int& idx )
+{
+  const pid_t pid = ::fork();
+  if ( pid < 0 )
+  {
+    ++g_child.fork_fail;
+    child_write_and_exit( make_fail_line( 82, "pair_fork_failed" ), 82 );
+  }
+  if ( pid == 0 )
+  {
+    g_child.rank = 1;
+    g_child.pair_pending = false;
+    g_child.sec = runner_up;
+    std::uint64_t k = mix64( mix64( g_child.key ^ PAIR_SALT ) ^ 1ull );
+    if ( k == 0 )
+      k = 0x2545F4914F6CDD1Dull;
+    g_child.key = k;
+    g_sink.busy = true;  // the re-deal rolls on the decks' own streams: no hook may answer it
+    sim->resalt_source_rngs( k );
+    sim->solver_explore_rng.seed( mix64( k ^ 0xE5910BEull ) );
+    redeal_every_deck( sim );
+    g_sink.busy = false;
+    idx = runner_up;
+    return;
+  }
+  int st = 0;
+  pid_t w;
+  do
+  {
+    w = ::waitpid( pid, &st, 0 );
+  } while ( w < 0 && errno == EINTR );
+  if ( w != pid || !WIFEXITED( st ) || WEXITSTATUS( st ) != 0 )
+    g_child.sub_failed = true;
+  g_child.rank = 0;
+  g_child.pair_pending = false;
+  g_child.sec = best;
+  idx = best;
+}
+
 // Mirrors solver_branch.cpp's become_child (396-506) step for step, for one search copy.
 void become_search_child( sim_t* sim, player_t* p, std::uint64_t seq, int pass, int copy, int cand, int button,
-                          std::uint64_t key, double window, int read_fd, int write_fd )
+                          bool pair, std::uint64_t key, double window, int read_fd, int write_fd )
 {
   const solver_branch::config_t& sb = solver_branch::cfg();
   g_child.active = true;
@@ -825,6 +894,9 @@ void become_search_child( sim_t* sim, player_t* p, std::uint64_t seq, int pass, 
   g_child.splits.clear();
   g_child.sub_failed = false;
   g_child.fork_fail = 0;
+  g_child.pair_pending = pair;
+  g_child.rank = 0;
+  g_child.sec = -1;
   g_counts.assign( g_sites.size(), site_count_t{} );
   for ( std::size_t i = 0; i < g_sites.size(); ++i )
     g_sites[ i ].ptr->rl_tag_source_roller( SEARCH_SITE_BASE + static_cast<std::uint32_t>( i ) );
@@ -868,12 +940,14 @@ struct leaf_t
   std::vector<split_rec_t> splits;
   bool has_stats = false;
   stats_t stats;
-  int rank = 0;
+  int rank = 0;                    // 0, 1, or 2 (a pair lineage that never reached a second-level decision)
+  int sec = -1;                    // the second-level button this leaf's lineage pressed, -1 when none
   double w = 1.0;
   double R = 0.0;
   double R_undisc = 0.0;
   double R_real = 0.0;
   double boot_q = 0.0;
+  double boot_v = 0.0;
   double t_end = 0.0;
   int ended = 0;
   int n_dec = 0;
@@ -886,14 +960,38 @@ struct copy_task_t
 {
   int cand = 0;    // index into the search's candidate list
   int button = 0;  // the root button this copy presses
+  bool pair = false;  // a pair (two copies spent: a rank-0 half and a rank-1 half) instead of one plain copy
 };
+
+// The bootstrap mode of the window label (280-06 task 2): 0 none, 1 q, 2 value. Task 1 keeps it at 0.
+int g_boot_mode = 0;
+
+// The label of a leaf: the window return plus the chosen bootstrap term (SRCH-07).
+double leaf_boot( const leaf_t& lf )
+{
+  return g_boot_mode == 1 ? lf.boot_q : g_boot_mode == 2 ? lf.boot_v : 0.0;
+}
+double leaf_label( const leaf_t& lf )
+{
+  return lf.R + leaf_boot( lf );
+}
 
 struct copy_result_t
 {
   int cand = 0;
   int button = 0;
+  bool pair = false;                     // the raw result of a pair process (turned into samples by make_samples)
+  int rank = 0;                          // the sample's second-level rank (0 or 1)
+  bool pair_forked = false;              // (rank-0 sample of a pair) some lineage forked
+  bool pair_cut_first = false;           // (rank-0 sample of a pair) no lineage forked: one sample for two copies
+  bool pair_failed = false;
+  bool pair_mixed = false;               // (rank-0 sample of a pair) some lineages forked and some did not
+  double value_R = 0.0;                  // sum over leaves of w x R
+  double value_boot = 0.0;               // sum over leaves of w x bootstrap term
+  double value_Rund = 0.0;
+  double value_Rreal = 0.0;
   std::vector<leaf_t> leaves;
-  std::map<std::string, stats_t> stats;  // by leaf path (STATS lines)
+  std::map<std::pair<int, std::string>, stats_t> stats;  // by (leaf rank, leaf path) (STATS lines)
   bool failed = false;  // a FAIL line, a malformed or duplicate leaf
   std::string fail;
   int exit_code = -1;
@@ -954,12 +1052,14 @@ void parse_line( const std::string& line, int pass, std::vector<copy_result_t>& 
   }
   if ( tok[ 0 ] == "STATS" )
   {
-    // STATS <copy> <path> <fork_fail> <row>:<n>:<sum_p>:<sum_pq>:<n_yes>;... ('-' when none)
+    // STATS <copy> <rank> <path> <fork_fail> <row>:<n>:<sum_p>:<sum_pq>:<n_yes>;... ('-' when none)
     stats_t st;
-    bool okline = tok.size() == 5 && parse_long( tok[ 3 ], st.fork_fail ) && st.fork_fail >= 0;
-    if ( okline && tok[ 4 ] != "-" )
+    long srank = -1;
+    bool okline = tok.size() == 6 && parse_long( tok[ 2 ], srank ) && srank >= 0 && srank <= ( r.pair ? 2 : 0 ) &&
+                  parse_long( tok[ 4 ], st.fork_fail ) && st.fork_fail >= 0;
+    if ( okline && tok[ 5 ] != "-" )
     {
-      std::stringstream is( tok[ 4 ] );
+      std::stringstream is( tok[ 5 ] );
       std::string item;
       while ( okline && std::getline( is, item, ';' ) )
       {
@@ -979,15 +1079,16 @@ void parse_line( const std::string& line, int pass, std::vector<copy_result_t>& 
           st.items.push_back( si );
       }
     }
-    const std::string path = okline && tok[ 2 ] != "-" ? tok[ 2 ] : std::string();
-    if ( !okline || r.stats.count( path ) )
+    const std::string path = okline && tok[ 3 ] != "-" ? tok[ 3 ] : std::string();
+    const std::pair<int, std::string> skey( static_cast<int>( srank ), path );
+    if ( !okline || r.stats.count( skey ) )
     {
       r.failed = true;
       r.fail = okline ? "duplicate_stats_line" : "bad_stats_line";
       ++g_count.unknown_lines;
       return;
     }
-    r.stats[ path ] = st;
+    r.stats[ skey ] = st;
     return;
   }
   if ( tok[ 0 ] != "LEAF" )
@@ -995,28 +1096,30 @@ void parse_line( const std::string& line, int pass, std::vector<copy_result_t>& 
     ++g_count.unknown_lines;
     return;
   }
-  // LEAF <copy> <pass> <cand> <rank> <w> <R> <R_undisc> <R_real> <boot_q> <t_end> <ended> <n_dec> <cut_state>
-  //      <vmhwm_kb> <cpu_s> <path> <splits>
+  // LEAF <copy> <pass> <cand> <rank> <w> <R> <R_undisc> <R_real> <boot_q> <boot_v> <t_end> <ended> <n_dec> <cut_state>
+  //      <vmhwm_kb> <cpu_s> <path> <splits> <sec>
   leaf_t lf;
-  long fpass = 0, fcand = 0, frank = 0, fended = 0, fndec = 0, fcut = 0, fhwm = 0;
-  bool good = tok.size() == 18 && parse_long( tok[ 2 ], fpass ) && parse_long( tok[ 3 ], fcand ) &&
+  long fpass = 0, fcand = 0, frank = 0, fended = 0, fndec = 0, fcut = 0, fhwm = 0, fsec = -1;
+  bool good = tok.size() == 20 && parse_long( tok[ 2 ], fpass ) && parse_long( tok[ 3 ], fcand ) &&
               parse_long( tok[ 4 ], frank ) && parse_double( tok[ 5 ], lf.w ) && parse_double( tok[ 6 ], lf.R ) &&
               parse_double( tok[ 7 ], lf.R_undisc ) && parse_double( tok[ 8 ], lf.R_real ) &&
-              parse_double( tok[ 9 ], lf.boot_q ) && parse_double( tok[ 10 ], lf.t_end ) &&
-              parse_long( tok[ 11 ], fended ) && parse_long( tok[ 12 ], fndec ) && parse_long( tok[ 13 ], fcut ) &&
-              parse_long( tok[ 14 ], fhwm ) && parse_double( tok[ 15 ], lf.cpu_s );
-  good = good && fpass == pass && fcand == r.cand && frank >= 0 && lf.w > 0.0 && lf.w <= 1.0 + 1e-9 &&
-         ( fended == 0 || fended == 1 ) && fndec >= 0 && fcut >= -1 && fcut <= 4 && fhwm >= 0;
+              parse_double( tok[ 9 ], lf.boot_q ) && parse_double( tok[ 10 ], lf.boot_v ) &&
+              parse_double( tok[ 11 ], lf.t_end ) && parse_long( tok[ 12 ], fended ) && parse_long( tok[ 13 ], fndec ) &&
+              parse_long( tok[ 14 ], fcut ) && parse_long( tok[ 15 ], fhwm ) && parse_double( tok[ 16 ], lf.cpu_s ) &&
+              parse_long( tok[ 19 ], fsec );
+  good = good && fpass == pass && fcand == r.cand && frank >= 0 && frank <= ( r.pair ? 2 : 0 ) && lf.w > 0.0 &&
+         lf.w <= 1.0 + 1e-9 && ( fended == 0 || fended == 1 ) && fndec >= 0 && fcut >= -1 && fcut <= 4 && fhwm >= 0 &&
+         fsec >= -1 && fsec < static_cast<long>( RL_ACTION_DIM ) && ( frank == 2 ? fsec == -1 : true );
   // the path and the split list: the outcome digits must equal the split list's outcomes, every row must exist, every
   // chance must be strictly between 0 and 1, and the weight must equal the product of the split probabilities (a
   // weight that does not follow from its own splits is a wrong leaf, never averaged in)
   if ( good )
   {
-    lf.path = tok[ 16 ] == "-" ? std::string() : tok[ 16 ];
+    lf.path = tok[ 17 ] == "-" ? std::string() : tok[ 17 ];
     double prod = 1.0;
-    if ( tok[ 17 ] != "-" )
+    if ( tok[ 18 ] != "-" )
     {
-      std::stringstream is( tok[ 17 ] );
+      std::stringstream is( tok[ 18 ] );
       std::string item;
       while ( good && std::getline( is, item, ';' ) )
       {
@@ -1047,8 +1150,8 @@ void parse_line( const std::string& line, int pass, std::vector<copy_result_t>& 
       good = digits == lf.path && std::fabs( prod - lf.w ) <= 1e-9;
     }
     for ( const leaf_t& other : r.leaves )
-      if ( good && other.path == lf.path )
-        good = false;  // two leaves on one path
+      if ( good && other.path == lf.path && other.rank == static_cast<int>( frank ) )
+        good = false;  // two leaves on one path (in one half of a pair)
   }
   if ( !good )
   {
@@ -1058,6 +1161,7 @@ void parse_line( const std::string& line, int pass, std::vector<copy_result_t>& 
     return;
   }
   lf.rank = static_cast<int>( frank );
+  lf.sec = static_cast<int>( fsec );
   lf.ended = static_cast<int>( fended );
   lf.n_dec = static_cast<int>( fndec );
   lf.cut_state = static_cast<int>( fcut );
@@ -1066,33 +1170,120 @@ void parse_line( const std::string& line, int pass, std::vector<copy_result_t>& 
   r.leaves.push_back( lf );
 }
 
-// A copy is usable when it has no FAIL / bad line, at least one leaf, a clean exit, and its leaf weights sum to 1.
-void finalise( copy_result_t& r )
+// The sums of a sample over its leaves (each leaf weighted by its path weight).
+void fill_values( copy_result_t& smp )
 {
-  r.w_sum = 0.0;
-  r.value = 0.0;
+  smp.w_sum = 0.0;
+  smp.value = 0.0;
+  smp.value_R = 0.0;
+  smp.value_boot = 0.0;
+  smp.value_Rund = 0.0;
+  smp.value_Rreal = 0.0;
+  for ( const leaf_t& lf : smp.leaves )
+  {
+    smp.w_sum += lf.w;
+    smp.value += lf.w * leaf_label( lf );
+    smp.value_R += lf.w * lf.R;
+    smp.value_boot += lf.w * leaf_boot( lf );
+    smp.value_Rund += lf.w * lf.R_undisc;
+    smp.value_Rreal += lf.w * lf.R_real;
+  }
+}
+
+// Pair halves that reached the same path (rank-0 leaf and rank-1 leaf): how many, and how many returned the same number
+// to 17 digits (a shared stream would show here; expected 0).
+struct pair_half_t
+{
+  long pairs = 0;
+  long ties = 0;
+};
+
+// One raw result into SAMPLES (280-06). A plain copy is one sample (rank 0) usable when it has no FAIL / bad line, at
+// least one leaf, a clean exit, and leaf weights summing to 1. A pair is two copies spent: its rank-0 sample (the rank-0
+// and rank-2 leaves) and, when some lineage forked, its rank-1 sample (the rank-1 and rank-2 leaves); a pair none of whose
+// lineages forked is ONE sample (pair_cut_first). A pair that fails in any way is dropped whole: two failed samples.
+void finalise( copy_result_t& r, std::vector<copy_result_t>& samples, pair_half_t& ph )
+{
   for ( leaf_t& lf : r.leaves )
   {
-    r.w_sum += lf.w;
-    r.value += lf.w * lf.R;
-    auto it = r.stats.find( lf.path );
+    auto it = r.stats.find( std::make_pair( lf.rank, lf.path ) );
     if ( it != r.stats.end() )
     {
       lf.stats = it->second;
       lf.has_stats = true;
     }
   }
-  r.ok = !r.failed && !r.leaves.empty() && r.exited && r.exit_code == 0 && r.signal == 0 &&
-         std::fabs( r.w_sum - 1.0 ) < 1e-9;
-  if ( !r.ok && r.fail.empty() )
-    r.fail = fmt::format( "no-line exit={} signal={} leaves={} w_sum={}", r.exit_code, r.signal, r.leaves.size(),
-                          r.w_sum );
+  const bool base_ok = !r.failed && !r.leaves.empty() && r.exited && r.exit_code == 0 && r.signal == 0;
+  if ( !r.pair )
+  {
+    r.rank = 0;
+    fill_values( r );
+    r.ok = base_ok && std::fabs( r.w_sum - 1.0 ) < 1e-9;
+    if ( !r.ok && r.fail.empty() )
+      r.fail = fmt::format( "no-line exit={} signal={} leaves={} w_sum={}", r.exit_code, r.signal, r.leaves.size(),
+                            r.w_sum );
+    samples.push_back( r );
+    return;
+  }
+  bool forked = false;
+  for ( const leaf_t& lf : r.leaves )
+    if ( lf.rank == 1 )
+      forked = true;
+  copy_result_t s0, s1;
+  for ( copy_result_t* smp : { &s0, &s1 } )
+  {
+    smp->cand = r.cand;
+    smp->button = r.button;
+    smp->pair = true;
+    smp->exited = r.exited;
+    smp->exit_code = r.exit_code;
+    smp->signal = r.signal;
+  }
+  s0.rank = 0;
+  s1.rank = 1;
+  for ( const leaf_t& lf : r.leaves )
+  {
+    if ( lf.rank != 1 )
+      s0.leaves.push_back( lf );
+    if ( forked && lf.rank != 0 )
+      s1.leaves.push_back( lf );
+  }
+  fill_values( s0 );
+  fill_values( s1 );
+  const bool ok = base_ok && std::fabs( s0.w_sum - 1.0 ) < 1e-9 && ( !forked || std::fabs( s1.w_sum - 1.0 ) < 1e-9 );
+  r.ok = ok;
+  if ( !ok && r.fail.empty() )
+    r.fail = fmt::format( "pair no-line exit={} signal={} leaves={} w_sum0={} w_sum1={}", r.exit_code, r.signal,
+                          r.leaves.size(), s0.w_sum, s1.w_sum );
+  s0.ok = s1.ok = ok;
+  s0.failed = s1.failed = !ok;
+  s0.fail = s1.fail = r.fail;
+  s0.pair_forked = forked;
+  s0.pair_cut_first = ok && !forked;
+  s0.pair_failed = s1.pair_failed = !ok;
+  if ( ok && forked )
+    for ( const leaf_t& lf : r.leaves )
+      if ( lf.rank == 2 )
+        s0.pair_mixed = true;
+  if ( ok && forked )
+    for ( const leaf_t& a : s0.leaves )
+      if ( a.rank == 0 )
+        for ( const leaf_t& b : s1.leaves )
+          if ( b.rank == 1 && b.path == a.path )
+          {
+            ++ph.pairs;
+            if ( a.R == b.R )
+              ++ph.ties;
+          }
+  samples.push_back( s0 );
+  if ( forked || !ok )
+    samples.push_back( s1 );
 }
 
 // Runs one pass: forks one copy per task, at most `jobs` alive at once, and reads every line to end of file.
 // Returns true IN A COPY (out_button = its button); false in the parent, with `res` filled.
 bool run_pass( sim_t* sim, player_t* p, std::uint64_t seq, int pass, const std::vector<copy_task_t>& tasks,
-               std::vector<copy_result_t>& res, int& out_button )
+               std::vector<copy_result_t>& samples, pair_half_t& ph, int& out_button )
 {
   const config_t& c = g_cfg;
   const solver_branch::config_t& sb = solver_branch::cfg();
@@ -1123,11 +1314,12 @@ bool run_pass( sim_t* sim, player_t* p, std::uint64_t seq, int pass, const std::
   ::fcntl( fds[ 0 ], F_SETFL, ::fcntl( fds[ 0 ], F_GETFL ) | O_NONBLOCK );
   (void)::fcntl( fds[ 0 ], F_SETPIPE_SZ, 1 << 20 );  // best effort; the poll-driven drain is safe without it
 
-  res.assign( tasks.size(), copy_result_t{} );
+  std::vector<copy_result_t> res( tasks.size(), copy_result_t{} );
   for ( std::size_t i = 0; i < tasks.size(); ++i )
   {
     res[ i ].cand = tasks[ i ].cand;
     res[ i ].button = tasks[ i ].button;
+    res[ i ].pair = tasks[ i ].pair;
   }
 
   std::string buf;
@@ -1179,7 +1371,7 @@ bool run_pass( sim_t* sim, player_t* p, std::uint64_t seq, int pass, const std::
         r.signal = WTERMSIG( st );
       pid_slot.erase( it );
       --running;
-      ++g_count.children_reaped;
+      g_count.children_reaped += r.pair ? 2 : 1;  // a pair is two copies spent
     }
   };
 
@@ -1195,14 +1387,14 @@ bool run_pass( sim_t* sim, player_t* p, std::uint64_t seq, int pass, const std::
       {
         const std::uint64_t key = copy_key( sb.branch_salt_base, seq, pass, static_cast<int>( next ) );
         become_search_child( sim, p, seq, pass, static_cast<int>( next ), tasks[ next ].cand, tasks[ next ].button,
-                             key, c.window, fds[ 0 ], fds[ 1 ] );
+                             tasks[ next ].pair, key, c.window, fds[ 0 ], fds[ 1 ] );
         out_button = tasks[ next ].button;
         return true;
       }
       pid_slot[ pid ] = next;
       ++running;
+      g_count.children += tasks[ next ].pair ? 2 : 1;  // a pair is two copies spent
       ++next;
-      ++g_count.children;
     }
     if ( next >= tasks.size() && !write_closed )
     {
@@ -1229,11 +1421,12 @@ bool run_pass( sim_t* sim, player_t* p, std::uint64_t seq, int pass, const std::
     while ( std::getline( ls, line ) )
       parse_line( line, pass, res );
   }
+  samples.clear();
   for ( auto& r : res )
   {
-    finalise( r );
+    finalise( r, samples, ph );
     if ( !r.ok )
-      ++g_count.child_fail;
+      g_count.child_fail += r.pair ? 2 : 1;
     for ( const leaf_t& lf : r.leaves )
     {
       g_count.leaf_vmhwm_kb_max = std::max( g_count.leaf_vmhwm_kb_max, lf.vmhwm_kb );
@@ -1244,20 +1437,42 @@ bool run_pass( sim_t* sim, player_t* p, std::uint64_t seq, int pass, const std::
 }
 #endif  // __linux__
 
-// ---- depth-one search at one decision ---------------------------------------------------------------
+// ---- the search at one decision ----------------------------------------------------------------------
+// One CELL: the samples that share a root candidate and a second-level rank (280-06). At depth one only rank 0 exists.
 struct cell_t
 {
-  int button = -1;
-  int rank_in_q = 0;
-  int n_assigned = 0;
+  int n_assigned = 0;        // samples that entered this cell (usable or not)
   int n_ok = 0;
   int n_fail = 0;
   double w_sum = 0.0;
-  std::vector<double> vals;  // per-COPY values, pass 1 then pass 2, in copy order
+  std::vector<double> vals;  // per-SAMPLE labels, pass 1 then pass 2, in sample order
+  std::vector<double> boots; // per-sample bootstrap part of the label (sum of w x term)
+  std::vector<double> Rs;    // per-sample window return R without the bootstrap
+  std::vector<double> Rund;  // per-sample undiscounted expected damage over the window
+  std::vector<double> Rreal; // per-sample realised damage over the window
+  std::map<int, double> sec_w;  // second-level button -> weighted leaf count (the modal button of the cell)
   double pass1_mean = std::numeric_limits<double>::quiet_NaN();
   double mean = std::numeric_limits<double>::quiet_NaN();
   double se = std::numeric_limits<double>::quiet_NaN();
-  double max_t_end_span = 0.0;
+};
+
+// One root candidate with its two cells.
+struct cand_t
+{
+  int button = -1;
+  int rank_in_q = 0;
+  int hold = 0;              // 0 not a wait button, 1 a wait button among the top candidates, 2 a wait button added
+  int spent = 0;             // copies spent on this candidate (a pair is two)
+  int pairs = 0;             // pairs dealt to this candidate
+  int pairs_cut_first = 0;   // of those, pairs none of whose lineages reached a second-level decision
+  int pairs_failed = 0;
+  int pairs_mixed = 0;       // pairs where some lineages forked and some reached the cut first (counted in both samples)
+  int singles2 = 0;          // plain copies dealt in pass 2 (the odd copy)
+  cell_t cell[ 2 ];
+  int best_rank = 0;         // the rank of the cell with the best mean
+  double value = std::numeric_limits<double>::quiet_NaN();   // the best cell's mean
+  double value_se = std::numeric_limits<double>::quiet_NaN();
+  double pass1_value = std::numeric_limits<double>::quiet_NaN();
 };
 
 // What the chance splits of one search add up to (280-04), over the copies of every pass.
@@ -1281,14 +1496,26 @@ struct split_agg_t
   long sibling_ties = 0;           // of those, pairs whose two returns are identical to 17 digits (shared dice?)
 };
 
-void add_pass_to_cells( const std::vector<copy_result_t>& res, std::vector<cell_t>& cells, split_agg_t& agg )
+void add_samples( const std::vector<copy_result_t>& samples, std::vector<cand_t>& cands, split_agg_t& agg,
+                  std::map<int, int>& leaves_hist )
 {
   if ( agg.rows.size() != g_sites.size() )
     agg.rows.assign( g_sites.size(), site_total_t{} );
-  for ( const copy_result_t& r : res )
+  for ( const copy_result_t& r : samples )
   {
-    cell_t& c = cells[ static_cast<std::size_t>( r.cand ) ];
+    cand_t& cd = cands[ static_cast<std::size_t>( r.cand ) ];
+    cell_t& c = cd.cell[ r.rank ];
     ++c.n_assigned;
+    if ( r.pair && r.rank == 0 )
+    {
+      ++cd.pairs;
+      if ( r.pair_cut_first )
+        ++cd.pairs_cut_first;
+      if ( r.pair_failed )
+        ++cd.pairs_failed;
+      if ( r.pair_mixed )
+        ++cd.pairs_mixed;
+    }
     if ( !r.failed && !r.leaves.empty() )
       agg.max_abs_wsum_err = std::max( agg.max_abs_wsum_err, std::fabs( r.w_sum - 1.0 ) );
     for ( const leaf_t& lf : r.leaves )
@@ -1298,9 +1525,17 @@ void add_pass_to_cells( const std::vector<copy_result_t>& res, std::vector<cell_
       ++c.n_ok;
       c.w_sum += r.w_sum;
       c.vals.push_back( r.value );
+      c.boots.push_back( r.value_boot );
+      c.Rs.push_back( r.value_R );
+      c.Rund.push_back( r.value_Rund );
+      c.Rreal.push_back( r.value_Rreal );
+      for ( const leaf_t& lf : r.leaves )
+        if ( lf.sec >= 0 )
+          c.sec_w[ lf.sec ] += lf.w;
       const long nl = static_cast<long>( r.leaves.size() );
       agg.leaves_total += nl;
       agg.splits_total += nl - 1;
+      ++leaves_hist[ static_cast<int>( nl ) ];
       if ( nl > 1 )
         ++agg.copies_split;
       // sibling leaves: two leaves whose paths agree on every digit but the last. Independent dice make an identical
@@ -1564,7 +1799,7 @@ void collect_gaps( const std::vector<copy_result_t>& res, std::vector<gap_obs_t>
         else if ( nd.row != row )
           nd.inconsistent = true;
         nd.w[ d ] += lf.w;
-        nd.wr[ d ] += lf.w * lf.R;
+        nd.wr[ d ] += lf.w * leaf_label( lf );
       }
     for ( const auto& kv : nodes )
     {
@@ -1777,16 +2012,40 @@ std::string parse_at_list( const std::string& spec, std::vector<std::int64_t>& o
   return std::string();
 }
 
+// One root candidate as the decision builds it (280-06): the button, its rank by q over the selectable buttons, and
+// whether it is a wait button (1) or a wait button ADDED as the hold candidate (2).
+struct cand_spec_t
+{
+  int button = 0;
+  int rank_q = 0;
+  int hold = 0;
+};
+
+// A cell's most pressed second-level button (weighted by leaf weight; ties to the lower button), -1 when none.
+int modal_sec( const cell_t& cl, double& n )
+{
+  int best = -1;
+  n = 0.0;
+  for ( const auto& kv : cl.sec_w )
+    if ( kv.second > n )
+    {
+      n = kv.second;
+      best = kv.first;
+    }
+  return best;
+}
+
 // Runs the whole search at one decision. Returns true IN A COPY (idx = the copy's candidate button).
-bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, const std::vector<int>& cands, int& idx,
-                  bool listed )
+bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, const std::vector<cand_spec_t>& specs,
+                  int& idx, bool listed )
 {
 #if defined( __linux__ )
   const config_t& c = g_cfg;
   const std::int64_t k = static_cast<std::int64_t>( seq ) - 1;
-  const int C = static_cast<int>( cands.size() );
+  const int C = static_cast<int>( specs.size() );
   const int K = c.copies;
   const int net = idx;
+  const bool d2 = c.depth == 2;
 
   const double self0 = rusage_cpu_s( RUSAGE_SELF );
   const double kids0 = rusage_cpu_s( RUSAGE_CHILDREN );
@@ -1796,26 +2055,36 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
 
   split_agg_t agg;
   agg.rows.assign( g_sites.size(), site_total_t{} );
-  std::vector<cell_t> cells( static_cast<std::size_t>( C ) );
+  std::vector<cand_t> cands( static_cast<std::size_t>( C ) );
+  bool hold_added = false;
+  bool hold_any = false;
   for ( int i = 0; i < C; ++i )
   {
-    cells[ static_cast<std::size_t>( i ) ].button = cands[ static_cast<std::size_t>( i ) ];
-    cells[ static_cast<std::size_t>( i ) ].rank_in_q = i;
+    cand_t& cd = cands[ static_cast<std::size_t>( i ) ];
+    cd.button = specs[ static_cast<std::size_t>( i ) ].button;
+    cd.rank_in_q = specs[ static_cast<std::size_t>( i ) ].rank_q;
+    cd.hold = specs[ static_cast<std::size_t>( i ) ].hold;
+    hold_any = hold_any || cd.hold != 0;
+    hold_added = hold_added || cd.hold == 2;
   }
+  std::map<int, int> leaves_hist;
+  pair_half_t ph;
 
-  // ---- pass 1: 8 copies per candidate (candidate-major) ----
+  // ---- pass 1: 8 copies per candidate (candidate-major), no second-level override: the (candidate, rank 0) cell ----
   std::vector<copy_task_t> t1;
   for ( int i = 0; i < C; ++i )
     for ( int j = 0; j < PASS1_PER_CAND; ++j )
-      t1.push_back( copy_task_t{ i, cands[ static_cast<std::size_t>( i ) ] } );
+      t1.push_back( copy_task_t{ i, cands[ static_cast<std::size_t>( i ) ].button, false } );
   std::vector<copy_result_t> r1;
   int child_button = -1;
-  if ( run_pass( sim, p, seq, 1, t1, r1, child_button ) )
+  if ( run_pass( sim, p, seq, 1, t1, r1, ph, child_button ) )
   {
     idx = child_button;
     return true;
   }
-  add_pass_to_cells( r1, cells, agg );
+  for ( cand_t& cd : cands )
+    cd.spent = PASS1_PER_CAND;
+  add_samples( r1, cands, agg, leaves_hist );
   std::vector<gap_obs_t> gap_obs;  // 280-05: one observation per completed split node, pass 1 then pass 2
   collect_gaps( r1, gap_obs );
   // the sites split on the first copy of pass 1 (the log receipt of the cold-start rule, SRCH-04)
@@ -1835,10 +2104,10 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
   }
   if ( first_copy_sites.empty() )
     first_copy_sites = "-";
-  for ( cell_t& cl : cells )
+  for ( cand_t& cd : cands )
   {
     double se_unused = 0.0;
-    mean_se( cl.vals, cl.pass1_mean, se_unused );
+    mean_se( cd.cell[ 0 ].vals, cd.cell[ 0 ].pass1_mean, se_unused );
   }
 
   // ---- halving: drop the worst candidate by its pass-1 mean (a tie drops the lower-ranked one) ----
@@ -1849,7 +2118,7 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
     order.push_back( i );
   const double lowest = -std::numeric_limits<double>::infinity();
   auto p1 = [ & ]( int i ) {
-    const double m = cells[ static_cast<std::size_t>( i ) ].pass1_mean;
+    const double m = cands[ static_cast<std::size_t>( i ) ].cell[ 0 ].pass1_mean;
     return std::isnan( m ) ? lowest : m;
   };
   std::stable_sort( order.begin(), order.end(), [ & ]( int a, int b ) {
@@ -1864,88 +2133,128 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
     survivors.pop_back();
   }
 
-  // ---- pass 2: the remaining copies, round-robin over the survivors, best pass-1 mean first ----
+  // ---- pass 2: the remaining copies, round-robin over the survivors, best pass-1 mean first. At depth 2 they are
+  // PAIRS (two copies each; the odd copy is one plain copy for the best survivor); at depth 1 they are plain copies. ----
   if ( R2 > 0 )
   {
     std::vector<copy_task_t> t2;
-    for ( int j = 0; j < R2; ++j )
+    const std::size_t nsurv = survivors.size();
+    if ( d2 )
     {
-      const int cand = survivors[ static_cast<std::size_t>( j ) % survivors.size() ];
-      t2.push_back( copy_task_t{ cand, cands[ static_cast<std::size_t>( cand ) ] } );
+      const int n_pairs = R2 / 2;
+      for ( int j = 0; j < n_pairs; ++j )
+      {
+        const int cand = survivors[ static_cast<std::size_t>( j ) % nsurv ];
+        t2.push_back( copy_task_t{ cand, cands[ static_cast<std::size_t>( cand ) ].button, true } );
+        cands[ static_cast<std::size_t>( cand ) ].spent += 2;
+      }
+      if ( R2 % 2 != 0 )
+      {
+        const int cand = survivors[ 0 ];
+        t2.push_back( copy_task_t{ cand, cands[ static_cast<std::size_t>( cand ) ].button, false } );
+        cands[ static_cast<std::size_t>( cand ) ].spent += 1;
+        ++cands[ static_cast<std::size_t>( cand ) ].singles2;
+      }
+    }
+    else
+    {
+      for ( int j = 0; j < R2; ++j )
+      {
+        const int cand = survivors[ static_cast<std::size_t>( j ) % nsurv ];
+        t2.push_back( copy_task_t{ cand, cands[ static_cast<std::size_t>( cand ) ].button, false } );
+        cands[ static_cast<std::size_t>( cand ) ].spent += 1;
+      }
     }
     std::vector<copy_result_t> r2;
-    if ( run_pass( sim, p, seq, 2, t2, r2, child_button ) )
+    if ( run_pass( sim, p, seq, 2, t2, r2, ph, child_button ) )
     {
       idx = child_button;
       return true;
     }
-    add_pass_to_cells( r2, cells, agg );
+    add_samples( r2, cands, agg, leaves_hist );
     collect_gaps( r2, gap_obs );
   }
 
-  // ---- per-candidate cells over COPIES (never over leaves) ----
-  for ( cell_t& cl : cells )
-    mean_se( cl.vals, cl.mean, cl.se );
+  // ---- per-candidate cells over SAMPLES (never over leaves); value = the best cell's mean ----
+  for ( cand_t& cd : cands )
+  {
+    for ( cell_t& cl : cd.cell )
+      mean_se( cl.vals, cl.mean, cl.se );
+    const cell_t& a0 = cd.cell[ 0 ];
+    const cell_t& a1 = cd.cell[ 1 ];
+    cd.best_rank = ( std::isnan( a0.mean ) || ( !std::isnan( a1.mean ) && a1.mean > a0.mean ) ) ? 1 : 0;
+    cd.value = cd.cell[ cd.best_rank ].mean;
+    cd.value_se = cd.cell[ cd.best_rank ].se;
+    cd.pass1_value = a0.pass1_mean;
+  }
 
-  // ---- 280-05: this search's statistics join the run's. The pooled within-cell variance of copy values (the
+  // ---- 280-05: this search's statistics join the run's. The pooled within-cell variance of sample values (the
   // noise-correction diagnostic of Pitfall 16): the cells' sums of squares over the sum of their degrees of freedom. ----
   {
     double ss_all = 0.0, df_all = 0.0;
     long copies_ok = 0;
-    for ( const cell_t& cl : cells )
-    {
-      copies_ok += static_cast<long>( cl.vals.size() );
-      if ( cl.vals.size() < 2 )
-        continue;
-      double m = 0.0;
-      for ( double v : cl.vals )
-        m += v;
-      m /= static_cast<double>( cl.vals.size() );
-      for ( double v : cl.vals )
-        ss_all += ( v - m ) * ( v - m );
-      df_all += static_cast<double>( cl.vals.size() - 1 );
-    }
+    for ( const cand_t& cd : cands )
+      for ( const cell_t& cl : cd.cell )
+      {
+        copies_ok += static_cast<long>( cl.vals.size() );
+        if ( cl.vals.size() < 2 )
+          continue;
+        double m = 0.0;
+        for ( double v : cl.vals )
+          m += v;
+        m /= static_cast<double>( cl.vals.size() );
+        for ( double v : cl.vals )
+          ss_all += ( v - m ) * ( v - m );
+        df_all += static_cast<double>( cl.vals.size() - 1 );
+      }
     apply_search_stats( agg, copies_ok, gap_obs, df_all > 0.0 ? ss_all / df_all : 0.0 );
   }
 
-  // ---- the fail rule: a candidate with fewer than half its copies usable marks the search skipped_fail ----
+  // ---- the fail rule: a candidate with fewer than half its samples usable marks the search skipped_fail ----
   bool fail = false;
-  for ( const cell_t& cl : cells )
-    if ( cl.n_ok < ( cl.n_assigned + 1 ) / 2 )
-      fail = true;
-
-  // ---- pick: the best cell mean among the survivors (strict greater: an exact tie stays with the higher rank) ----
-  int pick_i = 0;
+  for ( const cand_t& cd : cands )
   {
-    bool first = true;
-    for ( int i = 0; i < C; ++i )
-    {
-      if ( i == dropped )
-        continue;
-      if ( first || cells[ static_cast<std::size_t>( i ) ].mean > cells[ static_cast<std::size_t>( pick_i ) ].mean )
-        pick_i = i;
-      first = false;
-    }
+    const int ok = cd.cell[ 0 ].n_ok + cd.cell[ 1 ].n_ok;
+    const int asg = cd.cell[ 0 ].n_assigned + cd.cell[ 1 ].n_assigned;
+    if ( ok < ( asg + 1 ) / 2 )
+      fail = true;
   }
-  // runner-up: the best cell mean among every OTHER candidate (the dropped one included); ties to the higher rank
+
+  // ---- pick: the best value among the survivors (strict greater: an exact tie stays with the higher rank) ----
+  auto better = []( double x, double y ) { return !std::isnan( x ) && ( std::isnan( y ) || x > y ); };
+  int pick_i = -1;
+  int pick0_i = -1;  // the pick using the rank-0 cells only
+  for ( int i = 0; i < C; ++i )
+  {
+    if ( i == dropped )
+      continue;
+    const cand_t& cd = cands[ static_cast<std::size_t>( i ) ];
+    if ( pick_i < 0 || better( cd.value, cands[ static_cast<std::size_t>( pick_i ) ].value ) )
+      pick_i = i;
+    if ( pick0_i < 0 || better( cd.cell[ 0 ].mean, cands[ static_cast<std::size_t>( pick0_i ) ].cell[ 0 ].mean ) )
+      pick0_i = i;
+  }
+  // runner-up: the best value among every OTHER candidate (the dropped one included); ties to the higher rank
   int second_i = -1;
   for ( int i = 0; i < C; ++i )
   {
     if ( i == pick_i )
       continue;
-    if ( second_i < 0 || cells[ static_cast<std::size_t>( i ) ].mean > cells[ static_cast<std::size_t>( second_i ) ].mean )
+    if ( second_i < 0 || better( cands[ static_cast<std::size_t>( i ) ].value, cands[ static_cast<std::size_t>( second_i ) ].value ) )
       second_i = i;
   }
   double margin = std::numeric_limits<double>::quiet_NaN();
   double margin_se = std::numeric_limits<double>::quiet_NaN();
   if ( !fail && second_i >= 0 )
   {
-    const cell_t& a = cells[ static_cast<std::size_t>( pick_i ) ];
-    const cell_t& b = cells[ static_cast<std::size_t>( second_i ) ];
-    margin = a.mean - b.mean;
-    if ( std::isfinite( a.se ) && std::isfinite( b.se ) )
-      margin_se = std::sqrt( a.se * a.se + b.se * b.se );
+    const cand_t& a = cands[ static_cast<std::size_t>( pick_i ) ];
+    const cand_t& b = cands[ static_cast<std::size_t>( second_i ) ];
+    margin = a.value - b.value;
+    if ( std::isfinite( a.value_se ) && std::isfinite( b.value_se ) )
+      margin_se = std::sqrt( a.value_se * a.value_se + b.value_se * b.value_se );
   }
+  const int second_pick = d2 ? cands[ static_cast<std::size_t>( pick_i ) ].best_rank : -1;
+  const bool second_changed = d2 && pick_i != pick0_i;
 
   int pick = net;
   if ( fail )
@@ -1954,7 +2263,7 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
   }
   else
   {
-    pick = cands[ static_cast<std::size_t>( pick_i ) ];
+    pick = cands[ static_cast<std::size_t>( pick_i ) ].button;
     ++g_count.branched;
     if ( pick != net )
       ++g_count.overrides;  // press=net: the override the search WOULD have made
@@ -1962,6 +2271,7 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
       idx = pick;
   }
   ++g_count.searches;
+  const bool hold_won = !fail && RL_ACTIONS[ pick ].kind == rl_action_kind::wait;
 
   // ---- clocks ----
   const double fork_cpu = rusage_cpu_s( RUSAGE_SELF ) - self0;
@@ -1988,16 +2298,45 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
   {
     std::string jc;
     int n_total = 0;
-    for ( std::size_t i = 0; i < cells.size(); ++i )
+    int samples_total = 0;
+    int pairs_total = 0, pairs_cut = 0, pairs_failed = 0, pairs_mixed = 0;
+    for ( std::size_t i = 0; i < cands.size(); ++i )
     {
-      const cell_t& cl = cells[ i ];
-      n_total += cl.n_assigned;
+      const cand_t& cd = cands[ i ];
+      n_total += cd.spent;
+      pairs_total += cd.pairs;
+      pairs_cut += cd.pairs_cut_first;
+      pairs_failed += cd.pairs_failed;
+      pairs_mixed += cd.pairs_mixed;
+      std::string cells_json;
+      for ( int r = 0; r < ( d2 ? 2 : 1 ); ++r )
+      {
+        const cell_t& cl = cd.cell[ r ];
+        samples_total += cl.n_assigned;
+        double modal_n = 0.0;
+        const int modal = modal_sec( cl, modal_n );
+        cells_json += fmt::format(
+            "{}{{\"rank\":{},\"copies\":{},\"n_ok\":{},\"n_fail\":{},\"w_sum\":{},\"mean\":{},\"se\":{},"
+            "\"modal_button\":{},\"modal_n\":{}}}",
+            r ? "," : "", r, cl.n_assigned, cl.n_ok, cl.n_fail, jnum( cl.w_sum ), jnum( cl.mean ), jnum( cl.se ),
+            modal >= 0 ? std::to_string( modal ) : std::string( "null" ), jnum( modal_n ) );
+      }
+      const int c_ok = cd.cell[ 0 ].n_ok + cd.cell[ 1 ].n_ok;
+      const int c_fail = cd.cell[ 0 ].n_fail + cd.cell[ 1 ].n_fail;
+      const double c_w = cd.cell[ 0 ].w_sum + cd.cell[ 1 ].w_sum;
+      const std::string hold_event =
+          cd.hold != 0 ? fmt::format( "\"{}\"", RL_ACTIONS[ cd.button ].label ) : std::string( "null" );
       jc += fmt::format(
-          "{}{{\"button\":{},\"rank_in_q\":{},\"q\":{},\"copies\":{},\"n_ok\":{},\"n_fail\":{},\"w_sum\":{},"
-          "\"mean\":{},\"se\":{},\"pass1_mean\":{}}}",
-          i ? "," : "", cl.button, cl.rank_in_q, jnum( static_cast<double>( q[ cl.button ] ) ), cl.n_assigned, cl.n_ok,
-          cl.n_fail, jnum( cl.w_sum ), jnum( cl.mean ), jnum( cl.se ), jnum( cl.pass1_mean ) );
+          "{}{{\"button\":{},\"rank_in_q\":{},\"q\":{},\"hold_event\":{},\"copies\":{},\"n_ok\":{},\"n_fail\":{},"
+          "\"w_sum\":{},\"mean\":{},\"se\":{},\"pass1_mean\":{},\"value\":{},\"pass1_value\":{},\"pairs\":{},"
+          "\"pairs_cut_first\":{},\"pairs_failed\":{},\"singles2\":{},\"best_rank\":{},\"cells\":[{}]}}",
+          i ? "," : "", cd.button, cd.rank_in_q, jnum( static_cast<double>( q[ cd.button ] ) ), hold_event, cd.spent, c_ok,
+          c_fail, jnum( c_w ), jnum( cd.value ), jnum( cd.value_se ), jnum( cd.pass1_value ), jnum( cd.value ),
+          jnum( cd.pass1_value ), cd.pairs, cd.pairs_cut_first, cd.pairs_failed, cd.singles2, cd.best_rank, cells_json );
     }
+    std::string hist_json;
+    for ( const auto& kv : leaves_hist )
+      hist_json += fmt::format( "{}\"{}\":{}", hist_json.empty() ? "" : ",", kv.first, kv.second );
     const long hwm_max = g_count.search_vmhwm_kb_max;
     std::string site_stats_json;
     for ( std::size_t i = 0; i < agg.rows.size(); ++i )
@@ -2017,17 +2356,24 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
         "\"fork_cpu_s\":{},\"child_cpu_s\":{},\"wall_s\":{},\"leaf_vmhwm_kb_max\":{},"
         "\"split_mode\":\"{}\",\"splits_total\":{},\"leaves_total\":{},\"copies_split\":{},\"fork_fail\":{},"
         "\"max_abs_wsum_err\":{},\"sibling_pairs\":{},\"sibling_ties\":{},\"audit_nosplit\":{},\"gap_obs\":{},"
+        "\"depth\":{},\"second_pick\":{},\"second_level_changed\":{},\"pairs\":{},\"pair_forks\":{},"
+        "\"pair_cut_first\":{},\"pair_failed\":{},\"pair_mixed\":{},\"samples\":{},\"leaves_per_copy\":{{{}}},"
+        "\"hold_candidate\":{},\"hold_added\":{},\"hold_won\":{},\"pair_half_pairs\":{},\"pair_half_ties\":{},"
         "\"site_stats\":[{}]}}\n",
-        seq, k, jnum( t_k ), net, pick, idx, listed ? 1 : 0, jc, dropped >= 0 ? cells[ static_cast<std::size_t>( dropped ) ].button : -1,
-        jnum( margin ), jnum( margin_se ), n_total, fail ? 1 : 0, jnum( fork_cpu + child_cpu ), jnum( fork_cpu ),
-        jnum( child_cpu ), jnum( wall ), hwm_max, split_mode_name(), agg.splits_total,
-        agg.leaves_total, agg.copies_split, agg.fork_fail, jnum( agg.max_abs_wsum_err ), agg.sibling_pairs,
-        agg.sibling_ties, g_audit ? 1 : 0, gap_obs.size(), site_stats_json );
+        seq, k, jnum( t_k ), net, pick, idx, listed ? 1 : 0, jc,
+        dropped >= 0 ? cands[ static_cast<std::size_t>( dropped ) ].button : -1, jnum( margin ), jnum( margin_se ),
+        n_total, fail ? 1 : 0, jnum( fork_cpu + child_cpu ), jnum( fork_cpu ), jnum( child_cpu ), jnum( wall ), hwm_max,
+        split_mode_name(), agg.splits_total, agg.leaves_total, agg.copies_split, agg.fork_fail,
+        jnum( agg.max_abs_wsum_err ), agg.sibling_pairs, agg.sibling_ties, g_audit ? 1 : 0, gap_obs.size(), c.depth,
+        second_pick >= 0 ? std::to_string( second_pick ) : std::string( "null" ),
+        d2 ? ( second_changed ? "1" : "0" ) : "null", pairs_total, pairs_total - pairs_cut - pairs_failed, pairs_cut,
+        pairs_failed, pairs_mixed, samples_total, hist_json, hold_any ? 1 : 0, hold_added ? 1 : 0, hold_won ? 1 : 0, ph.pairs,
+        ph.ties, site_stats_json );
     g_log->flush();
   }
   return false;
 #else
-  (void)sim; (void)p; (void)seq; (void)q; (void)cands; (void)idx; (void)listed;
+  (void)sim; (void)p; (void)seq; (void)q; (void)specs; (void)idx; (void)listed;
   throw sc_runtime_error( "solver_search: fork() needs a Linux build" );
 #endif
 }
@@ -2132,10 +2478,20 @@ void validate( sim_t* sim )
     refuse( fmt::format( "solver_search_candidates must be 2..4 (got {}).", c.candidates ) );
   if ( !( c.window > 0.0 && c.window <= 120.0 ) )
     refuse( fmt::format( "solver_search_window must be > 0 and <= 120 seconds (got {}).", c.window ) );
-  if ( c.copies < PASS1_PER_CAND * c.candidates )
-    refuse( fmt::format( "solver_search_copies={} is below 8 x solver_search_candidates={} = {} (pass 1 alone needs 8 "
-                         "copies per candidate).",
-                         c.copies, c.candidates, PASS1_PER_CAND * c.candidates ) );
+  if ( c.depth != 1 && c.depth != 2 )
+    refuse( fmt::format( "solver_search_depth must be 1 or 2 (got {}).", c.depth ) );
+  if ( c.second != 2 )
+    refuse( fmt::format( "solver_search_second must be 2 (the second level is fixed at two buttons; got {}).", c.second ) );
+  {
+    // pass 1 needs 8 copies per candidate; the hold candidate is one more; depth two needs at least one pair after it
+    const int n_cands_max = c.candidates + ( c.holds ? 1 : 0 );
+    const int need = PASS1_PER_CAND * n_cands_max + ( c.depth == 2 ? 2 : 0 );
+    if ( c.copies < need )
+      refuse( fmt::format( "solver_search_copies={} is below {} = 8 x ({} candidates{}){} (pass 1 alone needs 8 copies "
+                           "per candidate; solver_search_copies must cover them).",
+                           c.copies, need, c.candidates, c.holds ? " + 1 hold" : "",
+                           c.depth == 2 ? " + 2 for one pair at depth 2" : "" ) );
+  }
   if ( c.copies > 4096 )
     refuse( fmt::format( "solver_search_copies must be at most 4096 (got {}).", c.copies ) );
   if ( c.jobs < 1 || c.jobs > 12 )
@@ -2203,11 +2559,12 @@ void validate( sim_t* sim )
 
   g_any = true;
   fmt::print( "[RL_SEARCH] candidates={} window={:.17g} copies={} jobs={} at={} margin={:.17g} press={} expected_crit={} "
-              "divisor={:.17g} gamma={:.17g} salt_base={} splits={} split_site={} audit_nosplit={} sites_in={} sites_out={} log={}\n",
+              "divisor={:.17g} gamma={:.17g} salt_base={} splits={} split_site={} audit_nosplit={} sites_in={} sites_out={} "
+              "depth={} second={} holds={} log={}\n",
               c.candidates, c.window, c.copies, c.jobs, c.at_list.size(), c.margin, c.press, c.expected_crit ? 1 : 0,
               sb.value_divisor, sb.gamma, sb.branch_salt_base, c.splits, c.split_site.empty() ? "-" : c.split_site,
               c.nosplit_audit ? 1 : 0, c.sites_in.empty() ? "-" : c.sites_in, c.sites_out.empty() ? "-" : c.sites_out,
-              c.log );
+              c.depth, c.depth == 2 ? c.second : 0, c.holds ? 1 : 0, c.log );
   std::fflush( stdout );
 }
 
@@ -2232,10 +2589,26 @@ void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* obs, 
     {
       const double boot_q = std::pow( g_child.gamma, t - g_child.t_k ) * static_cast<double>( top_q );
       write_leaf_and_exit( g_child.acc, p->solver_damage_expected_so_far - g_child.Eexp_k,
-                           p->solver_damage_so_far - g_child.D_k, boot_q, t, 0, g_child.cut_state );
+                           p->solver_damage_so_far - g_child.D_k, boot_q, 0.0, t, 0, g_child.cut_state );
     }
     g_child.last_t = t;
     g_child.last_E = E;
+    // 280-06: the second level. A pair process that has not forked yet forks at the first decision with at least two
+    // selectable buttons that is neither forced nor exploratory: the net's best button for the forker (rank 0), its
+    // runner-up for the new process (rank 1).
+    if ( g_child.pair_pending && !forced && !exploratory )
+    {
+      int n_sel2 = 0;
+      for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+        n_sel2 += select_mask[ i ] ? 1 : 0;
+      if ( n_sel2 >= 2 )
+      {
+        const std::vector<int> top2 = top_k( q, select_mask, 2 );
+        if ( top2.size() != 2 || top2[ 0 ] != idx )
+          child_write_and_exit( make_fail_line( 81, "second_level_net_pick_is_not_the_best_button" ), 81 );
+        pair_fork_here( sim, top2[ 0 ], top2[ 1 ], idx );
+      }
+    }
     return;
   }
 
@@ -2288,8 +2661,41 @@ void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* obs, 
         "search from a press the net did not choose",
         idx, cands.empty() ? -1 : cands[ 0 ], k ) );
 
+  // 280-06: the candidate list with the hold candidate (G280-8). A wait button already among the top candidates is
+  // marked (hold 1); with solver_search_holds=1 and no wait button among them, the selectable wait button with the
+  // highest q is appended (hold 2). The wait kind is read from the action table, never from fixed indices.
+  std::vector<cand_spec_t> specs;
+  bool any_wait = false;
+  for ( std::size_t i = 0; i < cands.size(); ++i )
+  {
+    cand_spec_t sp;
+    sp.button = cands[ i ];
+    sp.rank_q = static_cast<int>( i );
+    sp.hold = RL_ACTIONS[ cands[ i ] ].kind == rl_action_kind::wait ? 1 : 0;
+    any_wait = any_wait || sp.hold != 0;
+    specs.push_back( sp );
+  }
+  if ( c.holds && !any_wait )
+  {
+    int best_wait = -1;
+    for ( int b = 0; b < static_cast<int>( RL_ACTION_DIM ); ++b )
+      if ( select_mask[ b ] && RL_ACTIONS[ b ].kind == rl_action_kind::wait &&
+           ( best_wait < 0 || q[ b ] > q[ best_wait ] ) )
+        best_wait = b;
+    if ( best_wait >= 0 )
+    {
+      cand_spec_t sp;
+      sp.button = best_wait;
+      sp.hold = 2;
+      for ( int b = 0; b < static_cast<int>( RL_ACTION_DIM ); ++b )
+        if ( select_mask[ b ] && b != best_wait && ( q[ b ] > q[ best_wait ] || ( q[ b ] == q[ best_wait ] && b < best_wait ) ) )
+          ++sp.rank_q;
+      specs.push_back( sp );
+    }
+  }
+
   ensure_sites( sim );
-  search_here( sim, p, seq, q, cands, idx, listed_mode );
+  search_here( sim, p, seq, q, specs, idx, listed_mode );
 }
 
 void on_combat_end( sim_t* sim )
@@ -2302,7 +2708,7 @@ void on_combat_end( sim_t* sim )
   g_child.acc += std::pow( g_child.gamma, g_child.last_t - g_child.t_k ) * ( ( E_end - g_child.last_E ) / g_child.divisor );
   // the fight ended before the window did: ended = 1, no bootstrap, cut_state 4
   write_leaf_and_exit( g_child.acc, p->solver_damage_expected_so_far - g_child.Eexp_k,
-                       p->solver_damage_so_far - g_child.D_k, 0.0, t_end, 1, 4 );
+                       p->solver_damage_so_far - g_child.D_k, 0.0, 0.0, t_end, 1, 4 );
 }
 
 void on_child_exception( sim_t* sim, const char* what )
@@ -2341,22 +2747,22 @@ void write_summary( sim_t* sim )
   const double self_cpu = 0.0, kids_cpu = 0.0;
 #endif
   // The ten counters the frozen teacher reader knows, then this module's own, then a config object of NUMBERS only
-  // (the depth, second, splits, holds and bootstrap keys are 1, 0, 0, 0, 0 in this plan; later plans fill theirs).
+  // (depth, second, splits, holds, bootstrap: 280-06 fills them from the options; bootstrap 0 none, 1 q, 2 value).
   const std::string js = fmt::format(
       "{{\"summary\":1,\"decisions\":{},\"near_ties\":{},\"branched\":{},\"overrides\":{},\"skipped_fail\":{},"
       "\"children\":{},\"child_fail\":{},\"child_cpu_s\":{},\"fork_cpu_s\":{},\"wall_branch_s\":{},"
       "\"children_reaped\":{},\"searches\":{},\"unknown_lines\":{},\"self_cpu_s\":{},\"children_cpu_total_s\":{},"
       "\"rss_kb_first\":{},\"rss_kb_last\":{},\"fd_first\":{},\"fd_last\":{},\"leaf_vmhwm_kb_max\":{},"
       "\"listed\":{},\"listed_reached\":{},\"listed_skipped\":{},"
-      "\"config\":{{\"margin\":{},\"copies\":{},\"window\":{},\"candidates\":{},\"depth\":1,\"second\":0,\"splits\":{},"
-      "\"holds\":0,\"bootstrap\":0,\"gamma\":{},\"jobs\":{},\"salt_base\":{},\"press_best\":{},\"expected_crit\":{},"
+      "\"config\":{{\"margin\":{},\"copies\":{},\"window\":{},\"candidates\":{},\"depth\":{},\"second\":{},\"splits\":{},"
+      "\"holds\":{},\"bootstrap\":{},\"gamma\":{},\"jobs\":{},\"salt_base\":{},\"press_best\":{},\"expected_crit\":{},"
       "\"divisor\":{}}}}}",
       g_count.decisions, g_count.near_ties, g_count.branched, g_count.overrides, g_count.skipped_fail, g_count.children,
       g_count.child_fail, jnum( g_count.child_cpu_s ), jnum( g_count.fork_cpu_s ), jnum( g_count.wall_branch_s ),
       g_count.children_reaped, g_count.searches, g_count.unknown_lines, jnum( self_cpu ), jnum( kids_cpu ),
       g_count.rss_kb_first, g_count.rss_kb_last, g_count.fd_first, g_count.fd_last, g_count.leaf_vmhwm_kb_max,
       c.at_list.size(), g_count.listed_reached, g_count.listed_skipped, jnum( c.margin ), c.copies, jnum( c.window ),
-      c.candidates, c.splits, jnum( sb.gamma ), c.jobs, sb.branch_salt_base, c.press_best ? 1 : 0,
+      c.candidates, c.depth, c.depth == 2 ? c.second : 0, c.splits, c.holds ? 1 : 0, g_boot_mode, jnum( sb.gamma ), c.jobs, sb.branch_salt_base, c.press_best ? 1 : 0,
       c.expected_crit ? 1 : 0, jnum( sb.value_divisor ) );
   if ( g_log )
   {

@@ -43,6 +43,12 @@
 //                                          table ranked by var_share, C-A fields first, cumulative fields appended
 //   solver_search_nosplit_audit=0|1        (280-05) 1 runs every search of the process with no splits and marks it, so
 //                                          the label's standard error without splits can be set beside the one with
+//   solver_search_depth=1|2                (280-06) 1 = the depth-one search; 2 (default) = the depth-two tree: inside each
+//                                          pass-2 copy pair the next decision with at least two selectable buttons forks
+//                                          into the net's rank-0 and rank-1 buttons
+//   solver_search_second=2                 (280-06) the second level's width; only 2 is accepted
+//   solver_search_holds=0|1                (280-06) 1 (default) adds the legal wait button with the highest value as one
+//                                          more root candidate when no wait button is among the top candidates
 //
 // Read, not registered here: solver_branch_value_divisor (> 0), solver_branch_gamma, solver_branch_salt_base,
 // solver_branch_independent_dice and solver_branch_redeal (both must stay 1: paired futures are refused).
@@ -75,6 +81,9 @@ struct config_t
   std::string sites_in;               // solver_search_sites_in (280-05)
   std::string sites_out;              // solver_search_sites_out (280-05)
   bool nosplit_audit = false;         // solver_search_nosplit_audit (280-05)
+  int depth = 2;                      // solver_search_depth, 1 or 2 (280-06)
+  int second = 2;                     // solver_search_second, only 2 (280-06)
+  bool holds = true;                  // solver_search_holds (280-06)
   // set by validate()
   std::vector<std::int64_t> at_list;  // parsed from `at`
   bool press_best = false;
