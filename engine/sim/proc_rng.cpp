@@ -204,7 +204,69 @@ int shuffled_rng_t::trigger( action_state_t* )
     reset( reset_type_e::COMBAT );
   }
 
-  return *position++;
+  // tstl-sylvanas 280-02 (SRCH-02, G280-2 with the recorded deviation): with a sink attached, tell it the deck's own
+  // exact next-card chance and let it force the card. All of this sits behind the sink null check, so a run with no
+  // sink takes exactly the old path.
+  double p_success = -1.0;
+  if ( rng::rl_draw_sink )
+  {
+    p_success = next_success_chance();
+    if ( p_success > 0.0 && p_success < 1.0 )
+    {
+      std::uint32_t slot = source_rng_.rl_roller_id();
+      const std::uint32_t slot_before = slot;
+      const int answer = rng::rl_draw_sink->pre_deck_draw( slot, p_success );
+      if ( slot != slot_before )
+        source_rng_.rl_set_roller_id( slot );
+      if ( answer == rng::RL_PRE_FORCE_YES )
+        force_next( SUCCESS );
+      else if ( answer == rng::RL_PRE_FORCE_NO )
+        force_next( FAIL );
+    }
+  }
+
+  const int card = *position++;
+
+  if ( rng::rl_draw_sink && p_success >= 0.0 )
+  {
+    std::uint32_t slot = source_rng_.rl_roller_id();
+    const std::uint32_t slot_before = slot;
+    rng::rl_draw_sink->on_deck_draw_outcome( slot, p_success, card == SUCCESS );
+    if ( slot != slot_before )
+      source_rng_.rl_set_roller_id( slot );
+  }
+
+  return card;
+}
+
+double shuffled_rng_t::next_success_chance() const
+{
+  if ( position == entries.end() )
+    return -1.0;
+  for ( int key : entries )
+    if ( key != SUCCESS && key != FAIL )
+      return -1.0;
+  const std::vector<int>::const_iterator first = position;
+  const auto left = static_cast<double>( entries.end() - first );
+  const auto successes = static_cast<double>( std::count( first, entries.end(), static_cast<int>( SUCCESS ) ) );
+  return successes / left;
+}
+
+bool shuffled_rng_t::force_next( int key )
+{
+  if ( position == entries.end() )
+    return false;
+  if ( *position != key )
+  {
+    auto it = std::find( position + 1, entries.end(), key );
+    if ( it == entries.end() )
+      return false;
+    std::iter_swap( position, it );
+  }
+  ++position;
+  redeal_undrawn();
+  --position;
+  return true;
 }
 
 void shuffled_rng_t::redeal_undrawn()

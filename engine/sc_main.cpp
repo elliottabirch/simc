@@ -349,8 +349,9 @@ const char* const FIGHT_LIST_PROCESS_OPTIONS[] = {
 // Options refused in any entry, by name prefix (PLAN-A section 2.3). Each exists for one reason: the feature
 // keeps process-global state this driver does not carry (solver_branch, rl_buff_*), reads only one process
 // (rl_rng_*), or is a one-shot probe (rl_forward_probe, rl_obs_names_out), or would nest a list.
+// tstl-sylvanas 280-02: "solver_search" is refused too (a search forks process-wide state, same reason as solver_branch).
 const char* const FIGHT_LIST_REFUSED_PREFIXES[] = {
-    "solver_branch", "solver_teacher", "rl_buff_", "rl_rng_", "rl_forward_probe", "rl_obs_names_out", "rl_fight_list" };
+    "solver_branch", "solver_teacher", "solver_search", "rl_buff_", "rl_rng_", "rl_forward_probe", "rl_obs_names_out", "rl_fight_list" };
 
 // Options refused in any entry, by exact name.
 const char* const FIGHT_LIST_REFUSED_NAMES[] = { "solver_control", "decision_dump" };

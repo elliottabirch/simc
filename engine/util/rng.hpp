@@ -156,7 +156,32 @@ struct rl_draw_sink_t
   // is written for it, but an implementation still counts it (R-05: "rolls that never draw").
   // Same roller_slot/draw_counter meaning as on_draw() above.
   virtual void on_no_draw_roll( std::uint32_t& roller_slot, const std::uint64_t& draw_counter ) = 0;
+
+  // tstl-sylvanas 280-02 (SRCH-01, G280-1): asked by roll( chance ) BEFORE the draw, only when 0 < chance < 1
+  // and a sink is attached. Answer 0 = draw normally, 1 = force the roll to succeed, 2 = force it to fail. A
+  // forced roll consumes NO draw from the stream and is still reported through on_roll_outcome() like a drawn
+  // one. The default answers 0 and does nothing, so the recorder and every other sink that does not override it
+  // behave exactly as before. `roller_slot` is the calling stream's own roller number, as in on_draw().
+  virtual int pre_roll( std::uint32_t& roller_slot, double chance )
+  { (void)roller_slot; (void)chance; return 0; }
+
+  // tstl-sylvanas 280-02 (SRCH-02, G280-2 with the recorded deviation): asked by shuffled_rng_t::trigger BEFORE a
+  // card is taken, only when a sink is attached and the deck can state the EXACT chance `p_success` that the next
+  // card is a success (0 < p_success < 1). Same answers as pre_roll(). `roller_slot` is the deck's own stream's
+  // roller number. The default answers 0.
+  virtual int pre_deck_draw( std::uint32_t& roller_slot, double p_success )
+  { (void)roller_slot; (void)p_success; return 0; }
+
+  // tstl-sylvanas 280-02: told what card the deck dealt after an exact-chance question, forced or drawn
+  // (success = the card was a success). Lets a sink count outcomes against the stated chance. Default: nothing.
+  virtual void on_deck_draw_outcome( std::uint32_t& roller_slot, double p_success, bool success )
+  { (void)roller_slot; (void)p_success; (void)success; }
 };
+
+// tstl-sylvanas 280-02: the three answers pre_roll() / pre_deck_draw() may give.
+inline constexpr int RL_PRE_DRAW_NORMAL = 0;
+inline constexpr int RL_PRE_FORCE_YES = 1;
+inline constexpr int RL_PRE_FORCE_NO = 2;
 
 // Process-wide. Non-null only between rl_rng_record::open_and_write_header() and
 // rl_rng_record::write_footer() (or the recorder object's destructor) -- see rl_rng_record.hpp.
@@ -445,7 +470,10 @@ bool basic_rng_t<Engine>::roll( double chance )
       rng::rl_draw_sink->on_no_draw_roll( rl_roller_id_, rl_trace_n_ );
     return true;
   }
-  const bool ok = real() < chance;
+  // tstl-sylvanas 280-02 (SRCH-01, G280-1): ask an attached sink whether to force this roll BEFORE any draw. A
+  // forced outcome consumes no draw; with no sink attached this is the same one pointer check as below.
+  const int forced = rng::rl_draw_sink ? rng::rl_draw_sink->pre_roll( rl_roller_id_, chance ) : RL_PRE_DRAW_NORMAL;
+  const bool ok = forced == RL_PRE_FORCE_YES ? true : forced == RL_PRE_FORCE_NO ? false : real() < chance;
   // Random-roll recorder hook (250-01, D-02/D-04): the chance is known here, one level above
   // real()'s own hook call -- captured and attached to the SAME draw via draw_ordinal. Passes
   // rl_roller_id_ (the physical stream), not any override: the recorder matches this call back

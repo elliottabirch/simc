@@ -565,6 +565,10 @@ private:
           m_high_idx;  // Index of the highest successful draw
   int     m_max_draw;  // Maximum number of cards to draw per proc event
   size_t  m_end_distance = 0U;  // 261009-spd: reset()'s end_distance for the CURRENT deck (see redeal_undrawn)
+  // tstl-sylvanas 280-02: true once the UNDRAWN part of the current deck was dealt by redeal_undrawn() (whose law
+  // is exactly uniform over valid arrangements, so next_success_chance() below is exact); false after reset(),
+  // whose sequential-rejection deal is only close to uniform and has no closed-form next-card chance.
+  bool    m_dealt_by_redeal = false;
 public:
   dre_deck_rng_t( std::string_view n, player_t* p, initializer data ) = delete;
 
@@ -591,6 +595,49 @@ public:
   // and failures left, and the draw position, are unchanged. m_high_idx follows the new last success
   // (the next refill's end_distance reads it). A deck that cannot be re-dealt (the current arrangement
   // always is a valid one, so this only means a bug) throws by name.
+  // tstl-sylvanas 280-02 (SRCH-02): the EXACT chance that the card at the draw position is a success, under the
+  // uniform law redeal_undrawn() deals (a uniform valid arrangement, so conditioning on the drawn prefix keeps it
+  // uniform). The next card can only be the FIRST remaining success if it sits at the earliest legal index `lo`
+  // (computed exactly as redeal_undrawn computes it); the number of valid arrangements with the first success at
+  // `lo` over all valid arrangements is s / (n - (s - 1) * max_draw - pos). Anywhere else before `lo` the chance is
+  // 0. NOT successes left over cards left, which is wrong whenever two or more successes remain. Returns a negative
+  // number (unknown) when the deck was dealt by reset() instead, or when nothing is left undrawn.
+  double next_success_chance() const override
+  {
+    if ( !m_dealt_by_redeal )
+      return -1.0;
+    const size_t n = entries.size();
+    const size_t pos = static_cast<size_t>( position - entries.begin() );
+    if ( pos >= n )
+      return -1.0;
+    size_t s = 0U;
+    for ( size_t i = pos; i < n; ++i )
+      if ( entries[ i ] == SUCCESS )
+        ++s;
+    if ( s == 0U )
+      return 0.0;
+    const size_t gap = static_cast<size_t>( m_max_draw ) + 1U;
+    size_t lo = pos;
+    bool drawn_success = false;
+    size_t last_drawn = 0U;
+    for ( size_t i = 0; i < pos; ++i )
+      if ( entries[ i ] == SUCCESS )
+      {
+        drawn_success = true;
+        last_drawn = i;
+      }
+    if ( drawn_success )
+      lo = std::max( lo, last_drawn + gap );
+    else if ( m_end_distance < gap )
+      lo = std::max( lo, gap - m_end_distance );
+    if ( lo != pos )
+      return 0.0;
+    const size_t slack = ( s - 1U ) * static_cast<size_t>( m_max_draw );
+    if ( n <= slack + pos )
+      return -1.0;  // cannot happen in a valid deal; report unknown rather than divide by a non-positive number
+    return static_cast<double>( s ) / static_cast<double>( n - slack - pos );
+  }
+
   void redeal_undrawn() override
   {
     const size_t n = entries.size();
@@ -602,7 +649,10 @@ public:
       if ( entries[ i ] == SUCCESS )
         ++s;
     if ( s == 0U )
+    {
+      m_dealt_by_redeal = true;  // tstl-sylvanas 280-02: nothing to place, the remainder is all failures
       return;
+    }
 
     const size_t gap = static_cast<size_t>( m_max_draw ) + 1U;  // successes' indices differ by at least this
     size_t lo = pos;
@@ -646,6 +696,7 @@ public:
     for ( size_t idx : placed )
       entries[ idx ] = SUCCESS;
     m_high_idx = std::max( drawn_success ? last_drawn : size_t( 0 ), placed.back() );
+    m_dealt_by_redeal = true;  // tstl-sylvanas 280-02: see next_success_chance()
   }
 
   void reset( reset_type_e reset_type ) override
@@ -660,6 +711,7 @@ public:
       : entries.size() - m_high_idx;
 
     m_end_distance = end_distance;
+    m_dealt_by_redeal = false;  // tstl-sylvanas 280-02: reset()'s deal has no exact next-card chance
     m_high_idx = 0U;
     // Generate randomized m_success number of draws, that honor:
     // 1) The draw must be at least max_draw number of draws away from the previous deck's

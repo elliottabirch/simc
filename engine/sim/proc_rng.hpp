@@ -88,6 +88,11 @@ public:
   // registered.
   std::uint32_t rl_roller_id() const
   { return source_rng_.rl_roller_id(); }
+
+  // tstl-sylvanas 280-02: set this source's own stream's roller number (the number an attached sink sees as
+  // `roller_slot`). Plan 04 tags the sites of a search child with it; nothing in 280-02 calls it.
+  void rl_tag_source_roller( std::uint32_t id )
+  { source_rng_.rl_set_roller_id( id ); }
 };
 
 struct simple_proc_t final : public proc_rng_t
@@ -227,6 +232,20 @@ public:
   /// pity/gap guarantee of dre_deck_rng_t), that spacing. Read by the redeal trace/proof only.
   virtual int min_success_spacing() const
   { return 0; }
+
+  /// tstl-sylvanas 280-02 (SRCH-02): the EXACT chance that the next card dealt is a SUCCESS, or a negative number
+  /// when the deck cannot state it exactly (a card key other than SUCCESS or FAIL, nothing left undrawn, or, for the
+  /// spaced deck, a deal made by reset() rather than by a re-deal). For an ordinary deck, successes left over cards
+  /// left. A subclass whose deal is constrained states its own exact chance (dre_deck_rng_t, sc_shaman.cpp). Never
+  /// draws, shuffles or moves anything.
+  virtual double next_success_chance() const;
+
+  /// tstl-sylvanas 280-02 (SRCH-02): make the NEXT card dealt the given key (SUCCESS or FAIL) while keeping the
+  /// multiset of undrawn cards: a card of that key is swapped into the draw position, the position steps over it,
+  /// the remainder is re-dealt under the deck's own law (redeal_undrawn), and the position steps back so that the
+  /// following trigger() returns the forced card. Returns false and changes nothing when no undrawn card has that
+  /// key. May draw from this deck's own stream (the re-deal).
+  bool force_next( int key );
 
   /// Debug/proof: "<drawn>/<size>:" then one character per card (S success, . fail, digit otherwise),
   /// with '|' marking the draw position. Never draws or moves anything.
