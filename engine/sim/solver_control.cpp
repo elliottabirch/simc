@@ -23,6 +23,7 @@
 #include "fmt/format.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -1004,6 +1005,16 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       // Only a FOREGROUND boundary, where the unanchored wait is always legal, keeps the fail-closed abort below.
       if ( !any_legal && !foreground )
       {
+        // 271.1 credit-conservation fix (readout 271.1-CREDIT-CONSERVATION-READOUT.md, 2026-10-10): this boundary is not
+        // a decision (nothing executes, no translog row is written), so it must not consume a decision number -- the
+        // same invariant the solver_mask_no_enemy return above the increment keeps. A number with no row strands every
+        // own-stream credit stamped while it is current (an auto swing's AUTO stamp, ticking as DOT_TICK through
+        // dot_tick_class): the close row counts it, the .attr has no DECISION record to put it in, and the replay's
+        // conservation check refuses. Nothing between the increment above and here reads or stamps the number
+        // (bind_slots, read_state, build_mask and the mask edits only), and the return precedes every exploration draw,
+        // so play is unchanged.
+        assert( sim->solver_control_seq == seq );
+        --sim->solver_control_seq;
         sim->solver_control_last_reply_type = "noop";
         sim->solver_control_has_requested_wait_sec = false;
         sim->solver_control_last_requested_wait_sec = 0.0;
