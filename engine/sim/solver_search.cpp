@@ -62,6 +62,14 @@
 // left over goes, as a plain copy, to the best survivor's rank-0 cell. Pairs are dealt round-robin to the survivors, best
 // pass-1 mean first. value(candidate) = its best cell's mean; pick = the best value among the survivors.
 //
+// RECORD (280-07, SRCH-08). Besides the lines above a copy writes, each with one write() of at most 4,096 bytes:
+//     SECOND <copy> <path> <seq> <t> <w> <b0> <b1> <mask22> <obs_b64>   a pair lineage, just before it forks at its second level
+//     CHANCE <copy> <path> <rk> <seq> <t> <w> <press> <mask22> <obs_b64> the first labelled decision after a chance split
+// and every LEAF line gains <end_obs_b64> ('-' when the fight ended first) and rc=<mark>:<R_from>:<boot_from>,... (a mark per
+// SECOND and CHANCE decision on the leaf's path: the window return and bootstrap measured FROM that decision). The parent
+// turns them into rows (root, second, chance) and appends them to solver_search_record at the end of the fight, and rewrites
+// solver_search_summary. Encodings and readings: .planning/phases/280-the-search-in-the-fork/280-RECORD.md.
+//
 // PASS RUNNER. NOT solver_branch's run_batch (whose blocking waitpid() can deadlock against a full pipe): the read
 // end is non-blocking and 1 MiB, the parent poll()s and drains the pipe and reaps with waitpid( WNOHANG ) in one
 // loop, with at most `jobs` copies alive.
@@ -118,6 +126,10 @@ namespace
 {
 config_t g_cfg;
 bool g_any = false;  // set by validate() when the search is on
+// The bootstrap mode of the window label (280-06): 0 none, 1 q, 2 value. (Moved up by 280-07: a leaf line's rc marks read it.)
+int g_boot_mode = 0;
+// The value blob (solver_search_value), loaded once at validate; a copy shares it through fork().
+std::shared_ptr<rl_policy::rl_weights_t> g_value_w;
 
 // The depth-one reading of G280-7: 8 copies per candidate first.
 constexpr int PASS1_PER_CAND = 8;
@@ -132,6 +144,15 @@ struct split_rec_t
   int row = 0;
   double p = 0.0;
   int outcome = 0;
+};
+
+// One marked decision on a copy's way to a leaf (280-07): the pair's second-level decision ('S' + path) or the first labelled
+// decision after a chance split ('C' + path). The window return so far is kept so a leaf can state its return FROM the mark.
+struct mark_t
+{
+  std::string key;
+  double t = 0.0;
+  double acc = 0.0;
 };
 
 struct child_state_t
@@ -170,6 +191,9 @@ struct child_state_t
   bool pair_pending = false;           // a pair process that has not yet forked at its second-level decision
   int rank = 0;                        // 0 = the net's own second-level button, 1 = the runner-up (after a pair fork)
   int sec = -1;                        // the second-level button this lineage pressed, -1 when none
+  // 280-07
+  bool chance_pending = false;         // a chance split happened and no labelled decision has been met since
+  std::vector<mark_t> marks;           // the marked decisions on the way here, in order
 };
 child_state_t g_child;
 
@@ -295,6 +319,83 @@ std::string jnum( double v )
   if ( !std::isfinite( v ) )
     return "null";
   return fmt::format( "{:.17g}", v );
+}
+
+// ---- base64 of the observation (280-07) ------------------------------------------------------------------
+// Standard alphabet, '=' padding (RFC 4648). The 419 float32 inputs go out as their little-endian bytes: the box is little
+// endian (checked once at validate), so a plain copy of each float's four bytes is the little-endian encoding.
+std::string b64_encode( const unsigned char* d, std::size_t n )
+{
+  static const char* const A = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string o;
+  o.reserve( ( ( n + 2 ) / 3 ) * 4 );
+  std::size_t i = 0;
+  for ( ; i + 2 < n; i += 3 )
+  {
+    const unsigned v = ( static_cast<unsigned>( d[ i ] ) << 16 ) | ( static_cast<unsigned>( d[ i + 1 ] ) << 8 ) | d[ i + 2 ];
+    o += A[ ( v >> 18 ) & 63 ];
+    o += A[ ( v >> 12 ) & 63 ];
+    o += A[ ( v >> 6 ) & 63 ];
+    o += A[ v & 63 ];
+  }
+  if ( i + 1 == n )
+  {
+    const unsigned v = static_cast<unsigned>( d[ i ] ) << 16;
+    o += A[ ( v >> 18 ) & 63 ];
+    o += A[ ( v >> 12 ) & 63 ];
+    o += "==";
+  }
+  else if ( i + 2 == n )
+  {
+    const unsigned v = ( static_cast<unsigned>( d[ i ] ) << 16 ) | ( static_cast<unsigned>( d[ i + 1 ] ) << 8 );
+    o += A[ ( v >> 18 ) & 63 ];
+    o += A[ ( v >> 12 ) & 63 ];
+    o += A[ ( v >> 6 ) & 63 ];
+    o += '=';
+  }
+  return o;
+}
+
+std::string obs_b64( const float* obs )
+{
+  unsigned char bytes[ RL_OBS_DIM * 4 ];
+  std::memcpy( bytes, obs, sizeof( bytes ) );
+  return b64_encode( bytes, sizeof( bytes ) );
+}
+
+// The exact length and the characters of a base64 observation read back from a pipe line (a bad token drops its copy).
+bool valid_obs_b64( const std::string& t )
+{
+  if ( t.size() != 4 * ( ( RL_OBS_DIM * 4 + 2 ) / 3 ) )
+    return false;
+  for ( std::size_t i = 0; i < t.size(); ++i )
+  {
+    const char ch = t[ i ];
+    const bool ok = ( ch >= 'A' && ch <= 'Z' ) || ( ch >= 'a' && ch <= 'z' ) || ( ch >= '0' && ch <= '9' ) || ch == '+' ||
+                    ch == '/' || ( ch == '=' && i + 2 >= t.size() );
+    if ( !ok )
+      return false;
+  }
+  return true;
+}
+
+// The 22 legality bits as a string of 0/1 digits (the pipe form) and as a JSON list.
+std::string mask_digits( const std::uint8_t* mask )
+{
+  std::string o;
+  for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+    o += mask[ i ] ? '1' : '0';
+  return o;
+}
+
+bool valid_mask_digits( const std::string& t )
+{
+  if ( t.size() != RL_ACTION_DIM )
+    return false;
+  for ( char ch : t )
+    if ( ch != '0' && ch != '1' )
+      return false;
+  return true;
 }
 
 #if defined( __linux__ )
@@ -511,7 +612,7 @@ std::string stats_line()
 
 // A leaf line (this plan: one per copy, rank 0, weight 1). An oversize line is replaced by a FAIL (code 76).
 [[noreturn]] void write_leaf_and_exit( double R, double R_undisc, double R_real, double boot_q, double boot_v,
-                                       double t_end, int ended, int cut_state )
+                                       double t_end, int ended, int cut_state, const float* end_obs )
 {
   if ( !std::isfinite( R ) || !std::isfinite( R_undisc ) || !std::isfinite( R_real ) || !std::isfinite( boot_q ) ||
        !std::isfinite( boot_v ) || !std::isfinite( t_end ) )
@@ -526,10 +627,23 @@ std::string stats_line()
   // a branch this process forked and waited for did not leave cleanly: this copy has no complete answer
   if ( g_child.sub_failed )
     child_write_and_exit( make_fail_line( 78, "split_branch_failed" ), 78 );
+  // 280-07: the return and the bootstrap measured FROM each marked decision on this leaf's path: the window return left after
+  // the mark, rediscounted to the mark's own time (R_from = (R_end - R_at_mark) / gamma^(t_mark - t_k)), and the bootstrap
+  // term of the chosen mode, likewise.
+  const double boot_term = g_boot_mode == 1 ? boot_q : g_boot_mode == 2 ? boot_v : 0.0;
+  std::string rc;
+  for ( const mark_t& m : g_child.marks )
+  {
+    const double disc_m = std::pow( g_child.gamma, m.t - g_child.t_k );
+    rc += fmt::format( "{}{}:{:.17g}:{:.17g}", rc.empty() ? "" : ",", m.key, ( R - m.acc ) / disc_m, boot_term / disc_m );
+  }
+  if ( rc.empty() )
+    rc = "-";
+  const std::string end_tok = end_obs ? obs_b64( end_obs ) : std::string( "-" );
   const std::string line = fmt::format(
-      "LEAF {} {} {} {} {:.17g} {:.17g} {:.17g} {:.17g} {:.17g} {:.17g} {:.9g} {} {} {} {} {:.9g} {} {} {}\n",
+      "LEAF {} {} {} {} {:.17g} {:.17g} {:.17g} {:.17g} {:.17g} {:.17g} {:.9g} {} {} {} {} {:.9g} {} {} {} {} rc={}\n",
       g_child.copy, g_child.pass, g_child.cand, out_rank(), g_child.pw, R, R_undisc, R_real, boot_q, boot_v, t_end, ended,
-      g_child.n_dec, cut_state, hwm, cpu, path_token(), split_list_token(), g_child.sec );
+      g_child.n_dec, cut_state, hwm, cpu, path_token(), split_list_token(), g_child.sec, end_tok, rc );
   const std::string stats = stats_line();
   if ( line.size() > LINE_MAX_BYTES )
     child_write_and_exit( make_fail_line( 76, "line_too_long" ), 76 );
@@ -753,6 +867,7 @@ int split_here( search_sink_t& sink, int row, double p )
     sim->resalt_source_rngs( k );
     sim->solver_explore_rng.seed( mix64( k ^ 0xE5910BEull ) );
     redeal_every_deck( sim );
+    g_child.chance_pending = true;  // 280-07: the next labelled decision of this branch is a chance row
     sink.busy = false;
     return rng::RL_PRE_FORCE_NO;
   }
@@ -768,6 +883,7 @@ int split_here( search_sink_t& sink, int row, double p )
   g_child.pw *= p;
   g_child.splits.push_back( split_rec_t{ row, p, 1 } );
   g_child.path.push_back( '1' );
+  g_child.chance_pending = true;  // 280-07
   sink.busy = false;
   return rng::RL_PRE_FORCE_YES;
 }
@@ -897,6 +1013,8 @@ void become_search_child( sim_t* sim, player_t* p, std::uint64_t seq, int pass, 
   g_child.pair_pending = pair;
   g_child.rank = 0;
   g_child.sec = -1;
+  g_child.chance_pending = false;
+  g_child.marks.clear();
   g_counts.assign( g_sites.size(), site_count_t{} );
   for ( std::size_t i = 0; i < g_sites.size(); ++i )
     g_sites[ i ].ptr->rl_tag_source_roller( SEARCH_SITE_BASE + static_cast<std::uint32_t>( i ) );
@@ -954,6 +1072,23 @@ struct leaf_t
   int cut_state = -1;
   long vmhwm_kb = 0;
   double cpu_s = 0.0;
+  std::string end_obs;             // 280-07: the observation at the exact cut, base64; empty when the fight ended first
+  std::map<std::string, std::pair<double, double>> rc;  // 280-07: mark key -> (R_from, boot_from)
+};
+
+// A SECOND or CHANCE line of one copy (280-07), kept raw until the search has a pick.
+struct interior_line_t
+{
+  bool second = false;            // SECOND (a pair's second-level decision) or CHANCE
+  std::string path;               // the path of the process that wrote it ('' when empty)
+  int rk = 0;                     // CHANCE: the writer's rank (0, 1, or 2 = a pair lineage that had not forked yet)
+  std::uint64_t seq = 0;
+  double t = 0.0;
+  double w = 1.0;
+  int b0 = -1;                    // SECOND: the two buttons; CHANCE: b0 is the press
+  int b1 = -1;
+  std::string mask;               // 22 digits
+  std::string obs;                // base64
 };
 
 struct copy_task_t
@@ -962,11 +1097,6 @@ struct copy_task_t
   int button = 0;  // the root button this copy presses
   bool pair = false;  // a pair (two copies spent: a rank-0 half and a rank-1 half) instead of one plain copy
 };
-
-// The bootstrap mode of the window label (280-06 task 2): 0 none, 1 q, 2 value. Task 1 keeps it at 0.
-int g_boot_mode = 0;
-// The value blob (solver_search_value), loaded once at validate; a copy shares it through fork().
-std::shared_ptr<rl_policy::rl_weights_t> g_value_w;
 
 // The label of a leaf: the window return plus the chosen bootstrap term (SRCH-07).
 double leaf_boot( const leaf_t& lf )
@@ -994,6 +1124,7 @@ struct copy_result_t
   double value_Rreal = 0.0;
   std::vector<leaf_t> leaves;
   std::map<std::pair<int, std::string>, stats_t> stats;  // by (leaf rank, leaf path) (STATS lines)
+  std::vector<interior_line_t> interior;                 // 280-07: SECOND and CHANCE lines
   bool failed = false;  // a FAIL line, a malformed or duplicate leaf
   std::string fail;
   int exit_code = -1;
@@ -1093,16 +1224,63 @@ void parse_line( const std::string& line, int pass, std::vector<copy_result_t>& 
     r.stats[ skey ] = st;
     return;
   }
+  if ( tok[ 0 ] == "SECOND" || tok[ 0 ] == "CHANCE" )
+  {
+    // SECOND <copy> <path> <seq> <t> <w> <b0> <b1> <mask22> <obs_b64>
+    // CHANCE <copy> <path> <rk> <seq> <t> <w> <press> <mask22> <obs_b64>
+    const bool is_second = tok[ 0 ] == "SECOND";
+    interior_line_t il;
+    il.second = is_second;
+    long seqv = -1, a = -1, b = -1, rk = 0;
+    bool okl = tok.size() == 10;
+    if ( okl )
+    {
+      const std::size_t base = is_second ? 3 : 4;  // the index of <seq>
+      okl = ( is_second || ( parse_long( tok[ 3 ], rk ) && rk >= 0 && rk <= ( r.pair ? 2 : 0 ) ) ) &&
+            parse_long( tok[ base ], seqv ) && seqv >= 0 && parse_double( tok[ base + 1 ], il.t ) &&
+            parse_double( tok[ base + 2 ], il.w ) && il.w > 0.0 && il.w <= 1.0 + 1e-9 && parse_long( tok[ base + 3 ], a ) &&
+            a >= 0 && a < static_cast<long>( RL_ACTION_DIM ) &&
+            ( !is_second || ( parse_long( tok[ 7 ], b ) && b >= 0 && b < static_cast<long>( RL_ACTION_DIM ) ) ) &&
+            valid_mask_digits( tok[ 8 ] ) && valid_obs_b64( tok[ 9 ] ) && ( !is_second || r.pair );
+      for ( char ch : tok[ 2 ] )
+        if ( ch != '0' && ch != '1' && !( ch == '-' && tok[ 2 ].size() == 1 ) )
+          okl = false;
+      if ( okl && !is_second && tok[ 2 ] == "-" )
+        okl = false;  // a chance row has at least one split behind it
+    }
+    if ( okl )
+    {
+      il.path = tok[ 2 ] == "-" ? std::string() : tok[ 2 ];
+      il.rk = static_cast<int>( rk );
+      il.seq = static_cast<std::uint64_t>( seqv );
+      il.b0 = static_cast<int>( a );
+      il.b1 = static_cast<int>( b );
+      il.mask = tok[ 8 ];
+      il.obs = tok[ 9 ];
+      for ( const interior_line_t& o : r.interior )
+        if ( o.second == il.second && o.path == il.path && o.rk == il.rk )
+          okl = false;  // two lines for one decision of one lineage
+    }
+    if ( !okl )
+    {
+      r.failed = true;
+      r.fail = is_second ? "bad_second_line" : "bad_chance_line";
+      ++g_count.unknown_lines;
+      return;
+    }
+    r.interior.push_back( il );
+    return;
+  }
   if ( tok[ 0 ] != "LEAF" )
   {
     ++g_count.unknown_lines;
     return;
   }
   // LEAF <copy> <pass> <cand> <rank> <w> <R> <R_undisc> <R_real> <boot_q> <boot_v> <t_end> <ended> <n_dec> <cut_state>
-  //      <vmhwm_kb> <cpu_s> <path> <splits> <sec>
+  //      <vmhwm_kb> <cpu_s> <path> <splits> <sec> <end_obs_b64|-> rc=<key:R_from:boot_from,...|->
   leaf_t lf;
   long fpass = 0, fcand = 0, frank = 0, fended = 0, fndec = 0, fcut = 0, fhwm = 0, fsec = -1;
-  bool good = tok.size() == 20 && parse_long( tok[ 2 ], fpass ) && parse_long( tok[ 3 ], fcand ) &&
+  bool good = tok.size() == 22 && parse_long( tok[ 2 ], fpass ) && parse_long( tok[ 3 ], fcand ) &&
               parse_long( tok[ 4 ], frank ) && parse_double( tok[ 5 ], lf.w ) && parse_double( tok[ 6 ], lf.R ) &&
               parse_double( tok[ 7 ], lf.R_undisc ) && parse_double( tok[ 8 ], lf.R_real ) &&
               parse_double( tok[ 9 ], lf.boot_q ) && parse_double( tok[ 10 ], lf.boot_v ) &&
@@ -1112,6 +1290,36 @@ void parse_line( const std::string& line, int pass, std::vector<copy_result_t>& 
   good = good && fpass == pass && fcand == r.cand && frank >= 0 && frank <= ( r.pair ? 2 : 0 ) && lf.w > 0.0 &&
          lf.w <= 1.0 + 1e-9 && ( fended == 0 || fended == 1 ) && fndec >= 0 && fcut >= -1 && fcut <= 4 && fhwm >= 0 &&
          fsec >= -1 && fsec < static_cast<long>( RL_ACTION_DIM ) && ( frank == 2 ? fsec == -1 : true );
+  // 280-07: the end observation and the marks
+  if ( good )
+  {
+    if ( tok[ 20 ] != "-" )
+    {
+      good = valid_obs_b64( tok[ 20 ] );
+      lf.end_obs = tok[ 20 ];
+    }
+    good = good && tok[ 21 ].rfind( "rc=", 0 ) == 0;
+    if ( good && tok[ 21 ] != "rc=-" )
+    {
+      std::stringstream is( tok[ 21 ].substr( 3 ) );
+      std::string item;
+      while ( good && std::getline( is, item, ',' ) )
+      {
+        std::vector<std::string> f;
+        std::stringstream fs( item );
+        std::string x;
+        while ( std::getline( fs, x, ':' ) )
+          f.push_back( x );
+        double rf = 0.0, bf = 0.0;
+        good = f.size() == 3 && f[ 0 ].size() >= 2 && ( f[ 0 ][ 0 ] == 'S' || f[ 0 ][ 0 ] == 'C' ) &&
+               parse_double( f[ 1 ], rf ) && parse_double( f[ 2 ], bf ) && !lf.rc.count( f[ 0 ] );
+        for ( std::size_t ci = 1; good && ci < f[ 0 ].size(); ++ci )
+          good = f[ 0 ][ ci ] == '0' || f[ 0 ][ ci ] == '1' || ( f[ 0 ][ ci ] == '-' && f[ 0 ].size() == 2 );
+        if ( good )
+          lf.rc[ f[ 0 ] ] = std::make_pair( rf, bf );
+      }
+    }
+  }
   // the path and the split list: the outcome digits must equal the split list's outcomes, every row must exist, every
   // chance must be strictly between 0 and 1, and the weight must equal the product of the split probabilities (a
   // weight that does not follow from its own splits is a wrong leaf, never averaged in)
@@ -1285,7 +1493,8 @@ void finalise( copy_result_t& r, std::vector<copy_result_t>& samples, pair_half_
 // Runs one pass: forks one copy per task, at most `jobs` alive at once, and reads every line to end of file.
 // Returns true IN A COPY (out_button = its button); false in the parent, with `res` filled.
 bool run_pass( sim_t* sim, player_t* p, std::uint64_t seq, int pass, const std::vector<copy_task_t>& tasks,
-               std::vector<copy_result_t>& samples, pair_half_t& ph, int& out_button )
+               std::vector<copy_result_t>& samples, std::vector<copy_result_t>& raw_out, pair_half_t& ph,
+               int& out_button )
 {
   const config_t& c = g_cfg;
   const solver_branch::config_t& sb = solver_branch::cfg();
@@ -1435,6 +1644,7 @@ bool run_pass( sim_t* sim, player_t* p, std::uint64_t seq, int pass, const std::
       g_count.search_vmhwm_kb_max = std::max( g_count.search_vmhwm_kb_max, lf.vmhwm_kb );
     }
   }
+  raw_out = std::move( res );  // 280-07: the raw copies (leaves, marks, SECOND and CHANCE lines) for the row builder
   return false;
 }
 #endif  // __linux__
@@ -1453,6 +1663,9 @@ struct cell_t
   std::vector<double> Rund;  // per-sample undiscounted expected damage over the window
   std::vector<double> Rreal; // per-sample realised damage over the window
   std::map<int, double> sec_w;  // second-level button -> weighted leaf count (the modal button of the cell)
+  int n_pairs = 0;           // 280-07: pairs that gave a usable sample to this cell
+  double end_w = -1.0;       // 280-07: the largest leaf path weight in the cell (leaves taken in sample, then path order)
+  std::string end_obs;       // 280-07: that leaf's end observation (base64; empty when its fight ended first)
   double pass1_mean = std::numeric_limits<double>::quiet_NaN();
   double mean = std::numeric_limits<double>::quiet_NaN();
   double se = std::numeric_limits<double>::quiet_NaN();
@@ -1525,6 +1738,25 @@ void add_samples( const std::vector<copy_result_t>& samples, std::vector<cand_t>
     if ( r.ok )
     {
       ++c.n_ok;
+      if ( r.pair )
+        ++c.n_pairs;
+      // 280-07: the cell's end observation is the one of the leaf with the LARGEST path weight (never the highest return,
+      // which would select on luck); samples come in copy order, pass 1 first, and the first leaf to reach a weight wins
+      // a tie; inside a sample leaves are taken in (path, rank) order so the choice never depends on pipe arrival order.
+      {
+        std::vector<const leaf_t*> lv;
+        for ( const leaf_t& lf : r.leaves )
+          lv.push_back( &lf );
+        std::sort( lv.begin(), lv.end(), []( const leaf_t* a, const leaf_t* b ) {
+          return a->path != b->path ? a->path < b->path : a->rank < b->rank;
+        } );
+        for ( const leaf_t* lf : lv )
+          if ( lf->w > c.end_w )
+          {
+            c.end_w = lf->w;
+            c.end_obs = lf->end_obs;
+          }
+      }
       c.w_sum += r.w_sum;
       c.vals.push_back( r.value );
       c.boots.push_back( r.value_boot );
@@ -2037,9 +2269,334 @@ int modal_sec( const cell_t& cl, double& n )
   return best;
 }
 
+
+// ---- the record: rows, the buffer, the summary figures (280-07, SRCH-08) -----------------------------------------
+// Every row is built as one JSON line in the parent right after its search and kept in memory; write_summary() appends them
+// to solver_search_record at the end of the fight (O_APPEND, one write() per line) and rewrites solver_search_summary.
+std::vector<std::string> g_rows;
+long long g_rows_root = 0, g_rows_second = 0, g_rows_chance = 0, g_rare_rows = 0;
+long long g_record_bytes = 0;
+double g_copies_rows = 0.0;           // copies spent by the searches that wrote rows
+long long g_samples_total = 0, g_pair_cut_total = 0, g_fork_fail_total = 0;
+long long g_chance_dropped_cap = 0;   // chance rows the solver_search_chance_rows cap left out
+long long g_rows_skipped_mark = 0;    // interior rows left out because a leaf lacked the mark (never expected)
+
+struct root_stat_t
+{
+  bool audit = false;
+  bool decisive = false;
+  double se_pct = std::numeric_limits<double>::quiet_NaN();
+  bool hold_any = false;
+  bool hold_won = false;
+  double hold_payoff = std::numeric_limits<double>::quiet_NaN();
+  int second_changed = -1;  // -1 depth 1 (no second level), 0 or 1
+};
+std::vector<root_stat_t> g_root_stats;
+
+// What every row of one search shares.
+struct rec_ctx_t
+{
+  std::string fight_json;
+  double window_s = 0.0;
+  int copies = 0;
+  double cpu_s = 0.0;
+  std::string boot_mode;
+  double divisor = 1.0;
+  double gamma = 1.0;
+  std::int64_t k = 0;
+  bool audit = false;
+  std::string split_mode;
+  int depth = 2;
+  std::uint64_t root_seq = 0;
+};
+
+std::string json_str_or_null( const std::string& v )
+{
+  return v.empty() ? std::string( "null" ) : fmt::format( "\"{}\"", v );
+}
+
+std::string json_bool( bool b )
+{
+  return b ? "true" : "false";
+}
+
+std::string mask_json( const std::string& digits )
+{
+  std::string o = "[";
+  for ( std::size_t i = 0; i < digits.size(); ++i )
+  {
+    if ( i )
+      o += ',';
+    o += digits[ i ];
+  }
+  return o + "]";
+}
+
+std::string hold_event_json( int button )
+{
+  return RL_ACTIONS[ button ].kind == rl_action_kind::wait ? fmt::format( "\"{}\"", jstr( RL_ACTIONS[ button ].label ) )
+                                                           : std::string( "null" );
+}
+
+std::string cand_json( int button, double mean, double se, int n_ok, int n_fail, double w_sum, const std::string& second,
+                       const std::string& end_obs )
+{
+  return fmt::format(
+      "{{\"button\":{},\"hold_event\":{},\"mean\":{},\"se\":{},\"n_ok\":{},\"n_fail\":{},\"w_sum\":{},\"second\":[{}],"
+      "\"end_obs_b64\":{}}}",
+      button, hold_event_json( button ), jnum( mean ), jnum( se ), n_ok, n_fail, jnum( w_sum ), second,
+      json_str_or_null( end_obs ) );
+}
+
+std::string splits_json_n( const std::vector<split_rec_t>& sp, std::size_t n )
+{
+  std::string o;
+  for ( std::size_t i = 0; i < n && i < sp.size(); ++i )
+    o += fmt::format( "{}{{\"site\":\"{}\",\"p\":{},\"outcome\":{}}}", i ? "," : "",
+                      jstr( g_sites[ static_cast<std::size_t>( sp[ i ].row ) ].key ), jnum( sp[ i ].p ), sp[ i ].outcome );
+  return o;
+}
+
+double outcome_prob( const split_rec_t& sp )
+{
+  return sp.outcome == 1 ? sp.p : 1.0 - sp.p;
+}
+
+bool starts_with( const std::string& s, const std::string& pre )
+{
+  return s.size() >= pre.size() && s.compare( 0, pre.size(), pre ) == 0;
+}
+
+// The tail every row ends with: C-A's twenty fields come first, then these recorded additions in this order.
+std::string row_tail( const rec_ctx_t& cx, double window_return, const std::string& second_changed,
+                      const std::string& hold_won )
+{
+  return fmt::format(
+      ",\"label_units\":\"reward_discounted_over_divisor\",\"boot_mode\":\"{}\",\"window_return\":{},\"divisor\":{},"
+      "\"gamma\":{},\"k\":{},\"audit_nosplit\":{},\"second_level_changed\":{},\"hold_won\":{},\"split_mode\":\"{}\","
+      "\"depth\":{}}}",
+      cx.boot_mode, jnum( window_return ), jnum( cx.divisor ), jnum( cx.gamma ), cx.k, json_bool( cx.audit ), second_changed,
+      hold_won, cx.split_mode, cx.depth );
+}
+
+// One row, C-A's field order: rec_version, kind, seq, parent_seq, fight, t, obs_b64, mask, cands, pick, second_pick, margin,
+// margin_se, decisive, path_weight, window_s, copies, cpu_s, splits, bootstrap_share; then the tail.
+std::string make_row( const rec_ctx_t& cx, const char* kind, std::uint64_t seq, const std::string& parent_seq, double t,
+                      const std::string& obs, const std::string& mask, const std::string& cands, int pick,
+                      const std::string& second_pick, double margin, double margin_se, bool decisive, double path_weight,
+                      const std::string& splits, double bootstrap_share, const std::string& tail )
+{
+  return fmt::format(
+      "{{\"rec_version\":1,\"kind\":\"{}\",\"seq\":{},\"parent_seq\":{},\"fight\":{},\"t\":{},\"obs_b64\":\"{}\",\"mask\":{},"
+      "\"cands\":[{}],\"pick\":{},\"second_pick\":{},\"margin\":{},\"margin_se\":{},\"decisive\":{},\"path_weight\":{},"
+      "\"window_s\":{},\"copies\":{},\"cpu_s\":{},\"splits\":[{}],\"bootstrap_share\":{}{}",
+      kind, seq, parent_seq, cx.fight_json, jnum( t ), obs, mask, cands, pick, second_pick, jnum( margin ),
+      jnum( margin_se ), json_bool( decisive ), jnum( path_weight ), jnum( cx.window_s ), cx.copies, jnum( cx.cpu_s ), splits,
+      jnum( bootstrap_share ), tail );
+}
+
+// A set of leaves read from one marked decision: the weight-normalised mean of the label (window return plus bootstrap
+// term, both measured from that decision), the return and bootstrap parts alone, the weights, and the leaf with the largest
+// path weight (ties to the first in (path, rank) order).
+struct group_t
+{
+  bool ok = false;
+  int n = 0;
+  double w_sum = 0.0;
+  double label = std::numeric_limits<double>::quiet_NaN();
+  double R = std::numeric_limits<double>::quiet_NaN();
+  double boot = std::numeric_limits<double>::quiet_NaN();
+  const leaf_t* best = nullptr;
+};
+
+group_t summarise_group( std::vector<const leaf_t*> lv, const std::string& key )
+{
+  group_t g;
+  std::sort( lv.begin(), lv.end(), []( const leaf_t* a, const leaf_t* b ) {
+    return a->path != b->path ? a->path < b->path : a->rank < b->rank;
+  } );
+  double sw = 0.0, sl = 0.0, sr = 0.0, sb = 0.0;
+  for ( const leaf_t* lf : lv )
+  {
+    auto it = lf->rc.find( key );
+    if ( it == lf->rc.end() )
+      return g;  // a leaf without the mark: the group is unusable
+    sw += lf->w;
+    sl += lf->w * ( it->second.first + it->second.second );
+    sr += lf->w * it->second.first;
+    sb += lf->w * it->second.second;
+    if ( !g.best || lf->w > g.best->w )
+      g.best = lf;
+    ++g.n;
+  }
+  if ( g.n == 0 || !( sw > 0.0 ) )
+    return g;
+  g.ok = true;
+  g.w_sum = sw;
+  g.label = sl / sw;
+  g.R = sr / sw;
+  g.boot = sb / sw;
+  return g;
+}
+
+double share_of( const group_t& g )
+{
+  return g_boot_mode != 0 && g.label != 0.0 && std::isfinite( g.label ) ? g.boot / g.label
+                                                                        : std::numeric_limits<double>::quiet_NaN();
+}
+
+bool rare_split_list( const std::vector<split_rec_t>& sp, std::size_t n )
+{
+  for ( std::size_t i = 0; i < n && i < sp.size(); ++i )
+    if ( outcome_prob( sp[ i ] ) < 0.1 )
+      return true;
+  return false;
+}
+
+// The second and chance rows of one search (the root row is built by the caller). Second rows: one per SECOND line of each
+// usable pair of the winning candidate. Chance rows: every CHANCE line of every usable copy, kept up to the cap in the order
+// (under the winning candidate, the less likely outcome of the last split, the lower copy number).
+void build_interior_rows( const rec_ctx_t& cx, int pick_i, const std::vector<const std::vector<copy_result_t>*>& passes,
+                          std::vector<std::string>& out, long long& n_second, long long& n_chance, long long& n_rare )
+{
+  const std::string parent = std::to_string( cx.root_seq );
+  // -- second rows
+  for ( std::size_t pi = 0; pi < passes.size(); ++pi )
+    for ( std::size_t ci = 0; ci < passes[ pi ]->size(); ++ci )
+    {
+      const copy_result_t& r = ( *passes[ pi ] )[ ci ];
+      if ( !r.ok || !r.pair || r.cand != pick_i )
+        continue;
+      std::vector<const interior_line_t*> sl;
+      for ( const interior_line_t& il : r.interior )
+        if ( il.second )
+          sl.push_back( &il );
+      std::sort( sl.begin(), sl.end(), []( const interior_line_t* a, const interior_line_t* b ) { return a->path < b->path; } );
+      for ( const interior_line_t* il : sl )
+      {
+        std::vector<const leaf_t*> h0, h1;
+        for ( const leaf_t& lf : r.leaves )
+          if ( starts_with( lf.path, il->path ) )
+          {
+            if ( lf.rank == 0 )
+              h0.push_back( &lf );
+            else if ( lf.rank == 1 )
+              h1.push_back( &lf );
+          }
+        const std::string key = "S" + ( il->path.empty() ? std::string( "-" ) : il->path );
+        const group_t g0 = summarise_group( h0, key );
+        const group_t g1 = summarise_group( h1, key );
+        if ( !g0.ok || !g1.ok )
+        {
+          ++g_rows_skipped_mark;
+          continue;
+        }
+        const bool first_better = g0.label >= g1.label;
+        const group_t& gb = first_better ? g0 : g1;
+        const std::vector<split_rec_t>& spl = g0.best->splits;
+        const std::string cands =
+            cand_json( il->b0, g0.label, std::numeric_limits<double>::quiet_NaN(), 1, 0, g0.w_sum, "",
+                       g0.best->end_obs ) +
+            "," +
+            cand_json( il->b1, g1.label, std::numeric_limits<double>::quiet_NaN(), 1, 0, g1.w_sum, "", g1.best->end_obs );
+        out.push_back( make_row( cx, "second", il->seq, parent, il->t, il->obs, mask_json( il->mask ), cands,
+                                 first_better ? il->b0 : il->b1, "null", std::fabs( g0.label - g1.label ),
+                                 std::numeric_limits<double>::quiet_NaN(), false, il->w,
+                                 splits_json_n( spl, il->path.size() ), share_of( gb ),
+                                 row_tail( cx, gb.R, "null", "null" ) ) );
+        ++n_second;
+        if ( rare_split_list( spl, il->path.size() ) )
+          ++n_rare;
+      }
+    }
+  // -- chance rows
+  struct chance_cand_t
+  {
+    std::size_t pass = 0;
+    std::size_t copy = 0;
+    const interior_line_t* il = nullptr;
+    group_t g;
+    bool under = false;
+    double out_prob = 1.0;
+    const std::vector<split_rec_t>* splits = nullptr;
+  };
+  std::vector<chance_cand_t> cc;
+  for ( std::size_t pi = 0; pi < passes.size(); ++pi )
+    for ( std::size_t ci = 0; ci < passes[ pi ]->size(); ++ci )
+    {
+      const copy_result_t& r = ( *passes[ pi ] )[ ci ];
+      if ( !r.ok )
+        continue;
+      for ( const interior_line_t& il : r.interior )
+      {
+        if ( il.second )
+          continue;
+        std::vector<const leaf_t*> lv;
+        for ( const leaf_t& lf : r.leaves )
+          if ( starts_with( lf.path, il.path ) && ( il.rk == 2 || lf.rank == il.rk ) )
+            lv.push_back( &lf );
+        chance_cand_t c;
+        c.pass = pi;
+        c.copy = ci;
+        c.il = &il;
+        c.g = summarise_group( lv, "C" + il.path );
+        if ( !c.g.ok )
+        {
+          ++g_rows_skipped_mark;
+          continue;
+        }
+        c.under = r.cand == pick_i;
+        c.splits = &c.g.best->splits;
+        c.out_prob = outcome_prob( c.g.best->splits[ il.path.size() - 1 ] );
+        cc.push_back( c );
+      }
+    }
+  std::stable_sort( cc.begin(), cc.end(), []( const chance_cand_t& a, const chance_cand_t& b ) {
+    if ( a.under != b.under )
+      return a.under;
+    if ( a.out_prob != b.out_prob )
+      return a.out_prob < b.out_prob;
+    if ( a.pass != b.pass )
+      return a.pass < b.pass;
+    if ( a.copy != b.copy )
+      return a.copy < b.copy;
+    if ( a.il->path != b.il->path )
+      return a.il->path < b.il->path;
+    return a.il->rk < b.il->rk;
+  } );
+  const std::size_t cap = static_cast<std::size_t>( g_cfg.chance_rows );
+  if ( cc.size() > cap )
+  {
+    g_chance_dropped_cap += static_cast<long long>( cc.size() - cap );
+    cc.resize( cap );
+  }
+  std::sort( cc.begin(), cc.end(), []( const chance_cand_t& a, const chance_cand_t& b ) {
+    if ( a.pass != b.pass )
+      return a.pass < b.pass;
+    if ( a.copy != b.copy )
+      return a.copy < b.copy;
+    if ( a.il->path != b.il->path )
+      return a.il->path < b.il->path;
+    return a.il->rk < b.il->rk;
+  } );
+  for ( const chance_cand_t& c : cc )
+  {
+    const interior_line_t& il = *c.il;
+    const std::string cands = cand_json( il.b0, c.g.label, std::numeric_limits<double>::quiet_NaN(), 1, 0, c.g.w_sum, "",
+                                         c.g.best->end_obs );
+    out.push_back( make_row( cx, "chance", il.seq, parent, il.t, il.obs, mask_json( il.mask ), cands, il.b0, "null",
+                             std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN(), false, il.w,
+                             splits_json_n( *c.splits, il.path.size() ), share_of( c.g ),
+                             row_tail( cx, c.g.R, "null", "null" ) ) );
+    ++n_chance;
+    if ( rare_split_list( *c.splits, il.path.size() ) )
+      ++n_rare;
+  }
+}
+
 // Runs the whole search at one decision. Returns true IN A COPY (idx = the copy's candidate button).
-bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, const std::vector<cand_spec_t>& specs,
-                  int& idx, bool listed )
+bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* obs, const std::uint8_t* mask, const float* q,
+                  const std::vector<cand_spec_t>& specs, int& idx, bool listed )
 {
 #if defined( __linux__ )
   const config_t& c = g_cfg;
@@ -2077,9 +2634,9 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
   for ( int i = 0; i < C; ++i )
     for ( int j = 0; j < PASS1_PER_CAND; ++j )
       t1.push_back( copy_task_t{ i, cands[ static_cast<std::size_t>( i ) ].button, false } );
-  std::vector<copy_result_t> r1;
+  std::vector<copy_result_t> r1, raw1, raw2;
   int child_button = -1;
-  if ( run_pass( sim, p, seq, 1, t1, r1, ph, child_button ) )
+  if ( run_pass( sim, p, seq, 1, t1, r1, raw1, ph, child_button ) )
   {
     idx = child_button;
     return true;
@@ -2168,7 +2725,7 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
       }
     }
     std::vector<copy_result_t> r2;
-    if ( run_pass( sim, p, seq, 2, t2, r2, ph, child_button ) )
+    if ( run_pass( sim, p, seq, 2, t2, r2, raw2, ph, child_button ) )
     {
       idx = child_button;
       return true;
@@ -2308,6 +2865,89 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
   g_count.rss_kb_last = read_vmrss_kb();
   g_count.fd_last = count_dir_entries( "/proc/self/fd" );
 
+
+  // ---- 280-07: the record rows (a search that failed has no label and writes none) ----
+  {
+    int n_total_r = 0, samples_r = 0, pairs_cut_r = 0;
+    for ( const cand_t& cd : cands )
+    {
+      n_total_r += cd.spent;
+      pairs_cut_r += cd.pairs_cut_first;
+      for ( int r = 0; r < ( d2 ? 2 : 1 ); ++r )
+        samples_r += cd.cell[ r ].n_assigned;
+    }
+    g_samples_total += samples_r;
+    g_pair_cut_total += pairs_cut_r;
+    g_fork_fail_total += agg.fork_fail;
+    if ( !fail && pick_i >= 0 )
+    {
+      rec_ctx_t cx;
+      cx.fight_json = fmt::format( "{{\"shape\":{},\"setup\":{},\"seed\":{}}}", json_str_or_null( jstr( c.fight_shape ) ),
+                                   json_str_or_null( jstr( c.fight_setup ) ), static_cast<unsigned long long>( sim->seed ) );
+      cx.window_s = c.window;
+      cx.copies = n_total_r;
+      cx.cpu_s = fork_cpu + child_cpu;
+      cx.boot_mode = boot_mode_name;
+      cx.divisor = solver_branch::cfg().value_divisor;
+      cx.gamma = solver_branch::cfg().gamma;
+      cx.k = k;
+      cx.audit = g_audit;
+      cx.split_mode = split_mode_name();
+      cx.depth = c.depth;
+      cx.root_seq = seq;
+      std::string cj;
+      for ( std::size_t i = 0; i < cands.size(); ++i )
+      {
+        const cand_t& cd = cands[ i ];
+        const cell_t& bc = cd.cell[ cd.best_rank ];
+        std::string second;
+        if ( d2 )
+          for ( int r = 0; r < 2; ++r )
+          {
+            const cell_t& cl = cd.cell[ r ];
+            double modal_n = 0.0;
+            const int modal = modal_sec( cl, modal_n );
+            second += fmt::format( "{}{{\"button\":{},\"mean\":{},\"se\":{},\"n_ok\":{},\"rank\":{},\"n_pairs\":{}}}",
+                                   r ? "," : "", cl.n_pairs > 0 && modal >= 0 ? std::to_string( modal ) : std::string( "null" ),
+                                   jnum( cl.mean ), jnum( cl.se ), cl.n_ok, r, cl.n_pairs );
+          }
+        if ( i )
+          cj += ',';
+        cj += cand_json( cd.button, cd.value, cd.value_se, bc.n_ok, bc.n_fail, bc.w_sum, second, bc.end_obs );
+      }
+      const bool decisive = std::isfinite( margin ) && std::isfinite( margin_se ) && margin > 2.0 * margin_se;
+      const cand_t& pk = cands[ static_cast<std::size_t>( pick_i ) ];
+      g_rows.push_back( make_row( cx, "root", seq, "null", t_k, obs_b64( obs ), mask_json( mask_digits( mask ) ), cj, pick,
+                                  second_pick >= 0 ? std::to_string( second_pick ) : std::string( "null" ), margin,
+                                  margin_se, decisive, 1.0, "", boot_share,
+                                  row_tail( cx, window_return, d2 ? json_bool( second_changed ) : std::string( "null" ),
+                                            json_bool( hold_won ) ) ) );
+      ++g_rows_root;
+      root_stat_t rs;
+      rs.audit = g_audit;
+      rs.decisive = decisive;
+      if ( std::isfinite( pk.value_se ) && std::isfinite( pk.value ) && pk.value != 0.0 )
+        rs.se_pct = 100.0 * pk.value_se / std::fabs( pk.value );
+      rs.hold_any = hold_any;
+      rs.hold_won = hold_won;
+      if ( hold_won )
+      {
+        double best_non_hold = std::numeric_limits<double>::quiet_NaN();
+        for ( const cand_t& cd : cands )
+          if ( RL_ACTIONS[ cd.button ].kind != rl_action_kind::wait && std::isfinite( cd.value ) &&
+               ( std::isnan( best_non_hold ) || cd.value > best_non_hold ) )
+            best_non_hold = cd.value;
+        if ( std::isfinite( best_non_hold ) && best_non_hold != 0.0 )
+          rs.hold_payoff = 100.0 * ( pk.value - best_non_hold ) / std::fabs( best_non_hold );
+      }
+      rs.second_changed = d2 ? ( second_changed ? 1 : 0 ) : -1;
+      g_root_stats.push_back( rs );
+      g_copies_rows += static_cast<double>( n_total_r );
+      std::vector<const std::vector<copy_result_t>*> passes{ &raw1, &raw2 };
+      build_interior_rows( cx, pick_i, passes, g_rows, g_rows_second, g_rows_chance, g_rare_rows );
+    }
+  }
+
   // the SRCH-04 log receipt: one stderr line per search naming the sites split on the first copy
   std::string top_list;
   for ( const std::string& t : g_ranked_top )
@@ -2400,10 +3040,128 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
   }
   return false;
 #else
-  (void)sim; (void)p; (void)seq; (void)q; (void)specs; (void)idx; (void)listed;
+  (void)sim; (void)p; (void)seq; (void)obs; (void)mask; (void)q; (void)specs; (void)idx; (void)listed;
   throw sc_runtime_error( "solver_search: fork() needs a Linux build" );
 #endif
 }
+// ---- the record file and the summary file (280-07) ------------------------------------------------------------------
+// The record is opened O_APPEND by the parent and each row goes out in ONE write() call (Phase 281 may run several fight
+// processes into one file; a regular file's appended write is atomic with respect to the offset). A short write is finished
+// in a loop, which only happens on a full disk.
+void write_record_rows( const std::string& file )
+{
+#if defined( __linux__ )
+  const int fd = ::open( file.c_str(), O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0644 );
+  if ( fd < 0 )
+    throw sc_runtime_error( fmt::format( "solver_search_record='{}' cannot be opened for appending: {}.", file,
+                                         std::strerror( errno ) ) );
+  for ( const std::string& row : g_rows )
+  {
+    std::string line = row;
+    line += '\n';
+    const char* d = line.data();
+    std::size_t left = line.size();
+    while ( left > 0 )
+    {
+      const ssize_t w = ::write( fd, d, left );
+      if ( w < 0 )
+      {
+        if ( errno == EINTR )
+          continue;
+        const int e = errno;
+        ::close( fd );
+        throw sc_runtime_error( fmt::format( "solver_search_record='{}': write failed: {}.", file, std::strerror( e ) ) );
+      }
+      d += w;
+      left -= static_cast<std::size_t>( w );
+    }
+    g_record_bytes += static_cast<long long>( line.size() );
+  }
+  ::close( fd );
+#else
+  (void)file;
+#endif
+}
+
+double median_of( std::vector<double> v )
+{
+  if ( v.empty() )
+    return std::numeric_limits<double>::quiet_NaN();
+  std::sort( v.begin(), v.end() );
+  const std::size_t n = v.size();
+  return n % 2 ? v[ n / 2 ] : 0.5 * ( v[ n / 2 - 1 ] + v[ n / 2 ] );
+}
+
+// summary.json: C-A's seventeen fields in C-A's order, then the recorded additions. Definitions are in 280-RECORD.md.
+void write_summary_json( const std::string& file )
+{
+  const double n_roots = static_cast<double>( g_root_stats.size() );
+  auto pct = [ & ]( long long hits ) {
+    return n_roots > 0.0 ? jnum( 100.0 * static_cast<double>( hits ) / n_roots ) : std::string( "null" );
+  };
+  long long decisive = 0, hold_cand = 0, hold_won = 0, changed = 0;
+  std::vector<double> se_main, se_audit, payoff;
+  for ( const root_stat_t& r : g_root_stats )
+  {
+    decisive += r.decisive ? 1 : 0;
+    hold_cand += r.hold_any ? 1 : 0;
+    hold_won += r.hold_won ? 1 : 0;
+    changed += r.second_changed == 1 ? 1 : 0;
+    if ( std::isfinite( r.se_pct ) )
+      ( r.audit ? se_audit : se_main ).push_back( r.se_pct );
+    if ( std::isfinite( r.hold_payoff ) )
+      payoff.push_back( r.hold_payoff );
+  }
+  const bool any_depth1 = g_cfg.depth == 1;
+  double payoff_mean = std::numeric_limits<double>::quiet_NaN();
+  if ( !payoff.empty() )
+  {
+    double sum = 0.0;
+    for ( double x : payoff )
+      sum += x;
+    payoff_mean = sum / static_cast<double>( payoff.size() );
+  }
+  const long long rows = g_rows_root + g_rows_second + g_rows_chance;
+#if defined( __linux__ )
+  const double peak_kb = static_cast<double>( std::max( read_vmhwm_kb(), g_count.leaf_vmhwm_kb_max ) );
+#else
+  const double peak_kb = 0.0;
+#endif
+  const std::string js = fmt::format(
+      "{{\"decisions\":{},\"roots\":{},\"seconds\":{},\"chance_rows\":{},\"copies\":{},\"cpu_s\":{},\"wall_s\":{},"
+      "\"inside_round_wall_s\":{},\"decisive_pct\":{},\"label_se_pct\":{},\"label_se_nosplit_pct\":{},"
+      "\"second_level_changed_pick_pct\":{},\"hold_candidate_pct\":{},\"hold_won_pct\":{},\"hold_payoff_pct\":{},"
+      "\"rare_branch_rows\":{},\"peak_rss_mb\":{},\"searches\":{},\"copies_spent\":{},\"samples\":{},\"pair_cut_first\":{},"
+      "\"fork_fail\":{},\"child_fail\":{},\"fork_cpu_s\":{},\"child_cpu_s\":{},\"record_bytes\":{},"
+      "\"inside_round_wall_s_source\":\"fork_constant\"}}\n",
+      rows, g_rows_root, g_rows_second, g_rows_chance, jnum( g_copies_rows ),
+      jnum( g_count.fork_cpu_s + g_count.child_cpu_s ), jnum( g_count.wall_branch_s ), jnum( 0.0 ), pct( decisive ),
+      jnum( median_of( se_main ) ), se_audit.empty() ? std::string( "null" ) : jnum( median_of( se_audit ) ),
+      any_depth1 ? std::string( "null" ) : pct( changed ), pct( hold_cand ), pct( hold_won ), jnum( payoff_mean ),
+      g_rare_rows, jnum( peak_kb / 1024.0 ), g_count.searches, g_count.children, g_samples_total, g_pair_cut_total,
+      g_fork_fail_total, g_count.child_fail, jnum( g_count.fork_cpu_s ), jnum( g_count.child_cpu_s ), g_record_bytes );
+  const std::string tmp = fmt::format( "{}.tmp.{}", file, static_cast<long>( ::getpid() ) );
+  {
+    std::ofstream o( tmp, std::ios::out | std::ios::trunc | std::ios::binary );
+    if ( !o.is_open() )
+      throw sc_runtime_error( fmt::format( "solver_search_summary='{}': cannot write the temporary file '{}'.", file, tmp ) );
+    o << js;
+    o.flush();
+    if ( !o.good() )
+    {
+      o.close();
+      std::remove( tmp.c_str() );
+      throw sc_runtime_error( fmt::format( "solver_search_summary='{}': writing '{}' failed.", file, tmp ) );
+    }
+  }
+  if ( std::rename( tmp.c_str(), file.c_str() ) != 0 )
+  {
+    std::remove( tmp.c_str() );
+    throw sc_runtime_error( fmt::format( "solver_search_summary='{}': renaming '{}' failed: {}.", file, tmp,
+                                         std::strerror( errno ) ) );
+  }
+}
+
 }  // namespace
 
 config_t& cfg()
@@ -2611,15 +3369,66 @@ void validate( sim_t* sim )
     g_boot_mode = bm == "none" ? 0 : bm == "q" ? 1 : 2;
   }
 
+  // 280-07: the record, the summary, the fight names and the chance-row cap
+  {
+    const std::uint32_t one = 1;
+    unsigned char first_byte = 0;
+    std::memcpy( &first_byte, &one, 1 );
+    if ( first_byte != 1 )
+      refuse( "solver_search needs a little-endian machine (the record's observations are little-endian float32)." );
+  }
+  if ( c.chance_rows < 0 || c.chance_rows > 64 )
+    refuse( fmt::format( "solver_search_chance_rows must be 0..64 (got {}).", c.chance_rows ) );
+  if ( !c.fight.empty() )
+  {
+    const std::size_t comma = c.fight.find( ',' );
+    const bool one_comma = comma != std::string::npos && c.fight.find( ',', comma + 1 ) == std::string::npos;
+    bool plain = true;
+    for ( char ch : c.fight )
+      if ( static_cast<unsigned char>( ch ) < 0x21 || static_cast<unsigned char>( ch ) > 0x7e || ch == '"' || ch == '\\' )
+        plain = false;
+    if ( !one_comma || comma == 0 || comma + 1 >= c.fight.size() || !plain )
+      refuse( fmt::format( "solver_search_fight='{}' must be '<shape>,<setup>' (exactly two non-empty parts, one comma, "
+                           "printable characters without spaces, quotes or backslashes).",
+                           c.fight ) );
+    c.fight_shape = c.fight.substr( 0, comma );
+    c.fight_setup = c.fight.substr( comma + 1 );
+  }
+  {
+    const std::string outs[] = { c.record, c.summary, c.sites_out, c.log };
+    const char* const names[] = { "solver_search_record", "solver_search_summary", "solver_search_sites_out",
+                                  "solver_search_log" };
+    for ( int a = 0; a < 4; ++a )
+      for ( int b = a + 1; b < 4; ++b )
+        if ( !outs[ a ].empty() && outs[ a ] == outs[ b ] )
+          refuse( fmt::format( "{} and {} name the same file '{}'.", names[ a ], names[ b ], outs[ a ] ) );
+    // both are refused now, not at the end of the fight, when their place cannot be written
+    for ( int a = 0; a < 2; ++a )
+    {
+      if ( outs[ a ].empty() )
+        continue;
+#if defined( __linux__ )
+      const std::string dir = outs[ a ].find( '/' ) == std::string::npos ? std::string( "." )
+                                                                           : outs[ a ].substr( 0, outs[ a ].rfind( '/' ) );
+      const bool exists = ::access( outs[ a ].c_str(), F_OK ) == 0;
+      const bool ok = exists ? ::access( outs[ a ].c_str(), W_OK ) == 0 : ::access( dir.c_str(), W_OK | X_OK ) == 0;
+      if ( !ok )
+        refuse( fmt::format( "{}='{}' cannot be written (no write access to the file or its directory).", names[ a ],
+                             outs[ a ] ) );
+#endif
+    }
+  }
+
   g_any = true;
   fmt::print( "[RL_SEARCH] candidates={} window={:.17g} copies={} jobs={} at={} margin={:.17g} press={} expected_crit={} "
               "divisor={:.17g} gamma={:.17g} salt_base={} splits={} split_site={} audit_nosplit={} sites_in={} sites_out={} "
-              "depth={} second={} holds={} value={} bootstrap={} log={}\n",
+              "depth={} second={} holds={} value={} bootstrap={} record={} summary={} fight={} chance_rows={} log={}\n",
               c.candidates, c.window, c.copies, c.jobs, c.at_list.size(), c.margin, c.press, c.expected_crit ? 1 : 0,
               sb.value_divisor, sb.gamma, sb.branch_salt_base, c.splits, c.split_site.empty() ? "-" : c.split_site,
               c.nosplit_audit ? 1 : 0, c.sites_in.empty() ? "-" : c.sites_in, c.sites_out.empty() ? "-" : c.sites_out,
               c.depth, c.depth == 2 ? c.second : 0, c.holds ? 1 : 0, c.value.empty() ? "-" : c.value,
-              g_boot_mode == 0 ? "none" : g_boot_mode == 1 ? "q" : "value", c.log );
+              g_boot_mode == 0 ? "none" : g_boot_mode == 1 ? "q" : "value", c.record.empty() ? "-" : c.record,
+              c.summary.empty() ? "-" : c.summary, c.fight.empty() ? "-" : c.fight, c.chance_rows, c.log );
   std::fflush( stdout );
 }
 
@@ -2629,7 +3438,6 @@ void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* obs, 
 {
   if ( !g_any )
     return;
-  (void)mask;
 
   // 1. a copy: window accounting, and the exact cut
   if ( g_child.active )
@@ -2648,24 +3456,49 @@ void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* obs, 
       const double boot_v =
           g_value_w ? disc * rl_policy::value_forward( *g_value_w, obs ) / g_child.divisor : 0.0;
       write_leaf_and_exit( g_child.acc, p->solver_damage_expected_so_far - g_child.Eexp_k,
-                           p->solver_damage_so_far - g_child.D_k, boot_q, boot_v, t, 0, g_child.cut_state );
+                           p->solver_damage_so_far - g_child.D_k, boot_q, boot_v, t, 0, g_child.cut_state, obs );
     }
     g_child.last_t = t;
     g_child.last_E = E;
     // 280-06: the second level. A pair process that has not forked yet forks at the first decision with at least two
     // selectable buttons that is neither forced nor exploratory: the net's best button for the forker (rank 0), its
     // runner-up for the new process (rank 1).
-    if ( g_child.pair_pending && !forced && !exploratory )
+    // 280-07: the same decision is a labelled decision for the record. The forker writes a SECOND line (the observation,
+    // the mask and the two buttons) just before it forks, and marks the decision so each leaf below can state its return
+    // from here; a branch of a chance split writes a CHANCE line at its first labelled decision after the split (after the
+    // pair fork when both fall on one decision, so the line carries this process's own press and rank).
+    if ( ( g_child.pair_pending || g_child.chance_pending ) && !forced && !exploratory )
     {
       int n_sel2 = 0;
       for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
         n_sel2 += select_mask[ i ] ? 1 : 0;
       if ( n_sel2 >= 2 )
       {
-        const std::vector<int> top2 = top_k( q, select_mask, 2 );
-        if ( top2.size() != 2 || top2[ 0 ] != idx )
-          child_write_and_exit( make_fail_line( 81, "second_level_net_pick_is_not_the_best_button" ), 81 );
-        pair_fork_here( sim, top2[ 0 ], top2[ 1 ], idx );
+        if ( g_child.pair_pending )
+        {
+          const std::vector<int> top2 = top_k( q, select_mask, 2 );
+          if ( top2.size() != 2 || top2[ 0 ] != idx )
+            child_write_and_exit( make_fail_line( 81, "second_level_net_pick_is_not_the_best_button" ), 81 );
+          g_child.marks.push_back( mark_t{ "S" + path_token(), t, g_child.acc } );
+          const std::string second_line =
+              fmt::format( "SECOND {} {} {} {:.9g} {:.17g} {} {} {} {}\n", g_child.copy, path_token(), seq, t, g_child.pw,
+                           top2[ 0 ], top2[ 1 ], mask_digits( mask ), obs_b64( obs ) );
+          if ( second_line.size() > LINE_MAX_BYTES )
+            child_write_and_exit( make_fail_line( 76, "second_line_too_long" ), 76 );
+          child_write_only( second_line );
+          pair_fork_here( sim, top2[ 0 ], top2[ 1 ], idx );
+        }
+        if ( g_child.chance_pending )
+        {
+          g_child.chance_pending = false;
+          g_child.marks.push_back( mark_t{ "C" + path_token(), t, g_child.acc } );
+          const std::string chance_line =
+              fmt::format( "CHANCE {} {} {} {} {:.9g} {:.17g} {} {} {}\n", g_child.copy, path_token(), out_rank(), seq, t,
+                           g_child.pw, idx, mask_digits( mask ), obs_b64( obs ) );
+          if ( chance_line.size() > LINE_MAX_BYTES )
+            child_write_and_exit( make_fail_line( 76, "chance_line_too_long" ), 76 );
+          child_write_only( chance_line );
+        }
       }
     }
     return;
@@ -2754,7 +3587,7 @@ void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* obs, 
   }
 
   ensure_sites( sim );
-  search_here( sim, p, seq, q, specs, idx, listed_mode );
+  search_here( sim, p, seq, obs, mask, q, specs, idx, listed_mode );
 }
 
 void on_combat_end( sim_t* sim )
@@ -2767,7 +3600,7 @@ void on_combat_end( sim_t* sim )
   g_child.acc += std::pow( g_child.gamma, g_child.last_t - g_child.t_k ) * ( ( E_end - g_child.last_E ) / g_child.divisor );
   // the fight ended before the window did: ended = 1, no bootstrap, cut_state 4
   write_leaf_and_exit( g_child.acc, p->solver_damage_expected_so_far - g_child.Eexp_k,
-                       p->solver_damage_so_far - g_child.D_k, 0.0, 0.0, t_end, 1, 4 );
+                       p->solver_damage_so_far - g_child.D_k, 0.0, 0.0, t_end, 1, 4, nullptr );
 }
 
 void on_child_exception( sim_t* sim, const char* what )
@@ -2833,5 +3666,10 @@ void write_summary( sim_t* sim )
   // 280-05: the ranking table, once, at exit
   if ( !c.sites_out.empty() )
     write_sites_out( c.sites_out, c.window );
+  // 280-07: the record rows, then the summary file (the summary names the bytes the record just grew by)
+  if ( !c.record.empty() )
+    write_record_rows( c.record );
+  if ( !c.summary.empty() )
+    write_summary_json( c.summary );
 }
 }  // namespace solver_search

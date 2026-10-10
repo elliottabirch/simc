@@ -4577,6 +4577,11 @@ void sim_t::create_options()
     // tstl-sylvanas 280-06: the window-end value blob and the bootstrap mode (none, q or value)
     add_option( opt_string( "solver_search_value", ss.value ) );
     add_option( opt_string( "solver_search_bootstrap", ss.bootstrap ) );
+    // tstl-sylvanas 280-07: the search record (C-A rows), the run summary, the fight names and the chance-row cap
+    add_option( opt_string( "solver_search_record", ss.record ) );
+    add_option( opt_string( "solver_search_summary", ss.summary ) );
+    add_option( opt_string( "solver_search_fight", ss.fight ) );
+    add_option( opt_int( "solver_search_chance_rows", ss.chance_rows ) );
   }
   // S1 (260927-s1-spend-timing): forbids lightning_bolt/tempest (and, 261002-8rs, primordial_storm
   // when the action table offers it; the third Lightning-family spender is untouched) below n stacks

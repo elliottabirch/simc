@@ -56,6 +56,16 @@
 //                                          - t_k) x value_forward(end observation) / solver_branch_value_divisor (value).
 //                                          Default: value when solver_search_value is given, else none
 //
+//   solver_search_record=<records.jsonl>   (280-07) at the end of each fight the parent appends one JSON line per labelled
+//                                          decision (root, second and chance rows), C-A's fields in C-A's order then the
+//                                          recorded additions (O_APPEND, one write() per line)
+//   solver_search_summary=<summary.json>   (280-07) rewritten at the end of each fight (temp file, then rename): C-A's
+//                                          summary fields, then the recorded additions
+//   solver_search_fight=<shape>,<setup>    (280-07) the two names the record's `fight` object carries (the fork cannot
+//                                          know them); exactly two non-empty parts
+//   solver_search_chance_rows=0..64        (280-07) the most chance rows one search writes (default 16); second and root
+//                                          rows are never capped
+//
 // Read, not registered here: solver_branch_value_divisor (> 0), solver_branch_gamma, solver_branch_salt_base,
 // solver_branch_independent_dice and solver_branch_redeal (both must stay 1: paired futures are refused).
 // ==========================================================================
@@ -92,9 +102,15 @@ struct config_t
   bool holds = true;                  // solver_search_holds (280-06)
   std::string value;                  // solver_search_value (280-06)
   std::string bootstrap;              // solver_search_bootstrap (280-06): "", none, q or value
+  std::string record;                 // solver_search_record (280-07)
+  std::string summary;                // solver_search_summary (280-07)
+  std::string fight;                  // solver_search_fight (280-07): "<shape>,<setup>"
+  int chance_rows = 16;               // solver_search_chance_rows (280-07), 0..64
   // set by validate()
   std::vector<std::int64_t> at_list;  // parsed from `at`
   bool press_best = false;
+  std::string fight_shape;            // 280-07: the two parts of `fight`
+  std::string fight_setup;
 };
 
 config_t& cfg();
