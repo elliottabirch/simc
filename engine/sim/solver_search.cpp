@@ -1194,6 +1194,8 @@ struct split_agg_t
   long copies_split = 0;           // usable copies with at least one split
   long fork_fail = 0;              // fork() refusals reported by the leaves (a shared prefix is counted once per leaf)
   double max_abs_wsum_err = 0.0;   // largest |sum of leaf weights - 1| over copies that returned leaves cleanly
+  long sibling_pairs = 0;          // pairs of sibling leaves (same path but the last digit) in usable copies
+  long sibling_ties = 0;           // of those, pairs whose two returns are identical to 17 digits (shared dice?)
 };
 
 void add_pass_to_cells( const std::vector<copy_result_t>& res, std::vector<cell_t>& cells, split_agg_t& agg )
@@ -1218,6 +1220,21 @@ void add_pass_to_cells( const std::vector<copy_result_t>& res, std::vector<cell_
       agg.splits_total += nl - 1;
       if ( nl > 1 )
         ++agg.copies_split;
+      // sibling leaves: two leaves whose paths agree on every digit but the last. Independent dice make an identical
+      // return to 17 digits essentially impossible, so a tie is the sign of a shared stream (T-280-10).
+      for ( std::size_t a = 0; a < r.leaves.size(); ++a )
+        for ( std::size_t b = a + 1; b < r.leaves.size(); ++b )
+        {
+          const std::string& pa = r.leaves[ a ].path;
+          const std::string& pb = r.leaves[ b ].path;
+          if ( !pa.empty() && pa.size() == pb.size() && pa.compare( 0, pa.size() - 1, pb, 0, pb.size() - 1 ) == 0 &&
+               pa.back() != pb.back() )
+          {
+            ++agg.sibling_pairs;
+            if ( r.leaves[ a ].R == r.leaves[ b ].R )
+              ++agg.sibling_ties;
+          }
+        }
       for ( const leaf_t& lf : r.leaves )
         for ( const site_item_t& it : lf.stats.items )
         {
@@ -1548,11 +1565,12 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
         "\"dropped\":{},\"margin\":{},\"margin_se\":{},\"copies\":{},\"skipped_fail\":{},\"cpu_s\":{},"
         "\"fork_cpu_s\":{},\"child_cpu_s\":{},\"wall_s\":{},\"leaf_vmhwm_kb_max\":{},"
         "\"split_mode\":\"{}\",\"splits_total\":{},\"leaves_total\":{},\"copies_split\":{},\"fork_fail\":{},"
-        "\"max_abs_wsum_err\":{},\"site_stats\":[{}]}}\n",
+        "\"max_abs_wsum_err\":{},\"sibling_pairs\":{},\"sibling_ties\":{},\"site_stats\":[{}]}}\n",
         seq, k, jnum( t_k ), net, pick, idx, listed ? 1 : 0, jc, dropped >= 0 ? cells[ static_cast<std::size_t>( dropped ) ].button : -1,
         jnum( margin ), jnum( margin_se ), n_total, fail ? 1 : 0, jnum( fork_cpu + child_cpu ), jnum( fork_cpu ),
         jnum( child_cpu ), jnum( wall ), hwm_max, c.split_site.empty() ? "cold_start" : "proof_site", agg.splits_total,
-        agg.leaves_total, agg.copies_split, agg.fork_fail, jnum( agg.max_abs_wsum_err ), site_stats_json );
+        agg.leaves_total, agg.copies_split, agg.fork_fail, jnum( agg.max_abs_wsum_err ), agg.sibling_pairs,
+        agg.sibling_ties, site_stats_json );
     g_log->flush();
   }
   return false;
