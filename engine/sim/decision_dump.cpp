@@ -15,6 +15,7 @@
 #include "sim/cooldown.hpp"
 #include "sim/event.hpp"
 #include "sim/gain.hpp"
+#include "sim/rl_button_bind.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_target_select.hpp"
 #include "sim/sim.hpp"
@@ -831,7 +832,12 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   // array as "no engine truth on this wire" (a documented fail-open, not
   // a crash), so this degrades a multi-threaded dump into that existing,
   // named behaviour instead of undefined behaviour.
-  if ( p->sim->threads == 1 && p->sim->profileset_map.empty() )
+  // 271.3-05 (BIND-01, BIND-02): an actor whose buttons are not bound (a scripted run of a hand-written list: no
+  // decision-maker, the default list is not the catalog) has no button identity, so no legality bit may be derived
+  // from it. Such a row carries null for all of them and says why with `buttons_bound:false` (written once, after
+  // the action_ready key). A bound actor's row has no new key.
+  const bool buttons_unbound = !rl_button_bind::is_bound( p );
+  if ( p->sim->threads == 1 && p->sim->profileset_map.empty() && !buttons_unbound )
   {
     std::uint8_t action_resolvable[ RL_ACTION_DIM ];
     std::uint8_t action_ready[ RL_ACTION_DIM ];
@@ -868,6 +874,8 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
     out << ",\"action_resolvable\":null";
     out << ",\"action_ready\":null";
   }
+  if ( buttons_unbound )
+    out << ",\"buttons_bound\":false";
 
   // 233.1-02 Task 2 (R6-15, R6-20): the `thorims_primed` fact and the `shaman_thorims_primed_kind`
   // accessor it read (232-06, R-AC/P232-29) are REMOVED TOGETHER with the enum
@@ -922,7 +930,7 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
         out << ",";
       const char* token = targeted_tokens[ i ];
       out << "\"" << token << "\":";
-      action_t* a = p->find_action( token );
+      action_t* a = rl_button_bind::bound_action_for_token( p, token );
       if ( a == nullptr )
       {
         out << "null";
@@ -1065,7 +1073,7 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
         out << ",";
       const char* token = targeted_tokens[ i ];
       out << "\"" << token << "\":";
-      action_t* a = p->find_action( token );
+      action_t* a = rl_button_bind::bound_action_for_token( p, token );
       if ( a == nullptr )
       {
         out << "null";
@@ -1357,14 +1365,24 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
     }
     out << "]";
 
-    out << ",\"obs_mask\":[";
-    for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+    // 271.3-05: the button mask of an unbound actor is all zero by construction and says nothing about legality, so the
+    // mask is not written (null); `obs` stays populated, because scripted-run readers use its non-button fields
+    // (reader audit in 271.3-FORK-RECEIPTS.md, rule PD-4).
+    if ( buttons_unbound )
     {
-      if ( i > 0 )
-        out << ",";
-      out << static_cast<int>( obs_mask[ i ] );
+      out << ",\"obs_mask\":null";
     }
-    out << "]";
+    else
+    {
+      out << ",\"obs_mask\":[";
+      for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+      {
+        if ( i > 0 )
+          out << ",";
+        out << static_cast<int>( obs_mask[ i ] );
+      }
+      out << "]";
+    }
   }
   else
   {

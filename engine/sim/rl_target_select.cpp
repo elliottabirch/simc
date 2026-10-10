@@ -12,6 +12,7 @@
 #include "fmt/format.h"
 #include "player/pet.hpp"
 #include "player/player.hpp"
+#include "sim/rl_button_bind.hpp"
 #include "sim/rl_class_plugins.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_translog.hpp"
@@ -605,6 +606,26 @@ std::size_t actor_binding_entries()
   return n;
 }
 
+// 271.3-05 (BIND-01): the action an aimed token or the tag melee token means for actor `p`. A button reads the bound table
+// (list and line identity, never a name). An actor whose buttons are not bound (a scripted run of a hand-written list, no
+// decision-maker, so no legality bit and no net decision) has no bound table; its aim geometry keeps reading the engine
+// action of that name, exactly as before, because the geometry feeds only dump facts. A token that is not a cast button of
+// the header is an engine fact by name and keeps find_action.
+bool is_cast_token( const char* token )
+{
+  for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+    if ( RL_ACTIONS[ i ].kind == rl_action_kind::cast && std::strcmp( RL_ACTIONS[ i ].token, token ) == 0 )
+      return true;
+  return false;
+}
+
+action_t* geometry_action_for( const player_t* p, const char* token )
+{
+  if ( is_cast_token( token ) && rl_button_bind::is_bound( p ) )
+    return rl_button_bind::bound_action_for_token( p, token );
+  return p->find_action( token );
+}
+
 actor_binding_t& actor_binding_for( const player_t* p )
 {
   auto it = g_actor_binding_cache.find( p );
@@ -625,7 +646,7 @@ actor_binding_t& actor_binding_for( const player_t* p )
   {
     const double table_range = RL_AIMED_SPELL_RANGE_YARDS[ k ];
     b.widest_range           = std::max( b.widest_range, table_range );
-    const action_t* a        = p->find_action( RL_TARGETED_TOKENS[ k ] );
+    const action_t* a        = geometry_action_for( p, RL_TARGETED_TOKENS[ k ] );
     if ( a == nullptr )
       continue;
     // 2026-10-10 arms run: a deal without the Colossus Smash talent still carries the base action (range 5), because the
@@ -662,7 +683,7 @@ actor_binding_t& actor_binding_for( const player_t* p )
         RL_REGISTRY_ID, RL_TARGETED_TOKEN_COUNT, p->name() ) );
   }
   // Melee reach: the registry's optional tag melee action, else the shortest-range aimed action.
-  b.melee = ( RL_TAG_MELEE_ACTION != nullptr ) ? p->find_action( RL_TAG_MELEE_ACTION ) : shortest_action;
+  b.melee = ( RL_TAG_MELEE_ACTION != nullptr ) ? geometry_action_for( p, RL_TAG_MELEE_ACTION ) : shortest_action;
   if ( b.melee == nullptr )
     b.melee = b.hit_actions.front();
   b.feature_sources = build_feature_sources( p );  // refuses a feature no source can serve, here, at arise

@@ -312,6 +312,105 @@ eval_t evaluate( const player_t* p )
   return ev;
 }
 
+// ---- rule R6: the poll sets belong to the catalog ----
+//
+// The engine builds the two poll sets (off_gcd_cd, cast_while_casting_cd: the cooldowns whose readiness wakes the actor between
+// global cooldowns) over the actions of EVERY list (player.cpp init_actions). A hand-written line in a list the decision-maker
+// never reads (for example a stance toggle in the kept precombat list) can therefore add decision boundaries for the net that no
+// catalog button can use. With a decision-maker attached the poll sets are rebuilt from the default list's own actions, and the
+// player's active off-GCD (cast-while-casting) list is switched off when the default list owns no real action of that kind, so
+// the scheduler's own early return applies. R6 then re-checks the filtered sets.
+
+struct poll_filter_t
+{
+  int  removed_off_gcd           = 0;
+  int  removed_cast_while_casting = 0;
+  bool off_gcd_list_deactivated   = false;
+  bool cwc_list_deactivated       = false;
+  bool applied() const
+  {
+    return removed_off_gcd > 0 || removed_cast_while_casting > 0 || off_gcd_list_deactivated || cwc_list_deactivated;
+  }
+};
+
+template <typename Pred>
+bool owns_poll_action( const player_t* p, const action_priority_list_t* owned, Pred pred )
+{
+  for ( const action_t* a : p->action_list )
+    if ( pred( a ) && owned != nullptr && a->action_list == owned )
+      return true;
+  return false;
+}
+
+template <typename Pred>
+int filter_pairs( const player_t* p, const action_priority_list_t* owned, Pred pred,
+                  std::vector<std::pair<const cooldown_t*, const cooldown_t*>>& pairs )
+{
+  const std::size_t before = pairs.size();
+  pairs.erase( std::remove_if( pairs.begin(), pairs.end(),
+                               [ & ]( const std::pair<const cooldown_t*, const cooldown_t*>& c ) {
+                                 for ( const action_t* a : p->action_list )
+                                   if ( pred( a ) && owned != nullptr && a->action_list == owned && c.first == a->cooldown &&
+                                        c.second == a->internal_cooldown )
+                                     return false;
+                                 return true;
+                               } ),
+               pairs.end() );
+  return static_cast<int>( before - pairs.size() );
+}
+
+poll_filter_t filter_foreign_poll_pairs( player_t* p, const action_priority_list_t* owned )
+{
+  poll_filter_t f;
+  f.removed_off_gcd            = filter_pairs( p, owned, in_off_gcd_poll_set, p->off_gcd_cd );
+  f.removed_cast_while_casting = filter_pairs( p, owned, in_cast_while_casting_poll_set, p->cast_while_casting_cd );
+  if ( p->active_off_gcd_list != nullptr && !owns_poll_action( p, owned, in_off_gcd_poll_set ) )
+  {
+    p->active_off_gcd_list  = nullptr;
+    f.off_gcd_list_deactivated = true;
+  }
+  if ( p->active_cast_while_casting_list != nullptr && !owns_poll_action( p, owned, in_cast_while_casting_poll_set ) )
+  {
+    p->active_cast_while_casting_list = nullptr;
+    f.cwc_list_deactivated            = true;
+  }
+  return f;
+}
+
+// R6 after the filter: every remaining pair is owned by a default-list poll action. Returns the refusal text, "" when it holds.
+std::string poll_set_refusal( const player_t* p, const action_priority_list_t* owned )
+{
+  std::string names;
+  int         foreign = 0;
+  auto        scan    = [ & ]( auto pred, const std::vector<std::pair<const cooldown_t*, const cooldown_t*>>& pairs, const char* set ) {
+    for ( const auto& c : pairs )
+    {
+      bool accounted = false;
+      for ( const action_t* a : p->action_list )
+        if ( pred( a ) && owned != nullptr && a->action_list == owned && c.first == a->cooldown && c.second == a->internal_cooldown )
+        {
+          accounted = true;
+          break;
+        }
+      if ( accounted )
+        continue;
+      ++foreign;
+      for ( const action_t* a : p->action_list )
+        if ( pred( a ) && c.first == a->cooldown && c.second == a->internal_cooldown )
+          names += fmt::format( "{}{} action '{}' list '{}' {}", names.empty() ? "" : "; ", set, a->name_str,
+                                a->action_list ? a->action_list->name_str : std::string( "none" ), quote_line( a ) );
+    }
+  };
+  scan( in_off_gcd_poll_set, p->off_gcd_cd, "off-GCD" );
+  scan( in_cast_while_casting_poll_set, p->cast_while_casting_cd, "cast-while-casting" );
+  if ( foreign == 0 )
+    return std::string();
+  return refusal_text( p, "none", owned != nullptr ? owned->name_str : std::string( "none" ),
+                       "a cooldown pair in a poll set belongs to no default-list action: a hand-written list's off-GCD action "
+                       "would add decision boundaries for the net",
+                       names.empty() ? std::string( "no action found for the pair" ) : names );
+}
+
 // ---- report ----
 
 std::string jstr( const std::string& s )
@@ -387,7 +486,8 @@ std::string poll_set_json( const player_t* p, const action_priority_list_t* owne
   return out;
 }
 
-std::string report_json( const sim_t* sim, const player_t* p, const eval_t* ev, const std::string& refusal )
+std::string report_json( const sim_t* sim, const player_t* p, const eval_t* ev, const std::string& refusal,
+                         const poll_filter_t& filter )
 {
   const char* maker = !sim->solver_policy_str.empty() ? "solver_policy" : !sim->solver_control_str.empty() ? "solver_control" : "none";
   const bool  bound = p != nullptr && ev != nullptr && refusal.empty();
@@ -477,14 +577,21 @@ std::string report_json( const sim_t* sim, const player_t* p, const eval_t* ev, 
   {
     out += "  \"offGcdPollSet\": [],\n  \"castWhileCastingPollSet\": [],\n";
   }
-  out += fmt::format( "  \"foreignPollPairs\": {{\"offGcd\": {}, \"castWhileCasting\": {}}}\n", off_gcd_foreign, cwc_foreign );
+  out += fmt::format( "  \"foreignPollPairs\": {{\"offGcd\": {}, \"castWhileCasting\": {}}},\n", off_gcd_foreign, cwc_foreign );
+  // 271.3-05: additive (contract BR-1 fields above are unchanged). What the decision-maker poll-set filter removed at init.
+  out += fmt::format(
+      "  \"pollSetFilter\": {{\"applied\": {}, \"removedOffGcdPairs\": {}, \"removedCastWhileCastingPairs\": {}, "
+      "\"offGcdListDeactivated\": {}, \"castWhileCastingListDeactivated\": {}}}\n",
+      jbool( filter.applied() ), filter.removed_off_gcd, filter.removed_cast_while_casting, jbool( filter.off_gcd_list_deactivated ),
+      jbool( filter.cwc_list_deactivated ) );
   out += "}\n";
   return out;
 }
 
-void write_report( const sim_t* sim, const player_t* p, const eval_t* ev, const std::string& refusal )
+void write_report( const sim_t* sim, const player_t* p, const eval_t* ev, const std::string& refusal,
+                   const poll_filter_t& filter )
 {
-  const std::string text = report_json( sim, p, ev, refusal );
+  const std::string text = report_json( sim, p, ev, refusal, filter );
   std::FILE*        f    = std::fopen( g_report_path.c_str(), "wb" );
   if ( f == nullptr )
   {
@@ -540,6 +647,15 @@ void on_init_finished( sim_t* sim )
     refusal = ev.refusal;
   }
 
+  // R6 (271.3-05): with a decision-maker attached and every button bound, the poll sets are rebuilt from the default list's own
+  // actions and re-checked. Without a decision-maker nothing is changed; the report only counts the foreign pairs.
+  poll_filter_t filter;
+  if ( decision_maker && p != nullptr && refusal.empty() )
+  {
+    filter = filter_foreign_poll_pairs( p, ev.owned );
+    refusal = poll_set_refusal( p, ev.owned );
+  }
+
   if ( p != nullptr && sim->threads == 1 && sim->profileset_map.empty() )
   {
     table_t t;
@@ -553,7 +669,7 @@ void on_init_finished( sim_t* sim )
   }
 
   if ( !g_report_path.empty() )
-    write_report( sim, p, p != nullptr ? &ev : nullptr, refusal );
+    write_report( sim, p, p != nullptr ? &ev : nullptr, refusal, filter );
 
   if ( decision_maker && !refusal.empty() )
     throw sc_runtime_error( refusal );

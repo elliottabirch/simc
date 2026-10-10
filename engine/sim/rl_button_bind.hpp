@@ -22,6 +22,13 @@
 // actor unbound and never throw, so scripted stock-list runs keep working; an unbound actor resolves every
 // button to null.
 //
+// Rule R6 (271.3-05): the engine builds the two poll sets (the cooldowns whose readiness wakes the actor between global
+// cooldowns while idle and while casting) over the actions of every list. With a decision-maker attached, the poll sets are
+// rebuilt from the default list's own actions at init and the actor's active off-GCD (cast-while-casting) list is switched off
+// when the default list owns no real action of that kind; a pair that still belongs to no default-list action aborts init by
+// name. Without a decision-maker nothing is changed and the report only counts the foreign pairs. (This edit is a comment: no
+// declaration moved.)
+//
 // `rl_bind_report=<path>` writes the bind report (format `rl-bind-report-v1`) once per sim init, before any
 // refusal is thrown.
 //
