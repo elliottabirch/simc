@@ -4584,6 +4584,8 @@ void sim_t::create_options()
     add_option( opt_int( "solver_search_chance_rows", ss.chance_rows ) );
     // tstl-sylvanas 280-10: copies per candidate in the first pass (default 8); range and the copies check in validate()
     add_option( opt_int( "solver_search_pass1", ss.pass1 ) );
+    // tstl-sylvanas 284-06: the window-end value term's units, raw (default) or shape; checked in validate()
+    add_option( opt_string( "solver_search_value_units", ss.value_units ) );
   }
   // S1 (260927-s1-spend-timing): forbids lightning_bolt/tempest (and, 261002-8rs, primordial_storm
   // when the action table offers it; the third Lightning-family spender is untouched) below n stacks

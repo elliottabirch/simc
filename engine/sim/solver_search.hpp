@@ -68,6 +68,11 @@
 //   solver_search_pass1=1..256             (280-10) copies per candidate in the first pass (default 8, the value before
 //                                          this option); pass1 x (candidates + 1 hold when holds=1) (+ 2 at depth 2) must
 //                                          not exceed solver_search_copies
+//   solver_search_value_units=raw|shape    (284-06) the window-end value term's units (default raw). raw: the term is
+//                                          value_forward(end obs) / solver_branch_value_divisor, today's term; shape: the
+//                                          term is value_forward(end obs) / value_scale, the head's own output, exact for a
+//                                          value head trained in each fight shape's reward units (tstl-sylvanas plan
+//                                          284-03). shape needs solver_search_value
 //
 // Read, not registered here: solver_branch_value_divisor (> 0), solver_branch_gamma, solver_branch_salt_base,
 // solver_branch_independent_dice and solver_branch_redeal (both must stay 1: paired futures are refused).
@@ -110,6 +115,7 @@ struct config_t
   std::string fight;                  // solver_search_fight (280-07): "<shape>,<setup>"
   int chance_rows = 16;               // solver_search_chance_rows (280-07), 0..64
   int pass1 = 8;                      // solver_search_pass1 (280-10): copies per candidate in the first pass, 1..256 (default 8)
+  std::string value_units = "raw";    // solver_search_value_units (284-06): "raw" (default) or "shape"
   // set by validate()
   std::vector<std::int64_t> at_list;  // parsed from `at`
   bool press_best = false;

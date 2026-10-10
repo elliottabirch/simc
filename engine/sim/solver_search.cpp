@@ -128,6 +128,7 @@ config_t g_cfg;
 bool g_any = false;  // set by validate() when the search is on
 // The bootstrap mode of the window label (280-06): 0 none, 1 q, 2 value. (Moved up by 280-07: a leaf line's rc marks read it.)
 int g_boot_mode = 0;
+bool g_value_shape = false;  // solver_search_value_units=shape (284-06): the window-end term is the head's own output
 // The value blob (solver_search_value), loaded once at validate; a copy shares it through fork().
 std::shared_ptr<rl_policy::rl_weights_t> g_value_w;
 
@@ -3364,6 +3365,13 @@ void validate( sim_t* sim )
                            "(body '{}').",
                            c.value, rl_policy::body_name( g_value_w->body ) ) );
   }
+  // 284-06: the window-end value term's units
+  if ( c.value_units != "raw" && c.value_units != "shape" )
+    refuse( fmt::format( "solver_search_value_units='{}' is not 'raw' or 'shape'.", c.value_units ) );
+  if ( c.value_units == "shape" && !g_value_w )
+    refuse( "solver_search_value_units=shape needs solver_search_value=<v7 blob> (there is no value head to read the "
+            "term from)." );
+  g_value_shape = c.value_units == "shape";
   {
     std::string bm = c.bootstrap;
     if ( bm.empty() )
@@ -3428,13 +3436,13 @@ void validate( sim_t* sim )
   g_any = true;
   fmt::print( "[RL_SEARCH] candidates={} window={:.17g} copies={} jobs={} at={} margin={:.17g} press={} expected_crit={} "
               "divisor={:.17g} gamma={:.17g} salt_base={} splits={} split_site={} audit_nosplit={} sites_in={} sites_out={} "
-              "depth={} second={} holds={} value={} bootstrap={} record={} summary={} fight={} chance_rows={} pass1={} log={}\n",
+              "depth={} second={} holds={} value={} bootstrap={} record={} summary={} fight={} chance_rows={} pass1={} value_units={} log={}\n",
               c.candidates, c.window, c.copies, c.jobs, c.at_list.size(), c.margin, c.press, c.expected_crit ? 1 : 0,
               sb.value_divisor, sb.gamma, sb.branch_salt_base, c.splits, c.split_site.empty() ? "-" : c.split_site,
               c.nosplit_audit ? 1 : 0, c.sites_in.empty() ? "-" : c.sites_in, c.sites_out.empty() ? "-" : c.sites_out,
               c.depth, c.depth == 2 ? c.second : 0, c.holds ? 1 : 0, c.value.empty() ? "-" : c.value,
               g_boot_mode == 0 ? "none" : g_boot_mode == 1 ? "q" : "value", c.record.empty() ? "-" : c.record,
-              c.summary.empty() ? "-" : c.summary, c.fight.empty() ? "-" : c.fight, c.chance_rows, c.pass1, c.log );
+              c.summary.empty() ? "-" : c.summary, c.fight.empty() ? "-" : c.fight, c.chance_rows, c.pass1, c.value_units, c.log );
   std::fflush( stdout );
 }
 
@@ -3459,8 +3467,13 @@ void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* obs, 
       const double boot_q = disc * static_cast<double>( top_q );
       // 280-06: the window-end value on the observation built at the exact cut (rl_policy::value_forward returns the mean
       // of the quantiles x value_scale in raw damage units; divided by the shape's divisor it is in the reward units of R).
+      // 284-06: with solver_search_value_units=shape the term is the head's own output (value_forward / value_scale), exact
+      // for a head trained in each shape's reward units; raw (the default) is the expression above, unchanged.
       const double boot_v =
-          g_value_w ? disc * rl_policy::value_forward( *g_value_w, obs ) / g_child.divisor : 0.0;
+          g_value_w ? ( g_value_shape ? disc * rl_policy::value_forward( *g_value_w, obs ) /
+                                            static_cast<double>( g_value_w->value_scale )
+                                      : disc * rl_policy::value_forward( *g_value_w, obs ) / g_child.divisor )
+                    : 0.0;
       write_leaf_and_exit( g_child.acc, p->solver_damage_expected_so_far - g_child.Eexp_k,
                            p->solver_damage_so_far - g_child.D_k, boot_q, boot_v, t, 0, g_child.cut_state, obs );
     }
