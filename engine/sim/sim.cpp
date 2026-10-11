@@ -34,6 +34,7 @@
 #include "sim/rl_policy.hpp"
 #include "sim/rl_action_census.hpp"
 #include "sim/rl_button_bind.hpp"
+#include "sim/rl_stock_eval.hpp"
 #include "sim/rl_target_select.hpp"
 #include "sim/rl_translog.hpp"
 #include "sim/rl_rng_record.hpp"
@@ -3478,6 +3479,9 @@ void sim_t::init()
     // Phase 271.3 (271.3-01, BIND-01/BIND-02): bind every cast button to its catalog line in the default list
     // (identity of list and line, never a name); refuses by name when a decision-maker is attached and the bind fails.
     rl_button_bind::on_init_finished( this );
+    // Phase 271.4 (271.4-03, AGREE-01): the dry stock-rotation pick (solver_apl_stock_list=); refuses by name when the
+    // preserved copy is missing or misnamed. No-op unless the option is set and solver_record_apl_choice=1.
+    rl_stock_eval::on_init_finished( this );
   }
 
   // If save= option is used, don't bother initializing profilesets or plots as the main thread is going to
@@ -4641,6 +4645,9 @@ void sim_t::create_options()
   // Phase 271.3 (271.3-01): see rl_button_bind.hpp. The bind report path lives in that module for the same reason
   // (a sim_t member would rebuild every file). Default empty: no report is written.
   add_option( opt_string( "rl_bind_report", rl_button_bind::report_path_storage() ) );
+  // Phase 271.4 (271.4-03): names the preserved stock list the recorder walks dry at each net decision; turns the `.apl`
+  // sidecar to format 2. The name lives in rl_stock_eval (a sim_t member would rebuild every file). Default empty: off.
+  add_option( opt_string( "solver_apl_stock_list", rl_stock_eval::list_name_storage() ) );
   add_option( opt_bool( "sequence_soft_fail", sequence_soft_fail ) );
   add_option( opt_bool( "sequence_queue_delay", sequence_queue_delay ) );
   // Deterministic proc-roll option (simc-offline-evaluation-pipeline phase
@@ -5715,6 +5722,24 @@ void sim_t::setup( sim_control_t* c )
     throw sc_runtime_error(
         "solver_record_apl_choice=1 requires rl_translog= (the .apl sidecar has no base path of "
         "its own)." );
+  }
+
+  // Phase 271.4 (271.4-03): solver_apl_stock_list=<name> asks the in-process arm to walk the preserved stock list at
+  // each decision and write both picks into the `.apl` sidecar (format 2). It therefore needs the sidecar
+  // (solver_record_apl_choice=1 with rl_translog=) and the in-process arm (solver_policy=), the only writer of
+  // decision rows. Refuse by name rather than silently doing nothing.
+  if ( !rl_stock_eval::list_name_storage().empty() )
+  {
+    if ( !solver_record_apl_choice )
+    {
+      throw sc_runtime_error(
+          "solver_apl_stock_list= requires solver_record_apl_choice=1 (the picks are written to the .apl sidecar)." );
+    }
+    if ( solver_policy_str.empty() )
+    {
+      throw sc_runtime_error(
+          "solver_apl_stock_list= requires solver_policy= (only the in-process arm writes decision rows)." );
+    }
   }
 
   // 261005-fight-list (quick 261005-mix, plan 01): rl_fight_tags=<setup>:<stat>:<slot>. Empty (the default, and

@@ -17,6 +17,7 @@
 #include "sim/rl_buff_ledger.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_rng_record.hpp"
+#include "sim/rl_stock_eval.hpp"
 #include "sim/rl_target_select.hpp"
 #include "sim/sim.hpp"
 #include "util/io.hpp"
@@ -655,7 +656,9 @@ void open_and_write_header( sim_t* sim )
 
     rl_apl_choice::file_header ph{};
     std::memcpy( ph.magic, rl_apl_choice::MAGIC, sizeof( rl_apl_choice::MAGIC ) );
-    ph.format_version = rl_apl_choice::FORMAT_VERSION;
+    // 271.4-03: format 2 when solver_apl_stock_list= names a list (the decision record carries the dry stock-rotation
+    // pick); format 1, unchanged, otherwise.
+    ph.format_version = rl_stock_eval::enabled( root ) ? rl_apl_choice::FORMAT_VERSION_STOCK : rl_apl_choice::FORMAT_VERSION;
     ph.record_size = rl_apl_choice::RECORD_SIZE;
     ph.header_size = rl_apl_choice::HEADER_SIZE;
     std::memset( ph.zero16, 0, sizeof( ph.zero16 ) );
@@ -678,7 +681,7 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float ob
                        std::uint8_t candidate_count, std::uint8_t chosen_candidate_slot,
                        const char* apl_choice_name, bool aim_explored,
                        std::uint8_t rules_candidate_slot, std::uint8_t observed_candidate_slot,
-                       std::uint16_t chosen_enemy_actor_index )
+                       std::uint16_t chosen_enemy_actor_index, const rl_stock_eval::pick_t* stock_pick )
 {
   sim_t* root = root_of( sim );
   if ( root->rl_translog_file_str.empty() )
@@ -809,15 +812,42 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float ob
   // CHOICE SIDECAR section for why. No-op (one bool check, no allocation) when the option is off.
   if ( root->rl_translog_apl_stream )
   {
-    rl_apl_choice::decision_record ar{};
-    ar.kind = rl_apl_choice::KIND_DECISION;
-    ar.seq = static_cast<std::uint32_t>( seq );  // same narrowing convention as r.seq above
-    std::memset( ar.name, 0, sizeof( ar.name ) );
-    if ( apl_choice_name != nullptr )
+    rl_apl_choice::decision_record    ar{};
+    rl_apl_choice::decision_record_v2 ar2{};
+    const void*                       rec_ptr  = &ar;
+    std::size_t                       rec_size = sizeof( ar );
+    if ( rl_stock_eval::enabled( root ) )
     {
-      std::strncpy( ar.name, apl_choice_name, sizeof( ar.name ) - 1 );
+      // Format 2 (271.4-03): a format-2 file never receives a format-1 record.
+      if ( stock_pick == nullptr )
+      {
+        throw sc_runtime_error( fmt::format(
+            "rl_translog=: the '{}.apl' sidecar is format 2 (solver_apl_stock_list=) but decision seq={} carries no "
+            "stock pick.", root->rl_translog_file_str, seq ) );
+      }
+      ar2.kind = rl_apl_choice::KIND_DECISION;
+      ar2.seq = static_cast<std::uint32_t>( seq );
+      ar2.mapped_index = stock_pick->mapped_index;
+      ar2.strict_index = stock_pick->strict_index;
+      ar2.boundary = stock_pick->boundary;
+      ar2.flags = stock_pick->flags;
+      ar2.zero = 0;
+      std::memset( ar2.strict_name, 0, sizeof( ar2.strict_name ) );
+      std::strncpy( ar2.strict_name, stock_pick->strict_name.c_str(), rl_apl_choice::STOCK_NAME_BUF_SIZE - 1 );
+      rec_ptr  = &ar2;
+      rec_size = sizeof( ar2 );
     }
-    root->rl_translog_apl_stream->write( reinterpret_cast<const char*>( &ar ), sizeof( ar ) );
+    else
+    {
+      ar.kind = rl_apl_choice::KIND_DECISION;
+      ar.seq = static_cast<std::uint32_t>( seq );  // same narrowing convention as r.seq above
+      std::memset( ar.name, 0, sizeof( ar.name ) );
+      if ( apl_choice_name != nullptr )
+      {
+        std::strncpy( ar.name, apl_choice_name, sizeof( ar.name ) - 1 );
+      }
+    }
+    root->rl_translog_apl_stream->write( reinterpret_cast<const char*>( rec_ptr ), static_cast<std::streamsize>( rec_size ) );
     root->rl_translog_apl_stream->flush();
     if ( !*root->rl_translog_apl_stream )
     {

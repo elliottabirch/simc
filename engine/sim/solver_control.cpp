@@ -12,6 +12,7 @@
 #include "player/player.hpp"
 #include "sim/event.hpp"
 #include "sim/rl_button_bind.hpp"
+#include "sim/rl_stock_eval.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_target_select.hpp"
 #include "sim/rl_translog.hpp"
@@ -794,6 +795,12 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
   {
     const bool foreground = ( et == execute_type::FOREGROUND );
 
+    // Phase 271.4 (271.4-03, G271.4-8): the dry stock-rotation pick, evaluated BEFORE bind_slots, read_state, the aim pick
+    // and every exploration draw, so the list sees the state the net sees and the net's aim (p->target) never leaks into
+    // the list's target selection. Nothing runs and no random number is drawn (rl_stock_eval.hpp). Off: one bool test.
+    const rl_stock_eval::pick_t stock_pick =
+        rl_stock_eval::enabled( sim ) ? rl_stock_eval::evaluate( p, et ) : rl_stock_eval::pick_t{};
+
     // tstl-sylvanas phase 220, plan 220-01 (OBS-07), REORDERED by
     // 260831-mk7 (D-3, mask-as-input): rl_obs_timing=1 still wraps
     // read_state+build_obs -- and ONLY that pair, not build_mask/forward --
@@ -1378,7 +1385,9 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
                                      // 266-21 (funnel mode, record format 13): the chosen enemy (the tag)
                                      // at this boundary, read from the field the chooser wrote, never
                                      // recomputed here.
-                                     chosen_enemy_index_of( p ) );
+                                     chosen_enemy_index_of( p ),
+                                     // 271.4-03: the dry stock-rotation pick (null when the option is off).
+                                     rl_stock_eval::enabled( sim ) ? &stock_pick : nullptr );
       // 212-CR-FIX WR-06: accept_cast() can refuse a not-ready action via
       // protocol_abort() (a throw), which unwinds past combat_end()'s
       // record_close() hook entirely for this fight -- without this catch,
@@ -1452,7 +1461,9 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
                                    false, rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
                                    rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
                                    // 266-21: the tag at this boundary, same as the cast branch above.
-                                   chosen_enemy_index_of( p ) );
+                                   chosen_enemy_index_of( p ),
+                                   // 271.4-03: the dry stock-rotation pick, same as the cast branch above.
+                                   rl_stock_eval::enabled( sim ) ? &stock_pick : nullptr );
     // 212-CR-FIX WR-06: same reasoning as the cast branch above -- flush on
     // an abort out of accept_wait() so the decision row already appended
     // survives it.
