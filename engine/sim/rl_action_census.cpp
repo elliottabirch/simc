@@ -418,6 +418,16 @@ void classify_token( token_t& t, const player_t* p )
     t.multi_while     = t.nodes[ first_widened ].widened_by.front();
     t.chosen_node     = first_widened;
   }
+  // 271.6-07 (G271.6-28 as revised): the class the spell data gives this button, from its root action and its counted node.
+  t.gate_class = gate_class_t::EXEMPT;
+  for ( const node_t& n : t.nodes )
+  {
+    if ( n.via != "root" || n.action == nullptr )
+      continue;
+    const bool has_counted = t.chosen_node >= 0 && static_cast<std::size_t>( t.chosen_node ) < t.nodes.size();
+    t.gate_class = gate_class_default( n.action, has_counted ? &t.nodes[ static_cast<std::size_t>( t.chosen_node ) ] : nullptr );
+    break;
+  }
   add_disagreements( t, p );
 }
 
@@ -506,10 +516,10 @@ std::string token_json( const token_t& t )
   dis += "]";
   return fmt::format(
       "{{\"token\":{},\"actionFound\":{},\"spellId\":{},\"rangeYards\":{},\"minRangeYards\":{},\"radiusYards\":{},"
-      "\"multiTarget\":{},\"multiWhile\":{},\"nodes\":{},\"chosenNode\":{},\"disagreements\":{}}}",
+      "\"multiTarget\":{},\"multiWhile\":{},\"nodes\":{},\"chosenNode\":{},\"disagreements\":{},\"gateClass\":{}}}",
       esc( t.token ), t.found ? "true" : "false", t.spell_id, num( t.range ), num( t.min_range ), num( t.radius ),
       t.multi_target ? "true" : "false", t.has_multi_while ? widen_json( t.multi_while ) : std::string( "null" ), nodes,
-      t.chosen_node, dis );
+      t.chosen_node, dis, esc( gate_class_name( t.gate_class ) ) );
 }
 
 // What must agree between the init walk and the fight-end walk: structure, never live values
@@ -620,6 +630,58 @@ bool filter_contains( const filter_descriptor_t& f, const player_t* player, cons
                         candidate->combat_reach, f.length, f.half_width );
 }
 
+const char* gate_class_name( gate_class_t c )
+{
+  switch ( c )
+  {
+    case gate_class_t::UNIT: return "UNIT";
+    case gate_class_t::SHAPE: return "SHAPE";
+    default: return "EXEMPT";
+  }
+}
+
+namespace
+{
+// True for a `T_UNIT_TARGET_*` member of simc's own `effect_targeting` enum (engine/dbc/data_enums.hh): the press needs a unit.
+// The members are named, never numbered here; the bind-time check against the generated header is what proves this list agrees
+// with the list gen_hit_rows.py read from the fork's own table (its member names come from sc_spell_info.cpp).
+bool is_unit_target_code( unsigned code )
+{
+  switch ( static_cast<effect_targeting>( code ) )
+  {
+    case T_UNIT_TARGET_ENEMY:
+    case T_UNIT_TARGET_ALLY:
+    case T_UNIT_TARGET_ANY:
+    case T_UNIT_TARGET_PARTY:
+    case T_UNIT_TARGET_CHAINHEAL_ALLY:
+    case T_UNIT_TARGET_MINIPET:
+    case T_UNIT_TARGET_PASSENGER:
+    case T_UNIT_TARGET_ALLY_OR_RAID:
+    case T_UNIT_TARGET_TAP_LIST:
+      return true;
+    default:
+      return false;
+  }
+}
+}  // namespace
+
+gate_class_t gate_class_default( const action_t* root, const node_t* counted )
+{
+  if ( root != nullptr )
+  {
+    const spell_data_t& d = root->data();
+    for ( size_t i = 1; i <= d.effect_count(); ++i )
+    {
+      const spelleffect_data_t& e = d.effectN( i );
+      if ( is_unit_target_code( e.target_1() ) || is_unit_target_code( e.target_2() ) )
+        return gate_class_t::UNIT;
+    }
+  }
+  if ( counted != nullptr && counted->shape != shape_t::ANYWHERE )
+    return gate_class_t::SHAPE;
+  return gate_class_t::EXEMPT;
+}
+
 bool any_enemy_in_player_shape( const player_t* p, const player_t* axis_target, const filter_descriptor_t& f, double radius )
 {
   // The gust face: more yards still to run than the strike radius, so nothing is in reach.
@@ -669,6 +731,51 @@ std::vector<token_t> walk( player_t* p )
     out.push_back( std::move( t ) );
   }
   return out;
+}
+
+void check_header_gate_classes( const player_t* p, const std::vector<token_t>& walk )
+{
+#ifdef RL_HIT_ROW_NEEDS_UNIT_DEFINED
+  for ( std::size_t k = 0; k < RL_HIT_PROVIDER_COUNT; ++k )
+  {
+    if ( std::strncmp( RL_HIT_PROVIDERS[ k ].provider, "census.", 7 ) != 0 )
+      continue;
+    const char* token = RL_HIT_PROVIDERS[ k ].provider + 7;
+    for ( const token_t& t : walk )
+    {
+      if ( t.token != token || !t.found || t.nodes.empty() || t.nodes.front().action == nullptr )
+        continue;
+      // An action built from an untaken talent has spell data that is not enabled for this player (it can never be pressed);
+      // it says nothing about the class, as the aimed-range binder skips it too.
+      if ( !t.nodes.front().action->data().ok() )
+        continue;
+      // An owner's recorded word replaced the data default in the generated table: the header's class is taken, uncompared.
+      if ( RL_HIT_ROW_CLASS_OVERRIDDEN[ k ] )
+        continue;
+      const gate_class_t engine_class = t.gate_class;
+      const bool         engine_unit  = engine_class == gate_class_t::UNIT;
+      if ( engine_class == gate_class_t::EXEMPT || engine_unit != RL_HIT_ROW_NEEDS_UNIT[ k ] )
+      {
+        throw sc_runtime_error( fmt::format(
+            "rl_policy: registry '{}' header says hit row '{}' {} but player '{}' classifies it {} from its spell data "
+            "(bind-time refusal: the generated class table and the engine must agree; an owner override is recorded only in "
+            "the registry's gateClassOverrides, never here)",
+            RL_REGISTRY_ID, token, RL_HIT_ROW_NEEDS_UNIT[ k ] ? "needs a unit" : "needs no unit", p->name(),
+            gate_class_name( engine_class ) ) );
+      }
+    }
+  }
+#else
+  for ( std::size_t k = 0; k < RL_HIT_PROVIDER_COUNT; ++k )
+  {
+    if ( std::strncmp( RL_HIT_PROVIDERS[ k ].provider, "census.", 7 ) == 0 )
+      throw sc_runtime_error( fmt::format(
+          "rl_policy: registry '{}' header declares census hit row '{}' but carries no class table for player '{}' "
+          "(bind-time refusal: the header predates RL_HIT_ROW_NEEDS_UNIT; regenerate it with gen_rl_constants.py)",
+          RL_REGISTRY_ID, RL_HIT_PROVIDERS[ k ].provider + 7, p->name() ) );
+  }
+  (void)walk;
+#endif
 }
 
 std::vector<token_t> walk_classified( player_t* p )

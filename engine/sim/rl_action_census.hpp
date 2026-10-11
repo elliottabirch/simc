@@ -143,14 +143,16 @@ bool filter_contains( const filter_descriptor_t& f, const player_t* player, cons
                       const player_t* candidate );
 
 // ---- the reach rule (tstl-sylvanas 271.6-07, owner ~16:00Z 2026-10-11: "it might be smart to mask aoe spells that dont
-// have a target, if they dont have any units in range.", decision G271.6-15, widened by G271.6-24) ------------------------
-// A button whose spell has no range line the game can check, or no unit of its own, and whose damage is centred on the
-// player (Bladestorm, Colossus Smash) may be used only when at least one enemy stands inside its strike shape where the
-// player actually is. In the engine a gust (a movement raid event) never moves the player: it sets `distance_to_move`, the
-// yards still to run, so "where the player actually is" is the melee spot minus those yards, and with more yards to run
-// than the strike radius no enemy is in reach. With distance targeting off there are no positions and the answer is yes
-// (fights without positions play exactly as before). The enemy filter is the one `count_engine_hits` uses, so legality and
-// the `hits.<button>` input are one definition (G271.6-16).
+// have a target, if they dont have any units in range.", decision G271.6-15, widened by G271.6-24, keyed on the gate class by
+// G271.6-28 as revised) ----------------------------------------------------------------------------------------------------
+// A button of gate class SHAPE (it needs no unit of its own, and its damage is centred on the player: Bladestorm, Colossus
+// Smash) may be used only when at least one enemy stands inside its strike shape where the player actually is. A button of
+// class UNIT (the press needs a unit and the game's range check gates it: Mortal Strike, and Cleave by the owner's recorded
+// word of ~19:35Z, "why is cleave shape gated? it needs a target") gets no reach rule here. In the engine a gust (a movement
+// raid event) never moves the player: it sets `distance_to_move`, the yards still to run, so "where the player actually is" is
+// the melee spot minus those yards, and with more yards to run than the strike radius no enemy is in reach. With distance
+// targeting off there are no positions and the answer is yes (fights without positions play exactly as before). The enemy
+// filter is the one `count_engine_hits` uses, so legality and the `hits.<button>` input are one definition (G271.6-16).
 // The second form also requires the enemy to pass `f` (the front half circle of Colossus Smash, a cone round `axis_target`);
 // a descriptor of kind NONE reduces it to the first form. Reads only; never draws a random number.
 bool any_enemy_in_player_shape( const player_t* p, const player_t* axis_target, const filter_descriptor_t& f, double radius );
@@ -198,6 +200,17 @@ struct node_t
   game_t              game;
 };
 
+// The gate class of a hit-row button (owner ~19:20Z 2026-10-11: "crash lightning doesn not require a target, so correct that
+// class discovery, and ensure similar classes dont get labeled the same"; decision G271.6-28 as revised). UNIT: the press needs a
+// unit (a `T_UNIT_TARGET_*` implicit target code on the root action's spell) and the game's range check gates it. SHAPE: no
+// such code and the counted node has a shape: the press needs no unit, so the reach rule gates it. EXEMPT: neither (no hit row).
+enum class gate_class_t
+{
+  UNIT,
+  SHAPE,
+  EXEMPT
+};
+
 struct token_t
 {
   std::string          token;
@@ -212,7 +225,24 @@ struct token_t
   std::vector<node_t>  nodes;
   int                  chosen_node = -1;
   std::vector<std::string> disagreements;
+  gate_class_t         gate_class = gate_class_t::EXEMPT;  // filled by walk_classified (the data default; see gate_class_default)
 };
+
+// The ONE gate-class function (271.6-07, G271.6-28 as revised). The class the spell DATA gives a button: UNIT when any implicit
+// target code of the root action's spell (`target_1()` or `target_2()` of any effect) is a `T_UNIT_TARGET_*` member of simc's own
+// `effect_targeting` enum; otherwise SHAPE when `counted` (the node whose shape counts the hits, null when there is none) is
+// non-null and its shape is not ANYWHERE; otherwise EXEMPT. The census writer records it per token (`gateClass`) and the bind-time
+// check below compares it with the generated header, so the two can never be two readings. An owner's recorded override is NOT
+// applied here: it lives only in the registry's gateClassOverrides and reaches the engine through the header.
+gate_class_t gate_class_default( const action_t* root, const node_t* counted );
+const char*  gate_class_name( gate_class_t c );
+
+// The bind-time class check (271.6-07, G271.6-28 as revised; the model is the aimed-range refusal in rl_target_select). For every
+// hit-row button of the active header the actor has, the class the engine reads from the spell data must equal the header's
+// `RL_HIT_ROW_NEEDS_UNIT`, unless the header marks the row `RL_HIT_ROW_CLASS_OVERRIDDEN` (the owner's recorded word replaces the
+// data default, and the engine takes the header's class without comparison). A mismatch throws by name. A header that declares
+// census hit rows but carries no class table throws too. Reads only.
+void check_header_gate_classes( const player_t* p, const std::vector<token_t>& walk );
 
 // Walks every cast token of the active registry header for `p`. Reads only.
 std::vector<token_t> walk( player_t* p );

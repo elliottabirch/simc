@@ -72,12 +72,16 @@ namespace
 std::unordered_map<const player_t*, std::vector<action_t*>> g_action_handle_cache;
 
 // 271.6-07 (owner ~16:00Z 2026-10-11: "it might be smart to mask aoe spells that dont have a target, if they dont have any
-// units in range."; G271.6-15 a, G271.6-24): the generic mask conjunct of the reach rule. Per actor, per registry action, the
-// strike radius and front filter of a button that (1) has a generated header hit provider "census.<button>", (2) whose
-// classified node is centred on the player, and (3) is either not an aimed button or has no range line the game could check
-// (`range <= 0`: Bladestorm, Colossus Smash). Radius -1 means "no reach rule for this button". A header with no census
-// provider (enhancement) gets an empty table, so the conjunct is never taken for it. Same lifetime as g_action_handle_cache
-// (filled together with it, emptied by clear_process_caches()).
+// units in range."; G271.6-15 a, G271.6-24, keyed on the gate class by G271.6-28 as revised after the owner's words of ~19:20Z,
+// "crash lightning doesn not require a target, so correct that class discovery, and ensure similar classes dont get labeled the
+// same", and ~19:35Z, "why is cleave shape gated? it needs a target"): the generic mask conjunct of the reach rule. Per actor, per
+// registry action, the strike radius and front filter of a button whose generated header row says it needs NO unit
+// (`RL_HIT_ROW_NEEDS_UNIT` false: class SHAPE, whether by the spell data or by an owner's recorded override, which the header
+// carries as the final class). The header's class is the only key: a UNIT row (Mortal Strike, and Cleave by the owner's word)
+// gets no reach rule here because the game's own range check gates its unit, and an action with no hit row is not asked. A SHAPE
+// row whose counted node is not centred on the player is refused at bind by name (the conjunct has no test for it yet). Radius -1
+// means "no reach rule for this button". A header with no census provider (enhancement) gets an empty table, so the conjunct is
+// never taken for it. Same lifetime as g_action_handle_cache (filled together with it, emptied by clear_process_caches()).
 struct reach_gate_t
 {
   double                                    radius = -1.0;
@@ -1133,32 +1137,39 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
     if ( header_has_census )
     {
       const std::vector<rl_action_census::token_t> walk = rl_action_census::walk_classified( mutable_p );
+      // 271.6-07 (G271.6-28 as revised): the engine's reading of each hit row's class from the spell data must equal the header's
+      // (or the header marks it as the owner's recorded override), else the run is refused here, by name, at the first decision.
+      rl_action_census::check_header_gate_classes( mutable_p, walk );
       for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
       {
         const rl_action_desc& a = RL_ACTIONS[ i ];
-        if ( a.kind != rl_action_kind::cast || a.token == nullptr || handles[ i ] == nullptr )
+        if ( a.kind != rl_action_kind::cast || a.token == nullptr || handles[ i ] == nullptr || !handles[ i ]->data().ok() )
           continue;
-        bool has_provider = false;
+        int row = -1;
         for ( std::size_t k = 0; k < RL_HIT_PROVIDER_COUNT; ++k )
           if ( std::strncmp( RL_HIT_PROVIDERS[ k ].provider, "census.", 7 ) == 0 &&
                std::strcmp( RL_HIT_PROVIDERS[ k ].provider + 7, a.token ) == 0 )
-            has_provider = true;
-        if ( !has_provider )
+            row = static_cast<int>( k );
+        if ( row < 0 )
           continue;
-        bool aimed = false;
-        for ( std::size_t k = 0; k < RL_TARGETED_TOKEN_COUNT; ++k )
-          if ( std::strcmp( RL_TARGETED_TOKENS[ k ], a.token ) == 0 )
-            aimed = true;
-        if ( aimed && handles[ i ]->range > 0.0 )
-          continue;  // the game's own range check gates this button's unit (Cleave, Mortal Strike, ...)
+#ifdef RL_HIT_ROW_NEEDS_UNIT_DEFINED
+        if ( RL_HIT_ROW_NEEDS_UNIT[ static_cast<std::size_t>( row ) ] )
+          continue;  // class UNIT: the game's own range check gates this button's unit (Mortal Strike; Cleave by the owner's word)
+#endif
         for ( const rl_action_census::token_t& t : walk )
         {
-          if ( t.token != a.token || !t.found || t.chosen_node < 0 ||
-               static_cast<std::size_t>( t.chosen_node ) >= t.nodes.size() )
+          if ( t.token != a.token || !t.found )
             continue;
+          if ( t.chosen_node < 0 || static_cast<std::size_t>( t.chosen_node ) >= t.nodes.size() )
+            throw sc_runtime_error( fmt::format(
+                "rl_policy: hit row '{}' is SHAPE class but player '{}' has no counted node for it (bind-time refusal, 271.6-07)",
+                a.token, p->name() ) );
           const rl_action_census::node_t& node = t.nodes[ static_cast<std::size_t>( t.chosen_node ) ];
           if ( node.underlying != rl_action_census::shape_t::AROUND_PLAYER || node.radius <= 0.0 )
-            continue;
+            throw sc_runtime_error( fmt::format(
+                "rl_policy: hit row '{}' is SHAPE class but its counted node's shape '{}' has no mask test yet for player '{}' "
+                "(bind-time refusal, 271.6-07 planner default 6: fail closed rather than leave the button ungated)",
+                a.token, rl_action_census::shape_name( node.underlying ), p->name() ) );
           gates[ i ].radius = node.radius;
           gates[ i ].filter = node.filter;
           break;
