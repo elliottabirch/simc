@@ -620,6 +620,31 @@ bool filter_contains( const filter_descriptor_t& f, const player_t* player, cons
                         candidate->combat_reach, f.length, f.half_width );
 }
 
+bool any_enemy_in_player_shape( const player_t* p, const player_t* axis_target, const filter_descriptor_t& f, double radius )
+{
+  // The gust face: more yards still to run than the strike radius, so nothing is in reach.
+  if ( p->current.distance_to_move > radius )
+    return false;
+  const sim_t* sim = p->sim;
+  if ( !sim->distance_targeting_enabled )
+    return true;  // no positions: the rule cannot be asked, play is unchanged
+  for ( const player_t* t : sim->target_non_sleeping_list )
+  {
+    if ( !t->is_enemy() || !rl_target_select::rl_counts_as_enemy( t ) || sim->is_untargetable_enemy( t ) )
+      continue;
+    if ( f.kind != filter_kind_t::NONE && !filter_contains( f, p, axis_target, t ) )
+      continue;
+    if ( t->get_player_distance( *p ) <= radius + t->combat_reach )
+      return true;
+  }
+  return false;
+}
+
+bool any_enemy_around_player( const player_t* p, double radius )
+{
+  return any_enemy_in_player_shape( p, nullptr, filter_descriptor_t{}, radius );
+}
+
 std::vector<token_t> walk( player_t* p )
 {
   std::vector<token_t> out;
@@ -670,11 +695,23 @@ int count_engine_hits( const node_t& n, const player_t* centre )
   sim_t*          sim    = a->sim;
   const player_t* player = a->player;
   int             hits   = 1;  // the centre: check_distance_targeting never removes the primary target
+  // 271.6-07 (G271.6-19, G271.6-24): a node centred on the player (Bladestorm's circle, Colossus Smash's front half circle)
+  // follows the reach rule: while the player has more yards still to run than the radius it hits nothing, and the centre
+  // counts only when it passes the same test as every other enemy (the centre is not exempt). Legality and the
+  // `hits.<button>` input then never disagree (G271.6-16). Nodes of every other shape, and every no-position fight, are
+  // counted exactly as before; enhancement has no census rows.
+  const bool around_player = sim->distance_targeting_enabled && n.underlying == shape_t::AROUND_PLAYER;
+  if ( around_player )
+  {
+    if ( player->current.distance_to_move > n.radius )
+      return 0;
+    hits = 0;
+  }
   if ( sim->distance_targeting_enabled )
   {
     for ( player_t* t : sim->target_non_sleeping_list )
     {
-      if ( t == centre || !t->is_enemy() || !rl_target_select::rl_counts_as_enemy( t ) || sim->is_untargetable_enemy( t ) )
+      if ( ( t == centre && !around_player ) || !t->is_enemy() || !rl_target_select::rl_counts_as_enemy( t ) || sim->is_untargetable_enemy( t ) )
         continue;
       if ( n.filter.kind == filter_kind_t::UNKNOWN )
       {

@@ -71,6 +71,27 @@ namespace
 // declaration precede first use in the same translation unit.
 std::unordered_map<const player_t*, std::vector<action_t*>> g_action_handle_cache;
 
+// 271.6-07 (owner ~16:00Z 2026-10-11: "it might be smart to mask aoe spells that dont have a target, if they dont have any
+// units in range."; G271.6-15 a, G271.6-24): the generic mask conjunct of the reach rule. Per actor, per registry action, the
+// strike radius and front filter of a button that (1) has a generated header hit provider "census.<button>", (2) whose
+// classified node is centred on the player, and (3) is either not an aimed button or has no range line the game could check
+// (`range <= 0`: Bladestorm, Colossus Smash). Radius -1 means "no reach rule for this button". A header with no census
+// provider (enhancement) gets an empty table, so the conjunct is never taken for it. Same lifetime as g_action_handle_cache
+// (filled together with it, emptied by clear_process_caches()).
+struct reach_gate_t
+{
+  double                                    radius = -1.0;
+  rl_action_census::filter_descriptor_t     filter;
+};
+std::unordered_map<const player_t*, std::vector<reach_gate_t>> g_reach_gate_cache;
+
+// The one conjunct: true when the button has no reach rule, else when some enemy stands inside its strike shape where the
+// player actually is. `axis` is the enemy the strike faces (the pick of an aimed button), used only by a filtered shape.
+inline bool reach_rule_allows( const player_t* p, const reach_gate_t& g, const player_t* axis )
+{
+  return g.radius < 0.0 || rl_action_census::any_enemy_in_player_shape( p, axis, g.filter, g.radius );
+}
+
 // 260914-rbp Task 2b (A3, perf; recommended by the plan, small): per-actor cache of the hits.*
 // family's OWN find_action() handles -- chain_lightning/tempest/lava_lash/voltaic_blaze/
 // fire_nova_explosion -- resolved at most once per actor (ACT-02 pattern, mirrors
@@ -1102,8 +1123,52 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
                               ? solver_control::resolve_action( mutable_p, a.token )
                               : nullptr );
     }
+    // 271.6-07: the reach table, taken once beside the handles (reads only). Empty unless the header declares census hit
+    // providers, so enhancement never walks the census here.
+    std::vector<reach_gate_t> gates( RL_ACTION_DIM );
+    bool                      header_has_census = false;
+    for ( std::size_t k = 0; k < RL_HIT_PROVIDER_COUNT; ++k )
+      if ( std::strncmp( RL_HIT_PROVIDERS[ k ].provider, "census.", 7 ) == 0 )
+        header_has_census = true;
+    if ( header_has_census )
+    {
+      const std::vector<rl_action_census::token_t> walk = rl_action_census::walk_classified( mutable_p );
+      for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+      {
+        const rl_action_desc& a = RL_ACTIONS[ i ];
+        if ( a.kind != rl_action_kind::cast || a.token == nullptr || handles[ i ] == nullptr )
+          continue;
+        bool has_provider = false;
+        for ( std::size_t k = 0; k < RL_HIT_PROVIDER_COUNT; ++k )
+          if ( std::strncmp( RL_HIT_PROVIDERS[ k ].provider, "census.", 7 ) == 0 &&
+               std::strcmp( RL_HIT_PROVIDERS[ k ].provider + 7, a.token ) == 0 )
+            has_provider = true;
+        if ( !has_provider )
+          continue;
+        bool aimed = false;
+        for ( std::size_t k = 0; k < RL_TARGETED_TOKEN_COUNT; ++k )
+          if ( std::strcmp( RL_TARGETED_TOKENS[ k ], a.token ) == 0 )
+            aimed = true;
+        if ( aimed && handles[ i ]->range > 0.0 )
+          continue;  // the game's own range check gates this button's unit (Cleave, Mortal Strike, ...)
+        for ( const rl_action_census::token_t& t : walk )
+        {
+          if ( t.token != a.token || !t.found || t.chosen_node < 0 ||
+               static_cast<std::size_t>( t.chosen_node ) >= t.nodes.size() )
+            continue;
+          const rl_action_census::node_t& node = t.nodes[ static_cast<std::size_t>( t.chosen_node ) ];
+          if ( node.underlying != rl_action_census::shape_t::AROUND_PLAYER || node.radius <= 0.0 )
+            continue;
+          gates[ i ].radius = node.radius;
+          gates[ i ].filter = node.filter;
+          break;
+        }
+      }
+    }
+    g_reach_gate_cache.emplace( p, std::move( gates ) );
     cached = g_action_handle_cache.emplace( p, std::move( handles ) ).first;
   }
+  const std::vector<reach_gate_t>& reach_gates = g_reach_gate_cache[ p ];
 
   // CR-04 (260902/cr4): tracks whether this decision offered at least one legal registry action
   // to the RL-controlled actor, and whether any registry action existed to offer at all -- feeds
@@ -1170,6 +1235,7 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
                 "rl_target_select: a pick just filled for this decision must be immediately "
                 "readable (228-02, D-12)" );
         out_ready[ i ] = ( a->ready() && pick != nullptr && a->target_ready( pick ) &&
+                           reach_rule_allows( p, reach_gates[ i ], pick ) &&
                            pressable_at_boundary( p, a, boundary_is_foreground ) ) ? 1 : 0;
         // 240-05 Task 2: record this action for the target head's own pass, immediately after
         // this loop -- see that pass's own comment (below) for why identical gating matters.
@@ -1183,6 +1249,7 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
         // than a per-decision selector pick, since none was ever stamped for this decision. No
         // stamp bump, no fill_pick -- both would corrupt a stamp a boundary call never opened.
         out_ready[ i ] = ( a->ready() && a->target != nullptr && a->target_ready( a->target ) &&
+                           reach_rule_allows( p, reach_gates[ i ], a->target ) &&
                            pressable_at_boundary( p, a, boundary_is_foreground ) ) ? 1 : 0;
       }
       if ( out_ready[ i ] )
@@ -1202,6 +1269,7 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
     // line (`candidate_target->is_sleeping()`).
     out_ready[ i ] = ( out_resolvable[ i ] && a->ready() && a->target != nullptr &&
                         a->target_ready( a->target ) &&
+                        reach_rule_allows( p, reach_gates[ i ], a->target ) &&
                         pressable_at_boundary( p, a, boundary_is_foreground ) ) ? 1 : 0;
   }
 
@@ -4851,6 +4919,7 @@ void clear_process_caches()
 {
   rl_button_bind::clear();  // Phase 271.3: the bound table is pointer-keyed like the caches below
   g_action_handle_cache.clear();
+  g_reach_gate_cache.clear();
   g_hits_action_handle_cache.clear();
   g_gate_bits_cache.clear();
   g_aim_context_pending = aim_context_pending_t{};
@@ -4863,7 +4932,7 @@ void clear_process_caches()
 // How many entries the caches above hold right now (a set aim-context-pending record counts as one).
 std::size_t process_cache_entries()
 {
-  return rl_button_bind::entries() + g_action_handle_cache.size() + g_hits_action_handle_cache.size() + g_gate_bits_cache.size() +
+  return rl_button_bind::entries() + g_action_handle_cache.size() + g_reach_gate_cache.size() + g_hits_action_handle_cache.size() + g_gate_bits_cache.size() +
          ( ( g_aim_context_pending.valid || g_aim_context_pending.p != nullptr ) ? 1u : 0u ) +
          g_capability_bits.size() + g_slot_table_cache.size() + g_enemy_handle_cache.size() + g_census_hit_actors.size();
 }

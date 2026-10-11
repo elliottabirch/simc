@@ -142,6 +142,20 @@ inline bool rect_contains( double px, double py, double ax, double ay, double cx
 bool filter_contains( const filter_descriptor_t& f, const player_t* player, const player_t* axis_target,
                       const player_t* candidate );
 
+// ---- the reach rule (tstl-sylvanas 271.6-07, owner ~16:00Z 2026-10-11: "it might be smart to mask aoe spells that dont
+// have a target, if they dont have any units in range.", decision G271.6-15, widened by G271.6-24) ------------------------
+// A button whose spell has no range line the game can check, or no unit of its own, and whose damage is centred on the
+// player (Bladestorm, Colossus Smash) may be used only when at least one enemy stands inside its strike shape where the
+// player actually is. In the engine a gust (a movement raid event) never moves the player: it sets `distance_to_move`, the
+// yards still to run, so "where the player actually is" is the melee spot minus those yards, and with more yards to run
+// than the strike radius no enemy is in reach. With distance targeting off there are no positions and the answer is yes
+// (fights without positions play exactly as before). The enemy filter is the one `count_engine_hits` uses, so legality and
+// the `hits.<button>` input are one definition (G271.6-16).
+// The second form also requires the enemy to pass `f` (the front half circle of Colossus Smash, a cone round `axis_target`);
+// a descriptor of kind NONE reduces it to the first form. Reads only; never draws a random number.
+bool any_enemy_in_player_shape( const player_t* p, const player_t* axis_target, const filter_descriptor_t& f, double radius );
+bool any_enemy_around_player( const player_t* p, double radius );
+
 // ---- census records -----------------------------------------------------------------------------------
 
 struct widen_t

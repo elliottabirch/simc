@@ -1822,6 +1822,9 @@ struct avatar_t : public warrior_spell_t
     parse_options( options_str );
     harmful   = false;
     target    = p;
+    // 271.6-07 (G271.6-3, G271.6-13): an instant self buff with no range line can be used while running; range -1 is the
+    // warrior convention for "any distance" (the distance rule in warrior_action_t::ready() skips it).
+    range     = -1;
 
     if ( p->talents.mountain_thane.avatar_of_the_storm->ok() )
       avatar_of_the_storm_duration = timespan_t::from_seconds( p->talents.mountain_thane.avatar_of_the_storm->effectN( 3 ).base_value() );
@@ -3248,6 +3251,24 @@ struct bladestorm_tick_t : public warrior_attack_t
     }
   }
 
+  // 271.6-07 (G271.6-21, arms only, distance targeting on): a primary target beyond the strike's own reach is dropped,
+  // on the model of ravager_tick_t::check_distance_targeting, so the spin never hits an enemy it cannot reach.
+  std::vector<player_t*>& check_distance_targeting( std::vector<player_t*>& tl ) const override
+  {
+    if ( p()->specialization() != WARRIOR_ARMS || !sim->distance_targeting_enabled )
+      return warrior_attack_t::check_distance_targeting( tl );
+
+    warrior_attack_t::check_distance_targeting( tl );  // the stock rules edit tl in place
+    for ( auto it = tl.begin(); it != tl.end(); )
+    {
+      if ( *it == target && target->get_player_distance( *player ) > radius + target->combat_reach )
+        it = tl.erase( it );
+      else
+        ++it;
+    }
+    return tl;
+  }
+
   double composite_da_multiplier( const action_state_t* state ) const override
   {
     double m = warrior_attack_t::composite_da_multiplier( state );
@@ -3290,6 +3311,10 @@ struct bladestorm_t : public warrior_attack_t
     interrupt_auto_attack = false;
     travel_speed                      = 0;
     internal_cooldown->duration = 0_s; // allow Anger Management to reduce the cd properly due to having both charges and cooldown entries
+    // 271.6-07 (G271.6-13, G271.6-15): the spell has no range line, so the warrior distance rule must not refuse it while
+    // running (range -1); the reach rule in ready() below is what keeps it honest: legal only with an enemy in the strike
+    // radius where the player actually is.
+    range = -1;
 
     bladestorm_mh->weapon             = &( player->main_hand_weapon );
     add_child( bladestorm_mh );
@@ -3317,6 +3342,17 @@ struct bladestorm_t : public warrior_attack_t
         add_child( bloodbath );
       }
     }
+  }
+
+  // 271.6-07 (G271.6-15 a and b; owner ~16:00Z 2026-10-11: "it might be smart to mask aoe spells that dont have a target,
+  // if they dont have any units in range."): the one legality producer for Bladestorm. The hand-written action list reaches
+  // it through action_ready(), the net's mask through read_action_gate_bits (which calls ready()), so both deciders obey
+  // the same rule. The generic action_t::ready() deliberately does NOT carry it (it would reach enhancement's play).
+  bool ready() override
+  {
+    if ( !warrior_attack_t::ready() )
+      return false;
+    return rl_action_census::any_enemy_around_player( player, bladestorm_mh->radius );
   }
 
   void execute() override
@@ -3372,6 +3408,13 @@ struct bladestorm_t : public warrior_attack_t
         /*owner=*/nullptr, "tick", this );
 
     warrior_attack_t::tick( d );
+
+    // 271.6-07 (G271.6-15, the tick rule "no enemy in reach, no strike"): with nobody inside the strike radius where the
+    // player actually is (a gust has set yards still to run, or every enemy is out of reach) the spin strikes nothing.
+    // The dot keeps ticking, so the buff and its bookkeeping are unchanged.
+    if ( !rl_action_census::any_enemy_around_player( player, bladestorm_mh->radius ) )
+      return;
+
     // As of TWW, since bladestorm has an initial tick, unhinged procs on odd ticks
     if ( ( mortal_strike || bloodthirst || bloodbath ) && ( d->current_tick % 2 == 1 ) )
     {
@@ -3382,7 +3425,14 @@ struct bladestorm_t : public warrior_attack_t
       if ( t )
       {
         if ( mortal_strike )
-          mortal_strike->execute_on_target( t );
+        {
+          // 271.6-07 (G271.6-21, arms only, distance targeting on): the Unhinged Mortal Strike is skipped when its target
+          // is beyond that strike's own reach.
+          const bool in_reach = !sim->distance_targeting_enabled || mortal_strike->range <= 0.0 ||
+                                t->get_player_distance( *player ) <= mortal_strike->range + t->combat_reach;
+          if ( in_reach )
+            mortal_strike->execute_on_target( t );
+        }
         if ( bloodthirst || bloodbath )
         {
           if ( bloodbath && p()->talents.fury.reckless_abandon->ok() && p()->buff.recklessness->check() )
@@ -3838,11 +3888,26 @@ struct colossus_smash_t : public warrior_attack_t
     rl_front.axis           = rl_action_census::filter_axis_t::TOWARD_TARGET;
     rl_front.cos_half_angle = 0.0;  // 90 degrees either side of the player-to-target direction: the front half plane
     rl_front.radius         = radius;
+    // 271.6-07 (G271.6-24, owner ~16:00Z 2026-10-11 "mask aoe spells that dont have a target, if they dont have any units
+    // in range"): the aimed target is no longer exempt, so a target outside the front half circle is dropped like any other
+    // enemy outside it, and the strike lands on the enemies inside the half circle only. `range` stays 0 on purpose: the
+    // aim binder refuses at bind time any aimed action whose range differs from the generated table (rl_target_select.cpp),
+    // and a range of 0 keeps the warrior distance rule refusing the button while running, as before this phase.
     target_filter_callback  = [ this ]( const action_t*, player_t* candidate ) {
-      if ( !sim->distance_targeting_enabled || candidate == target )
+      if ( !sim->distance_targeting_enabled )
         return true;
       return rl_action_census::filter_contains( rl_front, player, target, candidate );
     };
+  }
+
+  // 271.6-07 (G271.6-15, G271.6-24): the reach rule. The game's range check cannot gate this button (its spell has no range
+  // line), so it is legal only when at least one enemy stands inside its front half circle where the player actually is
+  // (false while the player has more yards still to run than the radius; true with distance targeting off).
+  bool ready() override
+  {
+    if ( !warrior_attack_t::ready() )
+      return false;
+    return rl_action_census::any_enemy_in_player_shape( player, target, rl_front, radius );
   }
 
   rl_action_census::filter_descriptor_t rl_front;  // Phase 271 (271-04): the census explains the filter above
@@ -5393,6 +5458,8 @@ struct sweeping_strikes_t : public warrior_spell_t
   {
     parse_options( options_str );
     callbacks = false;
+    // 271.6-07 (G271.6-3, G271.6-13): an instant self buff with no range line can be used while running (range -1).
+    range     = -1;
   }
 
   void execute() override
