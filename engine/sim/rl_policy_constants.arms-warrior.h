@@ -133,7 +133,7 @@ inline constexpr std::size_t RL_ACTION_DIM = 18;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
-inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:b13275dec96f040d002a17d6022bf1719dbcc511ba95f1662a79eefc971acd4d";
+inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:0b3fb3806523a14cbf6fc5e655171a218b5ad55c2a5ca0f462e596389a7ca73a";
 inline constexpr const char* RL_MASK_RULES_SHA = "403fa658aabd986da04a24ad88c6625ad5a7fba10f3f6437922af21582877da5";
 inline constexpr const char* RL_ACTION_SPACE_SHA = "3dd9a025d3f4dc44fa4eab8586f6360aa28acf3df73322535d908fcccff36327";
 
@@ -1092,10 +1092,10 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "hits.cleave", rl_kind::k_int, 0.0, true, 15.0, false, 1.0, nullptr, 0, false },
     { "hits.colossus_smash", rl_kind::k_int, 0.0, true, 15.0, false, 1.0, nullptr, 0, false },
     { "hits.demolish", rl_kind::k_int, 0.0, true, 15.0, false, 1.0, nullptr, 0, false },
-    { "hits.execute", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
+    { "hits.execute", rl_kind::k_int, 0.0, true, 15.0, false, 1.0, nullptr, 0, false },
     { "hits.heroic_strike", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
     { "hits.mortal_strike", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
-    { "hits.overpower", rl_kind::k_int, 0.0, true, 15.0, false, 1.0, nullptr, 0, false },
+    { "hits.overpower", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
     { "hits.ravager", rl_kind::k_int, 0.0, true, 15.0, false, 1.0, nullptr, 0, false },
     { "hits.rend", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
     { "hits.slam", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
@@ -1797,7 +1797,7 @@ inline constexpr const char* RL_TARGETED_TOKENS[RL_TARGETED_TOKEN_COUNT] = {
   "storm_bolt",
   "cleave",
 };
-inline constexpr double RL_AIMED_SPELL_RANGE_YARDS[RL_TARGETED_TOKEN_COUNT] = {5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 0.0, 5.0, 30.0, 25.0, 5.0};
+inline constexpr double RL_AIMED_SPELL_RANGE_YARDS[RL_TARGETED_TOKEN_COUNT] = {5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 0.0, 5.0, 25.0, 20.0, 5.0};
 inline constexpr const char* RL_TAG_MELEE_ACTION = "mortal_strike";
 
 inline constexpr std::size_t RL_RULE_PREF_COUNT = 11;
@@ -1873,3 +1873,10 @@ inline constexpr rl_hit_provider RL_HIT_PROVIDERS[RL_HIT_PROVIDER_COUNT] = {
   { "hits", "rend", "census.rend" },
   { "hits", "slam", "census.slam" },
 };
+
+// The gate class of each census hit row, parallel to RL_HIT_PROVIDERS (a class-provider row reads false). NEEDS_UNIT true: the press
+// needs a unit and the game's range check gates it; false: it needs no unit and is legal only with an enemy's hitbox inside its
+// own shape. CLASS_OVERRIDDEN true: the class is the owner's recorded word, so the engine takes it instead of its own reading.
+#define RL_HIT_ROW_NEEDS_UNIT_DEFINED 1
+inline constexpr bool RL_HIT_ROW_NEEDS_UNIT[RL_HIT_PROVIDER_COUNT] = { false, true, false, true, true, true, true, true, true, true, true };
+inline constexpr bool RL_HIT_ROW_CLASS_OVERRIDDEN[RL_HIT_PROVIDER_COUNT] = { false, true, false, false, false, false, false, false, false, false, false };
