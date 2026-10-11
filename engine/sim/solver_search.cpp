@@ -125,6 +125,8 @@ namespace solver_search
 namespace
 {
 config_t g_cfg;
+bench_config_t g_bench_cfg;  // 287-02: the bench's options (a separate mode of this module)
+bool g_bench = false;        // 287-02: set by validate() when the bench is on (g_any is then set too, so the hooks run)
 bool g_any = false;  // set by validate() when the search is on
 // The bootstrap mode of the window label (280-06): 0 none, 1 q, 2 value. (Moved up by 280-07: a leaf line's rc marks read it.)
 int g_boot_mode = 0;
@@ -3163,11 +3165,198 @@ void write_summary_json( const std::string& file )
   }
 }
 
+// ---- the bench's refusals (287-02, BENCH-02) -------------------------------------------------------------------------
+// Each refusal is by name, in the search's own style and with its own text; with solver_bench off nothing here runs except the
+// stray-option scan in validate().
+void validate_bench( sim_t* sim )
+{
+  bench_config_t& b = g_bench_cfg;
+  solver_branch::config_t& sb = solver_branch::cfg();
+
+#if !defined( __linux__ )
+  refuse( "solver_bench needs a Linux build (fork())." );
+#endif
+
+  // 1. one mode per process: the bench excludes the search (refused by the caller), the teacher and every solver_branch mode
+  if ( sb.teacher )
+    refuse( "solver_bench cannot be combined with solver_teacher=1 -- one mode per process." );
+  if ( sb.branch_at >= 0 )
+    refuse( "solver_bench cannot be combined with solver_branch_at -- one mode per process." );
+  if ( sb.resalt_at_decision >= 0 )
+    refuse( "solver_bench cannot be combined with per_source_rng_resalt_at_decision -- one mode per process." );
+  // The bench always cuts exactly: solver_branch_cut is not its option, whatever its value.
+  if ( sim->control )
+    for ( const option_tuple_t& o : sim->control->options )
+      if ( o.name == "solver_branch_cut" )
+        refuse( "solver_branch_cut cannot be set with solver_bench (the bench always cuts its window exactly)." );
+
+  // 2. in-process transport only, one thread, one fight, per-source dice (the search's own rules)
+  if ( sim->solver_policy_str.empty() || !sim->solver_control_str.empty() )
+    refuse( "solver_bench requires solver_policy= and no solver_control= (in-process transport only)." );
+  if ( sim->threads != 1 )
+    refuse( fmt::format( "solver_bench requires threads=1 (effective threads={}).", sim->threads ) );
+  if ( sim->iterations != 1 )
+    refuse( fmt::format( "solver_bench requires iterations=1 (got {}).", sim->iterations ) );
+  if ( !sim->per_source_rng )
+    refuse( "solver_bench requires per_source_rng=1." );
+  if ( !sim->profileset_map.empty() )
+    refuse( "solver_bench cannot be combined with profilesets." );
+  if ( sim->parent != nullptr )
+    refuse( "solver_bench is set on a non-root sim." );
+
+  // 3. study options that would double-write or change the run (the same list the search refuses)
+  struct
+  {
+    bool on;
+    const char* opt;
+  } const conflicts[] = {
+    { !sim->decision_dump_file_str.empty(), "decision_dump" },
+    { !sim->rl_rng_record_file_str.empty(), "rl_rng_record" },
+    { !sim->rl_rng_replay_file_str.empty(), "rl_rng_replay" },
+    { !sim->rl_swing_pin_file_str.empty(), "rl_swing_pin" },
+    { !sim->rl_swing_trace_file_str.empty(), "rl_swing_trace" },
+    { static_cast<bool>( sim->solver_record_apl_choice ), "solver_record_apl_choice" },
+    { !sim->solver_fight_timeline_str.empty(), "solver_fight_timeline" },
+    { !sim->rl_forward_probe_str.empty(), "rl_forward_probe" },
+    { !sim->rl_buff_ledger_refund_probe_str.empty(), "rl_buff_ledger_refund_probe" },
+    { static_cast<bool>( sim->debug_each ), "debug_each" },
+    { sim->log != 0, "log=1" },
+    { sim->debug != 0, "debug=1" },
+  };
+  for ( const auto& cf : conflicts )
+    if ( cf.on )
+      refuse( fmt::format( "solver_bench cannot be combined with {}.", cf.opt ) );
+
+  // 4. owner rule D1: no paired futures
+  if ( !sb.independent_dice )
+    refuse( "solver_branch_independent_dice=0 is refused with solver_bench: every branch must roll its own dice "
+            "(owner rule D1)." );
+  if ( !sb.redeal )
+    refuse( "solver_branch_redeal=0 is refused with solver_bench: every branch must re-deal the undrawn deck cards "
+            "(owner rule D1)." );
+
+  // 5. this module's own values
+  if ( b.depth < 1 || b.depth > 12 )
+    refuse( fmt::format( "solver_bench_depth must be 1..12 (got {}).", b.depth ) );
+  if ( b.splits < 0 || b.splits > 8 )
+    refuse( fmt::format( "solver_bench_splits must be 0..8 (got {}).", b.splits ) );
+  if ( b.candidates != 2 )
+    refuse( fmt::format( "solver_bench_candidates must be 2 (the bench labels the net's top two buttons; got {}).",
+                         b.candidates ) );
+  if ( !( b.window > 0.0 && b.window <= 120.0 ) )
+    refuse( fmt::format( "solver_bench_window must be > 0 and <= 120 seconds (got {}).", b.window ) );
+  if ( !std::isfinite( b.margin ) || !( b.margin > 0.0 ) )
+    refuse( fmt::format( "solver_bench_margin must be finite and > 0 (got {}).", b.margin ) );
+  if ( b.jobs < 1 || b.jobs > 2 )
+    refuse( fmt::format( "solver_bench_jobs must be 1..2 (got {}).", b.jobs ) );
+  {
+    const std::string why = parse_at_list( b.at, b.at_list );
+    if ( !why.empty() )
+      refuse( fmt::format( "solver_bench_at='{}' is not an ascending list of distinct integers >= 0 (k = seq-1): {}.", b.at,
+                           why ) );
+  }
+  if ( b.at_list.empty() )
+    refuse( "solver_bench needs a decision set: solver_bench_at=k1,k2,... (k = seq-1)." );
+  if ( !( sb.value_divisor > 0.0 ) )
+    refuse( "solver_bench requires solver_branch_value_divisor > 0 (divisorByFightShape[shape])." );
+  if ( !( sb.gamma > 0.0 && sb.gamma <= 1.0 ) )
+    refuse( fmt::format( "solver_bench requires solver_branch_gamma in (0, 1] (got {}).", sb.gamma ) );
+
+  // 6. greedy weights only: the bench plays the net's own button between branch points
+  {
+    const auto& w = sim->solver_policy_weights;
+    if ( !w )
+      refuse( "solver_bench requires loaded solver_policy weights." );
+    if ( w->exploration > 0.0f )
+      refuse( fmt::format( "solver_bench requires greedy weights: the loaded weights carry exploration={}.", w->exploration ) );
+    if ( w->has_aim_section && w->aim.exploration > 0.0f )
+      refuse( fmt::format( "solver_bench requires greedy weights: the loaded aim section carries exploration={}.",
+                           w->aim.exploration ) );
+  }
+  if ( sim->solver_explore_softmax_share > 0.0 )
+    refuse( fmt::format( "solver_bench requires greedy play: solver_explore_softmax_share={}.",
+                         sim->solver_explore_softmax_share ) );
+
+  // 7. the record and the fight names (the search's fight rule)
+  {
+    const std::uint32_t one = 1;
+    unsigned char first_byte = 0;
+    std::memcpy( &first_byte, &one, 1 );
+    if ( first_byte != 1 )
+      refuse( "solver_bench needs a little-endian machine (the record's observations are little-endian float32)." );
+  }
+  if ( b.record.empty() )
+    refuse( "solver_bench_record is required (the bench writes one record row per labelled decision there)." );
+  {
+    const std::size_t comma = b.fight.find( ',' );
+    const bool one_comma = comma != std::string::npos && b.fight.find( ',', comma + 1 ) == std::string::npos;
+    bool plain = true;
+    for ( char ch : b.fight )
+      if ( static_cast<unsigned char>( ch ) < 0x21 || static_cast<unsigned char>( ch ) > 0x7e || ch == '"' || ch == '\\' )
+        plain = false;
+    if ( !one_comma || comma == 0 || comma + 1 >= b.fight.size() || !plain )
+      refuse( fmt::format( "solver_bench_fight='{}' must be '<shape>,<setup>' (exactly two non-empty parts, one comma, "
+                           "printable characters without spaces, quotes or backslashes).",
+                           b.fight ) );
+    b.fight_shape = b.fight.substr( 0, comma );
+    b.fight_setup = b.fight.substr( comma + 1 );
+  }
+  if ( !b.log.empty() && b.log == b.record )
+    refuse( fmt::format( "solver_bench_record and solver_bench_log name the same file '{}'.", b.record ) );
+  {
+    const std::string outs[] = { b.record, b.log };
+    const char* const names[] = { "solver_bench_record", "solver_bench_log" };
+    for ( int a = 0; a < 2; ++a )
+    {
+      if ( outs[ a ].empty() )
+        continue;
+#if defined( __linux__ )
+      const std::string dir = outs[ a ].find( '/' ) == std::string::npos ? std::string( "." )
+                                                                           : outs[ a ].substr( 0, outs[ a ].rfind( '/' ) );
+      const bool exists = ::access( outs[ a ].c_str(), F_OK ) == 0;
+      const bool ok = exists ? ::access( outs[ a ].c_str(), W_OK ) == 0 : ::access( dir.c_str(), W_OK | X_OK ) == 0;
+      if ( !ok )
+        refuse( fmt::format( "{}='{}' cannot be written (no write access to the file or its directory).", names[ a ],
+                             outs[ a ] ) );
+#endif
+    }
+  }
+
+  // 8. the ranking of roll sites: the bench has no cold-start fill, so any chance split needs a table. The file is read by the
+  // search's own reader (a malformed element, or a window_s other than the bench window, is refused there); its refusal text
+  // names solver_search_sites_in, so the name is swapped for the bench's here.
+  if ( b.splits > 0 && b.sites_in.empty() )
+    refuse( fmt::format( "solver_bench_splits={} needs solver_bench_sites_in=<ranking file> (the bench has no cold-start "
+                         "fill: a chance split is taken only at a ranked site).",
+                         b.splits ) );
+  if ( !b.sites_in.empty() )
+  {
+    try
+    {
+      read_sites_in( b.sites_in, b.window );
+    }
+    catch ( const sc_invalid_sim_argument& e )
+    {
+      std::string m = e.what();
+      const std::string from = "solver_search_sites_in";
+      const std::size_t at = m.find( from );
+      if ( at != std::string::npos )
+        m.replace( at, from.size(), "solver_bench_sites_in" );
+      refuse( m );
+    }
+  }
+}
+
 }  // namespace
 
 config_t& cfg()
 {
   return g_cfg;
+}
+
+bench_config_t& bench_cfg()
+{
+  return g_bench_cfg;
 }
 
 bool is_child()
@@ -3179,6 +3368,20 @@ void validate( sim_t* sim )
 {
   config_t& c = g_cfg;
 
+  // 287-02: a solver_bench_* option without the bench is a mistake too, and the bench is a mode of its own (one mode per
+  // process: the search refuses it by name).
+  if ( !g_bench_cfg.bench )
+  {
+    if ( sim->control )
+      for ( const option_tuple_t& o : sim->control->options )
+        if ( o.name.rfind( "solver_bench", 0 ) == 0 && o.name != "solver_bench" )
+          refuse( fmt::format( "{} is set but solver_bench is not 1 (a bench option without the bench).", o.name ) );
+  }
+  else if ( c.search )
+  {
+    refuse( "solver_bench cannot be combined with solver_search=1 -- one mode per process." );
+  }
+
   // A solver_search_* option without the search is a mistake, never silently ignored. (The name is looked up in
   // the parsed option list, so even a value equal to the default is caught.)
   if ( !c.search )
@@ -3187,6 +3390,13 @@ void validate( sim_t* sim )
       for ( const option_tuple_t& o : sim->control->options )
         if ( o.name.rfind( "solver_search", 0 ) == 0 && o.name != "solver_search" )
           refuse( fmt::format( "{} is set but solver_search is not 1 (a search option without the search).", o.name ) );
+    if ( g_bench_cfg.bench )
+    {
+      validate_bench( sim );
+      // fork commit 1 of 2 (287-02): the options and their refusals only; the labeller path is the next commit. A run that
+      // passes every refusal above stops here so a binary built from this commit can never silently ignore solver_bench=1.
+      refuse( "solver_bench: the labeller is not in this build (options and refusals only)." );
+    }
     return;
   }
 

@@ -4587,6 +4587,24 @@ void sim_t::create_options()
     // tstl-sylvanas 284-06: the window-end value term's units, raw (default) or shape; checked in validate()
     add_option( opt_string( "solver_search_value_units", ss.value_units ) );
   }
+  // tstl-sylvanas 287-02: the deep probe bench (the enumerating labeller), a separate mode of the same module, inert unless
+  // solver_bench=1. Bound to solver_search::bench_cfg(); every range and refusal is checked by name in
+  // solver_search::validate(). A solver_bench_* option set without solver_bench=1 is refused there too.
+  {
+    solver_search::bench_config_t& sbn = solver_search::bench_cfg();
+    add_option( opt_bool( "solver_bench", sbn.bench ) );
+    add_option( opt_int( "solver_bench_depth", sbn.depth ) );
+    add_option( opt_int( "solver_bench_candidates", sbn.candidates ) );
+    add_option( opt_int( "solver_bench_splits", sbn.splits ) );
+    add_option( opt_float( "solver_bench_window", sbn.window ) );
+    add_option( opt_string( "solver_bench_at", sbn.at ) );
+    add_option( opt_float( "solver_bench_margin", sbn.margin ) );
+    add_option( opt_string( "solver_bench_sites_in", sbn.sites_in ) );
+    add_option( opt_string( "solver_bench_record", sbn.record ) );
+    add_option( opt_string( "solver_bench_log", sbn.log ) );
+    add_option( opt_string( "solver_bench_fight", sbn.fight ) );
+    add_option( opt_int( "solver_bench_jobs", sbn.jobs ) );
+  }
   // S1 (260927-s1-spend-timing): forbids lightning_bolt/tempest (and, 261002-8rs, primordial_storm
   // when the action table offers it; the third Lightning-family spender is untouched) below n stacks
   // of Maelstrom Weapon. 0..10 range-checked and

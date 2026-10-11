@@ -74,6 +74,30 @@
 //                                          value head trained in each fight shape's reward units (tstl-sylvanas plan
 //                                          284-03). shape needs solver_search_value
 //
+// THE BENCH (tstl-sylvanas 287-02, v2.18 phase 287). A separate mode of this module: the enumerating labeller of the deep probe
+// bench. It is inert unless solver_bench=1 (every hook returns on one bool test and seeded play is byte for byte what it was),
+// and it excludes solver_search, the teacher and every solver_branch mode. At each listed decision it forks one process per
+// root candidate (the net's top two buttons); inside each, at every near tie of the window (q_margin < solver_bench_margin)
+// it forks again so BOTH buttons are played, up to solver_bench_depth - 1 times on a path; chance splits happen only at the
+// ranked sites of solver_bench_sites_in, at most solver_bench_splits on a path; every other roll stays a real draw on the
+// branch's own re-salted dice and damage is scored at expectation. Each leaf is scored the window return plus the net's own
+// discounted top value at the cut; the parent rebuilds the tree (max at decision nodes, probability-weighted mean at chance
+// nodes) and writes ONE record row per labelled decision. Options, all validated and refused by name in validate():
+//
+//   solver_bench=1                         turn the bench on (same transport rules as the search: solver_policy= greedy weights,
+//                                          iterations=1, threads=1, per_source_rng=1)
+//   solver_bench_depth=1..12               branch points on a path, the root counted (default 8)
+//   solver_bench_candidates=2              root candidates; only 2 is accepted
+//   solver_bench_splits=0..8               chance splits on a path, ranked sites only (default 5; above 0 needs sites_in)
+//   solver_bench_window=W                  seconds, > 0 and <= 120 (default 30)
+//   solver_bench_at=k1,k2,...              the decisions to label (k = seq - 1; ascending, distinct, >= 0)
+//   solver_bench_margin=m                  the near-tie rule inside the window (default 0.25; > 0)
+//   solver_bench_sites_in=<sites.json>     the window-matched ranking of roll sites (the same file format as the search's)
+//   solver_bench_record=<records.jsonl>    one JSON line per labelled decision (O_APPEND, one write() per line)
+//   solver_bench_log=<file>                JSON lines: one per listed decision, a final {"summary":1,...} line
+//   solver_bench_fight=<shape>,<setup>     the two names the record's `fight` object carries
+//   solver_bench_jobs=1..2                 root processes alive at once (default 1)
+//
 // Read, not registered here: solver_branch_value_divisor (> 0), solver_branch_gamma, solver_branch_salt_base,
 // solver_branch_independent_dice and solver_branch_redeal (both must stay 1: paired futures are refused).
 // ==========================================================================
@@ -123,7 +147,30 @@ struct config_t
   std::string fight_setup;
 };
 
+// The bench's options (tstl-sylvanas 287-02). Bound by sim.cpp beside the search's; a solver_bench* option set without
+// solver_bench=1 is refused by name in validate().
+struct bench_config_t
+{
+  bool bench = false;                 // solver_bench
+  int depth = 8;                      // solver_bench_depth, 1..12 (the root counts as branch point 1)
+  int candidates = 2;                 // solver_bench_candidates, only 2
+  int splits = 5;                     // solver_bench_splits, 0..8 (chance splits per path, ranked sites only)
+  double window = 30.0;               // solver_bench_window, seconds, (0, 120]
+  std::string at;                     // solver_bench_at, "k1,k2,..." (k = seq - 1)
+  double margin = 0.25;               // solver_bench_margin, the near-tie rule inside the window, > 0
+  std::string sites_in;               // solver_bench_sites_in
+  std::string record;                 // solver_bench_record
+  std::string log;                    // solver_bench_log
+  std::string fight;                  // solver_bench_fight: "<shape>,<setup>"
+  int jobs = 1;                       // solver_bench_jobs, 1..2
+  // set by validate()
+  std::vector<std::int64_t> at_list;  // parsed from `at`
+  std::string fight_shape;
+  std::string fight_setup;
+};
+
 config_t& cfg();
+bench_config_t& bench_cfg();
 
 // Called once at the end of sim_t::setup(), before solver_branch::validate(). Returns at once when the search is
 // off (after refusing a stray solver_search_* option that was set without it).
