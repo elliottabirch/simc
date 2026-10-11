@@ -325,7 +325,7 @@ struct ZSTD_CCtx_s;
 namespace rl_stock_eval
 {
 struct pick_t;
-}
+} // namespace rl_stock_eval
 
 namespace rl_translog
 {
