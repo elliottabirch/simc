@@ -197,6 +197,9 @@ struct child_state_t
   // 280-07
   bool chance_pending = false;         // a chance split happened and no labelled decision has been met since
   std::vector<mark_t> marks;           // the marked decisions on the way here, in order
+  // 287-02 (the bench): decision branch points on the way here ('n'/'r' characters of the path); the root counts as branch
+  // point 1 and is not included, so a path may take depth - 1 of these.
+  int bench_dec = 0;
 };
 child_state_t g_child;
 
@@ -223,7 +226,7 @@ std::vector<std::string> g_ranked_top;  // "<key>:<in-file var_share>" of the ra
 
 int effective_splits()
 {
-  return g_audit ? 0 : g_cfg.splits;
+  return g_bench ? g_bench_cfg.splits : ( g_audit ? 0 : g_cfg.splits );
 }
 
 // ---- site statistics (280-05) -------------------------------------------------------------------------
@@ -647,12 +650,15 @@ std::string stats_line()
       "LEAF {} {} {} {} {:.17g} {:.17g} {:.17g} {:.17g} {:.17g} {:.17g} {:.9g} {} {} {} {} {:.9g} {} {} {} {} rc={}\n",
       g_child.copy, g_child.pass, g_child.cand, out_rank(), g_child.pw, R, R_undisc, R_real, boot_q, boot_v, t_end, ended,
       g_child.n_dec, cut_state, hwm, cpu, path_token(), split_list_token(), g_child.sec, end_tok, rc );
-  const std::string stats = stats_line();
   if ( line.size() > LINE_MAX_BYTES )
     child_write_and_exit( make_fail_line( 76, "line_too_long" ), 76 );
-  if ( stats.size() > LINE_MAX_BYTES )
-    child_write_and_exit( make_fail_line( 76, "stats_line_too_long" ), 76 );
-  child_write_only( stats );
+  if ( !g_bench )  // 287-02: the bench's parent reads no site counts, so a bench leaf writes no STATS line
+  {
+    const std::string stats = stats_line();
+    if ( stats.size() > LINE_MAX_BYTES )
+      child_write_and_exit( make_fail_line( 76, "stats_line_too_long" ), 76 );
+    child_write_only( stats );
+  }
   child_write_and_exit( line, 0 );
 }
 
@@ -698,7 +704,8 @@ struct search_cut_event_t final : public event_t
 
 double scored_total( const player_t* p )
 {
-  return g_cfg.expected_crit ? p->solver_damage_expected_so_far : p->solver_damage_so_far;
+  // 287-02: the bench always scores expected-crit damage
+  return ( g_bench || g_cfg.expected_crit ) ? p->solver_damage_expected_so_far : p->solver_damage_so_far;
 }
 
 
@@ -763,6 +770,8 @@ struct search_sink_t final : public rng::rl_draw_sink_t
       return false;
     if ( g_ranked_flag[ static_cast<std::size_t>( row ) ] )
       return true;
+    if ( g_bench )
+      return false;  // 287-02: the bench has no cold-start fill: a chance split is taken at a ranked site only
     int cold_used = 0;
     for ( const split_rec_t& sp : g_child.splits )
       if ( !g_ranked_flag[ static_cast<std::size_t>( sp.row ) ] )
@@ -851,6 +860,8 @@ int split_here( search_sink_t& sink, int row, double p )
   if ( pid < 0 )
   {
     ++g_child.fork_fail;
+    if ( g_bench )
+      child_write_and_exit( make_fail_line( 82, "bench_split_fork_failed" ), 82 );  // 287-02: loud, never a silent sample
     sink.busy = false;
     return rng::RL_PRE_DRAW_NORMAL;
   }
@@ -935,6 +946,50 @@ void pair_fork_here( sim_t* sim, int best, int runner_up, int& idx )
   idx = best;
 }
 
+// The bench's decision branch point (287-02), DFS-wait like pair_fork_here: the NEW process presses the runner-up with its own
+// dice (a key mixed from this lineage's key, the bench constant and the path length, so no two forks of one lineage share a key;
+// every stream re-salted, the exploration stream re-seeded, every deck re-dealt) and appends 'r'; the FORKING process waits for
+// it to finish, then presses the net's best button and appends 'n'. Both count one more branch point on their path. A fork
+// refusal fails the copy loudly (code 82), never a silent single branch.
+constexpr std::uint64_t BENCH_SALT = 0x7F4A7C15F39CC060ull;
+
+void bench_fork_here( sim_t* sim, int best, int runner_up, int& idx )
+{
+  const pid_t pid = ::fork();
+  if ( pid < 0 )
+  {
+    ++g_child.fork_fail;
+    child_write_and_exit( make_fail_line( 82, "bench_fork_failed" ), 82 );
+  }
+  if ( pid == 0 )
+  {
+    ++g_child.bench_dec;
+    g_child.path.push_back( 'r' );
+    std::uint64_t k = mix64( mix64( g_child.key ^ BENCH_SALT ) ^ ( static_cast<std::uint64_t>( g_child.path.size() ) + 0x2F0B3A5C9D1E7864ull ) );
+    if ( k == 0 )
+      k = 0x2545F4914F6CDD1Dull;
+    g_child.key = k;
+    g_sink.busy = true;  // the re-deal rolls on the decks' own streams: no hook may answer it
+    sim->resalt_source_rngs( k );
+    sim->solver_explore_rng.seed( mix64( k ^ 0xE5910BEull ) );
+    redeal_every_deck( sim );
+    g_sink.busy = false;
+    idx = runner_up;
+    return;
+  }
+  int st = 0;
+  pid_t w;
+  do
+  {
+    w = ::waitpid( pid, &st, 0 );
+  } while ( w < 0 && errno == EINTR );
+  if ( w != pid || !WIFEXITED( st ) || WEXITSTATUS( st ) != 0 )
+    g_child.sub_failed = true;
+  ++g_child.bench_dec;
+  g_child.path.push_back( 'n' );
+  idx = best;
+}
+
 // Mirrors solver_branch.cpp's become_child (396-506) step for step, for one search copy.
 void become_search_child( sim_t* sim, player_t* p, std::uint64_t seq, int pass, int copy, int cand, int button,
                           bool pair, std::uint64_t key, double window, int read_fd, int write_fd )
@@ -951,7 +1006,7 @@ void become_search_child( sim_t* sim, player_t* p, std::uint64_t seq, int pass, 
   g_child.window = window;
   g_child.divisor = sb.value_divisor;
   g_child.gamma = sb.gamma;
-  g_child.expected = g_cfg.expected_crit;
+  g_child.expected = g_bench || g_cfg.expected_crit;
   g_child.fd = write_fd;
   g_child.Eexp_k = p->solver_damage_expected_so_far;
   g_child.D_k = p->solver_damage_so_far;
@@ -1018,6 +1073,7 @@ void become_search_child( sim_t* sim, player_t* p, std::uint64_t seq, int pass, 
   g_child.sec = -1;
   g_child.chance_pending = false;
   g_child.marks.clear();
+  g_child.bench_dec = 0;
   g_counts.assign( g_sites.size(), site_count_t{} );
   for ( std::size_t i = 0; i < g_sites.size(); ++i )
     g_sites[ i ].ptr->rl_tag_source_roller( SEARCH_SITE_BASE + static_cast<std::uint32_t>( i ) );
@@ -1128,6 +1184,7 @@ struct copy_result_t
   std::vector<leaf_t> leaves;
   std::map<std::pair<int, std::string>, stats_t> stats;  // by (leaf rank, leaf path) (STATS lines)
   std::vector<interior_line_t> interior;                 // 280-07: SECOND and CHANCE lines
+  std::map<std::string, std::pair<int, int>> branches;   // 287-02 (bench): path prefix -> (net's button, runner-up's button)
   bool failed = false;  // a FAIL line, a malformed or duplicate leaf
   std::string fail;
   int exit_code = -1;
@@ -1158,6 +1215,13 @@ bool parse_long( const std::string& s, long& out )
   out = std::strtol( s.c_str(), &end, 10 );
   return end != s.c_str() && *end == '\0' && errno == 0;
 }
+
+// 287-02 (bench): what the parent saw on the pipe for the state in progress. Reset by bench_here().
+struct bench_pipe_t
+{
+  std::size_t max_leaf_line = 0;  // the longest LEAF line, newline included
+};
+bench_pipe_t g_bench_pipe;
 
 // One pipe line into the results. Anything unknown or malformed is counted and ignored (T-280-07), except that a
 // malformed or duplicate LEAF for a known copy marks that copy failed so it is dropped whole.
@@ -1274,11 +1338,36 @@ void parse_line( const std::string& line, int pass, std::vector<copy_result_t>& 
     r.interior.push_back( il );
     return;
   }
+  if ( g_bench && tok[ 0 ] == "BRANCH" )
+  {
+    // 287-02: BRANCH <copy> <path> <best> <runner_up>, written by a bench copy just before it forks at a near tie: the path of
+    // the forking process so far and the two buttons its two descendants press (the new process presses the runner-up).
+    long b0 = -1, b1 = -1;
+    bool okb = tok.size() == 5 && parse_long( tok[ 3 ], b0 ) && parse_long( tok[ 4 ], b1 ) && b0 >= 0 &&
+               b0 < static_cast<long>( RL_ACTION_DIM ) && b1 >= 0 && b1 < static_cast<long>( RL_ACTION_DIM ) && b0 != b1;
+    for ( char ch : tok[ 2 ] )
+      if ( ch != '0' && ch != '1' && ch != 'n' && ch != 'r' && !( ch == '-' && tok[ 2 ].size() == 1 ) )
+        okb = false;
+    const std::string bkey = tok[ 2 ] == "-" ? std::string() : tok[ 2 ];
+    if ( okb && r.branches.count( bkey ) )
+      okb = false;  // two lines for one branch point of one lineage
+    if ( !okb )
+    {
+      r.failed = true;
+      r.fail = "bad_branch_line";
+      ++g_count.unknown_lines;
+      return;
+    }
+    r.branches[ bkey ] = std::make_pair( static_cast<int>( b0 ), static_cast<int>( b1 ) );
+    return;
+  }
   if ( tok[ 0 ] != "LEAF" )
   {
     ++g_count.unknown_lines;
     return;
   }
+  if ( g_bench )
+    g_bench_pipe.max_leaf_line = std::max( g_bench_pipe.max_leaf_line, line.size() + 1 );
   // LEAF <copy> <pass> <cand> <rank> <w> <R> <R_undisc> <R_real> <boot_q> <boot_v> <t_end> <ended> <n_dec> <cut_state>
   //      <vmhwm_kb> <cpu_s> <path> <splits> <sec> <end_obs_b64|-> rc=<key:R_from:boot_from,...|->
   leaf_t lf;
@@ -1360,7 +1449,25 @@ void parse_line( const std::string& line, int pass, std::vector<copy_result_t>& 
       std::string digits;
       for ( const split_rec_t& sp : lf.splits )
         digits.push_back( sp.outcome == 1 ? '1' : '0' );
-      good = digits == lf.path && std::fabs( prod - lf.w ) <= 1e-9;
+      // 287-02: a bench path also carries one 'n' or 'r' per decision branch point (the net's button or the runner-up's);
+      // the chance digits must still equal the split list's outcomes, and a path takes at most depth - 1 branch points.
+      std::string cmp_path = lf.path;
+      if ( g_bench )
+      {
+        cmp_path.clear();
+        int n_branch = 0;
+        for ( char ch : lf.path )
+        {
+          if ( ch == '0' || ch == '1' )
+            cmp_path.push_back( ch );
+          else if ( ch == 'n' || ch == 'r' )
+            ++n_branch;
+          else
+            good = false;
+        }
+        good = good && n_branch <= g_bench_cfg.depth - 1;
+      }
+      good = good && digits == cmp_path && std::fabs( prod - lf.w ) <= 1e-9;
     }
     for ( const leaf_t& other : r.leaves )
       if ( good && other.path == lf.path && other.rank == static_cast<int>( frank ) )
@@ -1592,7 +1699,7 @@ bool run_pass( sim_t* sim, player_t* p, std::uint64_t seq, int pass, const std::
   // 4. fork (at most `jobs` alive) and read, in one poll-driven loop
   for ( ;; )
   {
-    while ( next < tasks.size() && running < c.jobs )
+    while ( next < tasks.size() && running < ( g_bench ? g_bench_cfg.jobs : c.jobs ) )
     {
       const pid_t pid = ::fork();
       if ( pid < 0 )
@@ -1601,7 +1708,7 @@ bool run_pass( sim_t* sim, player_t* p, std::uint64_t seq, int pass, const std::
       {
         const std::uint64_t key = copy_key( sb.branch_salt_base, seq, pass, static_cast<int>( next ) );
         become_search_child( sim, p, seq, pass, static_cast<int>( next ), tasks[ next ].cand, tasks[ next ].button,
-                             tasks[ next ].pair, key, c.window, fds[ 0 ], fds[ 1 ] );
+                             tasks[ next ].pair, key, g_bench ? g_bench_cfg.window : c.window, fds[ 0 ], fds[ 1 ] );
         out_button = tasks[ next ].button;
         return true;
       }
@@ -1634,6 +1741,13 @@ bool run_pass( sim_t* sim, player_t* p, std::uint64_t seq, int pass, const std::
     std::string line;
     while ( std::getline( ls, line ) )
       parse_line( line, pass, res );
+  }
+  if ( g_bench )
+  {
+    // 287-02: the bench's parent rebuilds the trees from the raw copies (bench_here); a copy holds many leaves whose weights do
+    // not sum to 1 (every decision branch adds a whole subtree), so finalise() does not apply.
+    raw_out = std::move( res );
+    return false;
   }
   samples.clear();
   for ( auto& r : res )
@@ -3047,6 +3161,439 @@ bool search_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* obs, 
   throw sc_runtime_error( "solver_search: fork() needs a Linux build" );
 #endif
 }
+// ---- the bench: the enumerating labeller (287-02, BENCH-02) ---------------------------------------------------------------
+// WHAT IT DOES. At a listed decision the parent forks one ROOT process per root candidate (the net's top two selectable
+// buttons). Inside a root process the net plays on to the exact window cut at t_k + W. A BRANCH POINT is a later decision that
+// is not forced, not exploratory, has at least two selectable buttons and whose q_margin is below solver_bench_margin (the
+// near-tie rule), while this path has used fewer than depth - 1 of them: the process forks DFS-wait (bench_fork_here), the
+// forker presses the net's best button and appends 'n' to its path, the new process (own re-salted dice, owner rule D1)
+// presses the runner-up and appends 'r'. A CHANCE SPLIT is the search's own split_here, taken only at the ranked sites of
+// solver_bench_sites_in (no cold-start fill), at most solver_bench_splits on a path; it appends '0' (the new process, the no
+// outcome) or '1' (the forker, the yes outcome) and carries the exact outcome probability. Every other roll stays a real draw
+// on the process's own dice, and damage is scored at expectation (scored_total). A LEAF is a process that reached the cut; its
+// value is its window return R plus its tail, gamma^(T - t_k) x the net's own top value at the cut (boot_q; boot mode q).
+//
+// WHAT THE PARENT DOES WITH THE LEAVES. For each root candidate it rebuilds the tree from the leaves' path tokens and split
+// lists: a decision node (n/r children) takes the larger child value (a tie goes to 'n'), its net-line value is the 'n' child;
+// a chance node (0/1 children) is p x V(yes) + (1 - p) x V(no). The window part and the tail part are carried along the same
+// choices, so mean = window part + tail by construction. A missing sibling, a FAIL line, a leaf the parent cannot place or a
+// non-finite value fails the whole state: no record row, one log line naming the reason.
+//
+// THE BEST LINE reported in the record is the principal line: the pick's button first, then, following the best child at every
+// decision node and the more probable outcome at every chance node (a tie goes to yes), the button pressed at each decision
+// node met. THE BIAS to read: the max of noisy branch values is biased upward, which is why the net-line value (the 'n' child
+// at every decision node, no max) is recorded beside the best-line value.
+struct bnode_t
+{
+  double W = 0.0;           // best-line window part (probability-weighted along the best line)
+  double T = 0.0;           // best-line tail part
+  double Wn = 0.0;          // net-line window part ('n' child at every decision node)
+  double Tn = 0.0;          // net-line tail part
+  long leaves = 0;
+  long ended = 0;           // leaves whose fight ended before the cut
+  long dec_nodes = 0;       // interior decision (branch) nodes
+  long chance_nodes = 0;    // interior chance nodes
+  int max_branch = 0;       // the most decision nodes on one root-to-leaf path of this subtree
+  double w_all = 0.0;       // sum of every leaf's path weight
+  double w_best = 0.0;      // sum of the path weights of the leaves on the best line (1 for a sound tree)
+  std::vector<int> line;    // the principal line's buttons at decision nodes
+  const leaf_t* end_leaf = nullptr;  // the best line's leaf with the largest path weight (ties: the first in path order)
+  double total() const
+  {
+    return W + T;
+  }
+};
+
+bool bench_leaf_first( const leaf_t* a, const leaf_t* b )
+{
+  if ( a == nullptr )
+    return false;
+  if ( b == nullptr )
+    return true;
+  if ( a->w != b->w )
+    return a->w > b->w;
+  return a->path < b->path;
+}
+
+// leaves lv[lo, hi) share the path prefix of length d and si chance characters. Returns false (with `why`) on any inconsistency.
+bool bench_eval( const std::vector<const leaf_t*>& lv, std::size_t lo, std::size_t hi, std::size_t d, std::size_t si,
+                 const std::map<std::string, std::pair<int, int>>& branches, bnode_t& out, std::string& why )
+{
+  if ( hi - lo == 1 && lv[ lo ]->path.size() == d )
+  {
+    const leaf_t& lf = *lv[ lo ];
+    out = bnode_t{};
+    out.W = out.Wn = lf.R;
+    out.T = out.Tn = leaf_boot( lf );
+    out.leaves = 1;
+    out.ended = lf.ended;
+    out.w_all = out.w_best = lf.w;
+    out.end_leaf = &lf;
+    return std::isfinite( out.W ) && std::isfinite( out.T );
+  }
+  for ( std::size_t i = lo; i < hi; ++i )
+    if ( lv[ i ]->path.size() <= d )
+    {
+      why = fmt::format( "leaf_at_prefix_length_{}_inside_a_branch", d );
+      return false;
+    }
+  const char c0 = lv[ lo ]->path[ d ];
+  const bool chance = c0 == '0' || c0 == '1';
+  const char hi_char = chance ? '1' : 'r';
+  const char lo_char = chance ? '0' : 'n';
+  std::size_t mid = lo;
+  while ( mid < hi && lv[ mid ]->path[ d ] == lo_char )
+    ++mid;
+  for ( std::size_t i = mid; i < hi; ++i )
+    if ( lv[ i ]->path[ d ] != hi_char )
+    {
+      why = fmt::format( "mixed_node_kinds_at_prefix_length_{}", d );
+      return false;
+    }
+  if ( mid == lo || mid == hi )
+  {
+    why = fmt::format( "missing_sibling_at_prefix_length_{}", d );
+    return false;
+  }
+  bnode_t a, b;  // a: 'n' / no, b: 'r' / yes
+  if ( !bench_eval( lv, lo, mid, d + 1, si + ( chance ? 1 : 0 ), branches, a, why ) ||
+       !bench_eval( lv, mid, hi, d + 1, si + ( chance ? 1 : 0 ), branches, b, why ) )
+    return false;
+  out = bnode_t{};
+  out.leaves = a.leaves + b.leaves;
+  out.ended = a.ended + b.ended;
+  out.dec_nodes = a.dec_nodes + b.dec_nodes;
+  out.chance_nodes = a.chance_nodes + b.chance_nodes;
+  out.w_all = a.w_all + b.w_all;
+  out.max_branch = std::max( a.max_branch, b.max_branch );
+  if ( chance )
+  {
+    // the exact chance of the yes outcome, the same on every leaf under this node
+    double p = -1.0;
+    int row = -1;
+    for ( std::size_t i = lo; i < hi; ++i )
+    {
+      if ( lv[ i ]->splits.size() <= si )
+      {
+        why = "split_list_shorter_than_the_path";
+        return false;
+      }
+      const split_rec_t& sp = lv[ i ]->splits[ si ];
+      if ( p < 0.0 )
+      {
+        p = sp.p;
+        row = sp.row;
+      }
+      else if ( std::fabs( sp.p - p ) > 1e-12 || sp.row != row )
+      {
+        why = fmt::format( "chance_node_at_prefix_length_{}_disagrees_between_leaves", d );
+        return false;
+      }
+    }
+    const bnode_t& no = a;
+    const bnode_t& yes = b;
+    out.W = p * yes.W + ( 1.0 - p ) * no.W;
+    out.T = p * yes.T + ( 1.0 - p ) * no.T;
+    out.Wn = p * yes.Wn + ( 1.0 - p ) * no.Wn;
+    out.Tn = p * yes.Tn + ( 1.0 - p ) * no.Tn;
+    out.chance_nodes += 1;
+    out.w_best = no.w_best + yes.w_best;
+    out.line = p >= 0.5 ? yes.line : no.line;
+    out.end_leaf = bench_leaf_first( yes.end_leaf, no.end_leaf ) ? yes.end_leaf : no.end_leaf;
+    return true;
+  }
+  // a decision node: the BRANCH line of the forking process names the two buttons
+  const std::string prefix = lv[ lo ]->path.substr( 0, d );
+  const auto bit = branches.find( prefix );
+  if ( bit == branches.end() )
+  {
+    why = fmt::format( "branch_line_missing_for_prefix_length_{}", d );
+    return false;
+  }
+  const bnode_t& net = a;
+  const bnode_t& run = b;
+  const bool take_run = run.total() > net.total();  // a tie goes to the net's own button ('n')
+  const bnode_t& ch = take_run ? run : net;
+  out.W = ch.W;
+  out.T = ch.T;
+  out.Wn = net.Wn;
+  out.Tn = net.Tn;
+  out.dec_nodes += 1;
+  out.max_branch += 1;
+  out.w_best = ch.w_best;
+  out.line.push_back( take_run ? bit->second.second : bit->second.first );
+  out.line.insert( out.line.end(), ch.line.begin(), ch.line.end() );
+  out.end_leaf = ch.end_leaf;
+  return true;
+}
+
+struct bench_totals_t
+{
+  long long labelled = 0;
+  long long skipped = 0;
+  long long failed = 0;
+  long long leaves = 0;
+  double cpu_s = 0.0;
+};
+bench_totals_t g_bench_totals;
+
+void bench_log_line( const std::string& line )
+{
+  if ( !g_log )
+    return;
+  *g_log << line << "\n";
+  g_log->flush();
+}
+
+// One candidate object of the record row, keys in the bench record's order.
+std::string bench_cand_json( int button, const bnode_t& n )
+{
+  const std::string end_obs = n.end_leaf ? n.end_leaf->end_obs : std::string();
+  return fmt::format(
+      "{{\"button\":{},\"hold_event\":{},\"mean\":{},\"se\":null,\"n_ok\":{},\"n_fail\":0,\"w_sum\":{},\"second\":[],"
+      "\"end_obs_b64\":{},"
+      "\"bench_net_line_value\":{},"
+      "\"bench_window_return\":{},"
+      "\"bench_tail\":{},"
+      "\"bench_leaves\":{}}}",
+      button, hold_event_json( button ), jnum( n.total() ), n.leaves, jnum( n.w_all ), json_str_or_null( end_obs ),
+      jnum( n.Wn + n.Tn ), jnum( n.W ), jnum( n.T ), n.leaves );
+}
+
+// The row goes out in ONE write() on an O_APPEND descriptor, opened and closed per row (a copy never gets here).
+void bench_write_row( const std::string& row )
+{
+#if defined( __linux__ )
+  const std::string file = g_bench_cfg.record;
+  const int fd = ::open( file.c_str(), O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0644 );
+  if ( fd < 0 )
+    throw sc_runtime_error( fmt::format( "solver_bench_record='{}' cannot be opened for appending: {}.", file,
+                                         std::strerror( errno ) ) );
+  std::string line = row;
+  line += '\n';
+  const char* dptr = line.data();
+  std::size_t left = line.size();
+  while ( left > 0 )
+  {
+    const ssize_t w = ::write( fd, dptr, left );
+    if ( w < 0 )
+    {
+      if ( errno == EINTR )
+        continue;
+      const int e = errno;
+      ::close( fd );
+      throw sc_runtime_error( fmt::format( "solver_bench_record='{}': write failed: {}.", file, std::strerror( e ) ) );
+    }
+    dptr += w;
+    left -= static_cast<std::size_t>( w );
+  }
+  ::close( fd );
+#else
+  (void)row;
+#endif
+}
+
+// The labelling of one decision. Returns true IN A COPY (idx = the copy's candidate button).
+bool bench_here( sim_t* sim, player_t* p, std::uint64_t seq, const float* obs, const std::uint8_t* mask,
+                 const std::vector<int>& cand_buttons, int& idx )
+{
+#if defined( __linux__ )
+  const bench_config_t& b = g_bench_cfg;
+  const solver_branch::config_t& sb = solver_branch::cfg();
+  const std::int64_t k = static_cast<std::int64_t>( seq ) - 1;
+  const double self0 = rusage_cpu_s( RUSAGE_SELF );
+  const double kids0 = rusage_cpu_s( RUSAGE_CHILDREN );
+  const auto wall0 = std::chrono::steady_clock::now();
+  const double t_k = t_float32( sim );
+  g_bench_pipe = bench_pipe_t{};
+
+  std::vector<copy_task_t> tasks;
+  for ( std::size_t i = 0; i < cand_buttons.size(); ++i )
+    tasks.push_back( copy_task_t{ static_cast<int>( i ), cand_buttons[ i ], false } );
+  std::vector<copy_result_t> samples_unused, raw;
+  pair_half_t ph_unused;
+  int child_button = -1;
+  if ( run_pass( sim, p, seq, 0, tasks, samples_unused, raw, ph_unused, child_button ) )
+  {
+    idx = child_button;
+    return true;
+  }
+
+  auto fail_state = [ & ]( const std::string& reason ) {
+    ++g_bench_totals.failed;
+    bench_log_line( fmt::format( "{{\"seq\":{},\"k\":{},\"t\":{},\"status\":\"failed\",\"reason\":\"{}\"}}", seq, k, jnum( t_k ),
+                                 jstr( reason ) ) );
+    std::fprintf( stderr, "[RL_BENCH_FAIL] seq=%llu reason=%s\n", static_cast<unsigned long long>( seq ), reason.c_str() );
+    std::fflush( stderr );
+    return false;
+  };
+
+  // 1. every root process left cleanly with a complete set of lines
+  bnode_t node[ 2 ];
+  double leaf_cpu = 0.0;
+  long peak_kb = 0;
+  if ( raw.size() != 2 )
+  {
+    fail_state( "wrong_number_of_root_candidates" );
+    return false;
+  }
+  for ( std::size_t i = 0; i < raw.size(); ++i )
+  {
+    const copy_result_t& r = raw[ i ];
+    if ( r.failed || r.leaves.empty() || !r.exited || r.exit_code != 0 || r.signal != 0 )
+    {
+      fail_state( fmt::format( "candidate_{}_failed: {} (exit={} signal={} leaves={})", i,
+                               r.fail.empty() ? std::string( "no-line" ) : r.fail, r.exit_code, r.signal, r.leaves.size() ) );
+      return false;
+    }
+    for ( const leaf_t& lf : r.leaves )
+    {
+      leaf_cpu += lf.cpu_s;
+      peak_kb = std::max( peak_kb, lf.vmhwm_kb );
+      g_count.leaf_vmhwm_kb_max = std::max( g_count.leaf_vmhwm_kb_max, lf.vmhwm_kb );
+    }
+    // 2. the tree of this candidate
+    std::vector<const leaf_t*> lv;
+    for ( const leaf_t& lf : r.leaves )
+      lv.push_back( &lf );
+    std::sort( lv.begin(), lv.end(), []( const leaf_t* x, const leaf_t* y ) { return x->path < y->path; } );
+    std::string why;
+    if ( !bench_eval( lv, 0, lv.size(), 0, 0, r.branches, node[ i ], why ) )
+    {
+      fail_state( fmt::format( "candidate_{}_tree: {}", i, why.empty() ? std::string( "non_finite_leaf_value" ) : why ) );
+      return false;
+    }
+    if ( std::fabs( node[ i ].w_best - 1.0 ) > 1e-9 )
+    {
+      fail_state( fmt::format( "candidate_{}_best_line_weights_sum_{:.17g}_not_1", i, node[ i ].w_best ) );
+      return false;
+    }
+  }
+
+  // 3. the pick, the margin, the record row
+  const int pick_i = node[ 1 ].total() > node[ 0 ].total() ? 1 : 0;  // an exact tie goes to the net's own button
+  const bnode_t& pk = node[ pick_i ];
+  const bnode_t& ot = node[ 1 - pick_i ];
+  const double margin = pk.total() - ot.total();
+  const int pick_button = cand_buttons[ static_cast<std::size_t>( pick_i ) ];
+  long n_leaves = 0, n_dec = 0, n_chance = 0, n_ended = 0;
+  int max_branch = 0;
+  for ( const bnode_t& n : node )
+  {
+    n_leaves += n.leaves;
+    n_dec += n.dec_nodes;
+    n_chance += n.chance_nodes;
+    n_ended += n.ended;
+    max_branch = std::max( max_branch, n.max_branch );
+  }
+  const double parent_cpu = rusage_cpu_s( RUSAGE_SELF ) - self0;
+  const double bench_cpu = leaf_cpu + parent_cpu;
+  const double bench_wall = std::chrono::duration<double>( std::chrono::steady_clock::now() - wall0 ).count();
+  const double kids_cpu = rusage_cpu_s( RUSAGE_CHILDREN ) - kids0;
+  std::string best_line = "[" + std::to_string( pick_button );
+  for ( int bt : pk.line )
+    best_line += "," + std::to_string( bt );
+  best_line += "]";
+  const double mean_pick = pk.total();
+  const double boot_share = mean_pick != 0.0 && std::isfinite( mean_pick ) ? pk.T / mean_pick : std::numeric_limits<double>::quiet_NaN();
+
+  rec_ctx_t cx;
+  cx.fight_json = fmt::format( "{{\"shape\":{},\"setup\":{},\"seed\":{}}}", json_str_or_null( jstr( b.fight_shape ) ),
+                               json_str_or_null( jstr( b.fight_setup ) ), static_cast<unsigned long long>( sim->seed ) );
+  cx.window_s = b.window;
+  cx.copies = 0;
+  cx.cpu_s = bench_cpu;
+  cx.divisor = sb.value_divisor;
+  cx.gamma = sb.gamma;
+  cx.k = k;
+  cx.depth = b.depth;
+  cx.root_seq = seq;
+  // keys 21-31 (the Phase 280 tail, row_tail's names and order), then the bench fields 32-47 (one key per line on purpose)
+  const std::string tail = fmt::format(
+      ",\"label_units\":\"reward_discounted_over_divisor\",\"boot_mode\":\"q\",\"window_return\":{},\"divisor\":{},"
+      "\"gamma\":{},\"k\":{},\"audit_nosplit\":false,\"second_level_changed\":null,\"hold_won\":null,"
+      "\"split_mode\":\"bench_ranked\",\"depth\":{},"
+      "\"bench\":1,"
+      "\"bench_depth\":{},"
+      "\"bench_splits\":{},"
+      "\"bench_candidates\":2,"
+      "\"bench_margin\":{},"
+      "\"bench_sites_eligible\":{},"
+      "\"bench_branch_points_used\":{},"
+      "\"bench_decision_nodes\":{},"
+      "\"bench_chance_nodes\":{},"
+      "\"bench_leaves\":{},"
+      "\"bench_cpu_s\":{},"
+      "\"bench_wall_s\":{},"
+      "\"bench_best_line\":{},"
+      "\"bench_max_line_bytes\":{},"
+      "\"bench_peak_rss_mb\":{},"
+      "\"bench_ended_leaves\":{}}}",
+      jnum( pk.W ), jnum( cx.divisor ), jnum( cx.gamma ), cx.k, b.depth, b.depth, b.splits, jnum( b.margin ), g_ranked_count,
+      1 + max_branch, n_dec, n_chance, n_leaves, jnum( bench_cpu ), jnum( bench_wall ), best_line, g_bench_pipe.max_leaf_line,
+      jnum( static_cast<double>( peak_kb ) / 1024.0 ), n_ended );
+  const std::string cands_json = bench_cand_json( cand_buttons[ 0 ], node[ 0 ] ) + "," + bench_cand_json( cand_buttons[ 1 ], node[ 1 ] );
+  const std::string row = make_row( cx, "root", seq, "null", t_k, obs_b64( obs ), mask_json( mask_digits( mask ) ), cands_json,
+                                    pick_button, "null", margin, std::numeric_limits<double>::quiet_NaN(), false, 1.0, "",
+                                    boot_share, tail );
+  bench_write_row( row );
+  ++g_bench_totals.labelled;
+  g_bench_totals.leaves += n_leaves;
+  g_bench_totals.cpu_s += bench_cpu;
+  ++g_count.searches;
+  g_count.child_cpu_s += kids_cpu;
+  g_count.wall_branch_s += bench_wall;
+  bench_log_line( fmt::format(
+      "{{\"seq\":{},\"k\":{},\"t\":{},\"status\":\"ok\",\"pick\":{},\"margin\":{},\"means\":[{},{}],\"leaves\":{},"
+      "\"branch_points_used\":{},\"decision_nodes\":{},\"chance_nodes\":{},\"ended_leaves\":{},\"cpu_s\":{},\"wall_s\":{},"
+      "\"children_cpu_s\":{},\"max_line_bytes\":{},\"peak_rss_mb\":{}}}",
+      seq, k, jnum( t_k ), pick_button, jnum( margin ), jnum( node[ 0 ].total() ), jnum( node[ 1 ].total() ), n_leaves,
+      1 + max_branch, n_dec, n_chance, n_ended, jnum( bench_cpu ), jnum( bench_wall ), jnum( kids_cpu ),
+      g_bench_pipe.max_leaf_line, jnum( static_cast<double>( peak_kb ) / 1024.0 ) ) );
+  return false;
+#else
+  (void)sim; (void)p; (void)seq; (void)obs; (void)mask; (void)cand_buttons; (void)idx;
+  throw sc_runtime_error( "solver_bench: fork() needs a Linux build" );
+#endif
+}
+
+// The parent's side of a decision when the bench is on. Returns true IN A COPY.
+bool bench_parent_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* obs, const float* q,
+                            const std::uint8_t* mask, const std::uint8_t* select_mask, int legal_count, bool exploratory,
+                            bool forced, int& idx )
+{
+  const bench_config_t& b = g_bench_cfg;
+  const std::int64_t k = static_cast<std::int64_t>( seq ) - 1;
+  ++g_count.decisions;
+  if ( !std::binary_search( b.at_list.begin(), b.at_list.end(), k ) )
+    return false;
+  ++g_count.listed_reached;
+  int n_sel = 0;
+  for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+    n_sel += select_mask[ i ] ? 1 : 0;
+  const char* skip = legal_count < 2 ? "fewer_than_2_legal"
+                     : forced        ? "forced"
+                     : exploratory   ? "exploratory"
+                     : n_sel < 2     ? "held_or_fewer_than_2_selectable"
+                                     : nullptr;
+  if ( skip )
+  {
+    ++g_count.listed_skipped;
+    ++g_bench_totals.skipped;
+    bench_log_line( fmt::format( "{{\"seq\":{},\"k\":{},\"t\":{},\"status\":\"skipped\",\"reason\":\"{}\",\"legal\":{},\"n_sel\":{}}}",
+                                 seq, k, jnum( t_float32( sim ) ), skip, legal_count, n_sel ) );
+    return false;
+  }
+  const std::vector<int> cands = top_k( q, select_mask, 2 );
+  if ( cands.size() != 2 || cands[ 0 ] != idx )
+    throw sc_runtime_error( fmt::format(
+        "solver_bench: the net's pick {} is not the best selectable button {} at decision k={} -- refusing to label from a "
+        "press the net did not choose",
+        idx, cands.empty() ? -1 : cands[ 0 ], k ) );
+  ensure_sites( sim );
+  return bench_here( sim, p, seq, obs, mask, cands, idx );
+}
+
 // ---- the record file and the summary file (280-07) ------------------------------------------------------------------
 // The record is opened O_APPEND by the parent and each row goes out in ONE write() call (Phase 281 may run several fight
 // processes into one file; a regular file's appended write is atomic with respect to the offset). A short write is finished
@@ -3393,9 +3940,22 @@ void validate( sim_t* sim )
     if ( g_bench_cfg.bench )
     {
       validate_bench( sim );
-      // fork commit 1 of 2 (287-02): the options and their refusals only; the labeller path is the next commit. A run that
-      // passes every refusal above stops here so a binary built from this commit can never silently ignore solver_bench=1.
-      refuse( "solver_bench: the labeller is not in this build (options and refusals only)." );
+      bench_config_t& b = g_bench_cfg;
+      if ( !b.log.empty() )
+      {
+        g_log = std::make_unique<std::ofstream>( b.log, std::ios::out | std::ios::trunc );
+        if ( !g_log->is_open() )
+          refuse( fmt::format( "solver_bench_log='{}' cannot be opened for writing.", b.log ) );
+      }
+      g_boot_mode = 1;  // the bench's tail is always the net's own discounted top value at the cut (boot mode q)
+      g_bench = true;
+      g_any = true;
+      fmt::print( "[RL_BENCH_START] depth={} candidates={} splits={} window={:.17g} margin={:.17g} at={} jobs={} "
+                  "divisor={:.17g} gamma={:.17g} salt_base={} sites_in={} record={} log={} fight={}\n",
+                  b.depth, b.candidates, b.splits, b.window, b.margin, b.at_list.size(), b.jobs,
+                  solver_branch::cfg().value_divisor, solver_branch::cfg().gamma, solver_branch::cfg().branch_salt_base,
+                  b.sites_in.empty() ? "-" : b.sites_in, b.record, b.log.empty() ? "-" : b.log, b.fight );
+      std::fflush( stdout );
     }
     return;
   }
@@ -3689,6 +4249,29 @@ void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* obs, 
     }
     g_child.last_t = t;
     g_child.last_E = E;
+    // 287-02 (bench): a branch point is a decision that is not forced, not exploratory, has at least two selectable buttons and
+    // a q_margin below the bench's near-tie margin, on a path that has used fewer than depth - 1 branch points. The BRANCH line
+    // names the two buttons for the parent's tree, then the process forks.
+    if ( g_bench )
+    {
+      if ( !forced && !exploratory && g_child.bench_dec + 1 < g_bench_cfg.depth && q_margin < g_bench_cfg.margin )
+      {
+        int n_selb = 0;
+        for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+          n_selb += select_mask[ i ] ? 1 : 0;
+        if ( n_selb >= 2 )
+        {
+          const std::vector<int> top2 = top_k( q, select_mask, 2 );
+          if ( top2.size() != 2 || top2[ 0 ] != idx )
+            child_write_and_exit( make_fail_line( 81, "bench_branch_net_pick_is_not_the_best_button" ), 81 );
+          const std::string branch_line =
+              fmt::format( "BRANCH {} {} {} {}\n", g_child.copy, path_token(), top2[ 0 ], top2[ 1 ] );
+          child_write_only( branch_line );
+          bench_fork_here( sim, top2[ 0 ], top2[ 1 ], idx );
+        }
+      }
+      return;
+    }
     // 280-06: the second level. A pair process that has not forked yet forks at the first decision with at least two
     // selectable buttons that is neither forced nor exploratory: the net's best button for the forker (rank 0), its
     // runner-up for the new process (rank 1).
@@ -3734,6 +4317,11 @@ void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* obs, 
   }
 
   // 2. the parent
+  if ( g_bench )
+  {
+    (void)bench_parent_decision( sim, p, seq, obs, q, mask, select_mask, legal_count, exploratory, forced, idx );
+    return;
+  }
   config_t& c = g_cfg;
   const std::int64_t k = static_cast<std::int64_t>( seq ) - 1;
   ++g_count.decisions;
@@ -3860,6 +4448,30 @@ void write_summary( sim_t* sim )
   const config_t& c = g_cfg;
   if ( !g_any || g_child.active )
     return;
+  if ( g_bench )
+  {
+    // 287-02: the bench's one stdout line and the log's last line
+    const bench_config_t& b = g_bench_cfg;
+#if defined( __linux__ )
+    const double self_cpu = rusage_cpu_s( RUSAGE_SELF );
+    const double kids_cpu = rusage_cpu_s( RUSAGE_CHILDREN );
+#else
+    const double self_cpu = 0.0, kids_cpu = 0.0;
+#endif
+    const std::string js = fmt::format(
+        "{{\"summary\":1,\"bench\":1,\"states\":{},\"reached\":{},\"labelled\":{},\"skipped\":{},\"failed\":{},"
+        "\"leaves\":{},\"cpu_s\":{},\"self_cpu_s\":{},\"children_cpu_total_s\":{},\"leaf_vmhwm_kb_max\":{},"
+        "\"config\":{{\"depth\":{},\"splits\":{},\"window\":{},\"margin\":{},\"jobs\":{},\"sites_eligible\":{}}}}}",
+        b.at_list.size(), g_count.listed_reached, g_bench_totals.labelled, g_bench_totals.skipped, g_bench_totals.failed,
+        g_bench_totals.leaves, jnum( g_bench_totals.cpu_s ), jnum( self_cpu ), jnum( kids_cpu ), g_count.leaf_vmhwm_kb_max,
+        b.depth, b.splits, jnum( b.window ), jnum( b.margin ), b.jobs, g_ranked_count );
+    bench_log_line( js );
+    fmt::print( "[RL_BENCH] states={} labelled={} skipped={} failed={} leaves={} cpu_s={:.6g}\n", b.at_list.size(),
+                g_bench_totals.labelled, g_bench_totals.skipped, g_bench_totals.failed, g_bench_totals.leaves,
+                g_bench_totals.cpu_s );
+    std::fflush( stdout );
+    return;
+  }
   const solver_branch::config_t& sb = solver_branch::cfg();
 #if defined( __linux__ )
   const double self_cpu = rusage_cpu_s( RUSAGE_SELF );
