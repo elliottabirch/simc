@@ -2430,6 +2430,10 @@ void buff_t::decrement( int stacks, double value )
 
       last_stack_change = sim->current_time();
 
+      // 288.7: stacks consumed, the buff stays up.
+      if ( rl_rng_record::events_on() )
+        rl_rng_record::event_buff( sim, rl_rng_record::EVT_STACKS_CHANGED, this, old_stack );
+
       for ( const auto& cb : stack_change_callback )
         cb( this, old_stack, current_stack );
     }
@@ -2475,6 +2479,10 @@ void buff_t::extend_duration( timespan_t extra_seconds )
                                       &rl_old_end, &rl_new_end, 1, "extend_duration" );
     }
 
+    // 288.7: the expiry moved later.
+    if ( rl_rng_record::events_on() )
+      rl_rng_record::event_buff( sim, rl_rng_record::EVT_BUFF_REFRESHED, this, 0 );
+
     sim->print_log( "{} extends {} by {}. New expiration time: {}", *source, *this, extra_seconds,
                     expiration.front()->occurs() );
   }
@@ -2494,6 +2502,10 @@ void buff_t::extend_duration( timespan_t extra_seconds )
     expiration.erase( expiration.begin() );
 
     expiration.push_back( make_event<expiration_t>( *sim, this, reschedule_time ) );
+
+    // 288.7: the expiry moved earlier.
+    if ( rl_rng_record::events_on() )
+      rl_rng_record::event_buff( sim, rl_rng_record::EVT_BUFF_REFRESHED, this, 0 );
 
     sim->print_log( "{} decreases {} by {}. New expiration: {}", *source, *this, -extra_seconds,
                     expiration.back()->occurs() );
@@ -2548,6 +2560,10 @@ void buff_t::extend_async_duration( timespan_t extra_seconds )
       rl_buff_ledger::applier_extend( this, rl_bl_current_cause( this ), rl_buff_source_player( this ), extra_seconds,
                                       rl_old_ends.data(), rl_new_ends.data(), rl_old_ends.size(),
                                       "extend_async_duration" );
+
+    // 288.7: every stack's expiry moved later.
+    if ( rl_rng_record::events_on() )
+      rl_rng_record::event_buff( sim, rl_rng_record::EVT_BUFF_REFRESHED, this, 0 );
   }
   else if ( extra_seconds < timespan_t::zero() )
   {
@@ -2721,6 +2737,12 @@ void buff_t::start( int stacks, double value, timespan_t duration )
     }
   }
 
+  // 288.7: the aura is up with its expiry scheduled -- an application (a first stack) or, for an
+  // asynchronous buff that already had stacks, one more stack with its own expiry (a refresh).
+  if ( rl_rng_record::events_on() )
+    rl_rng_record::event_buff( sim, before_stacks <= 0 ? rl_rng_record::EVT_BUFF_APPLIED : rl_rng_record::EVT_BUFF_REFRESHED,
+                               this, 0 );
+
   timespan_t period = tick_time();
   if ( tick_behavior != buff_tick_behavior::NONE && period > timespan_t::zero() && ( period <= d || d == 0_ms ) )
   {
@@ -2823,7 +2845,12 @@ void buff_t::refresh( int stacks, double value, timespan_t duration )
   d = d * get_time_duration_multiplier();
 
   if ( refresh_behavior == buff_refresh_behavior::DISABLED && duration != timespan_t::zero() )
+  {
+    // 288.7: the bump above may have added stacks; the expiry did not move.
+    if ( rl_rng_record::events_on() )
+      rl_rng_record::event_buff( sim, rl_rng_record::EVT_BUFF_REFRESHED, this, 0 );
     return;
+  }
 
   // Make sure we always cancel the expiration event if we get an
   // infinite duration
@@ -2870,6 +2897,10 @@ void buff_t::refresh( int stacks, double value, timespan_t duration )
       tick_callback( this, expiration.empty() ? -1 : static_cast<int>( remains() / tick_time() ), timespan_t::zero() );
     }
   }
+
+  // 288.7: the refreshed aura, stacks and expiry as they now stand.
+  if ( rl_rng_record::events_on() )
+    rl_rng_record::event_buff( sim, rl_rng_record::EVT_BUFF_REFRESHED, this, 0 );
 
   if ( rl_on )
     rl_buff_ledger::applier_end_moved( this, rl_old_end );
@@ -3255,6 +3286,10 @@ void buff_t::expire( timespan_t d )
   }
 
   current_stack = 0;
+
+  // 288.7: the aura is gone (its expire callbacks, which may start other auras, run after this).
+  if ( rl_rng_record::events_on() )
+    rl_rng_record::event_buff( sim, rl_rng_record::EVT_BUFF_EXPIRED, this, old_stack );
 
   if ( last_start >= timespan_t::zero() )
   {

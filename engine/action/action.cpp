@@ -5109,6 +5109,9 @@ void action_t::do_schedule_travel( action_state_t* state, timespan_t time_ )
     // cause guard just above. A never-stamped state (recorder was off) leaves the current frames
     // untouched (D-07).
     rl_rng_record::rl_press_scope_t rl_press_guard( sim, state );
+    // 288.7: the hit reaches its target (before impact() runs its effects).
+    if ( rl_rng_record::events_on() )
+      rl_rng_record::event_hit( sim, this, state );
     impact( state );
     action_state_t::release( state );
   }

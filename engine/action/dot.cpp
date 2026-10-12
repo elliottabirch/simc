@@ -143,6 +143,10 @@ void dot_t::adjust_duration( timespan_t extra_seconds, timespan_t max_total_time
     end_event = make_event<dot_end_event_t>( sim, this, new_remains );
   }
 
+  // 288.7: the dot's end moved.
+  if ( rl_rng_record::events_on() )
+    rl_rng_record::event_dot( &sim, rl_rng_record::EVT_DOT_REFRESHED, this );
+
   if ( count_as_refresh )
     current_action->stats->add_refresh( state->target );
 
@@ -315,10 +319,12 @@ void dot_t::copy( player_t* destination, dot_copy_e copy_type, action_t* copy_ac
   {
     timespan_t new_duration;
     timespan_t old_remains;
+    bool rl_was_ticking = false;  // 288.7: set below without a second is_ticking() read
 
     // Other dot is ticking, the cloning process will be a refresh
     if ( other_dot->is_ticking() )
     {
+      rl_was_ticking = true;
       old_remains = other_dot->remains();
 
       if ( copy_type == DOT_COPY_CLONE_NO_REFRESH )
@@ -377,6 +383,11 @@ void dot_t::copy( player_t* destination, dot_copy_e copy_type, action_t* copy_ac
 
     other_dot->tick_event =
         make_event<dot_tick_event_t>( sim, other_dot, new_tick_time );
+
+    // 288.7: a clone starts or refreshes the destination dot without start()/refresh().
+    if ( rl_rng_record::events_on() )
+      rl_rng_record::event_dot( &sim, rl_was_ticking ? rl_rng_record::EVT_DOT_REFRESHED : rl_rng_record::EVT_DOT_APPLIED,
+                                other_dot );
   }
 }
 
@@ -821,6 +832,10 @@ void dot_t::tick()
   sim.print_debug( "{} ticks ({} of {}). duration={} time_to_tick={} remains={}", *this, current_tick, num_ticks(),
                    current_duration, time_to_tick(), remains() );
 
+  // 288.7: a periodic tick, written before its damage and effects.
+  if ( rl_rng_record::events_on() )
+    rl_rng_record::event_dot( &sim, rl_rng_record::EVT_PERIODIC_TICK, this );
+
   current_action->tick( this );
 }
 
@@ -829,6 +844,10 @@ void dot_t::tick()
 void dot_t::last_tick()
 {
   sim.print_debug( "{} fades from {}", *this, *state->target );
+
+  // 288.7: the dot ran out (or was cancelled) -- written before its last_tick effects.
+  if ( rl_rng_record::events_on() )
+    rl_rng_record::event_dot( &sim, rl_rng_record::EVT_DOT_EXPIRED, this );
 
   current_action->last_tick( this );
   reset();
@@ -966,6 +985,11 @@ void dot_t::start( timespan_t duration )
   source->add_active_dot( this );
 
   schedule_tick();
+
+  // 288.7: the dot is up with its end and first tick scheduled (before a tick-zero tick).
+  if ( rl_rng_record::events_on() )
+    rl_rng_record::event_dot( &sim, rl_rng_record::EVT_DOT_APPLIED, this );
+
   check_tick_zero( true );
 
 }
@@ -991,6 +1015,10 @@ void dot_t::refresh( timespan_t duration )
     event_t::cancel( end_event );
     end_event = make_event<dot_end_event_t>( sim, this, current_duration );
   }
+
+  // 288.7: the refreshed dot's end and next tick as they now stand (before a tick-zero tick).
+  if ( rl_rng_record::events_on() )
+    rl_rng_record::event_dot( &sim, rl_rng_record::EVT_DOT_REFRESHED, this );
 
   check_tick_zero( false );
 

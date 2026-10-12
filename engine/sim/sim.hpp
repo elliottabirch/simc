@@ -822,6 +822,9 @@ struct sim_t : private sc_thread_t
   // (inside rl_rng_record.cpp, where the type IS complete), so sim.cpp only ever needs to hold
   // and drop this pointer, never instantiate its destructor.
   std::string rl_rng_record_file_str;
+  // 288.7: rl_rng_record_events=<0|1>, default 1. 0 turns the event writer off: the recording and
+  // its sidecar are then byte-equal to those of a build without the writer. See rl_rng_record.hpp.
+  int rl_rng_record_events = 1;
   std::shared_ptr<rl_rng_record::recorder_t> rl_rng_recorder;
   // 261001-bac stage 0 (research clone only, never in production): rl_buff_ledger=<path> writes
   // a per-hit JSON-lines ledger (see rl_buff_ledger.hpp). OFF by default (empty string). With it

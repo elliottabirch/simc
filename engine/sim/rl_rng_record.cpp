@@ -35,9 +35,13 @@
 // in player.hpp), which needs attack_t's complete definition to verify the derived-to-base
 // pointer adjustment for that comparison -- a plain forward declaration is not enough.
 #include "action/attack.hpp"
+#include "action/dot.hpp"
+#include "buff/buff.hpp"
+#include "player/pet.hpp"
 #include "player/player.hpp"
 #include "player/stats.hpp"
 #include "sim/event.hpp"
+#include "sim/cooldown.hpp"
 #include "sim/event_manager.hpp"
 #include "sim/proc_rng.hpp"
 #include "sim/raid_event.hpp"
@@ -72,6 +76,10 @@
 
 namespace rl_rng_record
 {
+
+// 288.7: true exactly while event records are being written (see rl_rng_record.hpp).
+bool g_events_on = false;
+
 namespace
 {
 
@@ -632,6 +640,7 @@ public:
   {
     if ( rng::rl_draw_sink == this )
       rng::rl_draw_sink = nullptr;
+    g_events_on = false;
   }
 
   // ---- rng::rl_draw_sink_t ----
@@ -683,7 +692,26 @@ public:
   bool inner_owner_is( const action_t* action ) const { return current_inner_owner_ == action; }
   void note_early_return( const action_t* action );
 
+  // ---- Event writer (288.7). See rl_rng_record.hpp's EVENT RECORDS comment for the contract. ----
+  void events_begin();
+  void events_end();
+  void event_buff( std::uint8_t cls, const buff_t* b, int prior_stacks );
+  void event_dot( std::uint8_t cls, const dot_t* d );
+  void event_hit( const action_t* a, const action_state_t* s );
+  void event_speed( const player_t* p );
+  void event_cooldown_rate( const cooldown_t* cd, double new_multiplier, double old_multiplier );
+
 private:
+  // 288.7: the event writer's own helpers. None of them touches a random stream or simulation state.
+  bool in_scope( const player_t* source ) const;
+  std::uint32_t unit_code( const player_t* u );
+  std::uint32_t entity_of_buff( const buff_t& b );
+  std::uint32_t entity_of_action( const action_t& a );
+  void write_event( std::uint8_t cls, std::uint32_t entity, std::uint32_t unit, std::uint32_t source,
+                    std::uint32_t value_a, std::uint32_t value_b );
+  void append_event( const record& r );
+  void write_events_sidecar_block( std::ostream& out ) const;
+
   std::uint32_t ensure_registered( std::uint32_t& roller_slot, const std::uint64_t& draw_counter );
   std::uint32_t ensure_action_roller( rng::rng_t& stream );
   void append( const record& r );
@@ -770,6 +798,12 @@ private:
   swing_trace_state_t swing_trace_;
   std::unique_ptr<io::ofstream> stream_;
   std::vector<unsigned char> buffer_;
+  // 288.7: where the LAST ROLL record sits in buffer_, and whether it is still the last record of
+  // any kind other than an event. The three patch-the-last-roll functions use these instead of
+  // "the tail of the buffer", so an event written between a draw and its patch (none is today)
+  // could never change what a roll record says. Events are not counted by row_count_.
+  bool tail_is_roll_ = false;
+  std::size_t last_roll_offset_ = 0;
   std::uint64_t row_count_ = 0;          // total records appended (buffered or already flushed)
   std::uint64_t roll_entry_total_ = 0;   // total ROLL entries over the whole recording
   std::uint64_t fight_roll_entries_ = 0; // ROLL entries THIS fight, cleared at fight_begin()
@@ -835,6 +869,21 @@ private:
   using window_key_t = std::tuple<std::uint8_t, std::uint32_t, std::uint32_t, std::uint32_t>;
   std::map<window_key_t, std::uint32_t> outer_window_positions_;
   std::map<window_key_t, std::uint32_t> inner_window_positions_;
+
+  // ---- Event writer state (288.7). ----
+  const player_t* controlled_ = nullptr;     // the one non-pet, non-enemy player, set by events_begin()
+  std::uint32_t fight_event_ordinal_ = 0;    // events written this fight
+  std::uint64_t event_total_ = 0;            // events written over the whole recording
+  std::array<std::uint64_t, EVT_CLASS_MAX + 1u> event_class_totals_{};
+  std::uint64_t events_fights_written_ = 0;  // fights that ran with events live
+  std::uint64_t events_fights_skipped_ = 0;  // fights skipped: not exactly one controlled player
+  bool last_speed_valid_ = false;
+  std::uint32_t last_speed_a_ = 0;
+  std::uint32_t last_speed_b_ = 0;
+  std::unordered_map<const void*, std::uint32_t> entity_cache_;
+  // (family, entity) -> name, family 0 = buff, 1 = action; and unit code -> (name, kind name).
+  std::map<std::pair<std::uint8_t, std::uint32_t>, std::string> entity_names_;
+  std::map<std::uint32_t, std::pair<std::string, std::string>> unit_names_;
 };
 
 std::uint32_t recorder_t::ensure_registered( std::uint32_t& roller_slot, const std::uint64_t& draw_counter )
@@ -1040,15 +1089,15 @@ void recorder_t::on_roll_outcome( std::uint32_t roller, std::uint64_t draw_ordin
   // `roller` here is the caller's rl_roller_id_ (the physical stream) -- basic_rng_t::roll()
   // deliberately passes the stream, not any override, so this matches the ROLL entry by
   // (stream, draw_ordinal) exactly as 250-01-PLAN.md's on_roll_outcome contract specifies.
-  if ( roller == last_roll_stream_ && draw_ordinal == last_roll_ordinal_ && buffer_.size() >= RECORD_SIZE )
+  if ( roller == last_roll_stream_ && draw_ordinal == last_roll_ordinal_ && tail_is_roll_ )
   {
     record rec;
-    std::memcpy( &rec, buffer_.data() + buffer_.size() - RECORD_SIZE, RECORD_SIZE );
+    std::memcpy( &rec, buffer_.data() + last_roll_offset_, RECORD_SIZE );
     if ( rec.kind == KIND_ROLL && rec.stream == roller && rec.draw_ordinal == draw_ordinal )
     {
       rec.chance = chance;
       rec.outcome = outcome ? OUTCOME_SUCCESS : OUTCOME_FAIL;
-      std::memcpy( buffer_.data() + buffer_.size() - RECORD_SIZE, &rec, RECORD_SIZE );
+      std::memcpy( buffer_.data() + last_roll_offset_, &rec, RECORD_SIZE );
       return;
     }
   }
@@ -1071,11 +1120,11 @@ void recorder_t::annotate_draw( rng::rng_t& stream, std::uint64_t before, double
     return;
 
   const std::uint32_t roller = stream.rl_roller_id();
-  if ( roller != last_roll_stream_ || after != last_roll_ordinal_ || buffer_.size() < RECORD_SIZE )
+  if ( roller != last_roll_stream_ || after != last_roll_ordinal_ || !tail_is_roll_ )
     return;
 
   record rec;
-  std::memcpy( &rec, buffer_.data() + buffer_.size() - RECORD_SIZE, RECORD_SIZE );
+  std::memcpy( &rec, buffer_.data() + last_roll_offset_, RECORD_SIZE );
   if ( rec.kind != KIND_ROLL || rec.stream != roller || rec.draw_ordinal != after )
     return;
 
@@ -1083,7 +1132,7 @@ void recorder_t::annotate_draw( rng::rng_t& stream, std::uint64_t before, double
   rec.outcome = outcome ? OUTCOME_SUCCESS : OUTCOME_FAIL;
   rec.label = label;
   rec.flags = static_cast<std::uint8_t>( rec.flags | FLAG_ANNOTATED );
-  std::memcpy( buffer_.data() + buffer_.size() - RECORD_SIZE, &rec, RECORD_SIZE );
+  std::memcpy( buffer_.data() + last_roll_offset_, &rec, RECORD_SIZE );
 }
 
 void recorder_t::label_last_roll( std::uint8_t label, double chance, bool success )
@@ -1094,15 +1143,15 @@ void recorder_t::label_last_roll( std::uint8_t label, double chance, bool succes
     return;
 
   bool matched = false;
-  if ( buffer_.size() >= RECORD_SIZE )
+  if ( tail_is_roll_ )
   {
     record rec;
-    std::memcpy( &rec, buffer_.data() + buffer_.size() - RECORD_SIZE, RECORD_SIZE );
+    std::memcpy( &rec, buffer_.data() + last_roll_offset_, RECORD_SIZE );
     if ( rec.kind == KIND_ROLL && rec.label == LABEL_NONE && rec.chance == chance &&
          rec.outcome == ( success ? OUTCOME_SUCCESS : OUTCOME_FAIL ) )
     {
       rec.label = label;
-      std::memcpy( buffer_.data() + buffer_.size() - RECORD_SIZE, &rec, RECORD_SIZE );
+      std::memcpy( buffer_.data() + last_roll_offset_, &rec, RECORD_SIZE );
       matched = true;
     }
   }
@@ -1331,11 +1380,327 @@ void recorder_t::note_early_return( const action_t* action )
 void recorder_t::append( const record& r )
 {
   const auto* bytes = reinterpret_cast<const unsigned char*>( &r );
+  // 288.7: remember where the last ROLL record sits (the patch functions read it from here).
+  tail_is_roll_ = r.kind == KIND_ROLL;
+  if ( tail_is_roll_ )
+    last_roll_offset_ = buffer_.size();
   buffer_.insert( buffer_.end(), bytes, bytes + RECORD_SIZE );
   ++row_count_;
   if ( r.kind == KIND_COUNTER )
     ++fight_counter_entries_;
 }
+
+// ---- Event writer (288.7). See rl_rng_record.hpp's EVENT RECORDS comment for the record layout,
+// the scope rule and the no-side-effect contract. Nothing below calls an rng method, schedules or
+// cancels an event, or writes a simulation field; every read goes through a const path that the
+// buff ledger does not count (check_unnoted, remains_unnoted, the dot's event pointers). ----
+
+namespace
+{
+inline std::uint32_t float_bits( float f )
+{
+  std::uint32_t u;
+  std::memcpy( &u, &f, sizeof( u ) );
+  return u;
+}
+
+inline std::uint32_t whole_ms( timespan_t t )
+{
+  // A buff with no timed expiry reports timespan_t::min() (buff.cpp remains_unnoted); a negative
+  // or absent remainder is written as 0.
+  if ( t == timespan_t::min() || t < timespan_t::zero() )
+    return 0u;
+  return static_cast<std::uint32_t>( t.total_millis() );
+}
+
+constexpr std::array<const char*, EVT_CLASS_MAX + 1u> EVENT_CLASS_NAMES = {
+    "none",           "buff_applied", "buff_refreshed", "buff_expired",   "stacks_changed", "dot_applied",
+    "dot_refreshed",  "dot_expired",  "periodic_tick",  "hit_landed",     "speed_changed",  "cooldown_rate_changed" };
+}  // anonymous namespace
+
+void recorder_t::events_begin()
+{
+  g_events_on = false;
+  if ( !writing_ || !root_->rl_rng_record_events )
+    return;
+
+  // The controlled player: the one non-pet player that is not an enemy (the same actor the
+  // translog and the swing trace describe).
+  const player_t* found = nullptr;
+  int qualifying = 0;
+  for ( const player_t* p : root_->player_no_pet_list )
+  {
+    if ( p->is_enemy() )
+      continue;
+    ++qualifying;
+    found = p;
+  }
+  if ( qualifying != 1 )
+  {
+    controlled_ = nullptr;
+    ++events_fights_skipped_;
+    return;
+  }
+
+  controlled_ = found;
+  fight_event_ordinal_ = 0;
+  last_speed_valid_ = false;
+  ++events_fights_written_;
+  g_events_on = true;
+}
+
+void recorder_t::events_end()
+{
+  g_events_on = false;
+}
+
+bool recorder_t::in_scope( const player_t* source ) const
+{
+  if ( !source || !controlled_ )
+    return false;
+  if ( source == controlled_ )
+    return true;
+  return source->is_pet() && !source->is_enemy() && source->cast_pet()->owner == controlled_;
+}
+
+std::uint32_t recorder_t::unit_code( const player_t* u )
+{
+  if ( !u )
+    return UNIT_NONE << 24;
+  std::uint32_t kind = UNIT_OTHER;
+  if ( u == controlled_ )
+    kind = UNIT_PLAYER;
+  else if ( u->is_enemy() )
+    kind = UNIT_ENEMY;
+  else if ( u->is_pet() && u->cast_pet()->owner == controlled_ )
+    kind = UNIT_PET;
+  const std::uint32_t code = ( kind << 24 ) | ( static_cast<std::uint32_t>( u->actor_index ) & 0x00FFFFFFu );
+  if ( unit_names_.find( code ) == unit_names_.end() )
+  {
+    static constexpr const char* KIND_NAMES[] = { "player", "pet", "enemy", "other", "none" };
+    unit_names_.emplace( code, std::make_pair( u->name_str, std::string( KIND_NAMES[ kind ] ) ) );
+  }
+  return code;
+}
+
+std::uint32_t recorder_t::entity_of_buff( const buff_t& b )
+{
+  const auto cached = entity_cache_.find( &b );
+  if ( cached != entity_cache_.end() )
+    return cached->second;
+
+  std::uint32_t entity = b.data().id();
+  if ( entity == 0 )
+  {
+    // No spell id: flag | index in the owner's buff list (or the sim's, for a raid-wide buff).
+    std::uint32_t index = 0;
+    const auto& list = b.player ? b.player->buff_list : b.sim->buff_list;
+    for ( std::size_t i = 0; i < list.size(); ++i )
+    {
+      if ( list[ i ] == &b )
+      {
+        index = static_cast<std::uint32_t>( i );
+        break;
+      }
+    }
+    entity = ENTITY_NO_SPELL_FLAG | index;
+  }
+  entity_cache_.emplace( &b, entity );
+  entity_names_.emplace( std::make_pair( std::uint8_t{ 0 }, entity ), b.name_str );
+  return entity;
+}
+
+std::uint32_t recorder_t::entity_of_action( const action_t& a )
+{
+  const auto cached = entity_cache_.find( &a );
+  if ( cached != entity_cache_.end() )
+    return cached->second;
+
+  std::uint32_t entity = a.id;
+  if ( entity == 0 )
+  {
+    std::uint32_t index = 0;
+    const auto& list = a.player->action_list;
+    for ( std::size_t i = 0; i < list.size(); ++i )
+    {
+      if ( list[ i ] == &a )
+      {
+        index = static_cast<std::uint32_t>( i );
+        break;
+      }
+    }
+    entity = ENTITY_NO_SPELL_FLAG | index;
+  }
+  entity_cache_.emplace( &a, entity );
+  entity_names_.emplace( std::make_pair( std::uint8_t{ 1 }, entity ), a.name_str );
+  return entity;
+}
+
+void recorder_t::append_event( const record& r )
+{
+  // Deliberately NOT append(): an event is not a row of the roll accounting (no row_count_, no
+  // tail_is_roll_ change), so the footer, the counters and the patch functions never see it.
+  const auto* bytes = reinterpret_cast<const unsigned char*>( &r );
+  buffer_.insert( buffer_.end(), bytes, bytes + RECORD_SIZE );
+}
+
+void recorder_t::write_event( std::uint8_t cls, std::uint32_t entity, std::uint32_t unit, std::uint32_t source,
+                              std::uint32_t value_a, std::uint32_t value_b )
+{
+  record rec{};
+  rec.raw = 0.0;
+  rec.chance = CHANCE_NONE;
+  rec.time_ms = static_cast<std::int64_t>( root_->current_time().total_millis() );
+  rec.draw_ordinal = fight_event_ordinal_++;
+  rec.roller = entity;
+  rec.stream = unit;
+  rec.trigger = current_outer_.trigger;
+  rec.press = current_outer_.press;
+  rec.position = source;
+  rec.inner_trigger = current_inner_.trigger;
+  rec.inner_press = current_inner_.press;
+  rec.inner_position = 0;
+  rec.iteration = current_iteration_field_;
+  rec.kind = KIND_EVENT;
+  rec.trigger_kind = current_outer_.kind;
+  rec.inner_trigger_kind = current_inner_.kind;
+  rec.outcome = OUTCOME_NOT_A_ROLL;
+  rec.label = cls;
+  rec.flags = 0;
+  std::memcpy( rec.reserved, &value_a, sizeof( value_a ) );
+  std::memcpy( rec.reserved + 4, &value_b, sizeof( value_b ) );
+  append_event( rec );
+  ++event_total_;
+  ++event_class_totals_[ cls ];
+}
+
+void recorder_t::event_buff( std::uint8_t cls, const buff_t* b, int prior_stacks )
+{
+  if ( !in_scope( b->source ) )
+    return;
+
+  std::uint32_t a = 0, v = 0;
+  switch ( cls )
+  {
+    case EVT_BUFF_APPLIED:
+    case EVT_BUFF_REFRESHED:
+      a = static_cast<std::uint32_t>( b->check_unnoted() );
+      v = whole_ms( b->remains_unnoted() );
+      break;
+    case EVT_BUFF_EXPIRED:
+      a = static_cast<std::uint32_t>( prior_stacks );
+      break;
+    case EVT_STACKS_CHANGED:
+      a = static_cast<std::uint32_t>( b->check_unnoted() );
+      v = static_cast<std::uint32_t>( prior_stacks );
+      break;
+    default:
+      return;
+  }
+  write_event( cls, entity_of_buff( *b ), unit_code( b->player ), unit_code( b->source ), a, v );
+}
+
+void recorder_t::event_dot( std::uint8_t cls, const dot_t* d )
+{
+  if ( !d->current_action || !in_scope( d->source ) )
+    return;
+
+  const std::uint32_t remaining = d->end_event ? whole_ms( d->end_event->remains() ) : 0u;
+  const std::uint32_t to_tick = d->tick_event ? whole_ms( d->tick_event->remains() ) : 0u;
+  std::uint32_t a = 0, v = 0;
+  switch ( cls )
+  {
+    case EVT_DOT_APPLIED:
+    case EVT_DOT_REFRESHED:
+      a = remaining;
+      v = to_tick;
+      break;
+    case EVT_DOT_EXPIRED:
+      a = static_cast<std::uint32_t>( d->current_tick );
+      break;
+    case EVT_PERIODIC_TICK:
+      a = static_cast<std::uint32_t>( d->current_tick );
+      v = remaining;
+      break;
+    default:
+      return;
+  }
+  write_event( cls, entity_of_action( *d->current_action ), unit_code( d->target ), unit_code( d->source ), a, v );
+}
+
+void recorder_t::event_hit( const action_t* a, const action_state_t* s )
+{
+  if ( !in_scope( a->player ) )
+    return;
+  write_event( EVT_HIT_LANDED, entity_of_action( *a ), unit_code( s->target ), unit_code( a->player ),
+               static_cast<std::uint32_t>( static_cast<std::int32_t>( s->result ) ), 0u );
+}
+
+void recorder_t::event_speed( const player_t* p )
+{
+  if ( p != controlled_ )
+    return;
+  // The composite functions are called directly (never through the stat cache): a cache entry is
+  // never filled earlier than the simulation itself would have filled it.
+  const std::uint32_t a = float_bits( static_cast<float>( p->composite_spell_haste() ) );
+  const std::uint32_t v = float_bits( static_cast<float>( p->composite_melee_auto_attack_speed() ) );
+  if ( last_speed_valid_ && a == last_speed_a_ && v == last_speed_b_ )
+    return;
+  last_speed_valid_ = true;
+  last_speed_a_ = a;
+  last_speed_b_ = v;
+  write_event( EVT_SPEED_CHANGED, 0u, unit_code( p ), unit_code( p ), a, v );
+}
+
+void recorder_t::event_cooldown_rate( const cooldown_t* cd, double new_multiplier, double old_multiplier )
+{
+  if ( !cd->action || !in_scope( cd->action->player ) )
+    return;
+  write_event( EVT_COOLDOWN_RATE, entity_of_action( *cd->action ), unit_code( cd->action->player ),
+               unit_code( cd->action->player ), float_bits( static_cast<float>( new_multiplier ) ),
+               float_bits( static_cast<float>( old_multiplier ) ) );
+}
+
+void recorder_t::write_events_sidecar_block( std::ostream& out ) const
+{
+  out << ", \"events\": {\"version\": 1, \"total\": " << event_total_ << ", \"fightsWritten\": " << events_fights_written_
+      << ", \"fightsSkippedNoSinglePlayer\": " << events_fights_skipped_ << ", \"classes\": {";
+  for ( std::size_t c = 1; c <= EVT_CLASS_MAX; ++c )
+  {
+    if ( c != 1 )
+      out << ", ";
+    out << "\"" << c << "\": \"" << EVENT_CLASS_NAMES[ c ] << "\"";
+  }
+  out << "}, \"counts\": {";
+  for ( std::size_t c = 1; c <= EVT_CLASS_MAX; ++c )
+  {
+    if ( c != 1 )
+      out << ", ";
+    out << "\"" << c << "\": " << event_class_totals_[ c ];
+  }
+  out << "}, \"units\": [";
+  bool first = true;
+  for ( const auto& kv : unit_names_ )
+  {
+    if ( !first )
+      out << ", ";
+    first = false;
+    out << "{\"unit\": " << kv.first << ", \"name\": \"" << json_escape( kv.second.first ) << "\", \"kind\": \""
+        << kv.second.second << "\"}";
+  }
+  out << "], \"entities\": [";
+  first = true;
+  for ( const auto& kv : entity_names_ )
+  {
+    if ( !first )
+      out << ", ";
+    first = false;
+    out << "{\"family\": \"" << ( kv.first.first == 0 ? "buff" : "action" ) << "\", \"entity\": " << kv.first.second
+        << ", \"name\": \"" << json_escape( kv.second ) << "\"}";
+  }
+  out << "]}";
+}
+
 
 void recorder_t::assert_stream_ok( const char* where )
 {
@@ -1758,7 +2123,8 @@ void recorder_t::replay_fight_begin()
       found_end = true;
       break;
     }
-    if ( rec.kind < KIND_ROLL || rec.kind > KIND_FOOTER )
+    // 288.7: KIND_EVENT records are accepted and skipped (replay reads rolls only).
+    if ( rec.kind < KIND_ROLL || rec.kind > KIND_EVENT )
     {
       throw sc_runtime_error( fmt::format(
           "rl_rng_replay: '{}' fight {}: entry has invalid kind {}.",
@@ -2062,6 +2428,7 @@ void recorder_t::fight_end()
     stream_->flush();
     assert_stream_ok( "fight_end" );
     buffer_.clear();
+    tail_is_roll_ = false;
   }
 
   // Replay (253-02, D-15): close this fight's window -- tally its unhanded numbers, then free
@@ -2796,6 +3163,11 @@ void recorder_t::write_sidecar()
     }
   }
 
+  // 288.7: the event block, present only when the event writer was on for this recording --
+  // with rl_rng_record_events=0 the sidecar is byte-equal to one made before the writer existed.
+  if ( root_->rl_rng_record_events )
+    write_events_sidecar_block( sidecar );
+
   sidecar << "}";
 
   if ( !sidecar )
@@ -2825,6 +3197,7 @@ void recorder_t::write_footer()
     stream_->flush();
     assert_stream_ok( "write_footer" );
     buffer_.clear();
+    tail_is_roll_ = false;
     stream_->close();
 
     write_sidecar();
@@ -2980,6 +3353,65 @@ bool active( const sim_t* sim )
   while ( root->parent )
     root = root->parent;
   return static_cast<bool>( root->rl_rng_recorder );
+}
+
+// ---- Event writer free functions (288.7). Each is called only behind an events_on() guard at its
+// call site; the root and shadow checks make it safe to call from any sim. ----
+
+void events_begin( sim_t* sim )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder )
+    return;
+  root->rl_rng_recorder->events_begin();
+}
+
+void events_end( sim_t* sim )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder )
+    return;
+  root->rl_rng_recorder->events_end();
+}
+
+void event_buff( sim_t* sim, std::uint8_t cls, const buff_t* b, int prior_stacks )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder || sim->rl_bl_shadow )
+    return;
+  root->rl_rng_recorder->event_buff( cls, b, prior_stacks );
+}
+
+void event_dot( sim_t* sim, std::uint8_t cls, const dot_t* d )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder || sim->rl_bl_shadow )
+    return;
+  root->rl_rng_recorder->event_dot( cls, d );
+}
+
+void event_hit( sim_t* sim, const action_t* a, const action_state_t* s )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder || sim->rl_bl_shadow )
+    return;
+  root->rl_rng_recorder->event_hit( a, s );
+}
+
+void event_speed( sim_t* sim, const player_t* p )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder || sim->rl_bl_shadow )
+    return;
+  root->rl_rng_recorder->event_speed( p );
+}
+
+void event_cooldown_rate( sim_t* sim, const cooldown_t* cd, double new_multiplier, double old_multiplier )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder || sim->rl_bl_shadow )
+    return;
+  root->rl_rng_recorder->event_cooldown_rate( cd, new_multiplier, old_multiplier );
 }
 
 // ---- Swing trace / swing pin (tstl-sylvanas phase 257, plan 257-09, D-18). See each

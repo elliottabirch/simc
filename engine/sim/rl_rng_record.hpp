@@ -22,6 +22,73 @@
 //
 // Read with scripts/rl/probes/rng_record.py (plan 250-02, built in parallel with this plan).
 //
+// ==========================================================================================
+// EVENT RECORDS (tstl-sylvanas phase 288.7, v218-event-times): a new record kind, KIND_EVENT
+// (7), written into the SAME 80-byte record beside the rolls. A roll record says WHEN a random
+// number was drawn; an event record says WHEN the simulation changed something a decision-time
+// observation shows (an aura appeared, was refreshed or ran out, a hit reached its target, a
+// periodic effect ticked, the player's speed changed). Every static_assert of the record layout
+// below is kept; every field a roll writes keeps its meaning for a roll.
+//
+// Rules this code keeps (proved by 288.7-EVENT-RECORDER.md's parity receipts):
+//   1. Writing an event never touches a random stream, never schedules or cancels an event, and
+//      never changes simulation state: every value is read through a const path that records no
+//      read for the buff ledger (remains_unnoted, check_unnoted, direct event pointers) and the
+//      speed values are computed by calling the composite functions directly, never through
+//      the stat cache (so no cache entry is filled earlier than it would have been).
+//   2. An event is NOT a row of the roll accounting: it does not count toward the footer's total
+//      (FOOTER position field) or any COUNTER, so a recording with every KIND_EVENT record
+//      removed is byte-equal to the recording a build without this code would have written.
+//      Events are also invisible to the three patch-the-last-roll functions (on_roll_outcome,
+//      annotate_draw, label_last_roll): those patch the last ROLL record by its remembered
+//      offset, not whatever sits at the tail of the buffer.
+//   3. rl_rng_record_events=0 (default 1) turns the writer off entirely: the recording and its
+//      sidecar are then byte-equal to a build without this code.
+//   4. Scope: an event is written when its SOURCE is the controlled player (the one non-pet
+//      player of the simulation) or one of its pets, on any unit, plus the controlled player's
+//      own speed changes. Events are written only while a fight runs (after the reset phase,
+//      before combat_end), so the resets at fight boundaries write none.
+//
+// Field map of a KIND_EVENT record (everything not listed is zero):
+//   @16 time_ms        simulation time of the event, the same clock a roll carries
+//   @24 draw_ordinal   REUSED: the event's 0-based ordinal within its fight
+//   @32 roller         REUSED: ENTITY, the spell or aura the event is about.
+//                      A spell id when the thing has one (buff: its spell data id; dot, hit and
+//                      cooldown: the action's spell id). A thing with no spell id (an auto attack,
+//                      an item buff) is 0x80000000 | its index in its owner's action list (for an
+//                      action) or buff list (for a buff). The sidecar's events.entities names them.
+//                      EVT_SPEED_CHANGED: 0.
+//   @36 stream         REUSED: UNIT, where the event happens (the buff holder, the dot's or hit's
+//                      target, the player for a speed change or a cooldown).
+//   @48 position       REUSED: SOURCE, who caused it (the buff's source, the dot's or hit's actor).
+//                      UNIT and SOURCE share one coding: (unit_kind << 24) | actor_index, with
+//                      unit_kind 0 the controlled player, 1 a pet of it, 2 an enemy (boss, add,
+//                      dummy), 3 any other actor, 4 no unit (a raid-wide aura).
+//   @40 trigger, @44 press, @67 trigger_kind      the outer press at that moment, as on a roll
+//   @52 inner_trigger, @56 inner_press, @68 inner_trigger_kind      the inner press, as on a roll
+//   @66 kind           KIND_EVENT
+//   @69 outcome        OUTCOME_NOT_A_ROLL
+//   @70 label          REUSED: the event CLASS, one of EVT_* below
+//   @72 reserved[0..3] value A (int32 or float32, per class)
+//   @76 reserved[4..7] value B (int32 or float32, per class)
+// Values per class (ms = whole milliseconds, int32; "none" = 0):
+//   EVT_BUFF_APPLIED        A stacks after            B remaining ms (0 = no timed expiry)
+//   EVT_BUFF_REFRESHED      A stacks after            B remaining ms after (also an extend or cut of the duration)
+//   EVT_BUFF_EXPIRED        A stacks lost             B 0
+//   EVT_STACKS_CHANGED      A stacks after            B stacks before (stacks consumed, buff stays up)
+//   EVT_DOT_APPLIED         A remaining ms            B ms to the next tick
+//   EVT_DOT_REFRESHED       A remaining ms after      B ms to the next tick after
+//   EVT_DOT_EXPIRED         A ticks done              B 0
+//   EVT_PERIODIC_TICK       A tick number (1-based)   B remaining ms after the tick
+//   EVT_HIT_LANDED          A result (sc_enums result_e: 1 miss, 2 dodge, 3 parry, 4 glance, 5 crit, 6 hit)   B 0
+//   EVT_SPEED_CHANGED       A float32 spell haste multiplier (time scale, below 1 = faster)
+//                           B float32 auto-attack speed multiplier (swing interval scale)
+//   EVT_COOLDOWN_RATE       A float32 new recharge multiplier   B float32 old recharge multiplier
+//                           (an ongoing cooldown whose divisor changed; ENTITY = the action's id)
+// Reading: scripts/rl/probes/rng_record.py (the repo's reader) yields these records with their
+// kind; a reader that wants rolls only skips kind != KIND_ROLL.
+// ==========================================================================================
+//
 #pragma once
 
 #include <cstddef>
@@ -40,6 +107,9 @@ struct action_state_t;
 struct raid_event_t;
 struct proc_rng_t;
 struct event_t;
+struct buff_t;
+struct dot_t;
+struct cooldown_t;
 
 namespace rng
 {
@@ -60,6 +130,29 @@ inline constexpr std::uint32_t KIND_FIGHT_END = 3u;
 inline constexpr std::uint32_t KIND_COUNTER = 4u;
 inline constexpr std::uint32_t KIND_RESALT = 5u;
 inline constexpr std::uint32_t KIND_FOOTER = 6u;
+inline constexpr std::uint32_t KIND_EVENT = 7u;   // 288.7: see the EVENT RECORDS comment at the top of this file
+
+// Event classes, written into the label byte of a KIND_EVENT record. Never 0 (LABEL_NONE).
+inline constexpr std::uint8_t EVT_BUFF_APPLIED = 1u;
+inline constexpr std::uint8_t EVT_BUFF_REFRESHED = 2u;
+inline constexpr std::uint8_t EVT_BUFF_EXPIRED = 3u;
+inline constexpr std::uint8_t EVT_STACKS_CHANGED = 4u;
+inline constexpr std::uint8_t EVT_DOT_APPLIED = 5u;
+inline constexpr std::uint8_t EVT_DOT_REFRESHED = 6u;
+inline constexpr std::uint8_t EVT_DOT_EXPIRED = 7u;
+inline constexpr std::uint8_t EVT_PERIODIC_TICK = 8u;
+inline constexpr std::uint8_t EVT_HIT_LANDED = 9u;
+inline constexpr std::uint8_t EVT_SPEED_CHANGED = 10u;
+inline constexpr std::uint8_t EVT_COOLDOWN_RATE = 11u;
+inline constexpr std::uint8_t EVT_CLASS_MAX = 11u;
+
+// Unit kinds (high byte of a UNIT / SOURCE field of an event record).
+inline constexpr std::uint32_t UNIT_PLAYER = 0u;
+inline constexpr std::uint32_t UNIT_PET = 1u;
+inline constexpr std::uint32_t UNIT_ENEMY = 2u;
+inline constexpr std::uint32_t UNIT_OTHER = 3u;
+inline constexpr std::uint32_t UNIT_NONE = 4u;
+inline constexpr std::uint32_t ENTITY_NO_SPELL_FLAG = 0x80000000u;
 
 inline constexpr std::uint8_t TRIGGER_KIND_NONE = 0u;
 inline constexpr std::uint8_t TRIGGER_KIND_EXECUTE = 1u;
@@ -422,6 +515,41 @@ void register_raid_event( sim_t* sim, raid_event_t& event );
 // Cheap query for a call site that wants to skip building a key string entirely when recording
 // is off.
 bool active( const sim_t* sim );
+
+// ---- Event writer (288.7). Every function below is a no-op unless events are live: the recorder
+// is writing, rl_rng_record_events is on, the fight is running (between events_begin() and
+// events_end()) and the simulation has exactly one non-pet player. Call sites guard with
+// events_on() so the arguments of a disabled hook are never computed. ----
+
+// True exactly while events are being written (one process-wide flag: the recorder forces
+// threads=1, so there is one writer). Defined in rl_rng_record.cpp.
+extern bool g_events_on;
+inline bool events_on()
+{
+  return g_events_on;
+}
+
+// Called from sim_t::combat_begin() right after reset() (the reset phase is not part of a fight)
+// and from the top of sim_t::combat_end(). No-ops when the recorder is off.
+void events_begin( sim_t* sim );
+void events_end( sim_t* sim );
+
+// A buff event. `prior_stacks` is the stack count before the change (used by EVT_BUFF_EXPIRED
+// for the stacks lost and by EVT_STACKS_CHANGED for the count before); ignored by the others.
+void event_buff( sim_t* sim, std::uint8_t cls, const buff_t* b, int prior_stacks );
+
+// A damage-over-time event for `d` (APPLIED, REFRESHED, EXPIRED, TICK).
+void event_dot( sim_t* sim, std::uint8_t cls, const dot_t* d );
+
+// A hit reaching its target (called at the two impact dispatch points, before impact() runs).
+void event_hit( sim_t* sim, const action_t* a, const action_state_t* s );
+
+// The controlled player's speed (called from player_t::adjust_dynamic_cooldowns()); written only
+// when the pair of multipliers differs from the last one written this fight.
+void event_speed( sim_t* sim, const player_t* p );
+
+// An ongoing cooldown whose recharge multiplier changed (cooldown_t::adjust_recharge_multiplier()).
+void event_cooldown_rate( sim_t* sim, const cooldown_t* cd, double new_multiplier, double old_multiplier );
 
 // ---- Swing trace / swing pin (tstl-sylvanas phase 257, plan 257-09, D-18, owner ruling A-125 --
 // supersedes plan 257-07's own v1 pin-list design, A-124's finding: simc moves a swing LAZILY

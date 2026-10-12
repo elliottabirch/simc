@@ -2130,6 +2130,10 @@ void sim_t::combat_begin()
 
   reset();
 
+  // 288.7: from here on a fight's event records are written (the reset phase above is not part of
+  // a fight). No-op when rl_rng_record= is unset.
+  rl_rng_record::events_begin( this );
+
   // 261001-bac plan 07: from here on a fight's cooldown records are written (the reset phase above is not part of it).
   if ( rl_bl_on )
     rl_buff_ledger::reset_done( this );
@@ -2303,6 +2307,10 @@ bool sim_t::is_untargetable_enemy( const player_t* p ) const
 void sim_t::combat_end()
 {
   print_debug( "Combat End" );
+
+  // 288.7: the fight's event records stop here (everything after is the engine tearing the fight
+  // down). No-op when rl_rng_record= is unset.
+  rl_rng_record::events_end( this );
 
   // tstl-sylvanas 260929-bystander: per-enemy damage readout (opt-in). Every enemy actor is listed,
   // including raid-event adds (pets of the boss, not in target_list), so a non-bystander's
@@ -4709,6 +4717,8 @@ void sim_t::create_options()
   // Random-roll recorder (tstl-sylvanas phase 250, plan 250-01, REC-01/02/03). See sim.hpp's
   // rl_rng_record_file_str doc comment. Default empty, byte-identical to today's behavior.
   add_option( opt_string( "rl_rng_record", rl_rng_record_file_str ) );
+  // 288.7: the event writer's switch (default on). See sim.hpp's rl_rng_record_events comment.
+  add_option( opt_int( "rl_rng_record_events", rl_rng_record_events, 0, 1 ) );
   // 261001-bac stage 0 (research clone only): per-hit buff ledger. See sim.hpp's
   // rl_buff_ledger_str doc comment. Default empty (off).
   add_option( opt_string( "rl_buff_ledger", rl_buff_ledger_str ) );

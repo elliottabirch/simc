@@ -337,6 +337,9 @@ void travel_event_t::execute()
     // SAME deferred travel-time boundary -- see do_schedule_travel's zero-travel-time branch
     // (action.cpp) for the sibling call this mirrors.
     rl_rng_record::rl_press_scope_t rl_press_guard( action->sim, state );
+    // 288.7: the hit reaches its target after its travel time (before impact() runs its effects).
+    if ( rl_rng_record::events_on() )
+      rl_rng_record::event_hit( action->sim, action, state );
     action->impact( state );
   }
 

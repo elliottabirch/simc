@@ -9,6 +9,7 @@
 #include "sim/event.hpp"
 #include "sim/expressions.hpp"
 #include "sim/rl_buff_ledger.hpp"
+#include "sim/rl_rng_record.hpp"
 #include "sim/sim.hpp"
 
 #include <limits>
@@ -173,6 +174,10 @@ void cooldown_t::adjust_recharge_multiplier()
   {
     return;
   }
+
+  // 288.7: an ongoing cooldown's divisor changed.
+  if ( rl_rng_record::events_on() )
+    rl_rng_record::event_cooldown_rate( &sim, this, recharge_multiplier, old_multiplier );
 
   timespan_t old_ready = ready;
   adjust_remaining_duration( recharge_multiplier / old_multiplier );

@@ -14704,6 +14704,11 @@ unsigned player_t::get_active_dots( const dot_t* dot ) const
 
 void player_t::adjust_dynamic_cooldowns()
 {
+  // 288.7: the single funnel every haste change reaches (a stat gain or loss, a haste buff's
+  // stack change). Written before the cooldown rate changes it causes.
+  if ( rl_rng_record::events_on() )
+    rl_rng_record::event_speed( sim, this );
+
   range::for_each( dynamic_cooldown_list, []( cooldown_t* cd ) { cd -> adjust_recharge_multiplier(); } );
 }
 
