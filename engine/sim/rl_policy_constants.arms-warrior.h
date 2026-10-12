@@ -1880,3 +1880,17 @@ inline constexpr rl_hit_provider RL_HIT_PROVIDERS[RL_HIT_PROVIDER_COUNT] = {
 #define RL_HIT_ROW_NEEDS_UNIT_DEFINED 1
 inline constexpr bool RL_HIT_ROW_NEEDS_UNIT[RL_HIT_PROVIDER_COUNT] = { false, true, false, true, true, true, true, true, true, true, true };
 inline constexpr bool RL_HIT_ROW_CLASS_OVERRIDDEN[RL_HIT_PROVIDER_COUNT] = { false, true, false, false, false, false, false, false, false, false, false };
+
+// The channel lock (G271.6-37). While the player is channelling, or any aura of RL_LOCK_AURA_SPELL_IDS is up, the simulator refuses
+// every cast button whose RL_ACTION_REFUSED_WHILE_LOCKED entry (indexed by action id; a wait reads false) is true; item uses and
+// waits are never refused. RL_ACTION_LOCK_ANSWER_VARIES is true for a button whose answer depends on the talent build; the
+// table then carries the census build's answer. The engine's bind-time check compares its own answers with these tables and skips
+// a row whose answer varies. All of it is the simulator's own answer carried by the action census, never typed in a generator.
+#define RL_ACTION_LOCK_TABLE_DEFINED 1
+inline constexpr bool RL_ACTION_REFUSED_WHILE_LOCKED[RL_ACTION_DIM] = { true, true, true, true, true, true, true, true, true, true, true, true, false, true, true, false, false, false };
+inline constexpr bool RL_ACTION_LOCK_ANSWER_VARIES[RL_ACTION_DIM] = { false, false, false, false, false, false, false, false, false, false, false, false, true, false, false, false, false, false };
+inline constexpr std::size_t RL_LOCK_AURA_COUNT = 2;
+inline constexpr long long RL_LOCK_AURA_SPELL_IDS[RL_LOCK_AURA_COUNT] = {
+  227847,
+  446035,
+};
