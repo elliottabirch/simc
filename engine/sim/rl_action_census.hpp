@@ -247,6 +247,17 @@ const char*  gate_class_name( gate_class_t c );
 // census hit rows but carries no class table throws too. Reads only.
 void check_header_gate_classes( const player_t* p, const std::vector<token_t>& walk );
 
+// The bind-time lock check (271.6-18, G271.6-37; the model is check_header_gate_classes above). For every cast button of the active
+// header whose action exists for the actor and whose spell data is enabled for it (an untaken talent can never be pressed, so it
+// says nothing; the aimed-range binder skips it too), the engine's own answer `refused_while_channel_locked()` must equal the
+// header's `RL_ACTION_REFUSED_WHILE_LOCKED` entry, unless the header marks the row `RL_ACTION_LOCK_ANSWER_VARIES` (the answer
+// depends on the talent build, so the table carries the census build's answer and a dealt build may differ). Every lock aura the
+// actor lists must be one of the header's `RL_LOCK_AURA_SPELL_IDS`. A mismatch throws by name. A header without the lock table is
+// refused only when the engine refuses some button or lists some lock aura for this actor (a stale arms header); a header for a
+// spec that locks nothing (enhancement) passes. `handles` is in RL_ACTIONS order (nullptr for a wait or an action not found).
+// Reads only.
+void check_header_lock_table( const player_t* p, const std::vector<action_t*>& handles );
+
 // Walks every cast token of the active registry header for `p`. Reads only.
 std::vector<token_t> walk( player_t* p );
 

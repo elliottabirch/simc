@@ -1127,6 +1127,10 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
                               ? solver_control::resolve_action( mutable_p, a.token )
                               : nullptr );
     }
+    // 271.6-18 (G271.6-37): the engine's channel-lock answers for these handles must equal the header's lock table (a
+    // build-dependent row skipped), else the run is refused here, by name, at the first decision. Runs for every actor that
+    // reaches this fill, enhancement included, where it refuses nothing.
+    rl_action_census::check_header_lock_table( mutable_p, handles );
     // 271.6-07: the reach table, taken once beside the handles (reads only). Empty unless the header declares census hit
     // providers, so enhancement never walks the census here.
     std::vector<reach_gate_t> gates( RL_ACTION_DIM );

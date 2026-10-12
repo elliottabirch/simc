@@ -787,6 +787,65 @@ void check_header_gate_classes( const player_t* p, const std::vector<token_t>& w
 #endif
 }
 
+void check_header_lock_table( const player_t* p, const std::vector<action_t*>& handles )
+{
+  const std::vector<unsigned> engine_auras = p->channel_lock_aura_spell_ids();
+#ifdef RL_ACTION_LOCK_TABLE_DEFINED
+  for ( std::size_t i = 0; i < RL_ACTION_DIM && i < handles.size(); ++i )
+  {
+    const rl_action_desc& d = RL_ACTIONS[ i ];
+    if ( d.kind != rl_action_kind::cast || d.token == nullptr || handles[ i ] == nullptr )
+      continue;
+    // An action built from an untaken talent has spell data that is not enabled for this player: it can never be pressed.
+    if ( !handles[ i ]->data().ok() )
+      continue;
+    // A build-dependent answer (Storm Bolt: usable while channelling only with the Slayer talent Unrelenting Onslaught): the
+    // header carries the census build's answer; the training deal varies the hero tree, so a dealt build may answer otherwise.
+    if ( RL_ACTION_LOCK_ANSWER_VARIES[ i ] )
+      continue;
+    const bool engine_refused = handles[ i ]->refused_while_channel_locked();
+    if ( engine_refused != RL_ACTION_REFUSED_WHILE_LOCKED[ i ] )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy: registry '{}' header says button '{}' {} refused while locked but player '{}' answers {} "
+          "(bind-time refusal: the generated lock table and the engine must agree; regenerate the census and the header)",
+          RL_REGISTRY_ID, d.token, RL_ACTION_REFUSED_WHILE_LOCKED[ i ] ? "is" : "is not", p->name(),
+          engine_refused ? "it is" : "it is not" ) );
+    }
+  }
+  for ( unsigned id : engine_auras )
+  {
+    bool listed = false;
+    for ( std::size_t k = 0; k < RL_LOCK_AURA_COUNT; ++k )
+      if ( RL_LOCK_AURA_SPELL_IDS[ k ] == static_cast<long long>( id ) )
+        listed = true;
+    if ( !listed )
+      throw sc_runtime_error( fmt::format(
+          "rl_policy: registry '{}' header does not list lock aura {} but player '{}' reports it "
+          "(bind-time refusal: the generated lock aura list and the engine must agree; regenerate the census and the header)",
+          RL_REGISTRY_ID, id, p->name() ) );
+  }
+#else
+  // No lock table in this header: that is right for a spec that locks nothing, and a stale header for one that does.
+  for ( std::size_t i = 0; i < RL_ACTION_DIM && i < handles.size(); ++i )
+  {
+    const rl_action_desc& d = RL_ACTIONS[ i ];
+    if ( d.kind != rl_action_kind::cast || d.token == nullptr || handles[ i ] == nullptr || !handles[ i ]->data().ok() )
+      continue;
+    if ( handles[ i ]->refused_while_channel_locked() )
+      throw sc_runtime_error( fmt::format(
+          "rl_policy: registry '{}' header carries no lock table but player '{}' refuses button '{}' while locked "
+          "(bind-time refusal: the header predates the lock table; regenerate it with gen_rl_constants.py)",
+          RL_REGISTRY_ID, p->name(), d.token ) );
+  }
+  if ( !engine_auras.empty() )
+    throw sc_runtime_error( fmt::format(
+        "rl_policy: registry '{}' header carries no lock table but player '{}' reports lock aura {} "
+        "(bind-time refusal: the header predates the lock table; regenerate it with gen_rl_constants.py)",
+        RL_REGISTRY_ID, p->name(), engine_auras.front() ) );
+#endif
+}
+
 std::vector<token_t> walk_classified( player_t* p )
 {
   return walk_all( p, false );
