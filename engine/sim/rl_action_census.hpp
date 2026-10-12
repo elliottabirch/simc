@@ -252,6 +252,14 @@ bool         needs_melee_reach( const token_t& t );
 // census hit rows but carries no class table throws too. Reads only.
 void check_header_gate_classes( const player_t* p, const std::vector<token_t>& walk );
 
+// The bind-time reach-table check (Phase 271.7 plan 05, NXTB-01; the model is check_header_gate_classes above). For every cast button
+// of the active header whose action exists for the actor, the engine's own answer `needs_melee_reach( token )` must equal the header's
+// `RL_ACTION_NEEDS_MELEE_REACH` entry. A button built from an untaken talent (its spell data is not enabled for this player, so it can
+// never be pressed) says nothing and is skipped, EXCEPT an item use: `use_item_t` is built with no spell data, so its `data().ok()` is
+// always false, and the on-use trinket must be compared, never skipped. A mismatch throws by name. A header without the table
+// (RL_ACTION_NEEDS_MELEE_REACH_DEFINED absent, as enhancement's) is not asked: the body does nothing. Reads only.
+void check_header_reach_classes( const player_t* p, const std::vector<token_t>& walk );
+
 // The bind-time lock check (271.6-18, G271.6-37; the model is check_header_gate_classes above). For every cast button of the active
 // header whose action exists for the actor and whose spell data is enabled for it (an untaken talent can never be pressed, so it
 // says nothing; the aimed-range binder skips it too), the engine's own answer `refused_while_channel_locked()` must equal the

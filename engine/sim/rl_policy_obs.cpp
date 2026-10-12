@@ -1144,9 +1144,25 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
       // 271.6-07 (G271.6-28 as revised): the engine's reading of each hit row's class from the spell data must equal the header's
       // (or the header marks it as the owner's recorded override), else the run is refused here, by name, at the first decision.
       rl_action_census::check_header_gate_classes( mutable_p, walk );
+      // 271.7-05 (NXTB-01): the engine's answer to "does this press need an enemy within melee reach" for each cast button must equal the
+      // header's RL_ACTION_NEEDS_MELEE_REACH table (a header without the table, enhancement's, is not asked), else the run is refused
+      // here, by name, at the first decision.
+      rl_action_census::check_header_reach_classes( mutable_p, walk );
       for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
       {
         const rl_action_desc& a = RL_ACTIONS[ i ];
+#ifdef RL_ACTION_NEEDS_MELEE_REACH_DEFINED
+        // 271.7 class A (NXTB-01; the owner, 2026-10-12 about 05:45Z: "we should also mask avatar until we are in melee range of the
+        // boss ... same as the trinkets"): a press that needs no unit and has no hit shape (the header table says so) is offered only
+        // while some enemy stands within the melee reach, through the same conjunct as the shape rule: mask only, never ready(). This
+        // runs BEFORE the spell-data skip below because an on-use trinket's action has no spell data (use_item_t) and would otherwise
+        // be passed over. Radius MELEE_RANGE_YARDS plus the enemy's combat reach, no front filter.
+        if ( a.kind == rl_action_kind::cast && a.token != nullptr && handles[ i ] != nullptr && RL_ACTION_NEEDS_MELEE_REACH[ i ] )
+        {
+          gates[ i ].radius = rl_target_select::MELEE_RANGE_YARDS;
+          continue;
+        }
+#endif
         if ( a.kind != rl_action_kind::cast || a.token == nullptr || handles[ i ] == nullptr || !handles[ i ]->data().ok() )
           continue;
         int row = -1;

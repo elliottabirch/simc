@@ -831,6 +831,41 @@ void check_header_gate_classes( const player_t* p, const std::vector<token_t>& w
 #endif
 }
 
+void check_header_reach_classes( const player_t* p, const std::vector<token_t>& walk )
+{
+#ifdef RL_ACTION_NEEDS_MELEE_REACH_DEFINED
+  for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+  {
+    const rl_action_desc& d = RL_ACTIONS[ i ];
+    if ( d.kind != rl_action_kind::cast || d.token == nullptr )
+      continue;
+    for ( const token_t& t : walk )
+    {
+      if ( t.token != d.token || !t.found || t.nodes.empty() || t.nodes.front().action == nullptr )
+        continue;
+      const action_t* root = t.nodes.front().action;
+      // An action built from an untaken talent has spell data that is not enabled for this player (it can never be pressed); it
+      // says nothing about the table. An item use has no spell data at all (use_item_t, player.cpp), so it is compared, not skipped.
+      if ( root->item == nullptr && !root->data().ok() )
+        continue;
+      const bool engine_needs = needs_melee_reach( t );
+      if ( engine_needs != RL_ACTION_NEEDS_MELEE_REACH[ i ] )
+      {
+        throw sc_runtime_error( fmt::format(
+            "rl_policy: registry '{}' header says button '{}' {} an enemy within melee reach but player '{}' answers it {} "
+            "(bind-time refusal: the generated reach table and the engine must agree; regenerate the census and the header)",
+            RL_REGISTRY_ID, d.token, RL_ACTION_NEEDS_MELEE_REACH[ i ] ? "needs" : "does not need", p->name(),
+            engine_needs ? "does" : "does not" ) );
+      }
+      break;
+    }
+  }
+#else
+  (void)p;
+  (void)walk;
+#endif
+}
+
 void check_header_lock_table( const player_t* p, const std::vector<action_t*>& handles )
 {
   const std::vector<unsigned> engine_auras = p->channel_lock_aura_spell_ids();
