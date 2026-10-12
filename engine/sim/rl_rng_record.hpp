@@ -85,9 +85,11 @@
 //                           B float32 auto-attack speed multiplier (swing interval scale)
 //   EVT_COOLDOWN_STATE      A recharge time left in ms after the change (a one-charge cooldown: its time left; a
 //                           charged one: the time to its next charge; 0 = nothing running)
-//                           B cause | (charges available << 8) | (charges at most << 16), cause 1 started (a press),
-//                           2 adjusted (a cut or an extension), 3 reset, 4 rescaled (its rate or base duration changed),
-//                           5 recharged (a charge came back on its own and the next recharge started)
+//                           B cause (bits 0-3) | charges available (bits 4-7) | charges at most (bits 8-11, both clamped to 15) |
+//                           the length of one full recharge in ms at the cooldown's own multiplier now (bits 12-31, clamped to 1048575),
+//                           the number a "full recharge time" or "fractional charges" reading is computed from.
+//                           cause 1 started (a press), 2 adjusted (a cut or an extension), 3 reset,
+//                           4 rescaled (its rate or base duration changed), 5 recharged (a charge came back on its own)
 //                           ENTITY = 0x80000000 + the cooldown's index in its owner's cooldown list (named in the
 //                           sidecar, family "cooldown"); written only when the state (time left or charges) changed
 //   EVT_SWING_DUE           A ms from now until the auto-attack's swing is due after this operation (0xFFFFFFFF = no swing

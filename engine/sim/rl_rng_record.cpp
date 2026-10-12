@@ -1676,8 +1676,13 @@ void recorder_t::cooldown_snapshot( const cooldown_t& cd, std::uint32_t& remaini
     remaining = cd.recharge_event ? whole_ms( cd.recharge_event->remains() ) : 0u;
     now_charges = static_cast<std::uint32_t>( std::max( cd.current_charge, 0 ) );
   }
+  // The length of one full recharge as the cooldown itself would compute it now: its own multiplier (as last set by a start or a rescale)
+  // times its base duration -- the number the "full recharge time" and "fractional charges" readings are made from.
+  const timespan_t full = cd.base_duration * cd.recharge_multiplier;
+  const std::uint32_t full_ms = std::min<std::uint32_t>( whole_ms( full ), 0xFFFFFu );
   remaining_ms = remaining;
-  charges_packed = ( std::min<std::uint32_t>( now_charges, 255u ) << 8 ) | ( std::min<std::uint32_t>( static_cast<std::uint32_t>( std::max( cd.charges, 0 ) ), 255u ) << 16 );
+  charges_packed = ( std::min<std::uint32_t>( now_charges, 15u ) << 4 ) |
+                   ( std::min<std::uint32_t>( static_cast<std::uint32_t>( std::max( cd.charges, 0 ) ), 15u ) << 8 ) | ( full_ms << 12 );
 }
 
 std::uint32_t recorder_t::entity_of_cooldown( const cooldown_t& cd )
@@ -1710,7 +1715,8 @@ void recorder_t::event_cooldown_state( const cooldown_t* cd, std::uint8_t cause,
   cooldown_snapshot( *cd, remaining, charges );
   if ( remaining == before_remaining && charges == before_charges )
     return;                                                                  // nothing the observation shows changed
-  write_event( EVT_COOLDOWN_STATE, entity_of_cooldown( *cd ), unit_code( cd->player ), unit_code( cd->player ), remaining, charges | cause );
+  write_event( EVT_COOLDOWN_STATE, entity_of_cooldown( *cd ), unit_code( cd->player ), unit_code( cd->player ), remaining,
+               charges | static_cast<std::uint32_t>( cause & 0xFu ) );
 }
 
 int recorder_t::swing_hand_of_action( const action_t* a ) const
