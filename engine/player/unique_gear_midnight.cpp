@@ -22,6 +22,7 @@
 #include "set_bonus.hpp"
 #include "sim/cooldown.hpp"
 #include "sim/proc_rng.hpp"
+#include "sim/rl_rng_record.hpp"
 #include "sim/sim.hpp"
 #include "unique_gear.hpp"
 #include "unique_gear_helper.hpp"
@@ -5660,6 +5661,11 @@ void venomcursed_ascendance( special_effect_t& effect )
         listener->sim->print_debug( "{} {} with stat: {}", *buff, buff->check() ? "refreshes" : "procs",
                                     util::stat_type_abbrev( rng_stat.stat ) );
       }
+
+      // 288.7: one event per pick (also when the pick is the stat that is already positive): which stat the buff favours
+      // from now on, and the amount it adds to it. Writes nothing to a random stream and changes no state.
+      if ( rl_rng_record::events_on() )
+        rl_rng_record::event_stat_chosen( listener->sim, buff, static_cast<int>( rng_stat.stat ), pos_value );
 
       // update stat amounts if the randomly chosen stat is not already positive
       if ( rng_stat.amount != pos_value )

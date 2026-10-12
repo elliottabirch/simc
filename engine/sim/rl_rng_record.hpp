@@ -95,6 +95,18 @@
 //   EVT_SWING_DUE           A ms from now until the auto-attack's swing is due after this operation (0xFFFFFFFF = no swing
 //                           pending); B hand (0 main, 1 off) | (operation << 8), operation 1 booked, 2 rescheduled, 3 canceled;
 //                           ENTITY = the hand's action (the swing is due at TIME + A)
+//   EVT_STAT_CHOSEN         A the chosen stat's engine id (stat_e, int32); B the amount the buff adds to that stat, int32: the
+//                           engine's own number, the whole points update_player_buff_stat applies at one stack
+//                           (copysign( trunc( max( 1, |amount| ) + stat_fp_epsilon ), amount )); ENTITY = the stat buff (as for the
+//                           buff classes), UNIT the player holding it, SOURCE the buff's source. "A stat buff chose which stat it raises."
+//                           One event per pick, written after the pick is made and before the buff is applied or refreshed (so before
+//                           that buff's EVT_BUFF_APPLIED or EVT_BUFF_REFRESHED of the same millisecond), also when the pick is the stat
+//                           that is already the raised one. WHICH CASE WRITES IT: the engine has no single funnel for "a stat buff
+//                           changes which stat it carries" (stat_buff_t::update_player_buff_stat is the per-stat gain, run once per stat
+//                           on every bump of every stat buff and knows of no choice), so the hook is the choosing item's own call,
+//                           one generic recorder function: the item that picks one of its buff's stats at random on each proc
+//                           (unique_gear_midnight.cpp, venomcursed_ascendance_cb_t::execute). A stat buff of another item that picks a
+//                           stat would call the same function.
 // Reading: scripts/rl/probes/rng_record.py (the repo's reader) yields these records with their
 // kind; a reader that wants rolls only skips kind != KIND_ROLL.
 // ==========================================================================================
@@ -155,7 +167,8 @@ inline constexpr std::uint8_t EVT_HIT_LANDED = 9u;
 inline constexpr std::uint8_t EVT_SPEED_CHANGED = 10u;
 inline constexpr std::uint8_t EVT_COOLDOWN_STATE = 11u;
 inline constexpr std::uint8_t EVT_SWING_DUE = 12u;
-inline constexpr std::uint8_t EVT_CLASS_MAX = 12u;
+inline constexpr std::uint8_t EVT_STAT_CHOSEN = 13u;
+inline constexpr std::uint8_t EVT_CLASS_MAX = 13u;
 
 inline constexpr std::uint8_t CD_CAUSE_START = 1u;
 inline constexpr std::uint8_t CD_CAUSE_ADJUST = 2u;
@@ -558,6 +571,9 @@ void events_end( sim_t* sim );
 // A buff event. `prior_stacks` is the stack count before the change (used by EVT_BUFF_EXPIRED
 // for the stacks lost and by EVT_STACKS_CHANGED for the count before); ignored by the others.
 void event_buff( sim_t* sim, std::uint8_t cls, const buff_t* b, int prior_stacks );
+
+// A stat buff chose which stat it raises (EVT_STAT_CHOSEN): `stat` is the stat_e value, `amount` the amount the buff gives that stat.
+void event_stat_chosen( sim_t* sim, const buff_t* b, int stat, double amount );
 
 // A damage-over-time event for `d` (APPLIED, REFRESHED, EXPIRED, TICK).
 void event_dot( sim_t* sim, std::uint8_t cls, const dot_t* d );

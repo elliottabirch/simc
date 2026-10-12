@@ -4138,6 +4138,10 @@ void stat_buff_t::decrement( int stacks, double /* value */ )
 
       last_stack_change = sim->current_time();
 
+      // 288.7: stacks consumed, the buff stays up (this override never reaches buff_t::decrement's own hook).
+      if ( rl_rng_record::events_on() )
+        rl_rng_record::event_buff( sim, rl_rng_record::EVT_STACKS_CHANGED, this, old_stack );
+
       for ( const auto& cb : stack_change_callback )
         cb( this, old_stack, current_stack );
     }

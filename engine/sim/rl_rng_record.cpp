@@ -58,6 +58,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -696,6 +697,7 @@ public:
   void events_begin();
   void events_end();
   void event_buff( std::uint8_t cls, const buff_t* b, int prior_stacks );
+  void event_stat_chosen( const buff_t* b, int stat, double amount );
   void event_dot( std::uint8_t cls, const dot_t* d );
   void event_hit( const action_t* a, const action_state_t* s );
   void event_speed( const player_t* p );
@@ -1423,7 +1425,8 @@ inline std::uint32_t whole_ms( timespan_t t )
 
 constexpr std::array<const char*, EVT_CLASS_MAX + 1u> EVENT_CLASS_NAMES = {
     "none",           "buff_applied", "buff_refreshed", "buff_expired",   "stacks_changed", "dot_applied",
-    "dot_refreshed",  "dot_expired",  "periodic_tick",  "hit_landed",     "speed_changed",  "cooldown_state", "swing_due" };
+    "dot_refreshed",  "dot_expired",  "periodic_tick",  "hit_landed",     "speed_changed",  "cooldown_state", "swing_due",
+    "stat_chosen" };
 }  // anonymous namespace
 
 void recorder_t::events_begin()
@@ -1606,6 +1609,18 @@ void recorder_t::event_buff( std::uint8_t cls, const buff_t* b, int prior_stacks
       return;
   }
   write_event( cls, entity_of_buff( *b ), unit_code( b->player ), unit_code( b->source ), a, v );
+}
+
+void recorder_t::event_stat_chosen( const buff_t* b, int stat, double amount )
+{
+  if ( !in_scope( b->source ) )
+    return;
+
+  // The amount update_player_buff_stat applies at one stack (the same truncation, the same epsilon), as whole points.
+  const double applied = std::copysign( std::trunc( std::max( 1.0, std::fabs( amount ) ) + stat_buff_t::stat_fp_epsilon ), amount );
+  write_event( EVT_STAT_CHOSEN, entity_of_buff( *b ), unit_code( b->player ), unit_code( b->source ),
+               static_cast<std::uint32_t>( static_cast<std::int32_t>( stat ) ),
+               static_cast<std::uint32_t>( static_cast<std::int32_t>( applied ) ) );
 }
 
 void recorder_t::event_dot( std::uint8_t cls, const dot_t* d )
@@ -3483,6 +3498,14 @@ void event_buff( sim_t* sim, std::uint8_t cls, const buff_t* b, int prior_stacks
   if ( !root->rl_rng_recorder || sim->rl_bl_shadow )
     return;
   root->rl_rng_recorder->event_buff( cls, b, prior_stacks );
+}
+
+void event_stat_chosen( sim_t* sim, const buff_t* b, int stat, double amount )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder || sim->rl_bl_shadow )
+    return;
+  root->rl_rng_recorder->event_stat_chosen( b, stat, amount );
 }
 
 void event_dot( sim_t* sim, std::uint8_t cls, const dot_t* d )
