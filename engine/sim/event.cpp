@@ -84,6 +84,10 @@ void event_t::reschedule( timespan_t delta_time )
   }
 
   reschedule_time = delta_time;
+
+  // 288.7: the controlled player's own swing was moved -- when it is now due.
+  if ( rl_rng_record::events_on() )
+    rl_rng_record::event_swing_event( &_sim, this, rl_rng_record::SWING_OP_RESCHEDULE );
 }
 
 // event_t::cancel ==========================================================
@@ -103,6 +107,10 @@ void event_t::cancel( event_t*& e )
   // to override). Runs BEFORE `e->canceled` is set below, for a non-null, not-yet-canceled event.
   if ( !e->canceled )
     rl_rng_record::swing_event_canceled( &e->_sim, e );
+
+  // 288.7: the controlled player's own swing was canceled -- nothing is due.
+  if ( !e->canceled && rl_rng_record::events_on() )
+    rl_rng_record::event_swing_event( &e->_sim, e, rl_rng_record::SWING_OP_CANCEL );
 
 #ifdef ACTOR_EVENT_BOOKKEEPING
   if ( e->_sim.debug && e->actor && !e->canceled )

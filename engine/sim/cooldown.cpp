@@ -175,10 +175,6 @@ void cooldown_t::adjust_recharge_multiplier()
     return;
   }
 
-  // 288.7: an ongoing cooldown's divisor changed.
-  if ( rl_rng_record::events_on() )
-    rl_rng_record::event_cooldown_rate( &sim, this, recharge_multiplier, old_multiplier );
-
   timespan_t old_ready = ready;
   adjust_remaining_duration( recharge_multiplier / old_multiplier );
 
@@ -238,6 +234,8 @@ void cooldown_t::adjust_remaining_duration( double delta )
       return;
   }
   rl_buff_ledger::cd_scope_t rl_scope( this, "adjust_remaining_duration", sim.rl_bl_on );
+  // 288.7: a rescaled remaining time (the cooldown's rate or base duration changed) is an event if the state changed.
+  rl_rng_record::rl_cooldown_scope_t rl_event_scope( &sim, this, rl_rng_record::CD_CAUSE_RESCALE );
 
   assert( ongoing() && delta > 0.0 );
   assert( charges > 0 && "Cooldown charges must be positive");
@@ -295,6 +293,8 @@ void cooldown_t::adjust( timespan_t amount, bool requires_reaction, bool apply_r
       return;
   }
   rl_buff_ledger::cd_scope_t rl_scope( this, "adjust", sim.rl_bl_on );
+  // 288.7: a cut or an extension is an event if the state changed.
+  rl_rng_record::rl_cooldown_scope_t rl_event_scope( &sim, this, rl_rng_record::CD_CAUSE_ADJUST );
 
   if ( amount == 0_ms )
     return;
@@ -419,6 +419,8 @@ void cooldown_t::reset( bool require_reaction, int charges_ )
   if ( sim.rl_bl_probe && charges_ != 0 && rl_buff_ledger::cd_probe_skip( this, "reset", std::numeric_limits<std::int64_t>::max() ) )
     return;
   rl_buff_ledger::cd_scope_t rl_scope( this, "reset", sim.rl_bl_on );
+  // 288.7: a reset is always an event.
+  rl_rng_record::rl_cooldown_scope_t rl_event_scope( &sim, this, rl_rng_record::CD_CAUSE_RESET );
 
   if ( charges_ == 0 )
     return;
@@ -480,6 +482,9 @@ void cooldown_t::start( action_t* a, timespan_t _override, timespan_t delay )
 {
   if ( sim.rl_bl_shadow )
     return rl_buff_ledger::blocked( &sim, "cooldown.start" );
+
+  // 288.7: a start (a press) is always an event.
+  rl_rng_record::rl_cooldown_scope_t rl_event_scope( &sim, this, rl_rng_record::CD_CAUSE_START );
 
   // 261001-bac plan 07: what the ledger needs to see of the cooldown before it changes (a read, nothing else).
   rl_buff_ledger::cd_snap_t rl_before;

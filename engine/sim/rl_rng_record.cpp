@@ -699,9 +699,17 @@ public:
   void event_dot( std::uint8_t cls, const dot_t* d );
   void event_hit( const action_t* a, const action_state_t* s );
   void event_speed( const player_t* p );
-  void event_cooldown_rate( const cooldown_t* cd, double new_multiplier, double old_multiplier );
+  void event_cooldown_state( const cooldown_t* cd, std::uint8_t cause, std::uint32_t before_remaining, std::uint32_t before_charges );
+  void cooldown_snapshot( const cooldown_t& cd, std::uint32_t& remaining_ms, std::uint32_t& charges_packed ) const;
+  void event_swing_booked( const action_t* a, const event_t* e );
+  void event_swing_event( const event_t* e, std::uint8_t op );
 
 private:
+  int swing_hand_of_action( const action_t* a ) const;
+  int swing_hand_of_event( const event_t* e ) const;
+  void write_swing_due( int hand, const action_t* a, std::uint32_t due_ms, std::uint8_t op );
+  std::uint32_t entity_of_cooldown( const cooldown_t& cd );
+
   // 288.7: the event writer's own helpers. None of them touches a random stream or simulation state.
   bool in_scope( const player_t* source ) const;
   std::uint32_t unit_code( const player_t* u );
@@ -881,7 +889,7 @@ private:
   std::uint32_t last_speed_a_ = 0;
   std::uint32_t last_speed_b_ = 0;
   std::unordered_map<const void*, std::uint32_t> entity_cache_;
-  // (family, entity) -> name, family 0 = buff, 1 = action; and unit code -> (name, kind name).
+  // (family, entity) -> name, family 0 = buff, 1 = action, 2 = cooldown; and unit code -> (name, kind name).
   std::map<std::pair<std::uint8_t, std::uint32_t>, std::string> entity_names_;
   std::map<std::uint32_t, std::pair<std::string, std::string>> unit_names_;
 };
@@ -1415,7 +1423,7 @@ inline std::uint32_t whole_ms( timespan_t t )
 
 constexpr std::array<const char*, EVT_CLASS_MAX + 1u> EVENT_CLASS_NAMES = {
     "none",           "buff_applied", "buff_refreshed", "buff_expired",   "stacks_changed", "dot_applied",
-    "dot_refreshed",  "dot_expired",  "periodic_tick",  "hit_landed",     "speed_changed",  "cooldown_rate_changed" };
+    "dot_refreshed",  "dot_expired",  "periodic_tick",  "hit_landed",     "speed_changed",  "cooldown_state", "swing_due" };
 }  // anonymous namespace
 
 void recorder_t::events_begin()
@@ -1652,13 +1660,102 @@ void recorder_t::event_speed( const player_t* p )
   write_event( EVT_SPEED_CHANGED, 0u, unit_code( p ), unit_code( p ), a, v );
 }
 
-void recorder_t::event_cooldown_rate( const cooldown_t* cd, double new_multiplier, double old_multiplier )
+void recorder_t::cooldown_snapshot( const cooldown_t& cd, std::uint32_t& remaining_ms, std::uint32_t& charges_packed ) const
 {
-  if ( !cd->action || !in_scope( cd->action->player ) )
+  // Direct reads of the cooldown's own members: no call that notes a read, nothing that changes it.
+  const timespan_t now = root_->current_time();
+  std::uint32_t remaining = 0;
+  std::uint32_t now_charges = 0;
+  if ( cd.charges <= 1 )
+  {
+    remaining = cd.ready > now ? whole_ms( cd.ready - now ) : 0u;
+    now_charges = cd.ready > now ? 0u : 1u;
+  }
+  else
+  {
+    remaining = cd.recharge_event ? whole_ms( cd.recharge_event->remains() ) : 0u;
+    now_charges = static_cast<std::uint32_t>( std::max( cd.current_charge, 0 ) );
+  }
+  remaining_ms = remaining;
+  charges_packed = ( std::min<std::uint32_t>( now_charges, 255u ) << 8 ) | ( std::min<std::uint32_t>( static_cast<std::uint32_t>( std::max( cd.charges, 0 ) ), 255u ) << 16 );
+}
+
+std::uint32_t recorder_t::entity_of_cooldown( const cooldown_t& cd )
+{
+  const auto cached = entity_cache_.find( &cd );
+  if ( cached != entity_cache_.end() )
+    return cached->second;
+
+  std::uint32_t index = 0;
+  const auto& list = cd.player->cooldown_list;
+  for ( std::size_t i = 0; i < list.size(); ++i )
+  {
+    if ( list[ i ] == &cd )
+    {
+      index = static_cast<std::uint32_t>( i );
+      break;
+    }
+  }
+  const std::uint32_t entity = ENTITY_NO_SPELL_FLAG | index;
+  entity_cache_.emplace( &cd, entity );
+  entity_names_.emplace( std::make_pair( std::uint8_t{ 2 }, entity ), cd.name_str );
+  return entity;
+}
+
+void recorder_t::event_cooldown_state( const cooldown_t* cd, std::uint8_t cause, std::uint32_t before_remaining, std::uint32_t before_charges )
+{
+  if ( !cd->player || !in_scope( cd->player ) )
     return;
-  write_event( EVT_COOLDOWN_RATE, entity_of_action( *cd->action ), unit_code( cd->action->player ),
-               unit_code( cd->action->player ), float_bits( static_cast<float>( new_multiplier ) ),
-               float_bits( static_cast<float>( old_multiplier ) ) );
+  std::uint32_t remaining = 0, charges = 0;
+  cooldown_snapshot( *cd, remaining, charges );
+  if ( remaining == before_remaining && charges == before_charges )
+    return;                                                                  // nothing the observation shows changed
+  write_event( EVT_COOLDOWN_STATE, entity_of_cooldown( *cd ), unit_code( cd->player ), unit_code( cd->player ), remaining, charges | cause );
+}
+
+int recorder_t::swing_hand_of_action( const action_t* a ) const
+{
+  if ( !controlled_ || a->player != controlled_ )
+    return -1;
+  if ( a == controlled_->main_hand_attack )
+    return 0;
+  if ( a == controlled_->off_hand_attack )
+    return 1;
+  return -1;
+}
+
+int recorder_t::swing_hand_of_event( const event_t* e ) const
+{
+  if ( !controlled_ || !e )
+    return -1;
+  if ( controlled_->main_hand_attack && e == controlled_->main_hand_attack->execute_event )
+    return 0;
+  if ( controlled_->off_hand_attack && e == controlled_->off_hand_attack->execute_event )
+    return 1;
+  return -1;
+}
+
+void recorder_t::write_swing_due( int hand, const action_t* a, std::uint32_t due_ms, std::uint8_t op )
+{
+  write_event( EVT_SWING_DUE, entity_of_action( *a ), unit_code( controlled_ ), unit_code( controlled_ ), due_ms,
+               static_cast<std::uint32_t>( hand ) | ( static_cast<std::uint32_t>( op ) << 8 ) );
+}
+
+void recorder_t::event_swing_booked( const action_t* a, const event_t* e )
+{
+  const int hand = swing_hand_of_action( a );
+  if ( hand < 0 )
+    return;
+  write_swing_due( hand, a, whole_ms( e->occurs() - root_->current_time() ), SWING_OP_BOOK );
+}
+
+void recorder_t::event_swing_event( const event_t* e, std::uint8_t op )
+{
+  const int hand = swing_hand_of_event( e );
+  if ( hand < 0 )
+    return;
+  const action_t* a = hand == 0 ? static_cast<const action_t*>( controlled_->main_hand_attack ) : static_cast<const action_t*>( controlled_->off_hand_attack );
+  write_swing_due( hand, a, op == SWING_OP_CANCEL ? SWING_NONE : whole_ms( e->occurs() - root_->current_time() ), op );
 }
 
 void recorder_t::write_events_sidecar_block( std::ostream& out ) const
@@ -1695,7 +1792,7 @@ void recorder_t::write_events_sidecar_block( std::ostream& out ) const
     if ( !first )
       out << ", ";
     first = false;
-    out << "{\"family\": \"" << ( kv.first.first == 0 ? "buff" : "action" ) << "\", \"entity\": " << kv.first.second
+    out << "{\"family\": \"" << ( kv.first.first == 0 ? "buff" : ( kv.first.first == 1 ? "action" : "cooldown" ) ) << "\", \"entity\": " << kv.first.second
         << ", \"name\": \"" << json_escape( kv.second ) << "\"}";
   }
   out << "]}";
@@ -3406,12 +3503,42 @@ void event_speed( sim_t* sim, const player_t* p )
   root->rl_rng_recorder->event_speed( p );
 }
 
-void event_cooldown_rate( sim_t* sim, const cooldown_t* cd, double new_multiplier, double old_multiplier )
+void event_swing_booked( sim_t* sim, const action_t* a, const event_t* e )
 {
   sim_t* root = root_of( sim );
   if ( !root->rl_rng_recorder || sim->rl_bl_shadow )
     return;
-  root->rl_rng_recorder->event_cooldown_rate( cd, new_multiplier, old_multiplier );
+  root->rl_rng_recorder->event_swing_booked( a, e );
+}
+
+void event_swing_event( sim_t* sim, const event_t* e, std::uint8_t op )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder || sim->rl_bl_shadow )
+    return;
+  root->rl_rng_recorder->event_swing_event( e, op );
+}
+
+rl_cooldown_scope_t::rl_cooldown_scope_t( sim_t* sim, const cooldown_t* cd, std::uint8_t cause )
+  : sim_( sim ), cd_( cd ), cause_( cause )
+{
+  if ( !events_on() || !cd->player )
+    return;
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder )
+    return;
+  active_ = true;
+  root->rl_rng_recorder->cooldown_snapshot( *cd, before_remaining_, before_charges_ );
+}
+
+rl_cooldown_scope_t::~rl_cooldown_scope_t()
+{
+  if ( !active_ || !events_on() )
+    return;
+  sim_t* root = root_of( sim_ );
+  if ( !root->rl_rng_recorder || sim_->rl_bl_shadow )
+    return;
+  root->rl_rng_recorder->event_cooldown_state( cd_, cause_, before_remaining_, before_charges_ );
 }
 
 // ---- Swing trace / swing pin (tstl-sylvanas phase 257, plan 257-09, D-18). See each

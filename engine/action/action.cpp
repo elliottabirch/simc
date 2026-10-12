@@ -5091,7 +5091,11 @@ event_t* action_t::start_action_execute_event( timespan_t t, action_state_t* sta
   // belong. A cheap passthrough (returns `t` unchanged) for anything that is not currently the
   // one designated player's own main_hand_attack/off_hand_attack.
   t = rl_rng_record::swing_event_created( sim, this, t );
-  return make_event<action_execute_event_t>( *sim, this, t, state );
+  event_t* e = make_event<action_execute_event_t>( *sim, this, t, state );
+  // 288.7: the controlled player's own main-hand or off-hand swing was (re)booked -- when it is due.
+  if ( rl_rng_record::events_on() )
+    rl_rng_record::event_swing_booked( sim, this, e );
+  return e;
 }
 
 void action_t::do_schedule_travel( action_state_t* state, timespan_t time_ )

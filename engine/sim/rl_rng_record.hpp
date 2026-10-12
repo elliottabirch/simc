@@ -83,8 +83,15 @@
 //   EVT_HIT_LANDED          A result (sc_enums result_e: 1 miss, 2 dodge, 3 parry, 4 glance, 5 crit, 6 hit)   B 0
 //   EVT_SPEED_CHANGED       A float32 spell haste multiplier (time scale, below 1 = faster)
 //                           B float32 auto-attack speed multiplier (swing interval scale)
-//   EVT_COOLDOWN_RATE       A float32 new recharge multiplier   B float32 old recharge multiplier
-//                           (an ongoing cooldown whose divisor changed; ENTITY = the action's id)
+//   EVT_COOLDOWN_STATE      A recharge time left in ms after the change (a one-charge cooldown: its time left; a
+//                           charged one: the time to its next charge; 0 = nothing running)
+//                           B cause | (charges available << 8) | (charges at most << 16), cause 1 started (a press),
+//                           2 adjusted (a cut or an extension), 3 reset, 4 rescaled (its rate or base duration changed)
+//                           ENTITY = 0x80000000 + the cooldown's index in its owner's cooldown list (named in the
+//                           sidecar, family "cooldown"); written only when the state (time left or charges) changed
+//   EVT_SWING_DUE           A ms from now until the auto-attack's swing is due after this operation (0xFFFFFFFF = no swing
+//                           pending); B hand (0 main, 1 off) | (operation << 8), operation 1 booked, 2 rescheduled, 3 canceled;
+//                           ENTITY = the hand's action (the swing is due at TIME + A)
 // Reading: scripts/rl/probes/rng_record.py (the repo's reader) yields these records with their
 // kind; a reader that wants rolls only skips kind != KIND_ROLL.
 // ==========================================================================================
@@ -143,8 +150,18 @@ inline constexpr std::uint8_t EVT_DOT_EXPIRED = 7u;
 inline constexpr std::uint8_t EVT_PERIODIC_TICK = 8u;
 inline constexpr std::uint8_t EVT_HIT_LANDED = 9u;
 inline constexpr std::uint8_t EVT_SPEED_CHANGED = 10u;
-inline constexpr std::uint8_t EVT_COOLDOWN_RATE = 11u;
-inline constexpr std::uint8_t EVT_CLASS_MAX = 11u;
+inline constexpr std::uint8_t EVT_COOLDOWN_STATE = 11u;
+inline constexpr std::uint8_t EVT_SWING_DUE = 12u;
+inline constexpr std::uint8_t EVT_CLASS_MAX = 12u;
+
+inline constexpr std::uint8_t CD_CAUSE_START = 1u;
+inline constexpr std::uint8_t CD_CAUSE_ADJUST = 2u;
+inline constexpr std::uint8_t CD_CAUSE_RESET = 3u;
+inline constexpr std::uint8_t CD_CAUSE_RESCALE = 4u;
+inline constexpr std::uint8_t SWING_OP_BOOK = 1u;
+inline constexpr std::uint8_t SWING_OP_RESCHEDULE = 2u;
+inline constexpr std::uint8_t SWING_OP_CANCEL = 3u;
+inline constexpr std::uint32_t SWING_NONE = 0xFFFFFFFFu;
 
 // Unit kinds (high byte of a UNIT / SOURCE field of an event record).
 inline constexpr std::uint32_t UNIT_PLAYER = 0u;
@@ -548,8 +565,32 @@ void event_hit( sim_t* sim, const action_t* a, const action_state_t* s );
 // when the pair of multipliers differs from the last one written this fight.
 void event_speed( sim_t* sim, const player_t* p );
 
-// An ongoing cooldown whose recharge multiplier changed (cooldown_t::adjust_recharge_multiplier()).
-void event_cooldown_rate( sim_t* sim, const cooldown_t* cd, double new_multiplier, double old_multiplier );
+// A guard opened at the top of each function that changes a cooldown (start, adjust, reset, adjust_remaining_duration): when it closes it
+// writes EVT_COOLDOWN_STATE if the cooldown's state (time left or charges) changed. One check of events_on() when events are off.
+struct rl_cooldown_scope_t
+{
+  rl_cooldown_scope_t( sim_t* sim, const cooldown_t* cd, std::uint8_t cause );
+  ~rl_cooldown_scope_t();
+
+  rl_cooldown_scope_t( const rl_cooldown_scope_t& ) = delete;
+  rl_cooldown_scope_t& operator=( const rl_cooldown_scope_t& ) = delete;
+  rl_cooldown_scope_t( rl_cooldown_scope_t&& ) = delete;
+  rl_cooldown_scope_t& operator=( rl_cooldown_scope_t&& ) = delete;
+
+private:
+  sim_t* sim_;
+  const cooldown_t* cd_;
+  std::uint8_t cause_;
+  bool active_ = false;
+  std::uint32_t before_remaining_ = 0;
+  std::uint32_t before_charges_ = 0;
+};
+
+// The controlled player's auto-attack swing timer: after an action's execute event is booked (`e` is the new event), after an event is
+// rescheduled or before it is canceled (`event` names it). Written only when the action or event is the controlled player's main-hand or
+// off-hand attack at that moment.
+void event_swing_booked( sim_t* sim, const action_t* a, const event_t* e );
+void event_swing_event( sim_t* sim, const event_t* e, std::uint8_t op );
 
 // ---- Swing trace / swing pin (tstl-sylvanas phase 257, plan 257-09, D-18, owner ruling A-125 --
 // supersedes plan 257-07's own v1 pin-list design, A-124's finding: simc moves a swing LAZILY
