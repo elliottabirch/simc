@@ -2,7 +2,7 @@
 // GENERATED FILE -- DO NOT EDIT (XPORT-04, D-09).
 //
 // Produced by:      scripts/rl/gen_rl_constants.py
-// Registry source:  scripts/rl/specs/arms-warrior.json
+// Registry source:  data/specs/arms-warrior.json
 // Spec id:          'arms-warrior'
 //
 // D-09's regenerate-and-diff freshness check treats any difference between a
@@ -1879,7 +1879,7 @@ inline constexpr rl_hit_provider RL_HIT_PROVIDERS[RL_HIT_PROVIDER_COUNT] = {
 // own shape. CLASS_OVERRIDDEN true: the class is the owner's recorded word, so the engine takes it instead of its own reading.
 #define RL_HIT_ROW_NEEDS_UNIT_DEFINED 1
 inline constexpr bool RL_HIT_ROW_NEEDS_UNIT[RL_HIT_PROVIDER_COUNT] = { false, true, false, true, true, true, true, true, true, true, true };
-inline constexpr bool RL_HIT_ROW_CLASS_OVERRIDDEN[RL_HIT_PROVIDER_COUNT] = { false, true, false, false, false, false, false, false, false, false, false };
+inline constexpr bool RL_HIT_ROW_CLASS_OVERRIDDEN[RL_HIT_PROVIDER_COUNT] = { false, false, false, false, false, false, false, false, false, false, false };
 
 // The channel lock (G271.6-37). While the player is channelling, or any aura of RL_LOCK_AURA_SPELL_IDS is up, the simulator refuses
 // every cast button whose RL_ACTION_REFUSED_WHILE_LOCKED entry (indexed by action id; a wait reads false) is true; item uses and
@@ -1894,3 +1894,10 @@ inline constexpr long long RL_LOCK_AURA_SPELL_IDS[RL_LOCK_AURA_COUNT] = {
   227847,
   446035,
 };
+
+// The no-unit reach gate (271.7 class A). A cast button whose RL_ACTION_NEEDS_MELEE_REACH entry (indexed by action id; a wait reads
+// false) is true needs no unit and has no hit shape; the simulator offers it only while some enemy's hitbox is within its melee reach
+// (rl_target_select::MELEE_RANGE_YARDS plus the enemy's combat reach). The table is the census writer's own answer
+// (needsMeleeReach); the engine's bind-time check compares it with its own reading.
+#define RL_ACTION_NEEDS_MELEE_REACH_DEFINED 1
+inline constexpr bool RL_ACTION_NEEDS_MELEE_REACH[RL_ACTION_DIM] = { true, false, false, false, false, false, false, false, false, false, false, false, false, true, false, false, false, true };
