@@ -517,10 +517,11 @@ std::string token_json( const token_t& t )
   return fmt::format(
       "{{\"token\":{},\"actionFound\":{},\"spellId\":{},\"rangeYards\":{},\"minRangeYards\":{},\"radiusYards\":{},"
       "\"multiTarget\":{},\"multiWhile\":{},\"nodes\":{},\"chosenNode\":{},\"disagreements\":{},\"gateClass\":{},"
-      "\"refusedWhileLocked\":{}}}",
+      "\"refusedWhileLocked\":{},\"needsMeleeReach\":{}}}",
       esc( t.token ), t.found ? "true" : "false", t.spell_id, num( t.range ), num( t.min_range ), num( t.radius ),
       t.multi_target ? "true" : "false", t.has_multi_while ? widen_json( t.multi_while ) : std::string( "null" ), nodes,
-      t.chosen_node, dis, esc( gate_class_name( t.gate_class ) ), t.refused_while_locked ? "true" : "false" );
+      t.chosen_node, dis, esc( gate_class_name( t.gate_class ) ), t.refused_while_locked ? "true" : "false",
+      needs_melee_reach( t ) ? "true" : "false" );
 }
 
 // What must agree between the init walk and the fight-end walk: structure, never live values
@@ -648,6 +649,11 @@ const char* gate_class_name( gate_class_t c )
   }
 }
 
+bool needs_melee_reach( const token_t& t )
+{
+  return t.gate_class == gate_class_t::EXEMPT;
+}
+
 namespace
 {
 // True for a `T_UNIT_TARGET_*` member of simc's own `effect_targeting` enum (engine/dbc/data_enums.hh): the press needs a unit.
@@ -671,6 +677,34 @@ bool is_unit_target_code( unsigned code )
       return false;
   }
 }
+
+// Phase 271.7 plan 04 (NXTB-02; the owner, 2026-10-11 about 19:35Z: "why is cleave shape gated? it needs a target"). True for the
+// implicit target codes that are NOT `T_UNIT_TARGET_*` members and whose own description in the fork's target table
+// (engine/dbc/sc_spell_info.cpp, `_targeting_strings`) says the shape is aimed at a targeted enemy, or whose enum member name ends
+// `_TO_DESTINATION_ENEMY`: 104 "Enemies in Cone to Targeted Enemy", 108 "Gameobject in Cone to Targeted Enemy", 116 "Last Targeted
+// Enemy" and 134 "Line to Enemy". A spell with such a code AND a cast range above zero is pressed on a unit, so the game's own range
+// check gates it. Codes 16 ("at Enemy in Area") and 53 ("At Enemy") stay out: a press with only those has a shape round the target
+// and no unit is needed to press it. The members are named, never numbered here; gen_hit_rows.py reads the same members as data from
+// the fork's two files and the repository selftest compares the two lists.
+constexpr bool is_targeted_enemy_code( unsigned code )
+{
+  switch ( static_cast<effect_targeting>( code ) )
+  {
+    case T_UNIT_CONE_CASTER_TO_DESTINATION_ENEMY:
+    case T_GAMEOBJECT_CONE_CASTER_TO_DESTINATION_ENEMY:
+    case T_UNIT_AND_DESTINATION_LAST_ENEMY:
+    case T_UNIT_LINE_CASTER_TO_DESTINATION_ENEMY:
+      return true;
+    default:
+      return false;
+  }
+}
+// The build is this rule's selftest (the fork has no unit-test harness): the cone to a targeted enemy is code 104, and the two
+// "at enemy" codes a shape-only press carries are not in the list.
+static_assert( is_targeted_enemy_code( T_UNIT_CONE_CASTER_TO_DESTINATION_ENEMY ) && T_UNIT_CONE_CASTER_TO_DESTINATION_ENEMY == 104u,
+               "gate class rule: a cone from the caster to a targeted enemy is target code 104 and counts as a unit press" );
+static_assert( !is_targeted_enemy_code( 16u ) && !is_targeted_enemy_code( 53u ),
+               "gate class rule: 'at Enemy in Area' (16) and 'At Enemy' (53) do not make a press need a unit" );
 }  // namespace
 
 gate_class_t gate_class_default( const action_t* root, const node_t* counted )
@@ -683,6 +717,16 @@ gate_class_t gate_class_default( const action_t* root, const node_t* counted )
       const spelleffect_data_t& e = d.effectN( i );
       if ( is_unit_target_code( e.target_1() ) || is_unit_target_code( e.target_2() ) )
         return gate_class_t::UNIT;
+    }
+    // A cone or line aimed at a targeted enemy, on a spell with a cast range: pressed on a unit (see is_targeted_enemy_code).
+    if ( root->range > 0.0 )
+    {
+      for ( size_t i = 1; i <= d.effect_count(); ++i )
+      {
+        const spelleffect_data_t& e = d.effectN( i );
+        if ( is_targeted_enemy_code( e.target_1() ) || is_targeted_enemy_code( e.target_2() ) )
+          return gate_class_t::UNIT;
+      }
     }
   }
   if ( counted != nullptr && counted->shape != shape_t::ANYWHERE )

@@ -240,6 +240,11 @@ struct token_t
 gate_class_t gate_class_default( const action_t* root, const node_t* counted );
 const char*  gate_class_name( gate_class_t c );
 
+// Phase 271.7 plan 04 (NXTB-01): does the press need an enemy within melee reach? True exactly when the token's gate class is EXEMPT:
+// a press that needs no unit and has no hit shape (a self buff, a button with no hit row). The census writes it per token
+// (`needsMeleeReach`) and the bind check of the generated header reads it, so both use this one expression.
+bool         needs_melee_reach( const token_t& t );
+
 // The bind-time class check (271.6-07, G271.6-28 as revised; the model is the aimed-range refusal in rl_target_select). For every
 // hit-row button of the active header the actor has, the class the engine reads from the spell data must equal the header's
 // `RL_HIT_ROW_NEEDS_UNIT`, unless the header marks the row `RL_HIT_ROW_CLASS_OVERRIDDEN` (the owner's recorded word replaces the
