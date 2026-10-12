@@ -35,6 +35,9 @@ struct recharge_event_t : event_t
 
   void execute() override
   {
+    // 288.7: a charge came back on its own; the next recharge (its length at the multiplier now in force) starts. Written when this returns.
+    rl_rng_record::rl_cooldown_scope_t rl_event_scope( &sim(), cooldown_, rl_rng_record::CD_CAUSE_RECHARGE );
+
     assert( cooldown_->current_charge < cooldown_->charges );
     cooldown_->current_charge++;
     cooldown_->ready = cooldown_t::ready_init();

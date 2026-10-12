@@ -86,7 +86,8 @@
 //   EVT_COOLDOWN_STATE      A recharge time left in ms after the change (a one-charge cooldown: its time left; a
 //                           charged one: the time to its next charge; 0 = nothing running)
 //                           B cause | (charges available << 8) | (charges at most << 16), cause 1 started (a press),
-//                           2 adjusted (a cut or an extension), 3 reset, 4 rescaled (its rate or base duration changed)
+//                           2 adjusted (a cut or an extension), 3 reset, 4 rescaled (its rate or base duration changed),
+//                           5 recharged (a charge came back on its own and the next recharge started)
 //                           ENTITY = 0x80000000 + the cooldown's index in its owner's cooldown list (named in the
 //                           sidecar, family "cooldown"); written only when the state (time left or charges) changed
 //   EVT_SWING_DUE           A ms from now until the auto-attack's swing is due after this operation (0xFFFFFFFF = no swing
@@ -158,6 +159,7 @@ inline constexpr std::uint8_t CD_CAUSE_START = 1u;
 inline constexpr std::uint8_t CD_CAUSE_ADJUST = 2u;
 inline constexpr std::uint8_t CD_CAUSE_RESET = 3u;
 inline constexpr std::uint8_t CD_CAUSE_RESCALE = 4u;
+inline constexpr std::uint8_t CD_CAUSE_RECHARGE = 5u;
 inline constexpr std::uint8_t SWING_OP_BOOK = 1u;
 inline constexpr std::uint8_t SWING_OP_RESCHEDULE = 2u;
 inline constexpr std::uint8_t SWING_OP_CANCEL = 3u;
