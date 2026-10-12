@@ -846,7 +846,9 @@ void check_header_reach_classes( const player_t* p, const std::vector<token_t>& 
       const action_t* root = t.nodes.front().action;
       // An action built from an untaken talent has spell data that is not enabled for this player (it can never be pressed); it
       // says nothing about the table. An item use has no spell data at all (use_item_t, player.cpp), so it is compared, not skipped.
-      if ( root->item == nullptr && !root->data().ok() )
+      // It is recognised by used_item(), the virtual accessor: use_item_t keeps its item in its OWN shadowing member, and the base
+      // member action_t::item is never assigned for it (action.hpp, the used_item() comment), so reading `item` would skip the trinket.
+      if ( root->used_item() == nullptr && !root->data().ok() )
         continue;
       const bool engine_needs = needs_melee_reach( t );
       if ( engine_needs != RL_ACTION_NEEDS_MELEE_REACH[ i ] )
