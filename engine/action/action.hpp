@@ -1149,6 +1149,15 @@ public:
   /// Ability usable during the on-going global cooldown
   virtual bool usable_during_current_gcd() const;
 
+  /// True when a class module refuses this action while its actor channels or one of its lock auras (see
+  /// player_t::channel_lock_aura_spell_ids) is up. Phase 271.6 plan 18 (G271.6-37): the answer is the engine's own, read by the
+  /// RL action census and by the bind-time lock check so the addon refuses exactly the buttons the net trained against. The
+  /// generic default refuses nothing; only a class module that locks its actions overrides it.
+  virtual bool refused_while_channel_locked() const
+  {
+    return false;
+  }
+
   virtual void init();
 
   virtual void init_finished();

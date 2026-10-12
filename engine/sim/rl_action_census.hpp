@@ -226,6 +226,9 @@ struct token_t
   int                  chosen_node = -1;
   std::vector<std::string> disagreements;
   gate_class_t         gate_class = gate_class_t::EXEMPT;  // filled by walk_classified (the data default; see gate_class_default)
+  // Phase 271.6 plan 18 (G271.6-37): the engine's own answer to "does the channel lock refuse this button", read from the root
+  // action's refused_while_channel_locked() in walk(). False for a token whose action was not found and for item uses.
+  bool                 refused_while_locked = false;
 };
 
 // The ONE gate-class function (271.6-07, G271.6-28 as revised). The class the spell DATA gives a button: UNIT when any implicit

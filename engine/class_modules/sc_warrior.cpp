@@ -924,6 +924,7 @@ public:
   void parse_assisted_combat_step( const assisted_combat_step_data_t& step, action_priority_list_t* assisted_combat ) override;
   parsed_assisted_combat_rule_t parse_assisted_combat_rule( const assisted_combat_rule_data_t& rule, const assisted_combat_step_data_t& step ) const override;
   std::vector<std::string> action_names_from_spell_id( unsigned int spell_id ) const override;
+  std::vector<unsigned> channel_lock_aura_spell_ids() const override;
 
   action_t* create_action( util::string_view name, util::string_view options ) override;
   void activate() override;
@@ -1388,10 +1389,17 @@ public:
     if ( p()->current.distance_to_move > ab::range && ab::range != -1 )
       return false;
 
-    if ( ( p()->channeling || p()->buff.bladestorm->check() ) && !usable_while_channeling )
+    if ( ( p()->channeling || p()->buff.bladestorm->check() ) && refused_while_channel_locked() )
       return false;
 
     return true;
+  }
+
+  // Phase 271.6 plan 18 (G271.6-37): the engine's own answer to "does the channel lock refuse this button". ready() above reads
+  // this same query, so the action census's answer and the engine's refusal are one expression.
+  bool refused_while_channel_locked() const override
+  {
+    return !usable_while_channeling;
   }
 
   bool action_ready() override
@@ -9214,6 +9222,17 @@ std::vector<std::string> warrior_t::action_names_from_spell_id( unsigned int spe
 {
   // If we need to do spell id replacements for blizz apl, see DK module for an example
   return player_t::action_names_from_spell_id( spell_id );
+}
+
+// warrior_t::channel_lock_aura_spell_ids ==============================
+// Phase 271.6 plan 18 (G271.6-37): the buff that warrior_action_t::ready() reads as the lock is Bladestorm's; its spell is the
+// Slayer variant (446035) with Unrelenting Onslaught and the talent's own otherwise. Listed only when the buff exists and its
+// spell data is enabled.
+std::vector<unsigned> warrior_t::channel_lock_aura_spell_ids() const
+{
+  if ( buff.bladestorm && buff.bladestorm->data().ok() )
+    return { buff.bladestorm->data().id() };
+  return {};
 }
 
 // warrior_t::arise() ======================================================

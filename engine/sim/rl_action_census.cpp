@@ -516,10 +516,11 @@ std::string token_json( const token_t& t )
   dis += "]";
   return fmt::format(
       "{{\"token\":{},\"actionFound\":{},\"spellId\":{},\"rangeYards\":{},\"minRangeYards\":{},\"radiusYards\":{},"
-      "\"multiTarget\":{},\"multiWhile\":{},\"nodes\":{},\"chosenNode\":{},\"disagreements\":{},\"gateClass\":{}}}",
+      "\"multiTarget\":{},\"multiWhile\":{},\"nodes\":{},\"chosenNode\":{},\"disagreements\":{},\"gateClass\":{},"
+      "\"refusedWhileLocked\":{}}}",
       esc( t.token ), t.found ? "true" : "false", t.spell_id, num( t.range ), num( t.min_range ), num( t.radius ),
       t.multi_target ? "true" : "false", t.has_multi_while ? widen_json( t.multi_while ) : std::string( "null" ), nodes,
-      t.chosen_node, dis, esc( gate_class_name( t.gate_class ) ) );
+      t.chosen_node, dis, esc( gate_class_name( t.gate_class ) ), t.refused_while_locked ? "true" : "false" );
 }
 
 // What must agree between the init walk and the fight-end walk: structure, never live values
@@ -563,8 +564,15 @@ std::vector<token_t> walk_all( player_t* p, bool at_fight_end )
 
 void write_file( sim_t* sim, player_t* p, const std::vector<token_t>& tokens, bool init_matches_end )
 {
-  std::string body = fmt::format( "{{\"schemaVersion\":1,\"actor\":{},\"initMatchesEnd\":{},\"tokens\":[", esc( p->name_str ),
-                                  init_matches_end ? "true" : "false" );
+  // Phase 271.6 plan 18 (G271.6-37): the spell ids of the buffs that lock this actor's class-module actions, sorted ascending.
+  std::vector<unsigned> lock_auras = p->channel_lock_aura_spell_ids();
+  std::sort( lock_auras.begin(), lock_auras.end() );
+  std::string lock_list = "[";
+  for ( size_t i = 0; i < lock_auras.size(); ++i )
+    lock_list += ( i ? "," : "" ) + std::to_string( lock_auras[ i ] );
+  lock_list += "]";
+  std::string body = fmt::format( "{{\"schemaVersion\":1,\"actor\":{},\"initMatchesEnd\":{},\"lockAuraSpellIds\":{},\"tokens\":[",
+                                  esc( p->name_str ), init_matches_end ? "true" : "false", lock_list );
   for ( size_t i = 0; i < tokens.size(); ++i )
     body += ( i ? "," : "" ) + token_json( tokens[ i ] );
   body += "]}\n";
@@ -725,6 +733,7 @@ std::vector<token_t> walk( player_t* p )
       t.range     = root->range;
       t.min_range = root->data().min_range();
       t.radius    = root->radius;
+      t.refused_while_locked = root->refused_while_channel_locked();
       std::set<const action_t*> seen;
       walk_node( root, "root", 0, p, seen, t.nodes );
     }

@@ -1274,6 +1274,13 @@ public:
   virtual void init_action_list() {}
   virtual void init_blizzard_action_list();
   virtual std::vector<std::string> action_names_from_spell_id( unsigned int spell_id ) const;
+  /// The spell ids of the buffs whose presence locks this actor's class-module actions (Phase 271.6 plan 18, G271.6-37): while one
+  /// is up, every action whose refused_while_channel_locked() is true is refused by the class module. The generic default lists
+  /// none. Read only by the RL action census and the bind-time lock check, never per decision.
+  virtual std::vector<unsigned> channel_lock_aura_spell_ids() const
+  {
+    return {};
+  }
   virtual std::string aura_expr_from_spell_id( unsigned int spell_id, bool on_self = true ) const;
   virtual void parse_assisted_combat_step( const assisted_combat_step_data_t& step, action_priority_list_t* assisted_combat );
 
