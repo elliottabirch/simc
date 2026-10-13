@@ -8,6 +8,7 @@
 #include "config.hpp"
 #include "player/player.hpp"
 #include "player/player_event.hpp"
+#include "sim/rl_rng_record.hpp"
 #include "sim/sim.hpp"
 #include "util/timespan.hpp"
 
@@ -31,6 +32,8 @@ struct player_demise_event_t : public player_event_t
   virtual void execute() override
   {
     p()->demise_event = nullptr;
+    // 288.9: everything the demise does, including a class module's override after the base, is caused by the unit going away.
+    rl_rng_record::cause_scope_t rl_demise_cause( &sim(), nullptr, rl_rng_record::FAMILY_NONE, rl_rng_record::CAUSE_DEMISE );
     p()->demise();
   }
 };

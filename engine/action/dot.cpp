@@ -1257,6 +1257,9 @@ dot_t::dot_end_event_t::dot_end_event_t(dot_t* d, timespan_t time_to_end) :
 void dot_t::dot_end_event_t::execute()
 {
   dot->end_event = nullptr;
+  // 288.9: a dot reaching its end on its own is its action's timer (kind 9); the final partial tick below opens its own tick cause inside it.
+  rl_rng_record::cause_scope_t rl_timer_cause( &dot->sim, dot->current_action, rl_rng_record::FAMILY_ACTION, rl_rng_record::CAUSE_TIMER,
+                                                rl_rng_record::TIMER_DOT_END );
 
   assert( dot->tick_event );
   if ( dot->time_to_next_full_tick() < dot->tick_time )

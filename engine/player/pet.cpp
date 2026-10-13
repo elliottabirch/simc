@@ -231,6 +231,8 @@ void pet_t::update_stats()
 
 void pet_t::dismiss( bool expired )
 {
+  // 288.9: what this pet's demise cancels or ends (its own auras, and whatever a class module's demise override does after the base) is caused by its going away.
+  rl_rng_record::cause_scope_t rl_demise_cause( sim, nullptr, rl_rng_record::FAMILY_NONE, rl_rng_record::CAUSE_DEMISE );
   sim -> print_log( "{} dismisses {}", *owner, name_str );
 
   // Remove from active_pets list

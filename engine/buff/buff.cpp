@@ -207,6 +207,9 @@ struct tick_t : public buff_event_t
   void execute() override
   {
     buff->tick_event = nullptr;
+    // 288.9: the aura's own tick is the cause of what it does (a stack that decays on it): kind 9.
+    rl_rng_record::cause_scope_t rl_timer_cause( buff->sim, buff, rl_rng_record::FAMILY_BUFF, rl_rng_record::CAUSE_TIMER,
+                                                  rl_rng_record::TIMER_BUFF_TICK );
 
     if ( !buff->disable_tick_effects )
     {
@@ -290,6 +293,9 @@ struct expiration_t : public buff_event_t
   {
     assert( !buff->expiration.empty() );
     assert( *buff->expiration.begin() == this );
+    // 288.9: the aura's own expiry (or its asynchronous stack's expiry) is the cause of what happens below: kind 9.
+    rl_rng_record::cause_scope_t rl_timer_cause( buff->sim, buff, rl_rng_record::FAMILY_BUFF, rl_rng_record::CAUSE_TIMER,
+                                                  rl_rng_record::TIMER_BUFF_EXPIRY );
 
     // For non-async buffs, this is always unconditionally the "last tick" since we expire the buff
     auto last_tick = buff->stack_behavior != buff_stack_behavior::ASYNCHRONOUS ||
@@ -372,11 +378,15 @@ struct buff_delay_t : public buff_event_t
   // the ledger is on (empty, one flag store, otherwise).
   std::optional<rl_cause_t> rl_bl_cause;
 
+  // 288.9: the event cause in force when the trigger was delayed (empty unless the event recorder is writing), put back when the delayed application lands.
+  rl_rng_record::cause_frame_t rl_event_cause;
+
   buff_delay_t( buff_t* b, int stacks, double value, timespan_t d )
     : buff_event_t( b, b->rng().gauss( b->sim->default_aura_delay ) ),
       value( value ),
       duration( d ),
-      stacks( stacks )
+      stacks( stacks ),
+      rl_event_cause( rl_rng_record::snapshot_cause( b->sim ) )
   {
     if ( b->sim->rl_bl_on )
     {
@@ -394,6 +404,8 @@ struct buff_delay_t : public buff_event_t
 
   void execute() override
   {
+    // 288.9: the delayed application keeps the cause the trigger was made under.
+    rl_rng_record::cause_restore_scope_t rl_cause_restore( buff->sim, rl_event_cause );
     // Add a Cooldown check here to avoid extra processing due to delays
     if ( buff->cooldown->remains() == timespan_t::zero() )
     {
@@ -414,12 +426,16 @@ struct buff_delay_t : public buff_event_t
 
 struct expiration_delay_t : public buff_event_t
 {
-  expiration_delay_t( buff_t* b, timespan_t d ) : buff_event_t( b, d )
+  // 288.9: the event cause in force when the expiry was delayed, put back when it lands.
+  rl_rng_record::cause_frame_t rl_event_cause;
+
+  expiration_delay_t( buff_t* b, timespan_t d ) : buff_event_t( b, d ), rl_event_cause( rl_rng_record::snapshot_cause( b->sim ) )
   {
   }
 
   void execute() override
   {
+    rl_rng_record::cause_restore_scope_t rl_cause_restore( buff->sim, rl_event_cause );
     buff->expiration_delay = nullptr;
     // Call real expire after a delay
     buff->expire();
@@ -2386,6 +2402,7 @@ void buff_t::decrement( int stacks, double value )
 {
   if ( sim->rl_bl_shadow )
     return rl_buff_ledger::blocked( sim, "buff.decrement" );
+  rl_rng_record::buff_cause_scope_t rl_buff_cause( sim, this, rl_rng_record::EVT_STACKS_CHANGED );   // 288.9
 
   if ( overridden )
     return;
@@ -2481,7 +2498,7 @@ void buff_t::extend_duration( timespan_t extra_seconds )
 
     // 288.7: the expiry moved later.
     if ( rl_rng_record::events_on() )
-      rl_rng_record::event_buff( sim, rl_rng_record::EVT_BUFF_REFRESHED, this, 0 );
+      rl_rng_record::event_buff( sim, rl_rng_record::EVT_BUFF_REFRESHED, this, 0, static_cast<std::int32_t>( extra_seconds.total_millis() ) );
 
     sim->print_log( "{} extends {} by {}. New expiration time: {}", *source, *this, extra_seconds,
                     expiration.front()->occurs() );
@@ -2505,7 +2522,7 @@ void buff_t::extend_duration( timespan_t extra_seconds )
 
     // 288.7: the expiry moved earlier.
     if ( rl_rng_record::events_on() )
-      rl_rng_record::event_buff( sim, rl_rng_record::EVT_BUFF_REFRESHED, this, 0 );
+      rl_rng_record::event_buff( sim, rl_rng_record::EVT_BUFF_REFRESHED, this, 0, static_cast<std::int32_t>( extra_seconds.total_millis() ) );
 
     sim->print_log( "{} decreases {} by {}. New expiration: {}", *source, *this, -extra_seconds,
                     expiration.back()->occurs() );
@@ -2563,7 +2580,7 @@ void buff_t::extend_async_duration( timespan_t extra_seconds )
 
     // 288.7: every stack's expiry moved later.
     if ( rl_rng_record::events_on() )
-      rl_rng_record::event_buff( sim, rl_rng_record::EVT_BUFF_REFRESHED, this, 0 );
+      rl_rng_record::event_buff( sim, rl_rng_record::EVT_BUFF_REFRESHED, this, 0, static_cast<std::int32_t>( extra_seconds.total_millis() ) );
   }
   else if ( extra_seconds < timespan_t::zero() )
   {
@@ -2630,6 +2647,9 @@ void buff_t::start( int stacks, double value, timespan_t duration )
 {
   if ( sim->rl_bl_shadow )
     return rl_buff_ledger::blocked( sim, "buff.start" );
+  // 288.9: until this returns, a speed change or stat gain that this buff's coming up causes is caused by it (kind 5).
+  // (An asynchronous buff's further stack goes through start() too; its event is a refresh.)
+  rl_rng_record::buff_cause_scope_t rl_buff_cause( sim, this, current_stack > 0 ? rl_rng_record::EVT_BUFF_REFRESHED : rl_rng_record::EVT_BUFF_APPLIED );
 
   if ( _max_stack == 0 )
     return;
@@ -2773,6 +2793,7 @@ void buff_t::refresh( int stacks, double value, timespan_t duration )
 {
   if ( sim->rl_bl_shadow )
     return rl_buff_ledger::blocked( sim, "buff.refresh" );
+  rl_rng_record::buff_cause_scope_t rl_buff_cause( sim, this, rl_rng_record::EVT_BUFF_REFRESHED );   // 288.9
 
   if ( _max_stack == 0 )
     return;
@@ -2929,6 +2950,7 @@ void buff_t::bump( int stacks, double value )
 {
   if ( sim->rl_bl_shadow )
     return rl_buff_ledger::blocked( sim, "buff.bump" );
+  rl_rng_record::buff_cause_scope_t rl_buff_cause( sim, this, 0u );   // 288.9
 
   if ( _max_stack == 0 )
     return;
@@ -3214,6 +3236,7 @@ void buff_t::expire( timespan_t d )
 {
   if ( sim->rl_bl_shadow )
     return rl_buff_ledger::blocked( sim, "buff.expire" );
+  rl_rng_record::buff_cause_scope_t rl_buff_cause( sim, this, rl_rng_record::EVT_BUFF_EXPIRED );   // 288.9
 
   if ( current_stack <= 0 )
   {
@@ -4085,6 +4108,8 @@ void stat_buff_t::bump( int stacks, double value )
 {
   if ( sim->rl_bl_shadow )
     return rl_buff_ledger::blocked( sim, "buff.bump" );
+  // 288.9: the stat gains below follow buff_t::bump's own start or refresh event, so this scope outlives it.
+  rl_rng_record::buff_cause_scope_t rl_buff_cause( sim, this, 0u );
 
   buff_t::bump( stacks, value );
 
@@ -4101,6 +4126,7 @@ void stat_buff_t::decrement( int stacks, double /* value */ )
 {
   if ( sim->rl_bl_shadow )
     return rl_buff_ledger::blocked( sim, "buff.decrement" );
+  rl_rng_record::buff_cause_scope_t rl_buff_cause( sim, this, rl_rng_record::EVT_STACKS_CHANGED );   // 288.9
 
   if ( stacks == 0 || current_stack <= stacks )
   {

@@ -7386,6 +7386,8 @@ void player_t::demise()
   // No point in demising anything if we're not even active
   if ( current.sleeping )
     return;
+  // 288.9: the auras and damage-over-time effects cancelled below end because this unit died or was dismissed (kind 11; the unit is the event's own UNIT field).
+  rl_rng_record::cause_scope_t rl_demise_cause( sim, nullptr, rl_rng_record::FAMILY_NONE, rl_rng_record::CAUSE_DEMISE );
 
   leave_combat();
 
@@ -14420,6 +14422,8 @@ void player_t::update_movement( timespan_t duration )
   // Presume stunned players don't move
   if ( buffs.stunned->check() )
     return;
+  // 288.9: the movement update of the player (its aura ending when the distance is covered) is an engine timer (kind 9, type 5, no object).
+  rl_rng_record::cause_scope_t rl_movement_cause( sim, nullptr, rl_rng_record::FAMILY_NONE, rl_rng_record::CAUSE_TIMER, rl_rng_record::TIMER_MOVEMENT );
 
   double yards = duration.total_seconds() * composite_movement_speed();
   do_update_movement( yards );
@@ -14708,6 +14712,8 @@ void player_t::adjust_dynamic_cooldowns()
   // stack change). Written before the cooldown rate changes it causes.
   if ( rl_rng_record::events_on() )
     rl_rng_record::event_speed( sim, this );
+  // 288.9: the cooldown rescales below are consequences of the speed change (kind 10), which keeps the cause of the speed change as its entity.
+  rl_rng_record::cause_wrap_scope_t rl_speed_cause( sim, rl_rng_record::CAUSE_SPEED, 0u, true );
 
   range::for_each( dynamic_cooldown_list, []( cooldown_t* cd ) { cd -> adjust_recharge_multiplier(); } );
 }
@@ -14806,6 +14812,9 @@ void player_t::adjust_auto_attack( gcd_haste_type ht )
   {
     return;
   }
+
+  // 288.9: the swings moved below are consequences of the speed change (kind 10), which keeps the cause of the speed change as its entity.
+  rl_rng_record::cause_wrap_scope_t rl_speed_cause( sim, rl_rng_record::CAUSE_SPEED, 0u, true );
 
   if ( main_hand_attack )
     main_hand_attack->reschedule_auto_attack( current_auto_attack_speed );

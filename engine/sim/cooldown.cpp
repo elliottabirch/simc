@@ -36,6 +36,10 @@ struct recharge_event_t : event_t
   void execute() override
   {
     // 288.7: a charge came back on its own; the next recharge (its length at the multiplier now in force) starts. Written when this returns.
+    // 288.9: a charge returning on its own is the cooldown's own timer (kind 9). Declared BEFORE the event scope: the event is written when the
+    // scope below it closes, which must be while this cause is still in force.
+    rl_rng_record::cause_scope_t rl_timer_cause( &sim(), cooldown_, rl_rng_record::FAMILY_COOLDOWN, rl_rng_record::CAUSE_TIMER,
+                                                  rl_rng_record::TIMER_CHARGE_BACK );
     rl_rng_record::rl_cooldown_scope_t rl_event_scope( &sim(), cooldown_, rl_rng_record::CD_CAUSE_RECHARGE );
 
     assert( cooldown_->current_charge < cooldown_->charges );
@@ -297,7 +301,8 @@ void cooldown_t::adjust( timespan_t amount, bool requires_reaction, bool apply_r
   }
   rl_buff_ledger::cd_scope_t rl_scope( this, "adjust", sim.rl_bl_on );
   // 288.7: a cut or an extension is an event if the state changed.
-  rl_rng_record::rl_cooldown_scope_t rl_event_scope( &sim, this, rl_rng_record::CD_CAUSE_ADJUST );
+  rl_rng_record::rl_cooldown_scope_t rl_event_scope( &sim, this, rl_rng_record::CD_CAUSE_ADJUST,
+                                                      static_cast<std::int32_t>( amount.total_millis() ) );
 
   if ( amount == 0_ms )
     return;

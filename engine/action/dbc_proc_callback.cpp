@@ -106,6 +106,8 @@ struct proc_event_t : public event_t
     std::optional<rl_rng_record::rl_press_scope_t> rl_press_guard;
     if ( source_state )
       rl_press_guard.emplace( cb->listener->sim, source_state );
+    // 288.9: the callback is the cause of what its (detached) execution does.
+    rl_rng_record::cause_scope_t rl_callback_cause( cb->listener->sim, cb, rl_rng_record::FAMILY_CALLBACK, rl_rng_record::CAUSE_PROC );
     // 261001-bac plan 06: while a callback that an engine switch (activate_with_buff) turned on executes, its
     // launch is recorded as a switch launch carrying that buff (D-03's test-free gate).
     std::optional<rl_buff_ledger::switch_scope_t> rl_switch_guard;

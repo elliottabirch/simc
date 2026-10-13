@@ -7,6 +7,7 @@
 
 #include "action.hpp"
 #include "player/player.hpp"
+#include "sim/rl_rng_record.hpp"
 
 proc_data_t::proc_data_t()
   : spell( spell_data_t::nil() ),
@@ -82,7 +83,11 @@ void action_callback_t::trigger( const std::vector<action_callback_t*>& v, const
 
   for ( auto cb : v )
     if ( cb->active )
+    {
+      // 288.9: the callback is the cause of what its trigger does (a proc aura, a stat pick, a cooldown start ...).
+      rl_rng_record::cause_scope_t rl_callback_cause( player->sim, cb, rl_rng_record::FAMILY_CALLBACK, rl_rng_record::CAUSE_PROC );
       cb->trigger( data, target, state, type );
+    }
 }
 
 void action_callback_t::reset( const std::vector<action_callback_t*>& v )

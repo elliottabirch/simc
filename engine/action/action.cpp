@@ -2722,6 +2722,8 @@ void action_t::schedule_execute( action_state_t* state )
   // 261001-bac plan 12 (MJ-04): inside a ledger pass a counted no-op.
   if ( sim->rl_bl_shadow )
     return rl_buff_ledger::blocked( sim, "action.schedule_execute" );
+  // 288.9: an action starting (a decision, a queued cast) with no cause above it is the cause of what starting it does (the player's casting aura).
+  rl_rng_record::cause_default_scope_t rl_start_cause( sim, this, rl_rng_record::FAMILY_ACTION, rl_rng_record::CAUSE_PRESS );
   if ( target->is_sleeping() )
   {
     sim->print_debug( "{} action={} attempted to schedule on a dead target {}",
@@ -5116,6 +5118,9 @@ void action_t::do_schedule_travel( action_state_t* state, timespan_t time_ )
     // 288.7: the hit reaches its target (before impact() runs its effects).
     if ( rl_rng_record::events_on() )
       rl_rng_record::event_hit( sim, this, state );
+    // 288.9: the hit landing (with its result) is the cause of what impact() and its overrides do.
+    rl_rng_record::cause_scope_t rl_hit_cause( sim, this, rl_rng_record::FAMILY_ACTION, rl_rng_record::CAUSE_HIT,
+                                                static_cast<std::uint32_t>( state->result ) );
     impact( state );
     action_state_t::release( state );
   }

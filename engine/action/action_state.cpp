@@ -340,6 +340,9 @@ void travel_event_t::execute()
     // 288.7: the hit reaches its target after its travel time (before impact() runs its effects).
     if ( rl_rng_record::events_on() )
       rl_rng_record::event_hit( action->sim, action, state );
+    // 288.9: the hit landing (with its result) is the cause of what impact() and its overrides do.
+    rl_rng_record::cause_scope_t rl_hit_cause( action->sim, action, rl_rng_record::FAMILY_ACTION, rl_rng_record::CAUSE_HIT,
+                                                static_cast<std::uint32_t>( state->result ) );
     action->impact( state );
   }
 

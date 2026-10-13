@@ -1308,6 +1308,8 @@ struct bloodlust_check_t : public event_t
   void execute() override
   {
     sim_t& sim = this->sim();
+    // 288.9: the simulation's own periodic bloodlust check is the timer behind the aura it puts up (kind 9, type 6, no object).
+    rl_rng_record::cause_scope_t rl_check_cause( &sim, nullptr, rl_rng_record::FAMILY_NONE, rl_rng_record::CAUSE_TIMER, rl_rng_record::TIMER_SIM_CHECK );
     player_t* t = sim.target;
     if ( ( sim.bloodlust_percent > 0 && t->health_percentage() < sim.bloodlust_percent ) ||
          ( sim.bloodlust_time < timespan_t::zero() && t->time_to_percent( 0.0 ) < -sim.bloodlust_time ) ||
@@ -2133,6 +2135,8 @@ void sim_t::combat_begin()
   // 288.7: from here on a fight's event records are written (the reset phase above is not part of
   // a fight). No-op when rl_rng_record= is unset.
   rl_rng_record::events_begin( this );
+  // 288.9: what the engine puts up when the fight starts (flask, food, imbues, raid auras) has no cause above it: fight set-up (kind 12) until this returns.
+  rl_rng_record::cause_scope_t rl_setup_cause( this, nullptr, rl_rng_record::FAMILY_NONE, rl_rng_record::CAUSE_SETUP );
 
   // 261001-bac plan 07: from here on a fight's cooldown records are written (the reset phase above is not part of it).
   if ( rl_bl_on )

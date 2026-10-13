@@ -5666,6 +5666,8 @@ void venomcursed_ascendance( special_effect_t& effect )
       // from now on, and the amount it adds to it. Writes nothing to a random stream and changes no state.
       if ( rl_rng_record::events_on() )
         rl_rng_record::event_stat_chosen( listener->sim, buff, static_cast<int>( rng_stat.stat ), pos_value );
+      // 288.9: for the rest of this execute the pick (kind 7, the chosen stat in the detail) is how the stat moves and the aura that follows came about.
+      rl_rng_record::cause_wrap_scope_t rl_pick_cause( listener->sim, rl_rng_record::CAUSE_PICK, static_cast<std::uint32_t>( rng_stat.stat ), false );
 
       // update stat amounts if the randomly chosen stat is not already positive
       if ( rng_stat.amount != pos_value )

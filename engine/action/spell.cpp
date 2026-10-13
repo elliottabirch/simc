@@ -100,6 +100,8 @@ void spell_base_t::execute()
 
 void spell_base_t::schedule_execute( action_state_t* state )
 {
+  // 288.9: the casting aura started below is caused by this action starting (when nothing above it is the cause).
+  rl_rng_record::cause_default_scope_t rl_start_cause( sim, this, rl_rng_record::FAMILY_ACTION, rl_rng_record::CAUSE_PRESS );
   action_t::schedule_execute( state );
 
   if ( !background && time_to_execute > timespan_t::zero() )

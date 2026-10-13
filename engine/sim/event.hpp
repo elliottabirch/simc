@@ -10,6 +10,7 @@
 #include "util/timespan.hpp"
 #include "util/generic.hpp"
 #include "util/format.hpp"
+#include "sim/rl_rng_record.hpp"
 
 struct actor_t;
 struct sim_t;
@@ -133,18 +134,23 @@ template <typename T>
 class fn_event_t : public event_t
 {
   T fn;
+  // 288.9: the event-recorder cause in force when this event was made, put back while it runs (empty, and one flag test, unless events are being written).
+  rl_rng_record::cause_frame_t rl_event_cause;
 
 public:
   template <typename U = T>
   fn_event_t( sim_t& s, timespan_t t, U&& fn ) :
-    event_t( s, t ), fn( std::forward<U>( fn ) )
+    event_t( s, t ), fn( std::forward<U>( fn ) ), rl_event_cause( rl_rng_record::snapshot_cause( &s ) )
   { }
 
   const char* name() const override
   { return "function_event"; }
 
   void execute() override
-  { fn(); }
+  {
+    rl_rng_record::cause_restore_scope_t rl_cause_restore( &sim(), rl_event_cause );
+    fn();
+  }
 };
 
 template <typename T>

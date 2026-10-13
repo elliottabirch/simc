@@ -2558,6 +2558,8 @@ bool raid_event_t::up() const
 
 void raid_event_t::start()
 {
+  // 288.9: what this raid event's start does (an aura, a movement, an interrupt) is caused by it (kind 13).
+  rl_rng_record::cause_scope_t rl_raid_cause( sim, this, rl_rng_record::FAMILY_RAID_EVENT, rl_rng_record::CAUSE_RAID, 1u );
   sim->print_log( "{} starts.", log_name() );
 
   num_starts++;
@@ -2602,6 +2604,7 @@ void raid_event_t::start()
 
 void raid_event_t::finish()
 {
+  rl_rng_record::cause_scope_t rl_raid_cause( sim, this, rl_rng_record::FAMILY_RAID_EVENT, rl_rng_record::CAUSE_RAID, 2u );   // 288.9
   // Make sure we dont have any players which were active on start, but are now sleeping
   range::erase_remove( affected_players, []( const player_t* p ) { return p->is_sleeping(); } );
 
