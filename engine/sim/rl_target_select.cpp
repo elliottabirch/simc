@@ -352,6 +352,35 @@ bool generic_filter( const action_t* a, player_t* candidate, bool harmful )
   return true;
 }
 
+// ---- 261013-aimx class A: a gated button is aimed only among the enemies that pass its gate ---------------------------------
+// The registry declares a target-health gate on a button (maskRules.targetHealthGates: below a percent, a talent override, a bypass
+// aura). The legality mask already asks the engine's own target_ready about the rules pick, but the aim head chose among every
+// enemy in reach, so it could aim a gated press at an enemy the cast is refused on while another enemy qualified. The generated
+// header flags the aimed buttons that carry such a row (RL_TARGETED_TOKEN_HEALTH_GATED); for a flagged button the candidate list
+// is the pool run through generic_filter AND the engine's own target_ready, so the list the aim head scores, the dump lists and the
+// random-aim draw reads never holds an enemy the cast would be refused on. No threshold is copied into this file: target_ready is
+// the one definition (a bypass aura up makes every enemy pass, a talent override raises the line, both inside the class module).
+// It is deliberately NOT inside generic_filter: that function is also the reach predicate of rl_can_be_hit and the tag chooser,
+// and it must keep agreeing with target_ready about REACH only. A header without the table (enhancement's) compiles all of this to
+// nothing, so that build's behaviour is unchanged.
+bool aimed_action_health_gated( const action_t* a )
+{
+#ifdef RL_TARGETED_TOKEN_HEALTH_GATED_DEFINED
+  for ( std::size_t k = 0; k < RL_TARGETED_TOKEN_COUNT; ++k )
+    if ( a->name_str == RL_TARGETED_TOKENS[ k ] )
+      return RL_TARGETED_TOKEN_HEALTH_GATED[ k ];
+#else
+  (void)a;
+#endif
+  return false;
+}
+
+bool passes_aim_gate( const action_t* a, bool gated, player_t* candidate )
+{
+  // target_ready reads only (the engine's action API is non-const throughout, as at the other const_cast sites of this module).
+  return !gated || const_cast<action_t*>( a )->target_ready( candidate );
+}
+
 // ---- tstl-sylvanas 264-05 (O4) + 261006-dnh-F1: the sheet-declared do-not-hit rule (STRICT) --------------------------------
 // A boss the sheet declares do-not-hit (for a phase or a window; see sheet_fight_do_not_hit) is NEVER a candidate for a
 // single-target AIMED press while the declaration is active -- even when it is the only enemy an aimed spell can reach, and even
@@ -1022,8 +1051,9 @@ std::vector<enemy_fact> build_candidate_facts( const action_t* a, bool harmful )
   // tstl-sylvanas 264-05 (O4) + 261006-dnh-F1: the set the aim exploration draws from and the dump lists is the SAME set select() blocks (same
   // strict do-not-hit pass, no counting here), so its order and size match the stamped block's slots.
   std::vector<player_t*> gathered, kept;
+  const bool gated = aimed_action_health_gated( a );   // 261013-aimx class A: the same conjunct select() applies, so the two lists agree
   for ( player_t* t : aim_pool_for( a->player ) )   // 271-10 (T-2): the pool, in its order (current target first, then nearest)
-    if ( generic_filter( a, t, harmful ) )
+    if ( generic_filter( a, t, harmful ) && passes_aim_gate( a, gated, t ) )
       gathered.push_back( t );
   const std::vector<player_t*>& legal = dnh_split( a->sim, gathered, kept ) ? kept : gathered;
   for ( player_t* t : legal )
@@ -1360,8 +1390,9 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
   std::vector<player_t*>& candidates = g_candidate_buffer;
   candidates.clear();
   candidates.reserve( a->sim->target_non_sleeping_list.size() );
+  const bool gated = aimed_action_health_gated( a );   // 261013-aimx class A: a gated button is aimed only among the enemies that pass its gate
   for ( player_t* t : aim_pool_for( a->player ) )   // 271-10 (T-2): the pool, in its order (current target first, then nearest)
-    if ( generic_filter( a, t, harmful ) )
+    if ( generic_filter( a, t, harmful ) && passes_aim_gate( a, gated, t ) )
       candidates.push_back( t );
 
   // TGT-02 edge: empty -- no pick, legality bit goes to 0, the unanchored wait stays legal.
@@ -1921,6 +1952,44 @@ std::size_t process_cache_entries()
                ? 1u
                : 0u ) +
          ( g_every_targeted_action_illegal != 0 ? 1u : 0u ) + ( g_target_head_no_block_count != 0 ? 1u : 0u );
+}
+
+void check_header_health_gates( player_t* p )
+{
+#ifdef RL_TARGETED_TOKEN_HEALTH_GATED_DEFINED
+  for ( std::size_t k = 0; k < RL_TARGETED_TOKEN_COUNT; ++k )
+  {
+    const action_t* a = geometry_action_for( p, RL_TARGETED_TOKENS[ k ] );
+    // An aimed button the actor does not have, or built from an untaken talent (its spell data is not enabled for this player, so it can
+    // never be pressed), says nothing; the aimed-range binder skips the same actions.
+    if ( a == nullptr || !a->data().ok() )
+      continue;
+    // The probe: an enemy at full health that the generic filter lets through (alive, in reach, in front). An engine gate on health
+    // refuses it (no bypass aura is up at the first decision), so target_ready's answer on it IS the engine's answer to "is this button
+    // gated on enemy health". No such enemy (everyone hurt, or nobody in reach) means no probe for this button this fight.
+    player_t* probe = nullptr;
+    for ( player_t* t : p->sim->target_non_sleeping_list )
+      if ( rl_counts_as_enemy( t ) && t->health_percentage() >= 99.99 && generic_filter( a, t, /*harmful=*/true ) )
+      {
+        probe = t;
+        break;
+      }
+    if ( probe == nullptr )
+      continue;
+    const bool engine_gated = !const_cast<action_t*>( a )->target_ready( probe );
+    if ( engine_gated != RL_TARGETED_TOKEN_HEALTH_GATED[ k ] )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_target_select: registry '{}' header says aimed button '{}' {} a target-health gate but player '{}' answers it {} "
+          "(bind-time refusal: the generated gate table and the engine must agree; the gate is the registry's "
+          "maskRules.targetHealthGates row, regenerate the header)",
+          RL_REGISTRY_ID, RL_TARGETED_TOKENS[ k ], RL_TARGETED_TOKEN_HEALTH_GATED[ k ] ? "has" : "has no", p->name(),
+          engine_gated ? "does" : "does not" ) );
+    }
+  }
+#else
+  (void)p;
+#endif
 }
 
 bool is_targeted_action( const action_t* resolved )

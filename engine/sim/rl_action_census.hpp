@@ -197,6 +197,12 @@ struct node_t
   filter_descriptor_t filter;
   std::vector<widen_t> widened_by;
   bool                proc_only = false;
+  // 261013-aimx class B: the sample behind the proc verdict. Set by mark_proc_children (fight end only) on a child node whose verdict it
+  // actually weighed: the child's execute count and its root's execute count over the iteration the census file describes. -1 when no
+  // verdict was weighed (the init walk, a non-child node, a node that shares or cannot be told apart from its root's statistics, a root that
+  // never executed). A verdict resting on a small root count is thin: the census merge tool refuses it by name.
+  long long           proc_evidence_executes      = -1;
+  long long           proc_evidence_root_executes = -1;
   game_t              game;
 };
 

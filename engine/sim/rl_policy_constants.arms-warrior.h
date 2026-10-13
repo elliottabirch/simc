@@ -1901,3 +1901,32 @@ inline constexpr long long RL_LOCK_AURA_SPELL_IDS[RL_LOCK_AURA_COUNT] = {
 // (needsMeleeReach); the engine's bind-time check compares it with its own reading.
 #define RL_ACTION_NEEDS_MELEE_REACH_DEFINED 1
 inline constexpr bool RL_ACTION_NEEDS_MELEE_REACH[RL_ACTION_DIM] = { true, false, false, false, false, false, false, false, false, false, false, false, false, true, false, false, false, true };
+
+// The aimed buttons with a declared target-health gate (261013-aimx, class A), parallel to RL_TARGETED_TOKENS. A button whose entry is true
+// is aimed only among the enemies that pass its target-health gate (the registry's maskRules.targetHealthGates row, applied through the
+// simulator's own target_ready), so the aim head is never offered an enemy the cast would be refused on while another qualifies.
+#define RL_TARGETED_TOKEN_HEALTH_GATED_DEFINED 1
+inline constexpr bool RL_TARGETED_TOKEN_HEALTH_GATED[RL_TARGETED_TOKEN_COUNT] = { false, false, true, false, false, false, false, false, false, false, false };
+
+// The declared aggregates (261013-aimx, class C): a count or a lowest value over the enemies in reach of an aimed button, that is, over the button's
+// own candidate list (the list its aim head scores, already narrowed by the button's declared target-health gate). The observation leaf of a row is
+// `aggregates.<name>`. count = how many candidates; count_zero = how many have a raw fact of 0; min_positive = the lowest raw fact above 0; min = the
+// lowest raw fact. With no candidate a count reads 0 and a minimum reads the saturated end of its scale. fact_slot is the position of the fact in
+// the targeting block's candidate facts (0 when the row reads no fact).
+enum class rl_aggregate_reduce { count, count_zero, min_positive, min };
+struct rl_declared_aggregate
+{
+  const char*          name;
+  const char*          button;
+  const char*          fact;
+  std::size_t          fact_slot;
+  rl_aggregate_reduce  reduce;
+};
+#define RL_DECLARED_AGGREGATES_DEFINED 1
+inline constexpr std::size_t RL_DECLARED_AGGREGATE_COUNT = 4;
+inline constexpr rl_declared_aggregate RL_DECLARED_AGGREGATES[RL_DECLARED_AGGREGATE_COUNT] = {
+  { "rend_lacking_count", "rend", "rend_remaining", 12, rl_aggregate_reduce::count_zero },
+  { "rend_lowest_remaining", "rend", "rend_remaining", 12, rl_aggregate_reduce::min_positive },
+  { "execute_passing_count", "execute", nullptr, 0, rl_aggregate_reduce::count },
+  { "execute_lowest_health", "execute", "health_pct", 8, rl_aggregate_reduce::min },
+};

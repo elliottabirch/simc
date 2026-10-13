@@ -384,6 +384,8 @@ void mark_proc_children( token_t& t )
     // Bladestorm strikes are dual: a zero count there says nothing, so they stay counted.
     if ( n.action->dual )
       continue;
+    n.proc_evidence_executes      = static_cast<long long>( n.action->stats->iteration_num_executes );
+    n.proc_evidence_root_executes = static_cast<long long>( root_exec );
     if ( n.action->stats->iteration_num_executes + 1 < root_exec )  // at most one strike can still be pending
       n.proc_only = true;
   }
@@ -491,16 +493,20 @@ std::string node_json( const node_t& n )
   for ( size_t i = 0; i < n.game.implicit_targets.size(); ++i )
     implicit += fmt::format( "{}{}", i ? "," : "", n.game.implicit_targets[ i ] );
   implicit += "]";
+  // 261013-aimx class B: the sample behind a proc verdict (see node_t::proc_evidence_executes); null when none was weighed.
+  const std::string evidence = n.proc_evidence_root_executes < 0
+                                   ? std::string( "null" )
+                                   : fmt::format( "{{\"executes\":{},\"rootExecutes\":{}}}", n.proc_evidence_executes, n.proc_evidence_root_executes );
   return fmt::format(
       "{{\"name\":{},\"via\":{},\"spellId\":{},\"shape\":{},\"underlyingShape\":{},\"radiusYards\":{},\"rangeYards\":{},"
       "\"addReach\":{},\"capStatic\":{},\"capNow\":{},\"softCap\":{},\"fullAmountTargets\":{},\"splitDamage\":{},"
       "\"chain\":{},\"filter\":{},\"filterParams\":{},\"filterAxis\":{},\"ruleOverridden\":{},\"widenedBy\":{},"
-      "\"procOnly\":{},\"game\":{{\"coneDegrees\":{},\"implicitTargets\":{},\"radiusYards\":{},\"radiusMaxYards\":{},"
+      "\"procOnly\":{},\"evidence\":{},\"game\":{{\"coneDegrees\":{},\"implicitTargets\":{},\"radiusYards\":{},\"radiusMaxYards\":{},"
       "\"addReachAttr\":{}}}}}",
       esc( n.name ), esc( n.via ), n.spell_id, esc( shape_name( n.shape ) ), esc( shape_name( n.underlying ) ),
       num( n.radius ), num( n.range ), n.add_reach ? "true" : "false", n.cap_static, n.cap_now, num( n.soft_cap ),
       n.full_amount_targets, n.split_damage ? "true" : "false", n.chain ? "true" : "false", filter, params, axis,
-      n.override_active ? "true" : "false", widened, n.proc_only ? "true" : "false", num( n.game.cone_degrees ), implicit,
+      n.override_active ? "true" : "false", widened, n.proc_only ? "true" : "false", evidence, num( n.game.cone_degrees ), implicit,
       num( n.game.radius ), num( n.game.radius_max ), n.game.add_reach_attr ? "true" : "false" );
 }
 

@@ -141,6 +141,12 @@ struct census_hit_row_t
 {
   rl_action_census::token_t census;          // the button's classified walk (nodes, chosen_node)
   const action_t*           aimed = nullptr; // the resolved action of an AIMED button (its stamped pick is the centre), else null
+  // 261013-aimx class B: the census node this row counts, by NAME (the header's RL_HIT_ROW_NODE entry): a button's own row counts its
+  // unconditional node, a conditional row counts the button's proc node (what it would hit if it fires). Empty = the header names none (a
+  // header cut before this table): the walk's own chosen_node, as before. node_index is the position of that name in the walk's nodes, -1
+  // when this build's walk has no node of that name (a build without the proc talent), which reads 0 like a button the build cannot press.
+  std::string node_name;
+  int         node_index = -1;
 };
 struct census_hit_actor_t
 {
@@ -149,13 +155,14 @@ struct census_hit_actor_t
 };
 std::unordered_map<const player_t*, census_hit_actor_t> g_census_hit_actors;
 
-std::size_t census_hit_row_for( player_t* p, const char* token )
+std::size_t census_hit_row_for( player_t* p, const char* token, const char* node_name )
 {
   census_hit_actor_t& actor = g_census_hit_actors[ p ];
   if ( actor.walk.empty() )
     actor.walk = rl_action_census::walk_classified( p );
+  const std::string wanted_node = node_name != nullptr ? node_name : "";
   for ( std::size_t k = 0; k < actor.rows.size(); ++k )
-    if ( actor.rows[ k ].census.token == token )
+    if ( actor.rows[ k ].census.token == token && actor.rows[ k ].node_name == wanted_node )
       return k;
   if ( actor.rows.size() >= CENSUS_HIT_ROWS_MAX )
     throw sc_runtime_error( fmt::format(
@@ -174,7 +181,15 @@ std::size_t census_hit_row_for( player_t* p, const char* token )
         "header (player '{}') (bind-time refusal)",
         RL_REGISTRY_ID, token, p->name() ) );
   census_hit_row_t row;
-  row.census = *found;
+  row.census    = *found;
+  row.node_name = wanted_node;
+  if ( !wanted_node.empty() )
+    for ( std::size_t n = 0; n < row.census.nodes.size(); ++n )
+      if ( row.census.nodes[ n ].name == wanted_node )
+      {
+        row.node_index = static_cast<int>( n );
+        break;
+      }
   for ( std::size_t k = 0; k < RL_TARGETED_TOKEN_COUNT; ++k )
     if ( std::strcmp( RL_TARGETED_TOKENS[ k ], token ) == 0 )
       row.aimed = solver_control::resolve_action( p, token );
@@ -201,10 +216,68 @@ double census_hit_count( const player_t* p, const census_hit_row_t& row )
     centre = p->rl_chosen_enemy != nullptr ? p->rl_chosen_enemy : p->target;
   if ( centre == nullptr || centre->is_sleeping() || !centre->is_enemy() || !rl_target_select::rl_counts_as_enemy( centre ) )
     return 0.0;
+  // 261013-aimx class B: a header that names the node counts THAT node. A build whose walk has no node of that name (a conditional proc
+  // node of a talent this build does not take) hits nothing through it: 0, like a button the build cannot press.
+  if ( !row.node_name.empty() )
+  {
+    if ( row.node_index < 0 )
+      return 0.0;
+    return static_cast<double>( rl_action_census::count_engine_hits( row.census.nodes[ static_cast<std::size_t>( row.node_index ) ], centre ) );
+  }
   if ( row.census.chosen_node < 0 || static_cast<std::size_t>( row.census.chosen_node ) >= row.census.nodes.size() )
     return 1.0;
   return static_cast<double>( rl_action_census::count_engine_hits( row.census.nodes[ static_cast<std::size_t>( row.census.chosen_node ) ], centre ) );
 }
+
+#ifdef RL_DECLARED_AGGREGATES_DEFINED
+// 261013-aimx (class C): one declared aggregate, reduced over the candidate block the aim head scores for the row's aimed button. The block is
+// the button's candidate list of THIS decision (alive, not immune, in front, in its own reach, and, for a button with a declared target-health
+// gate, only the enemies that pass it), already stamped by select() before the observation is built; read through the same stale-checked access
+// the aim head uses, never recomputed. The reading is the RAW fact: the stored scaled value is inverted by the fact's own scale (a clipped-seconds
+// fact reads back clamped to its clip, every other fact in its own unit), exactly as the addon's aggregates family inverts the head's scaling, so a
+// capability-gated fact (which stores its fixed value) reads the same on both sides. No candidate (no block this decision, or none passing): a
+// count reads 0 and a minimum reads the leaf's `missing` value (the saturated end of its scale). Reads only; no allocation.
+double read_declared_aggregate( const rl_declared_aggregate& row, const rl_leaf_desc& leaf, const action_t* action )
+{
+  std::size_t count = 0;
+  const float* features = nullptr;
+  if ( action != nullptr )
+  {
+    bool found = false;
+    const rl_target_select::candidate_block block = rl_target_select::lookup_candidate_block( action, &found );
+    // More candidates than slots stores no rows (the engine records no block for such a decision either): it reads like no candidate.
+    if ( found && block.count <= RL_TARGET_SLOTS )
+    {
+      count    = block.count;
+      features = block.features;
+    }
+  }
+  if ( row.reduce == rl_aggregate_reduce::count )
+    return static_cast<double>( count );
+  const rl_aim_fact_desc& d = RL_AIM_FACT_DESCS[ row.fact_slot ];
+  const bool   clipped_seconds = d.kind == rl_kind::k_seconds && d.has_clip_div && d.clip_div > 0.0;
+  const double unscale         = clipped_seconds ? d.clip_div : ( d.has_div ? d.div : 1.0 );
+  std::size_t  zeros   = 0;
+  bool         found_min = false;
+  double       lowest  = leaf.missing;
+  for ( std::size_t k = 0; k < count; ++k )
+  {
+    const double raw = static_cast<double>( features[ k * RL_TARGET_FEATURES + row.fact_slot ] ) * unscale;
+    if ( row.reduce == rl_aggregate_reduce::count_zero )
+    {
+      if ( raw == 0.0 )
+        ++zeros;
+      continue;
+    }
+    if ( ( row.reduce == rl_aggregate_reduce::min || raw > 0.0 ) && ( !found_min || raw < lowest ) )
+    {
+      lowest    = raw;
+      found_min = true;
+    }
+  }
+  return row.reduce == rl_aggregate_reduce::count_zero ? static_cast<double>( zeros ) : lowest;
+}
+#endif
 
 // 260902/cr4 (CR-02): the two output arrays a BOUNDARY read_action_gate_bits call computed for
 // the CURRENT decision stamp, cached so the later non-boundary call (decision_dump::record(),
@@ -1131,6 +1204,10 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
     // build-dependent row skipped), else the run is refused here, by name, at the first decision. Runs for every actor that
     // reaches this fill, enhancement included, where it refuses nothing.
     rl_action_census::check_header_lock_table( mutable_p, handles );
+    // 261013-aimx class A: the engine's answer to "is this aimed button gated on enemy health" must equal the header's
+    // RL_TARGETED_TOKEN_HEALTH_GATED table (a header without the table, enhancement's, is not asked), else the run is refused here, by
+    // name, at the first decision.
+    rl_target_select::check_header_health_gates( mutable_p );
     // 271.6-07: the reach table, taken once beside the handles (reads only). Empty unless the header declares census hit
     // providers, so enhancement never walks the census here.
     std::vector<reach_gate_t> gates( RL_ACTION_DIM );
@@ -1558,7 +1635,9 @@ enum class direct_id
   // hand-written warrior providers.
   hits_census,
   // 261002-8rs: the Lashing Flames carrier count, appended LAST so no existing enumerator value shifts.
-  fw_lashing_flames_carrier_count
+  fw_lashing_flames_carrier_count,
+  // 261013-aimx (class C): a registry-declared aggregate, `aggregates.<name>` (the slot's `aggregate_row` names the RL_DECLARED_AGGREGATES row).
+  declared_aggregate
   // 260914-rbp Task 1's R14 (crash_lightning_next_expiry/crash_lightning_stack_seconds, two
   // ad-hoc scalar direct_ids) is MIGRATED and REMOVED here (Task 2b, Q17): the ASYNC STACK
   // PROFILE is now a generic `player_buffs.<b>.*` buff-family leaf (buff_leaf_kind::next_expiry/
@@ -1664,6 +1743,8 @@ struct slot_binding
   buff_leaf_kind buff_leaf = buff_leaf_kind::stacks;   // kind == buff
   direct_id direct = direct_id::t;      // kind == direct
   std::size_t census_row = 0;           // kind == direct, direct == direct_id::hits_census: the index into g_census_hit_actors[p].rows
+  std::size_t aggregate_row = 0;        // kind == direct, direct == direct_id::declared_aggregate: the index into RL_DECLARED_AGGREGATES
+  const action_t* aggregate_action = nullptr;  // that row's aimed button, resolved once at bind (its candidate block is the list reduced)
   resource_e resource = RESOURCE_NONE;  // kind == direct, direct == direct_id::resource: which engine resource to read (bound once)
   expr_t* expr = nullptr;               // kind == expression -- non-owning; owned by slot_table::owned_expressions
   cooldown_t* cooldown = nullptr;                        // kind == cooldown
@@ -1984,6 +2065,26 @@ slot_binding resolve_scalar_leaf( const player_t* p, const rl_leaf_desc& leaf )
     b.direct = direct_id::t;
     return b;
   }
+  // 261013-aimx (class C): `aggregates.<name>` binds to the header's RL_DECLARED_AGGREGATES row of that name and to the row's aimed button,
+  // resolved once here. A leaf with no row (a header cut before the table, or a stale census) is refused at bind by name, never read as zero.
+  if ( std::strncmp( leaf.leaf, "aggregates.", 11 ) == 0 )
+  {
+#ifdef RL_DECLARED_AGGREGATES_DEFINED
+    for ( std::size_t k = 0; k < RL_DECLARED_AGGREGATE_COUNT; ++k )
+      if ( std::strcmp( RL_DECLARED_AGGREGATES[ k ].name, leaf.leaf + 11 ) == 0 )
+      {
+        b.kind             = slot_binding_kind::direct;
+        b.direct           = direct_id::declared_aggregate;
+        b.aggregate_row    = k;
+        b.aggregate_action = solver_control::resolve_action( const_cast<player_t*>( p ), RL_DECLARED_AGGREGATES[ k ].button );
+        return b;
+      }
+#endif
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::resolve_scalar_leaf: registry '{}' scalar leaf '{}' names a declared aggregate that the header's RL_DECLARED_AGGREGATES "
+        "does not list (bind-time refusal: regenerate the header from the registry's targeting.aggregates)",
+        RL_REGISTRY_ID, leaf.leaf ) );
+  }
   // Phase 268 plan 04 (G268-7): the resource scalar is generic. `resource.<name>` binds the engine resource util::parse_resource_type
   // names; a bare leaf equal to RL_RESOURCE_NAME binds the header's own resource (enhancement's wire leaf `maelstrom` keeps its
   // name and its bytes). An unknown resource name is refused here, at bind, with the registry id.
@@ -2105,7 +2206,12 @@ slot_binding resolve_scalar_leaf( const player_t* p, const rl_leaf_desc& leaf )
     {
       b.kind       = slot_binding_kind::direct;
       b.direct     = direct_id::hits_census;
-      b.census_row = census_hit_row_for( const_cast<player_t*>( p ), row.provider + 7 );
+#ifdef RL_HIT_ROW_NODE_DEFINED
+      // 261013-aimx class B: the header names the census node each row counts (parallel to RL_HIT_PROVIDERS); a class-provider row reads null.
+      b.census_row = census_hit_row_for( const_cast<player_t*>( p ), row.provider + 7, RL_HIT_ROW_NODE[ k ] );
+#else
+      b.census_row = census_hit_row_for( const_cast<player_t*>( p ), row.provider + 7, nullptr );
+#endif
       return b;
     }
     const rl_class_plugin& plugin = rl_class_plugin_for( p );
@@ -4058,6 +4164,16 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
             case direct_id::hits_fire_nova:
               raw = get_hits_values().fire_nova;
               status = lookup_status::present;
+              break;
+
+            // 261013-aimx (class C): a declared aggregate, reduced from its button's stamped candidate block (see read_declared_aggregate).
+            case direct_id::declared_aggregate:
+#ifdef RL_DECLARED_AGGREGATES_DEFINED
+              raw = read_declared_aggregate( RL_DECLARED_AGGREGATES[ b.aggregate_row ], *b.leaf, b.aggregate_action );
+              status = lookup_status::present;
+#else
+              status = lookup_status::absent;
+#endif
               break;
 
             // 271-10 (H-3): a generated census hit column, read from its own per-decision memo.

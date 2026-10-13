@@ -211,6 +211,17 @@ std::size_t declared_fact_index_for_feature( const char* feature_name );
 // not silently skip the immunity clause by construction (R-E's guard, mirrored here).
 bool generic_filter( const action_t* a, player_t* candidate, bool harmful );
 
+// 261013-aimx class A: is this aimed action's button flagged by the generated header as carrying a target-health gate
+// (RL_TARGETED_TOKEN_HEALTH_GATED)? False for every action of a header without the table. When true, the candidate list of the
+// button (select(), build_candidate_facts) holds only the enemies for which the engine's own target_ready answers yes.
+bool aimed_action_health_gated( const action_t* a );
+
+// 261013-aimx class A, the bind-time check (the model is rl_action_census::check_header_reach_classes): for each aimed button the actor
+// has, the engine's own answer to "does target_ready refuse an enemy at full health that generic_filter lets through" must equal the
+// header's RL_TARGETED_TOKEN_HEALTH_GATED entry, else the run is refused at the first decision by name. A button with no such probe
+// enemy (nobody at full health within its reach) says nothing. A header without the table is not asked. Reads only.
+void check_header_health_gates( player_t* p );
+
 // Builds the fact record for one candidate against the given resolved action. OBS-01/R5-5
 // (tstl-sylvanas 232-02) dropped the `previous_pick` parameter entirely -- the sticky tie-break
 // that consumed it is gone from select() (score -> current target -> stable identity), and no

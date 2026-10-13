@@ -111,6 +111,15 @@ action_t* accept_cast( player_t* p, const std::string& action_name, std::uint64_
                        ") with no pick stamped for this decision -- refusing rather than "
                        "recomputing (228-02, D-12)" );
 
+    // 261013-aimx class A, the loud invariant: a button the header flags as health-gated is aimed only among the enemies that pass its
+    // gate (rl_target_select's candidate list), so its final pick must pass the engine's own target_ready. A pick that escaped the
+    // filter (a future exploration path, a head pick outside the stamped block) would otherwise cast silently on an enemy the engine
+    // would refuse, which is how the defect lived for months. Abort by name, never repair.
+    if ( rl_target_select::aimed_action_health_gated( resolved ) && !resolved->target_ready( pick ) )
+      protocol_abort( "'cast' reply named health-gated targeted action '" + action_name + "' (seq=" + std::to_string( seq ) +
+                       ") whose pick fails the engine's own target gate -- the aim candidate list must hold only enemies that pass it "
+                       "(261013-aimx class A)" );
+
     // WR-07 (260902/cr4): the ONE retarget function this call site and the mid-cast re-resolution
     // ladder's fallback arm (action.cpp) both call -- see rl_target_select.hpp's own doc comment.
     // Casting on a unit IS targeting it in game (D-13, ledger R11): the player's own target and
