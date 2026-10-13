@@ -1983,7 +1983,7 @@ void check_header_health_gates( player_t* p )
           "rl_target_select: registry '{}' header says aimed button '{}' {} a target-health gate but player '{}' answers it {} "
           "(bind-time refusal: the generated gate table and the engine must agree; the gate is the registry's "
           "maskRules.targetHealthGates row, regenerate the header)",
-          RL_REGISTRY_ID, RL_TARGETED_TOKENS[ k ], RL_TARGETED_TOKEN_HEALTH_GATED[ k ] ? "has" : "has no", p->name(),
+          RL_REGISTRY_ID, RL_TARGETED_TOKENS[ k ], RL_TARGETED_TOKEN_HEALTH_GATED[ k ] ? "has" : "does not have", p->name(),
           engine_gated ? "does" : "does not" ) );
     }
   }
