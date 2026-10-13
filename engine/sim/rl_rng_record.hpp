@@ -157,10 +157,10 @@
 //                        hit, tick or swing): the buff is named by the event's own ENTITY.
 //   9  engine timer      an object's own timer is the only cause. DETAIL = the timer: 1 an aura's own expiry, 2 an aura's own tick (a stack
 //                        that decays on the tick is an EVT_STACKS_CHANGED with this cause), 3 a cooldown's charge coming back, 4 a dot
-//                        reaching its end, 5 a movement update of the player (C = 0), 6 the simulation's periodic bloodlust check (C = 0).
+//                        reaching its end, 5 a movement update of the player (C = 0), 6 the simulation's periodic check that puts up a raid-wide aura (C = 0).
 //                        C = that buff, cooldown or the dot's action (the family says which). Scopes: buff.cpp expiration_t::execute and
 //                        tick_t::execute, cooldown.cpp recharge_event_t::execute, dot.cpp dot_end_event_t::execute, player.cpp
-//                        update_movement, sim.cpp bloodlust_check_t::execute.
+//                        update_movement, sim.cpp (the periodic raid-aura check event's execute).
 //   10 speed change      a consequence of the player's speed changing: a cooldown rescaled, a swing moved or canceled and rebooked.
 //                        C = the entity that caused the speed change; DETAIL = that cause's KIND (bits 0-7) and its own detail (low 12
 //                        bits, shifted left 8). The family is the speed change's cause's family. Scope in player_t::adjust_dynamic_cooldowns
@@ -170,7 +170,7 @@
 //                        override runs after the base) and player_demise_event_t::execute.
 //   12 fight set-up      the auras and swings the engine puts up when a fight starts, before the first decision (flask, food, weapon
 //                        imbues, a raid aura). C = 0. Scope in sim_t::combat_begin from the moment events open until it returns.
-//   13 raid event        a raid event starting (DETAIL 1) or finishing (2): a movement, a bloodlust, a distraction, an add spawn;
+//   13 raid event        a raid event starting (DETAIL 1) or finishing (2): a movement, a raid-wide aura, a distraction, an add spawn;
 //                        C = the raid event (family 5: 0x80000000 | its index in the simulation's raid event list; one that is not in the
 //                        list reads 0x80FFFFFF). Scopes in raid_event_t::start and finish.
 // A DEFERRED dispatch carries the cause it was made under and restores it when it runs, so the cause survives the delay: the engine's aura

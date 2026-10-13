@@ -1308,7 +1308,7 @@ struct bloodlust_check_t : public event_t
   void execute() override
   {
     sim_t& sim = this->sim();
-    // 288.9: the simulation's own periodic bloodlust check is the timer behind the aura it puts up (kind 9, type 6, no object).
+    // 288.9: the simulation's own periodic check that puts up a raid-wide aura is the timer behind that aura (kind 9, type 6, no object).
     rl_rng_record::cause_scope_t rl_check_cause( &sim, nullptr, rl_rng_record::FAMILY_NONE, rl_rng_record::CAUSE_TIMER, rl_rng_record::TIMER_SIM_CHECK );
     player_t* t = sim.target;
     if ( ( sim.bloodlust_percent > 0 && t->health_percentage() < sim.bloodlust_percent ) ||
