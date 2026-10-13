@@ -374,8 +374,6 @@ void mark_proc_children( token_t& t )
   if ( !root || !root->stats )
     return;
   const unsigned root_exec = root->stats->iteration_num_executes;
-  if ( root_exec == 0 )
-    return;
   for ( node_t& n : t.nodes )
   {
     if ( n.via != "child" || !n.action || !n.action->stats || n.action->stats == root->stats )
@@ -384,8 +382,13 @@ void mark_proc_children( token_t& t )
     // Bladestorm strikes are dual: a zero count there says nothing, so they stay counted.
     if ( n.action->dual )
       continue;
+    // 261013-aimx class B: the sample behind the verdict is recorded even when the button never ran this iteration (root_exec 0): then no
+    // verdict is possible, the node stays counted as before, and the evidence says so (rootExecutes 0) instead of being absent, so the census
+    // merge can tell "never pressed" from "cannot be told apart from its button".
     n.proc_evidence_executes      = static_cast<long long>( n.action->stats->iteration_num_executes );
     n.proc_evidence_root_executes = static_cast<long long>( root_exec );
+    if ( root_exec == 0 )
+      continue;
     if ( n.action->stats->iteration_num_executes + 1 < root_exec )  // at most one strike can still be pending
       n.proc_only = true;
   }
