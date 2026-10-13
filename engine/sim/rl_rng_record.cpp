@@ -35,8 +35,10 @@
 // in player.hpp), which needs attack_t's complete definition to verify the derived-to-base
 // pointer adjustment for that comparison -- a plain forward declaration is not enough.
 #include "action/attack.hpp"
+#include "action/dbc_proc_callback.hpp"
 #include "action/dot.hpp"
 #include "buff/buff.hpp"
+#include "item/special_effect.hpp"
 #include "player/pet.hpp"
 #include "player/player.hpp"
 #include "player/stats.hpp"
@@ -696,17 +698,37 @@ public:
   // ---- Event writer (288.7). See rl_rng_record.hpp's EVENT RECORDS comment for the contract. ----
   void events_begin();
   void events_end();
-  void event_buff( std::uint8_t cls, const buff_t* b, int prior_stacks );
+  void event_buff( std::uint8_t cls, const buff_t* b, int prior_stacks, std::int32_t amount_ms );
   void event_stat_chosen( const buff_t* b, int stat, double amount );
   void event_dot( std::uint8_t cls, const dot_t* d );
   void event_hit( const action_t* a, const action_state_t* s );
   void event_speed( const player_t* p );
-  void event_cooldown_state( const cooldown_t* cd, std::uint8_t cause, std::uint32_t before_remaining, std::uint32_t before_charges );
+  void event_cooldown_state( const cooldown_t* cd, std::uint8_t cause, std::uint32_t before_remaining, std::uint32_t before_charges, std::int32_t amount_ms );
   void cooldown_snapshot( const cooldown_t& cd, std::uint32_t& remaining_ms, std::uint32_t& charges_packed ) const;
   void event_swing_booked( const action_t* a, const event_t* e );
   void event_swing_event( const event_t* e, std::uint8_t op );
 
+  // ---- Cause tracking (288.9). The cause events are written under; saved and restored by the scopes of rl_rng_record.hpp, by
+  // rl_press_scope_t (press causes) and by the deferred dispatches that carry one. ----
+  const cause_frame_t& cause() const { return cause_; }
+  void set_cause( const cause_frame_t& f ) { cause_ = f; }
+  const cause_frame_t& cause_before_buff() const { return cause_before_buff_; }
+  void set_cause_before_buff( const cause_frame_t& f ) { cause_before_buff_ = f; }
+  // The cause an executing action stands for (a press, or a swing of the controlled player's hand), and the one a restored press frame stands for.
+  cause_frame_t cause_of_execute( const action_t* action ) const;
+  cause_frame_t cause_of_frame( const press_frame_t& frame ) const;
+  // After a press snapshot was restored: the restored inner press is the cause (a snapshot that names no action leaves the cause alone).
+  void derive_cause_from_inner()
+  {
+    const cause_frame_t restored = cause_of_frame( current_inner_ );
+    if ( restored.kind != CAUSE_UNKNOWN )
+      cause_ = restored;
+  }
+
 private:
+  void resolve_cause( const cause_frame_t& f, std::uint32_t& c, std::uint32_t& d );
+  std::uint32_t cause_entity( std::uint8_t family, const void* obj );
+  void write_cause_sidecar_block( std::ostream& out ) const;
   int swing_hand_of_action( const action_t* a ) const;
   int swing_hand_of_event( const event_t* e ) const;
   void write_swing_due( int hand, const action_t* a, std::uint32_t due_ms, std::uint8_t op );
@@ -718,7 +740,7 @@ private:
   std::uint32_t entity_of_buff( const buff_t& b );
   std::uint32_t entity_of_action( const action_t& a );
   void write_event( std::uint8_t cls, std::uint32_t entity, std::uint32_t unit, std::uint32_t source,
-                    std::uint32_t value_a, std::uint32_t value_b );
+                    std::uint32_t value_a, std::uint32_t value_b, const cause_frame_t& cause, std::int32_t amount_ms = 0 );
   void append_event( const record& r );
   void write_events_sidecar_block( std::ostream& out ) const;
 
@@ -891,6 +913,12 @@ private:
   std::uint32_t last_speed_a_ = 0;
   std::uint32_t last_speed_b_ = 0;
   std::unordered_map<const void*, std::uint32_t> entity_cache_;
+  // 288.9: the cause events are written under, and the cause that was in force when the innermost buff scope opened (the cause of that buff's own event).
+  cause_frame_t cause_{};
+  cause_frame_t cause_before_buff_{};
+  // Cause entities have their own cache and name table (family: FAMILY_*), so naming a cause never adds an entity to the `entities` list of the sidecar.
+  std::map<std::pair<std::uint8_t, const void*>, std::uint32_t> cause_cache_;
+  std::map<std::pair<std::uint8_t, std::uint32_t>, std::string> cause_entity_names_;
   // (family, entity) -> name, family 0 = buff, 1 = action, 2 = cooldown; and unit code -> (name, kind name).
   std::map<std::pair<std::uint8_t, std::uint32_t>, std::string> entity_names_;
   std::map<std::uint32_t, std::pair<std::string, std::string>> unit_names_;
@@ -1294,6 +1322,8 @@ void recorder_t::open_execute( action_t* action, const action_state_t* carried_s
 
   current_inner_ = new_frame;
   current_inner_owner_ = action;
+  if ( g_events_on )
+    cause_ = cause_of_execute( action );   // 288.9: an action executing is the cause of what its code does (kind 1, or 6 for the hand attacks)
 
   if ( roller < rollers_.size() )
     rollers_[ roller ].execute_presses = action->rl_press_count_;
@@ -1322,6 +1352,8 @@ void recorder_t::open_tick( action_t* action )
 
   current_inner_ = new_frame;
   current_inner_owner_ = nullptr;  // ticks are never an execute()'s "owner frame" (A-04)
+  if ( g_events_on )
+    cause_ = cause_frame_t{ action, 0u, FAMILY_ACTION, CAUSE_TICK };   // 288.9: a dot tick (kind 3)
 
   if ( roller < rollers_.size() )
     rollers_[ roller ].tick_presses = action->rl_tick_count_;
@@ -1341,6 +1373,13 @@ void recorder_t::restore_from_state( const action_state_t* state )
   current_inner_ = press_frame_t{ state->rl_press_inner_kind, state->rl_press_inner_trigger,
                                    state->rl_press_inner_number };
   current_inner_owner_ = nullptr;  // a restored frame is never itself an execute()'s owner frame
+  if ( g_events_on )
+  {
+    // 288.9: the restored inner press is the press (or tick) this boundary continues; a frame that names no action leaves the cause as it was.
+    const cause_frame_t restored = cause_of_frame( current_inner_ );
+    if ( restored.kind != CAUSE_UNKNOWN )
+      cause_ = restored;
+  }
 }
 
 void recorder_t::restore_frames( const press_frame_t& outer, const press_frame_t& inner, const action_t* inner_owner )
@@ -1432,6 +1471,8 @@ constexpr std::array<const char*, EVT_CLASS_MAX + 1u> EVENT_CLASS_NAMES = {
 void recorder_t::events_begin()
 {
   g_events_on = false;
+  cause_ = cause_frame_t{};
+  cause_before_buff_ = cause_frame_t{};
   if ( !writing_ || !root_->rl_rng_record_events )
     return;
 
@@ -1463,6 +1504,8 @@ void recorder_t::events_begin()
 void recorder_t::events_end()
 {
   g_events_on = false;
+  cause_ = cause_frame_t{};
+  cause_before_buff_ = cause_frame_t{};
 }
 
 bool recorder_t::in_scope( const player_t* source ) const
@@ -1556,10 +1599,14 @@ void recorder_t::append_event( const record& r )
 }
 
 void recorder_t::write_event( std::uint8_t cls, std::uint32_t entity, std::uint32_t unit, std::uint32_t source,
-                              std::uint32_t value_a, std::uint32_t value_b )
+                              std::uint32_t value_a, std::uint32_t value_b, const cause_frame_t& cause, std::int32_t amount_ms )
 {
   record rec{};
-  rec.raw = 0.0;
+  // 288.9: the cause words ride in the roll's raw-number field (an event has no raw number): C at @0, D at @4. 0 and 0 is the double 0.0, what an older recording holds.
+  std::uint32_t cause_c = 0, cause_d = 0;
+  resolve_cause( cause, cause_c, cause_d );
+  std::memcpy( reinterpret_cast<unsigned char*>( &rec.raw ), &cause_c, sizeof( cause_c ) );
+  std::memcpy( reinterpret_cast<unsigned char*>( &rec.raw ) + sizeof( cause_c ), &cause_d, sizeof( cause_d ) );
   rec.chance = CHANCE_NONE;
   rec.time_ms = static_cast<std::int64_t>( root_->current_time().total_millis() );
   rec.draw_ordinal = fight_event_ordinal_++;
@@ -1570,7 +1617,7 @@ void recorder_t::write_event( std::uint8_t cls, std::uint32_t entity, std::uint3
   rec.position = source;
   rec.inner_trigger = current_inner_.trigger;
   rec.inner_press = current_inner_.press;
-  rec.inner_position = 0;
+  rec.inner_position = static_cast<std::uint32_t>( amount_ms );   // 288.9: E, the amount in ms the engine asked for (0 when none)
   rec.iteration = current_iteration_field_;
   rec.kind = KIND_EVENT;
   rec.trigger_kind = current_outer_.kind;
@@ -1585,8 +1632,173 @@ void recorder_t::write_event( std::uint8_t cls, std::uint32_t entity, std::uint3
   ++event_class_totals_[ cls ];
 }
 
-void recorder_t::event_buff( std::uint8_t cls, const buff_t* b, int prior_stacks )
+cause_frame_t recorder_t::cause_of_execute( const action_t* action ) const
 {
+  if ( !action )
+    return cause_frame_t{};
+  const bool hand = controlled_ && action->player == controlled_ &&
+                    ( action == controlled_->main_hand_attack || action == controlled_->off_hand_attack );
+  return cause_frame_t{ action, 0u, FAMILY_ACTION, hand ? CAUSE_SWING : CAUSE_PRESS };
+}
+
+cause_frame_t recorder_t::cause_of_frame( const press_frame_t& frame ) const
+{
+  if ( ( frame.kind == TRIGGER_KIND_EXECUTE || frame.kind == TRIGGER_KIND_TICK ) && frame.trigger < rollers_.size() && rollers_[ frame.trigger ].action )
+  {
+    const action_t* a = rollers_[ frame.trigger ].action;
+    if ( frame.kind == TRIGGER_KIND_TICK )
+      return cause_frame_t{ a, 0u, FAMILY_ACTION, CAUSE_TICK };
+    return cause_of_execute( a );
+  }
+  return cause_frame_t{};
+}
+
+std::uint32_t recorder_t::cause_entity( std::uint8_t family, const void* obj )
+{
+  const auto key = std::make_pair( family, obj );
+  const auto cached = cause_cache_.find( key );
+  if ( cached != cause_cache_.end() )
+    return cached->second;
+
+  std::uint32_t entity = 0;
+  std::string name;
+  switch ( family )
+  {
+    case FAMILY_BUFF:
+    {
+      const buff_t& b = *static_cast<const buff_t*>( obj );
+      entity = b.data().id();
+      name = b.name_str;
+      if ( entity == 0 )
+      {
+        std::uint32_t index = 0;
+        const auto& list = b.player ? b.player->buff_list : b.sim->buff_list;
+        for ( std::size_t i = 0; i < list.size(); ++i )
+        {
+          if ( list[ i ] == &b )
+          {
+            index = static_cast<std::uint32_t>( i );
+            break;
+          }
+        }
+        entity = ENTITY_NO_SPELL_FLAG | index;
+      }
+      break;
+    }
+    case FAMILY_ACTION:
+    {
+      const action_t& a = *static_cast<const action_t*>( obj );
+      entity = a.id;
+      name = a.name_str;
+      if ( entity == 0 )
+      {
+        std::uint32_t index = 0;
+        const auto& list = a.player->action_list;
+        for ( std::size_t i = 0; i < list.size(); ++i )
+        {
+          if ( list[ i ] == &a )
+          {
+            index = static_cast<std::uint32_t>( i );
+            break;
+          }
+        }
+        entity = ENTITY_NO_SPELL_FLAG | index;
+      }
+      break;
+    }
+    case FAMILY_COOLDOWN:
+    {
+      const cooldown_t& cd = *static_cast<const cooldown_t*>( obj );
+      name = cd.name_str;
+      std::uint32_t index = 0;
+      if ( cd.player )
+      {
+        const auto& list = cd.player->cooldown_list;
+        for ( std::size_t i = 0; i < list.size(); ++i )
+        {
+          if ( list[ i ] == &cd )
+          {
+            index = static_cast<std::uint32_t>( i );
+            break;
+          }
+        }
+      }
+      entity = ENTITY_NO_SPELL_FLAG | index;
+      break;
+    }
+    case FAMILY_CALLBACK:
+    {
+      const action_callback_t& cb = *static_cast<const action_callback_t*>( obj );
+      if ( const auto* dbc = dynamic_cast<const dbc_proc_callback_t*>( &cb ) )
+      {
+        const spell_data_t* driver = dbc->effect.driver();
+        entity = driver ? driver->id() : 0u;
+        name = dbc->effect.name();
+      }
+      else
+        name = "callback";
+      if ( entity == 0 )
+      {
+        std::uint32_t index = 0;
+        const auto& list = cb.listener->callbacks.all_callbacks;
+        for ( std::size_t i = 0; i < list.size(); ++i )
+        {
+          if ( list[ i ] == &cb )
+          {
+            index = static_cast<std::uint32_t>( i );
+            break;
+          }
+        }
+        entity = ENTITY_NO_SPELL_FLAG | index;
+      }
+      break;
+    }
+    case FAMILY_RAID_EVENT:
+    {
+      const raid_event_t& re = *static_cast<const raid_event_t*>( obj );
+      name = re.name.empty() ? re.type : re.type + ":" + re.name;
+      std::uint32_t index = 0x00FFFFFFu;
+      for ( std::size_t i = 0; i < root_->raid_events.size(); ++i )
+      {
+        if ( root_->raid_events[ i ].get() == &re )
+        {
+          index = static_cast<std::uint32_t>( i );
+          break;
+        }
+      }
+      entity = ENTITY_NO_SPELL_FLAG | index;
+      break;
+    }
+    default:
+      break;
+  }
+  cause_cache_.emplace( key, entity );
+  cause_entity_names_.emplace( std::make_pair( family, entity ), std::move( name ) );
+  return entity;
+}
+
+void recorder_t::resolve_cause( const cause_frame_t& f, std::uint32_t& c, std::uint32_t& d )
+{
+  c = 0;
+  d = 0;
+  if ( f.kind == CAUSE_UNKNOWN && f.family == FAMILY_NONE )
+    return;
+  const std::uint8_t family = f.obj ? f.family : FAMILY_NONE;
+  if ( family != FAMILY_NONE )
+    c = cause_entity( family, f.obj );
+  d = static_cast<std::uint32_t>( f.kind ) | ( static_cast<std::uint32_t>( family ) << 8 ) | ( ( f.detail & 0xFFFFFu ) << 12 );
+}
+
+void recorder_t::event_buff( std::uint8_t cls, const buff_t* b, int prior_stacks, std::int32_t amount_ms )
+{
+  // 288.9: inside this buff's own scope the event is written under the cause that was in force when the scope opened (who applied it, who spent its
+  // stacks, whose timer ended it) and the scope's detail becomes this event's class (what a speed change behind it was caused by). Done before the scope
+  // test so a buff of another source (a raid aura) still tells the speed change which of its events it was.
+  const bool own = cause_.family == FAMILY_BUFF && cause_.obj == b && cause_.kind == CAUSE_BUFF;
+  cause_frame_t cause = own ? cause_before_buff_ : cause_;
+  if ( own )
+    cause_.detail = cls;
+
   if ( !in_scope( b->source ) )
     return;
 
@@ -1608,7 +1820,16 @@ void recorder_t::event_buff( std::uint8_t cls, const buff_t* b, int prior_stacks
     default:
       return;
   }
-  write_event( cls, entity_of_buff( *b ), unit_code( b->player ), unit_code( b->source ), a, v );
+
+  // Stacks spent by an action's press, hit, tick or swing are CAUSE_CONSUMED (the stacks spent in the detail).
+  if ( ( cls == EVT_BUFF_EXPIRED || cls == EVT_STACKS_CHANGED ) && cause.family == FAMILY_ACTION &&
+       ( cause.kind == CAUSE_PRESS || cause.kind == CAUSE_HIT || cause.kind == CAUSE_TICK || cause.kind == CAUSE_SWING ) )
+  {
+    const int spent = cls == EVT_BUFF_EXPIRED ? prior_stacks : prior_stacks - b->check_unnoted();
+    cause.kind = CAUSE_CONSUMED;
+    cause.detail = static_cast<std::uint32_t>( std::max( spent, 0 ) );
+  }
+  write_event( cls, entity_of_buff( *b ), unit_code( b->player ), unit_code( b->source ), a, v, cause, amount_ms );
 }
 
 void recorder_t::event_stat_chosen( const buff_t* b, int stat, double amount )
@@ -1620,7 +1841,7 @@ void recorder_t::event_stat_chosen( const buff_t* b, int stat, double amount )
   const double applied = std::copysign( std::trunc( std::max( 1.0, std::fabs( amount ) ) + stat_buff_t::stat_fp_epsilon ), amount );
   write_event( EVT_STAT_CHOSEN, entity_of_buff( *b ), unit_code( b->player ), unit_code( b->source ),
                static_cast<std::uint32_t>( static_cast<std::int32_t>( stat ) ),
-               static_cast<std::uint32_t>( static_cast<std::int32_t>( applied ) ) );
+               static_cast<std::uint32_t>( static_cast<std::int32_t>( applied ) ), cause_ );
 }
 
 void recorder_t::event_dot( std::uint8_t cls, const dot_t* d )
@@ -1648,7 +1869,7 @@ void recorder_t::event_dot( std::uint8_t cls, const dot_t* d )
     default:
       return;
   }
-  write_event( cls, entity_of_action( *d->current_action ), unit_code( d->target ), unit_code( d->source ), a, v );
+  write_event( cls, entity_of_action( *d->current_action ), unit_code( d->target ), unit_code( d->source ), a, v, cause_ );
 }
 
 void recorder_t::event_hit( const action_t* a, const action_state_t* s )
@@ -1656,7 +1877,7 @@ void recorder_t::event_hit( const action_t* a, const action_state_t* s )
   if ( !in_scope( a->player ) )
     return;
   write_event( EVT_HIT_LANDED, entity_of_action( *a ), unit_code( s->target ), unit_code( a->player ),
-               static_cast<std::uint32_t>( static_cast<std::int32_t>( s->result ) ), 0u );
+               static_cast<std::uint32_t>( static_cast<std::int32_t>( s->result ) ), 0u, cause_ );
 }
 
 void recorder_t::event_speed( const player_t* p )
@@ -1672,7 +1893,7 @@ void recorder_t::event_speed( const player_t* p )
   last_speed_valid_ = true;
   last_speed_a_ = a;
   last_speed_b_ = v;
-  write_event( EVT_SPEED_CHANGED, 0u, unit_code( p ), unit_code( p ), a, v );
+  write_event( EVT_SPEED_CHANGED, 0u, unit_code( p ), unit_code( p ), a, v, cause_ );
 }
 
 void recorder_t::cooldown_snapshot( const cooldown_t& cd, std::uint32_t& remaining_ms, std::uint32_t& charges_packed ) const
@@ -1722,7 +1943,7 @@ std::uint32_t recorder_t::entity_of_cooldown( const cooldown_t& cd )
   return entity;
 }
 
-void recorder_t::event_cooldown_state( const cooldown_t* cd, std::uint8_t cause, std::uint32_t before_remaining, std::uint32_t before_charges )
+void recorder_t::event_cooldown_state( const cooldown_t* cd, std::uint8_t cause, std::uint32_t before_remaining, std::uint32_t before_charges, std::int32_t amount_ms )
 {
   if ( !cd->player || !in_scope( cd->player ) )
     return;
@@ -1731,7 +1952,7 @@ void recorder_t::event_cooldown_state( const cooldown_t* cd, std::uint8_t cause,
   if ( remaining == before_remaining && charges == before_charges )
     return;                                                                  // nothing the observation shows changed
   write_event( EVT_COOLDOWN_STATE, entity_of_cooldown( *cd ), unit_code( cd->player ), unit_code( cd->player ), remaining,
-               charges | static_cast<std::uint32_t>( cause & 0xFu ) );
+               charges | static_cast<std::uint32_t>( cause & 0xFu ), cause_, amount_ms );
 }
 
 int recorder_t::swing_hand_of_action( const action_t* a ) const
@@ -1759,7 +1980,7 @@ int recorder_t::swing_hand_of_event( const event_t* e ) const
 void recorder_t::write_swing_due( int hand, const action_t* a, std::uint32_t due_ms, std::uint8_t op )
 {
   write_event( EVT_SWING_DUE, entity_of_action( *a ), unit_code( controlled_ ), unit_code( controlled_ ), due_ms,
-               static_cast<std::uint32_t>( hand ) | ( static_cast<std::uint32_t>( op ) << 8 ) );
+               static_cast<std::uint32_t>( hand ) | ( static_cast<std::uint32_t>( op ) << 8 ), cause_ );
 }
 
 void recorder_t::event_swing_booked( const action_t* a, const event_t* e )
@@ -1816,9 +2037,29 @@ void recorder_t::write_events_sidecar_block( std::ostream& out ) const
     out << "{\"family\": \"" << ( kv.first.first == 0 ? "buff" : ( kv.first.first == 1 ? "action" : "cooldown" ) ) << "\", \"entity\": " << kv.first.second
         << ", \"name\": \"" << json_escape( kv.second ) << "\"}";
   }
-  out << "]}";
+  out << "]";
+  write_cause_sidecar_block( out );
+  out << "}";
 }
 
+void recorder_t::write_cause_sidecar_block( std::ostream& out ) const
+{
+  // 288.9: how to read the cause words, and the names of the cause entities (own list: the `entities` list above is unchanged by cause naming).
+  out << ", \"causeWords\": \"C = raw@0 (uint32 cause entity), D = raw@4 (uint32: kind | family << 8 | detail << 12), E = inner_position@60 (int32 amount ms)\""
+      << ", \"causeKinds\": {\"0\": \"unknown\", \"1\": \"press\", \"2\": \"hit_landed\", \"3\": \"periodic_tick\", \"4\": \"proc_callback\", \"5\": \"buff_event\", "
+         "\"6\": \"swing\", \"7\": \"stat_pick\", \"8\": \"stack_consumed\", \"9\": \"engine_timer\", \"10\": \"speed_change\", \"11\": \"unit_demise\", \"12\": \"fight_setup\", \"13\": \"raid_event\"}"
+      << ", \"causeFamilies\": {\"0\": \"none\", \"1\": \"buff\", \"2\": \"action\", \"3\": \"cooldown\", \"4\": \"callback\", \"5\": \"raid_event\"}, \"causeEntities\": [";
+  static constexpr const char* FAMILY_NAMES[] = { "none", "buff", "action", "cooldown", "callback", "raid_event" };
+  bool first = true;
+  for ( const auto& kv : cause_entity_names_ )
+  {
+    if ( !first )
+      out << ", ";
+    first = false;
+    out << "{\"family\": \"" << FAMILY_NAMES[ kv.first.first ] << "\", \"entity\": " << kv.first.second << ", \"name\": \"" << json_escape( kv.second ) << "\"}";
+  }
+  out << "]";
+}
 
 void recorder_t::assert_stream_ok( const char* where )
 {
@@ -3492,12 +3733,12 @@ void events_end( sim_t* sim )
   root->rl_rng_recorder->events_end();
 }
 
-void event_buff( sim_t* sim, std::uint8_t cls, const buff_t* b, int prior_stacks )
+void event_buff( sim_t* sim, std::uint8_t cls, const buff_t* b, int prior_stacks, std::int32_t amount_ms )
 {
   sim_t* root = root_of( sim );
   if ( !root->rl_rng_recorder || sim->rl_bl_shadow )
     return;
-  root->rl_rng_recorder->event_buff( cls, b, prior_stacks );
+  root->rl_rng_recorder->event_buff( cls, b, prior_stacks, amount_ms );
 }
 
 void event_stat_chosen( sim_t* sim, const buff_t* b, int stat, double amount )
@@ -3548,8 +3789,8 @@ void event_swing_event( sim_t* sim, const event_t* e, std::uint8_t op )
   root->rl_rng_recorder->event_swing_event( e, op );
 }
 
-rl_cooldown_scope_t::rl_cooldown_scope_t( sim_t* sim, const cooldown_t* cd, std::uint8_t cause )
-  : sim_( sim ), cd_( cd ), cause_( cause )
+rl_cooldown_scope_t::rl_cooldown_scope_t( sim_t* sim, const cooldown_t* cd, std::uint8_t cause, std::int32_t amount_ms )
+  : sim_( sim ), cd_( cd ), cause_( cause ), amount_ms_( amount_ms )
 {
   if ( !events_on() || !cd->player )
     return;
@@ -3567,7 +3808,88 @@ rl_cooldown_scope_t::~rl_cooldown_scope_t()
   sim_t* root = root_of( sim_ );
   if ( !root->rl_rng_recorder || sim_->rl_bl_shadow )
     return;
-  root->rl_rng_recorder->event_cooldown_state( cd_, cause_, before_remaining_, before_charges_ );
+  root->rl_rng_recorder->event_cooldown_state( cd_, cause_, before_remaining_, before_charges_, amount_ms_ );
+}
+
+// ---- Cause scopes (288.9). See the CAUSE WORDS comment of rl_rng_record.hpp. Each is guarded like the event writers: the recorder must exist and the sim
+// must not be a ledger shadow; the callers have already tested events_on(). ----
+
+bool cause_push( sim_t* sim, const cause_frame_t& frame, cause_frame_t& saved )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder || sim->rl_bl_shadow )
+    return false;
+  saved = root->rl_rng_recorder->cause();
+  root->rl_rng_recorder->set_cause( frame );
+  return true;
+}
+
+bool cause_push_default( sim_t* sim, const cause_frame_t& frame, cause_frame_t& saved )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder || sim->rl_bl_shadow )
+    return false;
+  const cause_frame_t& current = root->rl_rng_recorder->cause();
+  if ( current.kind != CAUSE_UNKNOWN || current.family != FAMILY_NONE )
+    return false;
+  saved = current;
+  root->rl_rng_recorder->set_cause( frame );
+  return true;
+}
+
+bool cause_push_wrap( sim_t* sim, std::uint8_t kind, std::uint32_t detail, bool pack_original, cause_frame_t& saved )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder || sim->rl_bl_shadow )
+    return false;
+  saved = root->rl_rng_recorder->cause();
+  cause_frame_t wrapped = saved;
+  wrapped.detail = pack_original ? ( static_cast<std::uint32_t>( saved.kind ) | ( ( saved.detail & 0xFFFu ) << 8 ) ) : ( detail & 0xFFFFFu );
+  wrapped.kind = kind;
+  root->rl_rng_recorder->set_cause( wrapped );
+  return true;
+}
+
+bool cause_push_buff( sim_t* sim, const buff_t* b, std::uint32_t initial_class, cause_frame_t& saved, cause_frame_t& saved_before )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder || sim->rl_bl_shadow )
+    return false;
+  const cause_frame_t& current = root->rl_rng_recorder->cause();
+  if ( current.family == FAMILY_BUFF && current.obj == b && current.kind == CAUSE_BUFF )
+    return false;   // already inside this buff's scope: the outermost scope keeps the cause before it
+  saved = current;
+  saved_before = root->rl_rng_recorder->cause_before_buff();
+  root->rl_rng_recorder->set_cause_before_buff( current );
+  root->rl_rng_recorder->set_cause( cause_frame_t{ b, initial_class, FAMILY_BUFF, CAUSE_BUFF } );
+  return true;
+}
+
+void cause_pop( sim_t* sim, const cause_frame_t& saved )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder )
+    return;
+  root->rl_rng_recorder->set_cause( saved );
+}
+
+void cause_pop_buff( sim_t* sim, const cause_frame_t& saved, const cause_frame_t& saved_before )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder )
+    return;
+  root->rl_rng_recorder->set_cause( saved );
+  root->rl_rng_recorder->set_cause_before_buff( saved_before );
+}
+
+cause_frame_t snapshot_cause( sim_t* sim )
+{
+  if ( !events_on() )
+    return cause_frame_t{};
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder || sim->rl_bl_shadow )
+    return cause_frame_t{};
+  return root->rl_rng_recorder->cause();
 }
 
 // ---- Swing trace / swing pin (tstl-sylvanas phase 257, plan 257-09, D-18). See each
@@ -3631,6 +3953,7 @@ rl_press_scope_t::rl_press_scope_t( sim_t* sim, action_t* action, mode_e mode, c
   saved_outer_ = root->rl_rng_recorder->current_outer();
   saved_inner_ = root->rl_rng_recorder->current_inner();
   saved_inner_owner_ = root->rl_rng_recorder->current_inner_owner();
+  saved_cause_ = root->rl_rng_recorder->cause();   // 288.9
 
   if ( mode == mode_e::open_execute )
     root->rl_rng_recorder->open_execute( action, carried_state );
@@ -3649,6 +3972,7 @@ rl_press_scope_t::rl_press_scope_t( sim_t* sim, const action_state_t* state )
   saved_outer_ = root->rl_rng_recorder->current_outer();
   saved_inner_ = root->rl_rng_recorder->current_inner();
   saved_inner_owner_ = root->rl_rng_recorder->current_inner_owner();
+  saved_cause_ = root->rl_rng_recorder->cause();   // 288.9
 
   root->rl_rng_recorder->restore_from_state( state );
 }
@@ -3664,6 +3988,7 @@ rl_press_scope_t::rl_press_scope_t( sim_t* sim, const press_snapshot_t& snapshot
   saved_outer_ = root->rl_rng_recorder->current_outer();
   saved_inner_ = root->rl_rng_recorder->current_inner();
   saved_inner_owner_ = root->rl_rng_recorder->current_inner_owner();
+  saved_cause_ = root->rl_rng_recorder->cause();   // 288.9
 
   // "When it is not stamped, change nothing" -- mirrors restore_from_state()'s own D-07 rule, but
   // for a plain-value snapshot instead of an action_state_t.
@@ -3671,6 +3996,8 @@ rl_press_scope_t::rl_press_scope_t( sim_t* sim, const press_snapshot_t& snapshot
     return;
 
   root->rl_rng_recorder->restore_frames( snapshot.outer, snapshot.inner, nullptr );
+  if ( g_events_on )
+    root->rl_rng_recorder->derive_cause_from_inner();   // 288.9
 }
 
 rl_press_scope_t::~rl_press_scope_t()
@@ -3681,6 +4008,7 @@ rl_press_scope_t::~rl_press_scope_t()
   if ( !root->rl_rng_recorder )
     return;
   root->rl_rng_recorder->restore_frames( saved_outer_, saved_inner_, saved_inner_owner_ );
+  root->rl_rng_recorder->set_cause( saved_cause_ );   // 288.9
 }
 
 // ---- rl_raid_draw_scope_t (plan 250-03, REC-05/R-01). Out-of-line ctors/dtor for the same

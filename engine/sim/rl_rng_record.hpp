@@ -107,6 +107,85 @@
 //                           one generic recorder function: the item that picks one of its buff's stats at random on each proc
 //                           (unique_gear_midnight.cpp, venomcursed_ascendance_cb_t::execute). A stat buff of another item that picks a
 //                           stat would call the same function.
+//
+// CAUSE WORDS (tstl-sylvanas phase 288.9, same branch): every KIND_EVENT record also says WHO caused it and HOW.
+// Written where the engine already has the cause; never by a change of the engine's order of operations and never by a
+// new random draw. A cause the engine does not hold at that point is written as 0 (no entity, kind 0 = unknown).
+//
+// WHERE THE WORDS LIVE. The record is 80 bytes and its reserved bytes @72..79 are values A and B, so no free word is left
+// there. The cause words sit in fields an event never used (they hold 0.0 / CHANCE_NONE / 0 in every older recording, which is
+// why an older recording reads as "no cause"):
+//   @0  raw (8 bytes)     REUSED, two uint32: @0 C = the CAUSE ENTITY, @4 D = the CAUSE KIND word (below). 0 and 0 reads as 0.0.
+//   @60 inner_position    REUSED, int32 E = an AMOUNT in ms the engine asked for: the requested cut (negative) or extension
+//                         (positive) of a cooldown (cooldown_t::adjust's argument, before the recharge-rate multiplier) and of an
+//                         aura's duration (buff_t::extend_duration's argument, after the aura's own duration multiplier). 0 otherwise.
+//   @8 chance stays CHANCE_NONE. A cause that is a random roll draws no extra record; a roll the engine did not make (a
+//   certainty, which writes no roll entry) is covered by the event's own cause (the action and its hit result).
+// C = the cause entity, coded exactly like the ENTITY field (a spell id, or 0x80000000 | the index in the owner's action, buff or
+//   cooldown list). A roller number is never an entity: a cause that is a roll names the roller's owning action or callback.
+//   Which list an index points into is in D (the family, below). The sidecar's events.causeEntities names every C that was used.
+// D = kind | family << 8 | detail << 12:
+//   bits 0-7   KIND   how the cause acted (the table below)
+//   bits 8-11  FAMILY which list C is an entity of: 0 none, 1 buff, 2 action, 3 cooldown, 4 callback (a proc callback), 5 raid event
+//   bits 12-31 DETAIL kind-specific (the table below), 20 bits
+// Kinds, and the engine call that sets each. A "scope" is a RAII guard that sets the current cause for the code inside it and restores it on
+// the way out; it is a single read of events_on() when events are off. The innermost scope wins.
+//   0  unknown           the engine held no cause: an event written from the event queue by code with no owner we name
+//   1  press             an action executing or starting; C = the action (family 2). Set by rl_press_scope_t when an execute press opens
+//                        (action_t's three dispatch entry points) and by a boundary that restores a stamped press (a travel, a detached
+//                        proc); also by action_t::schedule_execute and spell_base_t::schedule_execute when nothing is the cause yet (a decision
+//                        starting a cast: the player's casting aura). A swing of the controlled player's main or off-hand attack is kind 6.
+//   2  hit landed        a hit reaching its target; C = the action; DETAIL = the hit result (result_e: 1 miss, 2 dodge, 3 parry,
+//                        4 glance, 5 crit, 6 hit). Scope in action_t::do_schedule_travel (zero travel time) and travel_event_t::execute,
+//                        around impact() and its overrides: a crit that gives an aura is distinguishable here.
+//   3  periodic tick     a dot tick assessing damage; C = the dot's action. Set by rl_press_scope_t open_tick (dot.cpp).
+//   4  proc callback     an item/enchant/set-bonus callback firing; C = the callback (family 4: its driver spell id, or
+//                        0x80000000 | its index in the listener's callback list). Scopes in action_callback_t::trigger (the one
+//                        dispatcher of the callback list) and in dbc_proc_callback.cpp proc_event_t::execute (the detached run).
+//   5  buff event        an aura came up, was refreshed, ran out or changed stacks; C = that buff (family 1); DETAIL = the buff event
+//                        class (1 applied, 2 refreshed, 3 expired, 4 stacks changed): at first the class of the function that opened the
+//                        scope, then the class of the event the buff writes inside it. THIS is the cause of a speed change by a haste
+//                        aura or stat buff and of the stat gain behind it. Scopes in buff_t::start, refresh, bump, decrement, expire and
+//                        stat_buff_t::bump, decrement. The buff's own event carries the cause OUTSIDE its own scope (who applied it).
+//   6  swing             the controlled player's main or off-hand attack executing (landed; its rebook is written inside);
+//                        C = the hand's action. Same scope as kind 1 (rl_press_scope_t open_execute), told apart by the action.
+//   7  stat pick         a stat buff item chose which stat it raises; C = the choosing callback (family 4, as kind 4); DETAIL = the
+//                        chosen stat's stat_e id. Scope in the choosing item (unique_gear_midnight.cpp) for the rest of its execute: the
+//                        stat moves and the aura application that follow carry it.
+//   8  stack consumed    stacks spent by an action; C = the action that spent them (family 2); DETAIL = the stacks spent. Written for
+//                        EVT_STACKS_CHANGED and EVT_BUFF_EXPIRED whose cause would otherwise be kind 1, 2, 3 or 6 (an action's press,
+//                        hit, tick or swing): the buff is named by the event's own ENTITY.
+//   9  engine timer      an object's own timer is the only cause. DETAIL = the timer: 1 an aura's own expiry, 2 an aura's own tick (a stack
+//                        that decays on the tick is an EVT_STACKS_CHANGED with this cause), 3 a cooldown's charge coming back, 4 a dot
+//                        reaching its end, 5 a movement update of the player (C = 0), 6 the simulation's periodic bloodlust check (C = 0).
+//                        C = that buff, cooldown or the dot's action (the family says which). Scopes: buff.cpp expiration_t::execute and
+//                        tick_t::execute, cooldown.cpp recharge_event_t::execute, dot.cpp dot_end_event_t::execute, player.cpp
+//                        update_movement, sim.cpp bloodlust_check_t::execute.
+//   10 speed change      a consequence of the player's speed changing: a cooldown rescaled, a swing moved or canceled and rebooked.
+//                        C = the entity that caused the speed change; DETAIL = that cause's KIND (bits 0-7) and its own detail (low 12
+//                        bits, shifted left 8). The family is the speed change's cause's family. Scope in player_t::adjust_dynamic_cooldowns
+//                        (after the speed event) and player_t::adjust_auto_attack.
+//   11 unit demise       the unit died or was dismissed and what it held was cancelled: its auras expire, its damage-over-time effects end.
+//                        C = 0 (the unit is the event's own UNIT field). Scopes in player_t::demise, pet_t::dismiss (a class module's demise
+//                        override runs after the base) and player_demise_event_t::execute.
+//   12 fight set-up      the auras and swings the engine puts up when a fight starts, before the first decision (flask, food, weapon
+//                        imbues, a raid aura). C = 0. Scope in sim_t::combat_begin from the moment events open until it returns.
+//   13 raid event        a raid event starting (DETAIL 1) or finishing (2): a movement, a bloodlust, a distraction, an add spawn;
+//                        C = the raid event (family 5: 0x80000000 | its index in the simulation's raid event list; one that is not in the
+//                        list reads 0x80FFFFFF). Scopes in raid_event_t::start and finish.
+// A DEFERRED dispatch carries the cause it was made under and restores it when it runs, so the cause survives the delay: the engine's aura
+// delay (buff.cpp buff_delay_t) and a delayed expiry (expiration_delay_t), and every lambda event (sim/event.hpp fn_event_t: a class module's
+// "do this in 40 ms"). A recurring lambda event (fn_event_repeating_t) does not carry one.
+// Per class:
+//   EVT_SPEED_CHANGED    the current cause at player_t::adjust_dynamic_cooldowns (a buff event, a stat pick, a callback, a press ...)
+//   EVT_COOLDOWN_STATE   the current cause when cooldown_t::start/adjust/reset/adjust_remaining_duration/recharge ran: the action,
+//                        callback or buff that called it; a rescale is kind 10 (its C is the speed change's cause); a charge that
+//                        comes back on its own is kind 9; E = the requested amount for an adjust
+//   EVT_STACKS_CHANGED   consumed (8), decayed by the aura's own tick (9), or whatever scope held it (4, 5, 7 ...)
+//   EVT_BUFF_* and EVT_DOT_*   the action and its hit result (2), a callback (4), a tick (3), a pick (7), another aura (5)
+//   EVT_SWING_DUE        the swing landing that rebooks it (6), a speed change (10), or a press (1)
+// Cause not available without a mechanics change: written as 0 (see 288.9-EVENT-CAUSES.md for the list).
+//
 // Reading: scripts/rl/probes/rng_record.py (the repo's reader) yields these records with their
 // kind; a reader that wants rolls only skips kind != KIND_ROLL.
 // ==========================================================================================
@@ -169,6 +248,35 @@ inline constexpr std::uint8_t EVT_COOLDOWN_STATE = 11u;
 inline constexpr std::uint8_t EVT_SWING_DUE = 12u;
 inline constexpr std::uint8_t EVT_STAT_CHOSEN = 13u;
 inline constexpr std::uint8_t EVT_CLASS_MAX = 13u;
+
+// 288.9: the cause words of an event record (see CAUSE WORDS above).
+inline constexpr std::uint8_t CAUSE_UNKNOWN = 0u;
+inline constexpr std::uint8_t CAUSE_PRESS = 1u;
+inline constexpr std::uint8_t CAUSE_HIT = 2u;
+inline constexpr std::uint8_t CAUSE_TICK = 3u;
+inline constexpr std::uint8_t CAUSE_PROC = 4u;
+inline constexpr std::uint8_t CAUSE_BUFF = 5u;
+inline constexpr std::uint8_t CAUSE_SWING = 6u;
+inline constexpr std::uint8_t CAUSE_PICK = 7u;
+inline constexpr std::uint8_t CAUSE_CONSUMED = 8u;
+inline constexpr std::uint8_t CAUSE_TIMER = 9u;
+inline constexpr std::uint8_t CAUSE_SPEED = 10u;
+inline constexpr std::uint8_t CAUSE_DEMISE = 11u;
+inline constexpr std::uint8_t CAUSE_SETUP = 12u;
+inline constexpr std::uint8_t CAUSE_RAID = 13u;
+inline constexpr std::uint8_t CAUSE_KIND_MAX = 13u;
+inline constexpr std::uint8_t FAMILY_NONE = 0u;
+inline constexpr std::uint8_t FAMILY_BUFF = 1u;
+inline constexpr std::uint8_t FAMILY_ACTION = 2u;
+inline constexpr std::uint8_t FAMILY_COOLDOWN = 3u;
+inline constexpr std::uint8_t FAMILY_CALLBACK = 4u;
+inline constexpr std::uint8_t FAMILY_RAID_EVENT = 5u;
+inline constexpr std::uint32_t TIMER_BUFF_EXPIRY = 1u;
+inline constexpr std::uint32_t TIMER_BUFF_TICK = 2u;
+inline constexpr std::uint32_t TIMER_CHARGE_BACK = 3u;
+inline constexpr std::uint32_t TIMER_DOT_END = 4u;
+inline constexpr std::uint32_t TIMER_MOVEMENT = 5u;
+inline constexpr std::uint32_t TIMER_SIM_CHECK = 6u;
 
 inline constexpr std::uint8_t CD_CAUSE_START = 1u;
 inline constexpr std::uint8_t CD_CAUSE_ADJUST = 2u;
@@ -316,6 +424,17 @@ static_assert( offsetof( record, label ) == 70 );
 static_assert( offsetof( record, flags ) == 71 );
 static_assert( offsetof( record, reserved ) == 72 );
 
+// 288.9: the cause an event is written under (see CAUSE WORDS at the top of this file): the object that caused it (an action_t, buff_t, cooldown_t
+// or action_callback_t, per `family`), the kind of cause and the kind-specific detail. A plain value; copied by every scope that saves and restores it,
+// and by a deferred dispatch that carries it across a delay (buff_delay_t). `kind` CAUSE_UNKNOWN and `family` FAMILY_NONE is "the engine held no cause".
+struct cause_frame_t
+{
+  const void* obj = nullptr;
+  std::uint32_t detail = 0;
+  std::uint8_t family = 0;   // FAMILY_*
+  std::uint8_t kind = 0;     // CAUSE_*
+};
+
 // A logical press frame: the outermost or innermost active press at the moment a roll happens.
 // Unused until plan 250-03 wires the press guards at the call sites -- declared now so the
 // record layout above never has to change shape when that plan starts filling these fields in.
@@ -393,6 +512,7 @@ private:
   press_frame_t saved_outer_{};
   press_frame_t saved_inner_{};
   const action_t* saved_inner_owner_ = nullptr;
+  cause_frame_t saved_cause_{};   // 288.9: the event cause in force when this press scope opened, restored with the frames
 };
 
 // A guard opened around ONE shared-stream draw a raid event makes (plan 250-03, REC-05/R-01).
@@ -570,7 +690,8 @@ void events_end( sim_t* sim );
 
 // A buff event. `prior_stacks` is the stack count before the change (used by EVT_BUFF_EXPIRED
 // for the stacks lost and by EVT_STACKS_CHANGED for the count before); ignored by the others.
-void event_buff( sim_t* sim, std::uint8_t cls, const buff_t* b, int prior_stacks );
+// `amount_ms` (288.9): for a duration extension, the extension asked for (negative = a cut); 0 otherwise.
+void event_buff( sim_t* sim, std::uint8_t cls, const buff_t* b, int prior_stacks, std::int32_t amount_ms = 0 );
 
 // A stat buff chose which stat it raises (EVT_STAT_CHOSEN): `stat` is the stat_e value, `amount` the amount the buff gives that stat.
 void event_stat_chosen( sim_t* sim, const buff_t* b, int stat, double amount );
@@ -585,11 +706,145 @@ void event_hit( sim_t* sim, const action_t* a, const action_state_t* s );
 // when the pair of multipliers differs from the last one written this fight.
 void event_speed( sim_t* sim, const player_t* p );
 
+// ---- Cause scopes (288.9). Each one sets the cause events are written under for the code inside it and restores it on the way out. Every one is a
+// single read of events_on() when events are off. Implemented in rl_rng_record.cpp; nothing here touches a random stream, schedules or cancels an event, or
+// changes simulation state. ----
+bool cause_push( sim_t* sim, const cause_frame_t& frame, cause_frame_t& saved );
+// Same, but only when no cause is in force (an action starting its cast at a decision, with nothing above it); false (nothing changed) otherwise.
+bool cause_push_default( sim_t* sim, const cause_frame_t& frame, cause_frame_t& saved );
+// Keeps the current object and family, changes the kind and detail. `pack_original`: detail = the current kind | the current detail << 8 (the speed change).
+bool cause_push_wrap( sim_t* sim, std::uint8_t kind, std::uint32_t detail, bool pack_original, cause_frame_t& saved );
+bool cause_push_buff( sim_t* sim, const buff_t* b, std::uint32_t initial_class, cause_frame_t& saved, cause_frame_t& saved_before );
+void cause_pop( sim_t* sim, const cause_frame_t& saved );
+void cause_pop_buff( sim_t* sim, const cause_frame_t& saved, const cause_frame_t& saved_before );
+// The cause in force now, as a value a deferred dispatch can carry (an empty frame when events are off). Restored by cause_restore_scope_t.
+cause_frame_t snapshot_cause( sim_t* sim );
+
+struct cause_scope_t
+{
+  cause_scope_t( sim_t* sim, const void* obj, std::uint8_t family, std::uint8_t kind, std::uint32_t detail = 0 )
+  {
+    if ( events_on() )
+      active_ = cause_push( sim_ = sim, cause_frame_t{ obj, detail, family, kind }, saved_ );
+  }
+  ~cause_scope_t()
+  {
+    if ( active_ )
+      cause_pop( sim_, saved_ );
+  }
+  cause_scope_t( const cause_scope_t& ) = delete;
+  cause_scope_t& operator=( const cause_scope_t& ) = delete;
+  cause_scope_t( cause_scope_t&& ) = delete;
+  cause_scope_t& operator=( cause_scope_t&& ) = delete;
+
+private:
+  sim_t* sim_ = nullptr;
+  bool active_ = false;
+  cause_frame_t saved_{};
+};
+
+struct cause_default_scope_t
+{
+  cause_default_scope_t( sim_t* sim, const void* obj, std::uint8_t family, std::uint8_t kind, std::uint32_t detail = 0 )
+  {
+    if ( events_on() )
+      active_ = cause_push_default( sim_ = sim, cause_frame_t{ obj, detail, family, kind }, saved_ );
+  }
+  ~cause_default_scope_t()
+  {
+    if ( active_ )
+      cause_pop( sim_, saved_ );
+  }
+  cause_default_scope_t( const cause_default_scope_t& ) = delete;
+  cause_default_scope_t& operator=( const cause_default_scope_t& ) = delete;
+  cause_default_scope_t( cause_default_scope_t&& ) = delete;
+  cause_default_scope_t& operator=( cause_default_scope_t&& ) = delete;
+
+private:
+  sim_t* sim_ = nullptr;
+  bool active_ = false;
+  cause_frame_t saved_{};
+};
+
+struct cause_wrap_scope_t
+{
+  cause_wrap_scope_t( sim_t* sim, std::uint8_t kind, std::uint32_t detail, bool pack_original )
+  {
+    if ( events_on() )
+      active_ = cause_push_wrap( sim_ = sim, kind, detail, pack_original, saved_ );
+  }
+  ~cause_wrap_scope_t()
+  {
+    if ( active_ )
+      cause_pop( sim_, saved_ );
+  }
+  cause_wrap_scope_t( const cause_wrap_scope_t& ) = delete;
+  cause_wrap_scope_t& operator=( const cause_wrap_scope_t& ) = delete;
+  cause_wrap_scope_t( cause_wrap_scope_t&& ) = delete;
+  cause_wrap_scope_t& operator=( cause_wrap_scope_t&& ) = delete;
+
+private:
+  sim_t* sim_ = nullptr;
+  bool active_ = false;
+  cause_frame_t saved_{};
+};
+
+// Opens CAUSE_BUFF for `b` (see the CAUSE WORDS comment); a nested scope of the same buff is a no-op, so the cause before the outermost one stays the
+// cause the buff's own event is written under.
+struct buff_cause_scope_t
+{
+  buff_cause_scope_t( sim_t* sim, const buff_t* b, std::uint32_t initial_class )
+  {
+    if ( events_on() )
+      active_ = cause_push_buff( sim_ = sim, b, initial_class, saved_, saved_before_ );
+  }
+  ~buff_cause_scope_t()
+  {
+    if ( active_ )
+      cause_pop_buff( sim_, saved_, saved_before_ );
+  }
+  buff_cause_scope_t( const buff_cause_scope_t& ) = delete;
+  buff_cause_scope_t& operator=( const buff_cause_scope_t& ) = delete;
+  buff_cause_scope_t( buff_cause_scope_t&& ) = delete;
+  buff_cause_scope_t& operator=( buff_cause_scope_t&& ) = delete;
+
+private:
+  sim_t* sim_ = nullptr;
+  bool active_ = false;
+  cause_frame_t saved_{};
+  cause_frame_t saved_before_{};
+};
+
+// Restores a cause a deferred dispatch carried across its delay (snapshot_cause at creation, this at the deferred point).
+struct cause_restore_scope_t
+{
+  cause_restore_scope_t( sim_t* sim, const cause_frame_t& carried )
+  {
+    if ( events_on() && ( carried.kind != CAUSE_UNKNOWN || carried.family != FAMILY_NONE ) )
+      active_ = cause_push( sim_ = sim, carried, saved_ );
+  }
+  ~cause_restore_scope_t()
+  {
+    if ( active_ )
+      cause_pop( sim_, saved_ );
+  }
+  cause_restore_scope_t( const cause_restore_scope_t& ) = delete;
+  cause_restore_scope_t& operator=( const cause_restore_scope_t& ) = delete;
+  cause_restore_scope_t( cause_restore_scope_t&& ) = delete;
+  cause_restore_scope_t& operator=( cause_restore_scope_t&& ) = delete;
+
+private:
+  sim_t* sim_ = nullptr;
+  bool active_ = false;
+  cause_frame_t saved_{};
+};
+
 // A guard opened at the top of each function that changes a cooldown (start, adjust, reset, adjust_remaining_duration): when it closes it
 // writes EVT_COOLDOWN_STATE if the cooldown's state (time left or charges) changed. One check of events_on() when events are off.
 struct rl_cooldown_scope_t
 {
-  rl_cooldown_scope_t( sim_t* sim, const cooldown_t* cd, std::uint8_t cause );
+  // `amount_ms` (288.9): the cut (negative) or extension (positive) the caller asked for, for an adjust; 0 for every other cause.
+  rl_cooldown_scope_t( sim_t* sim, const cooldown_t* cd, std::uint8_t cause, std::int32_t amount_ms = 0 );
   ~rl_cooldown_scope_t();
 
   rl_cooldown_scope_t( const rl_cooldown_scope_t& ) = delete;
@@ -601,6 +856,7 @@ private:
   sim_t* sim_;
   const cooldown_t* cd_;
   std::uint8_t cause_;
+  std::int32_t amount_ms_;
   bool active_ = false;
   std::uint32_t before_remaining_ = 0;
   std::uint32_t before_charges_ = 0;
