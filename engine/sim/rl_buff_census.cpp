@@ -46,6 +46,7 @@ struct row_t
   double      default_chance      = 0.0;
   bool        constant            = false;
   bool        applied             = false;
+  bool        channeled           = false;  // a dot: its applying action is a channel (the dot is the channel's tick carrier, not an aura on the enemy)
   bool        triggered           = false;  // a buff: executed at least once this fight (last_trigger_time is set only by buff_t::execute)
 };
 
@@ -111,6 +112,7 @@ void add_row( std::map<key_t, row_t>& rows, const row_t& r )
   old.has_rppm          = old.has_rppm || r.has_rppm;
   old.constant          = old.constant || r.constant;
   old.applied           = old.applied || r.applied;
+  old.channeled         = old.channeled || r.channeled;
   old.triggered         = old.triggered || r.triggered;
 }
 
@@ -154,6 +156,7 @@ row_t dot_row( const dot_t* d )
   {
     r.spell_id      = d->current_action->data().id();
     r.base_duration = d->current_action->dot_duration.value().total_seconds();
+    r.channeled     = d->current_action->channeled;
   }
   return r;
 }
@@ -169,7 +172,7 @@ std::string row_json( const row_t& r )
                                num( r.internal_cooldown ), r.has_rppm ? "true" : "false", num( r.rppm_frequency ),
                                num( r.default_chance ), r.constant ? "true" : "false" );
   if ( r.kind == "dot" )
-    o += fmt::format( ",\"applied\":{}", r.applied ? "true" : "false" );
+    o += fmt::format( ",\"applied\":{},\"channeled\":{}", r.applied ? "true" : "false", r.channeled ? "true" : "false" );
   else
     o += fmt::format( ",\"triggered\":{}", r.triggered ? "true" : "false" );
   return o + "}";
