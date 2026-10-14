@@ -134,7 +134,10 @@ row_t buff_row( const buff_t* b, const char* holder, bool fight_played )
   // Quiet buffs are left out of the JSON report entirely (report_helper.cpp buff_is_dynamic), so the report cannot witness them. The
   // engine's own last-trigger time can: buff_t::reset() sets it to the minimum and only buff_t::execute() writes the current time.
   // Before the fight is played (the init-finished write) the field still holds its constructor value, so it says nothing yet.
-  r.triggered = fight_played && b->last_trigger_time() >= timespan_t::zero();
+  // An enemy's buffs are made lazily, after the iteration reset, so they still hold the constructor value zero until their first
+  // execute: for them only a time above zero counts. The actor's own buffs are reset to the minimum, so time zero is a real trigger.
+  const bool lazily_made = r.holder == "enemy";
+  r.triggered = fight_played && ( lazily_made ? b->last_trigger_time() > timespan_t::zero() : b->last_trigger_time() >= timespan_t::zero() );
   return r;
 }
 
