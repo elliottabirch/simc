@@ -46,6 +46,7 @@ struct row_t
   double      default_chance      = 0.0;
   bool        constant            = false;
   bool        applied             = false;
+  bool        triggered           = false;  // a buff: executed at least once this fight (last_trigger_time is set only by buff_t::execute)
 };
 
 using key_t = std::tuple<std::string, std::string, std::string>;
@@ -110,9 +111,10 @@ void add_row( std::map<key_t, row_t>& rows, const row_t& r )
   old.has_rppm          = old.has_rppm || r.has_rppm;
   old.constant          = old.constant || r.constant;
   old.applied           = old.applied || r.applied;
+  old.triggered         = old.triggered || r.triggered;
 }
 
-row_t buff_row( const buff_t* b, const char* holder )
+row_t buff_row( const buff_t* b, const char* holder, bool fight_played )
 {
   row_t r;
   r.holder  = holder;
@@ -129,6 +131,10 @@ row_t buff_row( const buff_t* b, const char* holder )
   r.rppm_frequency    = b->rppm != nullptr ? b->rppm->get_frequency() : 0.0;
   r.default_chance    = b->default_chance;
   r.constant          = b->constant;
+  // Quiet buffs are left out of the JSON report entirely (report_helper.cpp buff_is_dynamic), so the report cannot witness them. The
+  // engine's own last-trigger time can: buff_t::reset() sets it to the minimum and only buff_t::execute() writes the current time.
+  // Before the fight is played (the init-finished write) the field still holds its constructor value, so it says nothing yet.
+  r.triggered = fight_played && b->last_trigger_time() >= timespan_t::zero();
   return r;
 }
 
@@ -161,10 +167,12 @@ std::string row_json( const row_t& r )
                                num( r.default_chance ), r.constant ? "true" : "false" );
   if ( r.kind == "dot" )
     o += fmt::format( ",\"applied\":{}", r.applied ? "true" : "false" );
+  else
+    o += fmt::format( ",\"triggered\":{}", r.triggered ? "true" : "false" );
   return o + "}";
 }
 
-void write_table( sim_t* sim )
+void write_table( sim_t* sim, bool fight_played )
 {
   player_t* actor = census_actor( sim );
   if ( !actor )
@@ -175,7 +183,7 @@ void write_table( sim_t* sim )
   // The actor's own buffs. Buffs for talents not taken still exist (make_buff is unconditional), so this is the full engine set.
   for ( const buff_t* b : actor->buff_list )
     if ( b )
-      add_row( rows, buff_row( b, "self" ) );
+      add_row( rows, buff_row( b, "self", fight_played ) );
 
   // Buffs and dots an enemy holds whose source is the actor. The target data objects are made lazily, so none exist at
   // init-finished; at combat end every enemy has demised and left the non-sleeping list, hence the actor list.
@@ -185,7 +193,7 @@ void write_table( sim_t* sim )
       continue;
     for ( const buff_t* b : e->buff_list )
       if ( b && b->source == actor )
-        add_row( rows, buff_row( b, "enemy" ) );
+        add_row( rows, buff_row( b, "enemy", fight_played ) );
     for ( const dot_t* d : e->dot_list )
       if ( d && d->source == actor )
         add_row( rows, dot_row( d ) );
@@ -221,14 +229,14 @@ void on_init_finished( sim_t* sim )
 {
   if ( g_path.empty() )
     return;
-  write_table( sim );
+  write_table( sim, false );
 }
 
 void on_combat_end( sim_t* sim )
 {
   if ( g_path.empty() )
     return;
-  write_table( sim );
+  write_table( sim, true );
 }
 
 }  // namespace rl_buff_census
