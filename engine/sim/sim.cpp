@@ -33,6 +33,7 @@
 #include "sim/profileset.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_action_census.hpp"
+#include "sim/rl_buff_census.hpp"
 #include "sim/rl_button_bind.hpp"
 #include "sim/rl_stock_eval.hpp"
 #include "sim/rl_target_select.hpp"
@@ -2474,6 +2475,9 @@ void sim_t::combat_end()
   // Phase 271 (271-04, H-3): rewrite the action discovery census with the fight's own evidence
   // (initMatchesEnd, proc-only children). No-op unless rl_action_census=<path>; reads actions only.
   rl_action_census::on_combat_end( this );
+  // 261014-bufx (class A1): rewrite the engine buff table with the enemy buffs and dots the fight produced. No-op unless
+  // rl_buff_census=<path>; reads buffs and dots only.
+  rl_buff_census::on_combat_end( this );
   // 261005-branch-teacher: a branch child closes its window here (no-op otherwise).
   solver_branch::on_combat_end( this );
 
@@ -3476,6 +3480,9 @@ void sim_t::init()
     // Phase 271 (271-04, H-3): opt-in action discovery census, written once every actor is initialised.
     // No-op unless rl_action_census=<path>; reads actions only.
     rl_action_census::on_init_finished( this );
+    // 261014-bufx (class A1): the engine buff table of the actor, written once every actor is initialised. No-op unless
+    // rl_buff_census=<path>; reads buffs only.
+    rl_buff_census::on_init_finished( this );
     // Phase 271.3 (271.3-01, BIND-01/BIND-02): bind every cast button to its catalog line in the default list
     // (identity of list and line, never a name); refuses by name when a decision-maker is attached and the bind fails.
     rl_button_bind::on_init_finished( this );
@@ -4642,6 +4649,8 @@ void sim_t::create_options()
   // Phase 271 (271-04, H-3): see rl_action_census.hpp. The path lives in that module (a sim_t member would
   // rebuild every file); the RL rigs run one sim per process. Default empty: nothing is read or written.
   add_option( opt_string( "rl_action_census", rl_action_census::path_storage() ) );
+  // 261014-bufx (class A1): see rl_buff_census.hpp. Same storage reasoning as rl_action_census. Default empty: nothing is written.
+  add_option( opt_string( "rl_buff_census", rl_buff_census::path_storage() ) );
   // Phase 271.3 (271.3-01): see rl_button_bind.hpp. The bind report path lives in that module for the same reason
   // (a sim_t member would rebuild every file). Default empty: no report is written.
   add_option( opt_string( "rl_bind_report", rl_button_bind::report_path_storage() ) );
