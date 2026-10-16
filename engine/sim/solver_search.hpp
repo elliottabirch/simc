@@ -49,8 +49,10 @@
 //   solver_search_second=2                 (280-06) the second level's width; only 2 is accepted
 //   solver_search_holds=0|1                (280-06) 1 (default) adds the legal wait button with the highest value as one
 //                                          more root candidate when no wait button is among the top candidates
-//   solver_search_value=<v7 blob>          (280-06) an RLW1 version-7 weights file (body chooser-value, with a value head); the
-//                                          window-end value is read from it at the exact cut (refused by name otherwise)
+//   solver_search_value=<v7|v8 blob>       (280-06) an RLW1 version-7 weights file (body chooser-value, with a value head) or,
+//                                          since v218-291F, a version-8 file (body tree-chooser, whose TREE section carries the
+//                                          one-number value head); the window-end value is read from it at the exact cut
+//                                          (refused by name otherwise)
 //   solver_search_bootstrap=none|q|value   (280-06) what is added to the window return R at the cut: nothing; gamma^(T - t_k)
 //                                          x the net's top value there (q, the depth-one teacher's own treatment); or gamma^(T
 //                                          - t_k) x value_forward(end observation) / solver_branch_value_divisor (value).
@@ -68,11 +70,15 @@
 //   solver_search_pass1=1..256             (280-10) copies per candidate in the first pass (default 8, the value before
 //                                          this option); pass1 x (candidates + 1 hold when holds=1) (+ 2 at depth 2) must
 //                                          not exceed solver_search_copies
-//   solver_search_value_units=raw|shape    (284-06) the window-end value term's units (default raw). raw: the term is
+//   solver_search_value_units=raw|shape    (284-06) the window-end value term's units. raw: the term is
 //                                          value_forward(end obs) / solver_branch_value_divisor, today's term; shape: the
 //                                          term is value_forward(end obs) / value_scale, the head's own output, exact for a
 //                                          value head trained in each fight shape's reward units (tstl-sylvanas plan
-//                                          284-03). shape needs solver_search_value
+//                                          284-03). shape needs solver_search_value. Left unset the file decides (v218-291F):
+//                                          a v7 chooser-value file reads raw (the default it always had); a v8 tree-chooser
+//                                          file reads shape, because its head is already in the search's units (damage over
+//                                          the fight's divisor, value_scale exactly 1.0) and raw would divide a second time:
+//                                          raw given EXPLICITLY with a v8 file is refused by name
 //
 // THE BENCH (tstl-sylvanas 287-02, v2.18 phase 287). A separate mode of this module: the enumerating labeller of the deep probe
 // bench. It is inert unless solver_bench=1 (every hook returns on one bool test and seeded play is byte for byte what it was),
@@ -139,7 +145,7 @@ struct config_t
   std::string fight;                  // solver_search_fight (280-07): "<shape>,<setup>"
   int chance_rows = 16;               // solver_search_chance_rows (280-07), 0..64
   int pass1 = 8;                      // solver_search_pass1 (280-10): copies per candidate in the first pass, 1..256 (default 8)
-  std::string value_units = "raw";    // solver_search_value_units (284-06): "raw" (default) or "shape"
+  std::string value_units;            // solver_search_value_units (284-06): "raw", "shape", or unset (the value file decides, v218-291F)
   // set by validate()
   std::vector<std::int64_t> at_list;  // parsed from `at`
   bool press_best = false;
