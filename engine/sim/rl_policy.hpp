@@ -437,13 +437,20 @@ wait_result build_wait( const rl_state_t& s, const rl_wait_anchor& anchor );
 // SAME grouped trunk as grouped_ln_dueling, then ONE final linear layer (the chooser row, one score per
 // button, read by the unchanged masked_argmax with no dueling combine). The value head lives in the
 // separate CHVL section (rl_weights_t::value_*), reached through value_forward().
+// v218-291F: `tree_chooser` is body index 5 on the wire (RLW1 format 8, the tree learner's own net
+// file): the SAME grouped trunk and the SAME chooser row as chooser_value, but the file says what the
+// numbers ARE in its own trailing TREE section (rl_weights_t::tree): the logits are a probability
+// model over the legal buttons (the press is the legal argmax, unchanged), and the one-number value
+// head is in the search's own units (damage over the fight's divisor) with NO value scale in the file.
+// It is its own body, never body 4 read with a zero value slot: nothing here maps it onto body 4.
 enum class rl_body_type
 {
   mlp,
   dueling,
   ln_dueling,
   grouped_ln_dueling,
-  chooser_value
+  chooser_value,
+  tree_chooser
 };
 
 // NET-01 (Phase 222): the ONE derived layer-split rule this language uses --
@@ -457,6 +464,11 @@ enum class rl_body_type
 // re-validate that.
 std::size_t hidden_layer_count( rl_body_type body, std::size_t n_layers );
 const char* body_name( rl_body_type body );
+// v218-291F: the two shape questions every body switch in rl_policy_net.cpp asks, stated once. The grouped
+// bodies (3, 4, 5) share the STRUCTURE-driven input stage; the chooser-shaped bodies (4, 5) are a trunk then
+// ONE final chooser layer written straight into the logits (no dueling combine).
+bool body_is_grouped( rl_body_type body );
+bool body_is_chooser_shaped( rl_body_type body );
 
 struct rl_layer
 {
@@ -550,6 +562,25 @@ struct rl_grouped_layout_t
   mutable std::vector<float>              concat_scratch;         // the trunk's own input buffer
 };
 
+// v218-291F: the RLW1 format 8 TREE section -- what the tree learner's net says about ITSELF, kept as read
+// (rlw1.py "FORMAT VERSION 8" is the byte layout). The value head's weights and bias are NOT here: they sit in
+// rl_weights_t::value_w / value_b (one row, value_n_quantiles 1) with value_scale 1.0, the places value_forward
+// reads, so the body-4 value and the tree learner's value are read by the one function. `meta` is the file's
+// JSON object as text (the four words chooser_meaning, candidate_rule, value_units and value_meaning are
+// proven present at load; nothing else reads it).
+struct rl_tree_t
+{
+  std::uint32_t chooser_model     = 0;      // 1: p_i = exp(l_i) over the sum of exp(l_j) across the legal buttons
+  double        label_temperature = 0.0;    // > 0: one logit unit is this many units of value
+  std::uint32_t candidate_rule    = 0;      // 1: every legal button was a candidate
+  double        window_s          = 0.0;    // the value's window, emulated seconds (> 0)
+  double        gamma             = 0.0;    // the discount per emulated second, (0, 1]
+  std::uint32_t bootstrap         = 0;      // 2: a backed-up root value under the loop's own horizon
+  std::int32_t  round             = -1;     // the round that trained the file (-1: a scratch net)
+  std::string   bank_sha256;                // 64 lowercase hex of the label bank's manifest (64 zeros: none)
+  std::string   meta;                       // the JSON object, as text
+};
+
 struct rl_weights_t
 {
   std::uint32_t format_version = 0;
@@ -639,6 +670,12 @@ struct rl_weights_t
   std::vector<float> value_w;     // [value_n_quantiles][last hidden width], row-major
   std::vector<float> value_b;     // [value_n_quantiles]
   float         value_scale      = 1.0f;
+
+  // v218-291F: the RLW1 format 8 TREE section, present only when body == tree_chooser. The value head above
+  // is then the file's own one-number head (value_n_quantiles 1, value_scale exactly 1.0: the head's units are
+  // the search's, so nothing rescales it).
+  bool          has_tree_section = false;
+  rl_tree_t     tree;
 };
 
 rl_weights_t load_rlw1( const std::string& path );   // throws sc_runtime_error, named per refusal
@@ -651,6 +688,8 @@ int          masked_argmax( const float q[ RL_ACTION_DIM ], const std::uint8_t m
 // `value_scale` (G280-11). Runs the trunk through forward() (an all-legal mask; the chooser row it
 // produces is discarded) and reads the hidden activation forward() leaves in hidden_scratch.
 // Throws a named sc_runtime_error when the weights carry no value head (has_value_head false).
+// v218-291F: for a body-5 'tree-chooser' file the head is one number in the search's own units and
+// value_scale is exactly 1.0, so this returns the head's own output.
 double       value_forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ] );
 
 // Phase 259 (plan 259-05b): the aim head's own forward pass -- one hidden-layer stack (ReLU, the

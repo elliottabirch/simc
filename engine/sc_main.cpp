@@ -1262,8 +1262,9 @@ int sim_t::main( const std::vector<std::string>& args )
 
         // tstl-sylvanas 280-01 (SRCH-09): a chooser-value blob also reports its value head's answer
         // through rl_policy::value_forward; every other body's output bytes are unchanged.
+        // v218-291F: so does a tree-chooser blob (its TREE section's head), through the same function.
         std::string value_json;
-        if ( solver_policy_weights->body == rl_policy::rl_body_type::chooser_value )
+        if ( solver_policy_weights->has_value_head )
           value_json = fmt::format( ",\"value\":{:.9g}", rl_policy::value_forward( *solver_policy_weights, probe_obs ) );
 
         const std::string out_json = fmt::format(

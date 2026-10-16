@@ -61,6 +61,7 @@
 #include "sim/rl_policy.hpp"
 
 #include "fmt/format.h"
+#include "rapidjson/document.h"
 #include "util/util.hpp"
 
 #include <algorithm>
@@ -80,11 +81,27 @@ namespace rl_policy
 // below) AND an out-of-file caller holding only a loaded rl_weights_t (the
 // rl_forward_probe sim option, sc_main.cpp) all share it -- never a third,
 // independently re-derived copy (222-RESEARCH.md "Anti-Patterns to Avoid").
+// v218-291F: the two shape questions every body switch in this file asks, stated once (declared in
+// rl_policy.hpp). Bodies 3, 4 and 5 share the STRUCTURE-driven grouped input stage; bodies 4 and 5 are a
+// trunk then ONE final chooser layer written straight into the logits.
+bool body_is_grouped( rl_body_type body )
+{
+  return body == rl_body_type::grouped_ln_dueling || body == rl_body_type::chooser_value ||
+         body == rl_body_type::tree_chooser;
+}
+
+bool body_is_chooser_shaped( rl_body_type body )
+{
+  return body == rl_body_type::chooser_value || body == rl_body_type::tree_chooser;
+}
+
 std::size_t hidden_layer_count( rl_body_type body, std::size_t n_layers )
 {
   // tstl-sylvanas 280-01: chooser_value is mlp-shaped past the trunk (hidden layers, then ONE final
   // chooser layer), so it hides n_layers - 1 layers like mlp; the dueling bodies hide n_layers - 2.
-  return ( body == rl_body_type::mlp || body == rl_body_type::chooser_value ) ? n_layers - 1 : n_layers - 2;
+  // v218-291F: tree_chooser is the same shape past the trunk -- the layers past the trunk are the chooser
+  // alone, there is NO value slot in its list.
+  return ( body == rl_body_type::mlp || body_is_chooser_shaped( body ) ) ? n_layers - 1 : n_layers - 2;
 }
 
 const char* body_name( rl_body_type body )
@@ -96,6 +113,7 @@ const char* body_name( rl_body_type body )
     case rl_body_type::ln_dueling: return "ln-dueling";
     case rl_body_type::grouped_ln_dueling: return "grouped-ln-dueling";
     case rl_body_type::chooser_value: return "chooser-value";   // tstl-sylvanas 280-01
+    case rl_body_type::tree_chooser: return "tree-chooser";     // v218-291F
   }
   return "unknown";
 }
@@ -126,8 +144,24 @@ constexpr std::uint32_t RLW1_MIN_SUPPORTED_FORMAT_VERSION = 2;
 // tstl-sylvanas 280-01 (SRCH-09, G280-13, contract C-B): 6 -> 7 -- widening the accepted SET again.
 // Format 7 = format 6's sections (STRUCTURE, AIM) followed by the CHVL value-head section, body 4
 // ('chooser-value') ONLY; format 8 and above stay refused by the range message below.
-constexpr std::uint32_t RLW1_MAX_SUPPORTED_FORMAT_VERSION = 7;
+// v218-291F: 7 -> 8, widening the accepted SET again. Format 8 = format 6's sections (STRUCTURE, AIM) followed by the
+// TREE section, body 5 ('tree-chooser') ONLY: the tree learner's own net file, which says what its numbers are
+// (a probability model over the legal buttons, a one-number value in the search's own units). Format 9 and above
+// stay refused by the range message below.
+constexpr std::uint32_t RLW1_MAX_SUPPORTED_FORMAT_VERSION = 8;
 constexpr std::uint32_t RLW1_CHOOSER_VALUE_FORMAT_VERSION = 7;
+constexpr std::uint32_t RLW1_TREE_FORMAT_VERSION = 8;
+// TREE section bounds, mirroring scripts/rl/rlw1.py's own (the layout is its "FORMAT VERSION 8" docstring): the section's
+// fixed head (tag, chooser_model, label_temperature, candidate_rule, n_values) is 24 bytes, its provenance block
+// (window_s, gamma, bootstrap, round) 24, then a 32-byte bank sha and a 4-byte meta length.
+constexpr std::uint32_t RLW1_TREE_CHOOSER_MODEL_MASKED_SOFTMAX = 1;
+constexpr std::uint32_t RLW1_TREE_CANDIDATE_RULE_EVERY_LEGAL = 1;
+constexpr std::uint32_t RLW1_TREE_BOOTSTRAP_OWN_VALUE_HEAD = 2;
+constexpr std::uint32_t RLW1_TREE_N_VALUES = 1;
+constexpr std::uint32_t RLW1_TREE_MAX_META_BYTES = 65536;
+constexpr std::size_t   RLW1_TREE_HEAD_BYTES = 24;
+constexpr std::size_t   RLW1_TREE_PROVENANCE_BYTES = 24;
+constexpr std::size_t   RLW1_TREE_BANK_SHA_BYTES = 32;
 // CHVL section bounds: n_quantiles in [1, 256] (the value head is a linear layer, one row per quantile).
 constexpr std::uint32_t RLW1_MIN_VALUE_QUANTILES = 1;
 constexpr std::uint32_t RLW1_MAX_VALUE_QUANTILES = 256;
@@ -184,10 +218,11 @@ rl_body_type decode_body_type( std::uint32_t raw, const std::string& path )
     case 2: return rl_body_type::ln_dueling;
     case 3: return rl_body_type::grouped_ln_dueling;
     case 4: return rl_body_type::chooser_value;   // tstl-sylvanas 280-01
+    case 5: return rl_body_type::tree_chooser;    // v218-291F
     default:
       throw sc_runtime_error( fmt::format(
           "rl_policy::load_rlw1: file '{}' declares body_type={}, must be 0 (mlp), 1 (dueling), 2 "
-          "(ln-dueling), 3 (grouped-ln-dueling), or 4 (chooser-value)",
+          "(ln-dueling), 3 (grouped-ln-dueling), 4 (chooser-value), or 5 (tree-chooser)",
           path, raw ) );
   }
 }
@@ -201,7 +236,8 @@ rl_body_type decode_body_type( std::uint32_t raw, const std::string& path )
 std::size_t expected_layer_count( rl_body_type body )
 {
   // tstl-sylvanas 280-01: chooser_value needs one hidden layer and the chooser layer, like mlp.
-  return ( body == rl_body_type::mlp || body == rl_body_type::chooser_value ) ? 2 : 3;
+  // v218-291F: so does tree_chooser (one trunk layer and the chooser).
+  return ( body == rl_body_type::mlp || body_is_chooser_shaped( body ) ) ? 2 : 3;
 }
 
 // Phase 230-02 (SCOR-01, T-230-01-01), reused by the v6 aim section (259-05b): an auxiliary
@@ -477,6 +513,196 @@ raw_structure_t parse_structure_section( const std::vector<unsigned char>& data,
 
   return s;
 }
+
+// v218-291F: the RLW1 format 8 TREE section (body 5), read at `offset` (advanced in place) and stored on `w`
+// (w.tree, plus the one-number value head in the places value_forward reads: value_n_quantiles 1, value_w,
+// value_b, value_scale exactly 1.0). scripts/rl/rlw1.py's `_unpack_tree` is the byte contract: a positive length
+// check precedes every read (T-210-04), `meta_bytes` is bounded BEFORE it sizes a read, and every field is
+// range-checked by name, in the order Python checks them. `hidden` is the chooser layer's in_features (the trunk
+// width): the value head has one weight per trunk unit and the section stores no width of its own.
+void parse_tree_section( const std::vector<unsigned char>& data, std::size_t& offset, const std::string& path,
+                          std::uint32_t hidden, rl_weights_t& w )
+{
+  if ( offset == data.size() )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' has no TREE section -- the file ends at offset {}, right after the AIM "
+        "section, but a format_version {} file (body 'tree-chooser') must carry one; there is no older reading to "
+        "fall back to",
+        path, offset, RLW1_TREE_FORMAT_VERSION ) );
+  }
+  auto need = [ & ]( std::uint64_t n, const char* what ) {
+    if ( offset + n > data.size() )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' truncated -- the v8 TREE section {} needs {} bytes at offset {}, only "
+          "{} remain",
+          path, what, n, offset, data.size() - offset ) );
+    }
+  };
+
+  need( RLW1_TREE_HEAD_BYTES, "head (tag, chooser_model, label_temperature, candidate_rule, n_values)" );
+  if ( std::memcmp( data.data() + offset, "TREE", 4 ) != 0 )
+  {
+    std::string found;
+    for ( std::size_t bi = 0; bi < 4; ++bi )
+    {
+      const unsigned char ch = data[ offset + bi ];
+      found += ( ch >= 0x20 && ch < 0x7f ) ? std::string( 1, static_cast<char>( ch ) )
+                                            : fmt::format( "\\x{:02x}", static_cast<unsigned>( ch ) );
+    }
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' has bad TREE section tag '{}' at offset {} (expected 'TREE')", path, found,
+        offset ) );
+  }
+  std::uint32_t chooser_model = 0, candidate_rule = 0, n_values = 0;
+  double label_temperature = 0.0;
+  std::memcpy( &chooser_model, data.data() + offset + 4, 4 );
+  std::memcpy( &label_temperature, data.data() + offset + 8, 8 );
+  std::memcpy( &candidate_rule, data.data() + offset + 16, 4 );
+  std::memcpy( &n_values, data.data() + offset + 20, 4 );
+  offset += RLW1_TREE_HEAD_BYTES;
+  if ( chooser_model != RLW1_TREE_CHOOSER_MODEL_MASKED_SOFTMAX )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' declares TREE chooser_model={}, only {} (masked softmax over the legal "
+        "buttons) exists",
+        path, chooser_model, RLW1_TREE_CHOOSER_MODEL_MASKED_SOFTMAX ) );
+  }
+  if ( candidate_rule != RLW1_TREE_CANDIDATE_RULE_EVERY_LEGAL )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' declares TREE candidate_rule={}, only {} (every legal button) exists", path,
+        candidate_rule, RLW1_TREE_CANDIDATE_RULE_EVERY_LEGAL ) );
+  }
+  if ( n_values != RLW1_TREE_N_VALUES )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' declares TREE n_values={}, the tree net's value head is exactly {} number",
+        path, n_values, RLW1_TREE_N_VALUES ) );
+  }
+  if ( !std::isfinite( label_temperature ) || !( label_temperature > 0.0 ) )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' declares TREE label_temperature={}, must be finite and greater than 0",
+        path, label_temperature ) );
+  }
+
+  const std::uint64_t value_bytes = ( static_cast<std::uint64_t>( hidden ) + 1 ) * 4;
+  need( value_bytes + RLW1_TREE_PROVENANCE_BYTES + RLW1_TREE_BANK_SHA_BYTES + 4,
+        "value head, provenance, bank sha and meta length" );
+  w.value_n_quantiles = RLW1_TREE_N_VALUES;
+  w.value_w.resize( hidden );
+  std::memcpy( w.value_w.data(), data.data() + offset, static_cast<std::size_t>( hidden ) * 4 );
+  offset += static_cast<std::size_t>( hidden ) * 4;
+  w.value_b.resize( 1 );
+  std::memcpy( w.value_b.data(), data.data() + offset, 4 );
+  offset += 4;
+  // The head is in the search's own units (damage over the fight's divisor); the file carries no value scale, so
+  // nothing rescales it: value_forward returns the head's own number.
+  w.value_scale = 1.0f;
+  w.has_value_head = true;
+
+  double window_s = 0.0, gamma = 0.0;
+  std::uint32_t bootstrap = 0;
+  std::int32_t round = 0;
+  std::memcpy( &window_s, data.data() + offset, 8 );
+  std::memcpy( &gamma, data.data() + offset + 8, 8 );
+  std::memcpy( &bootstrap, data.data() + offset + 16, 4 );
+  std::memcpy( &round, data.data() + offset + 20, 4 );
+  offset += RLW1_TREE_PROVENANCE_BYTES;
+  if ( !std::isfinite( window_s ) || !( window_s > 0.0 ) )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' declares TREE window_s={}, must be finite and greater than 0", path,
+        window_s ) );
+  }
+  if ( !std::isfinite( gamma ) || !( gamma > 0.0 ) || gamma > 1.0 )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' declares TREE gamma={}, must be finite and in (0, 1]", path, gamma ) );
+  }
+  if ( bootstrap != RLW1_TREE_BOOTSTRAP_OWN_VALUE_HEAD )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' declares TREE bootstrap={}, only {} (the net's own value head at the "
+        "window's end) exists",
+        path, bootstrap, RLW1_TREE_BOOTSTRAP_OWN_VALUE_HEAD ) );
+  }
+  if ( round < -1 )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' declares TREE round={}, must be -1 (a scratch net) or more", path, round ) );
+  }
+
+  static const char hex_digits[] = "0123456789abcdef";
+  std::string bank_sha256;
+  bank_sha256.reserve( RLW1_TREE_BANK_SHA_BYTES * 2 );
+  for ( std::size_t bi = 0; bi < RLW1_TREE_BANK_SHA_BYTES; ++bi )
+  {
+    bank_sha256 += hex_digits[ data[ offset + bi ] >> 4 ];
+    bank_sha256 += hex_digits[ data[ offset + bi ] & 0x0f ];
+  }
+  offset += RLW1_TREE_BANK_SHA_BYTES;
+
+  std::uint32_t meta_bytes = 0;
+  std::memcpy( &meta_bytes, data.data() + offset, 4 );
+  offset += 4;
+  if ( meta_bytes < 1 || meta_bytes > RLW1_TREE_MAX_META_BYTES )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' declares TREE meta_bytes={}, must be 1..{}", path, meta_bytes,
+        RLW1_TREE_MAX_META_BYTES ) );
+  }
+  need( meta_bytes, "meta" );
+  std::string meta( reinterpret_cast<const char*>( data.data() + offset ), meta_bytes );
+  offset += meta_bytes;
+
+  // The meta is kept as the file's own text, but it is proven to be what the writer promises: UTF-8 JSON, an
+  // object, with each of the four words that say what the numbers are present as a non-empty string
+  // (rlw1.py `_check_tree_meta`; whitespace here is ASCII whitespace, Python's strip() is wider).
+  {
+    rapidjson::Document doc;
+    doc.Parse<rapidjson::kParseValidateEncodingFlag>( meta.data(), meta.size() );
+    if ( doc.HasParseError() )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' TREE meta is not UTF-8 JSON (rapidjson error {} at byte {})", path,
+          static_cast<int>( doc.GetParseError() ), doc.GetErrorOffset() ) );
+    }
+    if ( !doc.IsObject() )
+    {
+      throw sc_runtime_error( fmt::format( "rl_policy::load_rlw1: file '{}' TREE meta must be a JSON object", path ) );
+    }
+    for ( const char* word : { "chooser_meaning", "candidate_rule", "value_units", "value_meaning" } )
+    {
+      bool ok = false;
+      if ( doc.HasMember( word ) && doc[ word ].IsString() )
+      {
+        const std::string text( doc[ word ].GetString(), doc[ word ].GetStringLength() );
+        ok = text.find_first_not_of( " \t\r\n\f\v" ) != std::string::npos;
+      }
+      if ( !ok )
+      {
+        throw sc_runtime_error( fmt::format(
+            "rl_policy::load_rlw1: file '{}' TREE meta lacks the words '{}' (a non-empty string): the file must say "
+            "what its numbers are",
+            path, word ) );
+      }
+    }
+  }
+
+  w.has_tree_section = true;
+  w.tree.chooser_model = chooser_model;
+  w.tree.label_temperature = label_temperature;
+  w.tree.candidate_rule = candidate_rule;
+  w.tree.window_s = window_s;
+  w.tree.gamma = gamma;
+  w.tree.bootstrap = bootstrap;
+  w.tree.round = round;
+  w.tree.bank_sha256 = std::move( bank_sha256 );
+  w.tree.meta = std::move( meta );
+}
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -523,7 +749,7 @@ rl_weights_t load_rlw1( const std::string& path )
   {
     throw sc_runtime_error( fmt::format(
         "rl_policy::load_rlw1: file '{}' has format_version=4, whose scorer section is retired; "
-        "its successor is the v6 aim section (this loader reads format_version 2, 3, 5, 6 and 7)",
+        "its successor is the v6 aim section (this loader reads format_version 2, 3, 5, 6, 7 and 8)",
         path ) );
   }
 
@@ -538,7 +764,26 @@ rl_weights_t load_rlw1( const std::string& path )
   // tstl-sylvanas 280-01: body 4 (chooser-value) shares body 3's grouped trunk, so every check below
   // keyed on `is_grouped` (STRUCTURE pairing, identity v3 subset, the block/shared/trunk split, the
   // skipped first-layer width check, the grouped scratch) applies to both.
-  const bool is_grouped = w.body == rl_body_type::grouped_ln_dueling || w.body == rl_body_type::chooser_value;
+  // v218-291F: body 5 (tree-chooser) shares the same grouped trunk, so the same checks apply to it.
+  const bool is_grouped = body_is_grouped( w.body );
+
+  // v218-291F: body 5 requires format 8 and format 8 requires body 5 -- the two-way pairing body 4 has with
+  // format 7, each direction refused by a message naming the body and the version. Placed before body 4's pair
+  // so a version-8 file of any other body (or a version-7 file of body 5) is told which pairing it broke.
+  if ( w.body == rl_body_type::tree_chooser && format_version != RLW1_TREE_FORMAT_VERSION )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' declares body='tree-chooser' at format_version={}, but that body exists "
+        "only at format_version {} (its TREE section)",
+        path, format_version, RLW1_TREE_FORMAT_VERSION ) );
+  }
+  if ( format_version == RLW1_TREE_FORMAT_VERSION && w.body != rl_body_type::tree_chooser )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::load_rlw1: file '{}' declares format_version={} but body='{}' is not 'tree-chooser' -- "
+        "format_version {} is the tree-chooser body only",
+        path, format_version, body_name( w.body ), RLW1_TREE_FORMAT_VERSION ) );
+  }
 
   // tstl-sylvanas 280-01 (contract C-B): body 4 requires format 7 and format 7 requires body 4 -- the
   // same two-way pairing the STRUCTURE section has with the grouped bodies, each refused by a message
@@ -973,7 +1218,9 @@ rl_weights_t load_rlw1( const std::string& path )
   // finite and > 0). `hidden` is the last HIDDEN layer's out_features (the layer before the chooser
   // layer); there is no in_features field in the section. Every read is length-checked first
   // (T-210-04 / T-280-01); the trailing-byte refusal below still runs after it.
-  if ( format_version >= RLW1_CHOOSER_VALUE_FORMAT_VERSION )
+  // v218-291F: keyed on the body, not on `format_version >= 7`: format 8 is the tree-chooser body, whose value head
+  // is in its own TREE section below, never in a CHVL section.
+  if ( w.body == rl_body_type::chooser_value )
   {
     if ( raw_layers.size() < 2 )
     {
@@ -1041,6 +1288,22 @@ rl_weights_t load_rlw1( const std::string& path )
     w.has_value_head = true;
   }
 
+  // v218-291F: the v8 TREE section, after the AIM section, ends the file of body 5. Its own reading of the net:
+  // the chooser row is a probability model over the legal buttons (the press is the legal argmax, unchanged),
+  // and the value head is one number in the search's units. Nothing is mapped onto body 4's CHVL shape: the
+  // section is parsed here for what it is, and a file without it is refused by name.
+  if ( w.body == rl_body_type::tree_chooser )
+  {
+    if ( raw_layers.size() < 2 )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::load_rlw1: file '{}' body='tree-chooser' declares {} layer(s), needs at least 2 (a trunk "
+          "layer and the chooser layer) before the TREE section can be sized",
+          path, raw_layers.size() ) );
+    }
+    parse_tree_section( data, offset, path, raw_layers.back().in_features, w );
+  }
+
   // Pitfall 14: read_rlw1 (and this loader, pre-222) never compared `offset`
   // to `data.size()` after the layer/section walk -- trailing bytes were
   // silently ignored. Strengthens v2 parsing too: closes it for every
@@ -1099,9 +1362,19 @@ rl_weights_t load_rlw1( const std::string& path )
   {
     const std::size_t n_blocks = structure.blocks.size();
     const std::size_t n_facts = structure.per_spell.empty() ? 0 : structure.per_spell.front().size();
-    const std::size_t min_layers = n_blocks + 1 /*shared*/ + 1 /*>=1 trunk*/ + 2 /*heads*/;
+    // v218-291F: body 5's list ends in the chooser alone (ONE layer past the trunk), bodies 3 and 4 keep two
+    // heads (their message is byte for byte what it was).
+    const bool is_tree = w.body == rl_body_type::tree_chooser;
+    const std::size_t min_layers = n_blocks + 1 /*shared*/ + 1 /*>=1 trunk*/ + ( is_tree ? 1 : 2 ) /*heads*/;
     if ( raw_layers.size() < min_layers )
     {
+      if ( is_tree )
+      {
+        throw sc_runtime_error( fmt::format(
+            "rl_policy::load_rlw1: file '{}' body='tree-chooser' requires at least {} layers "
+            "({} blocks + 1 shared + >=1 trunk + the chooser), got {}",
+            path, min_layers, n_blocks, raw_layers.size() ) );
+      }
       throw sc_runtime_error( fmt::format(
           "rl_policy::load_rlw1: file '{}' body='grouped-ln-dueling' requires at least {} layers "
           "({} blocks + 1 shared + >=1 trunk + 2 heads), got {}",
@@ -1224,9 +1497,10 @@ rl_weights_t load_rlw1( const std::string& path )
   // layer carries has_ln=true, exactly like ln-dueling's hidden layers.
   {
     // tstl-sylvanas 280-01: chooser_value's trunk layers carry has_ln=1, its final chooser layer 0.
+    // v218-291F: and tree_chooser's (trunk layers has_ln=1, the chooser layer 0).
     const bool expect_ln_hidden = w.body == rl_body_type::ln_dueling ||
                                   w.body == rl_body_type::grouped_ln_dueling ||
-                                  w.body == rl_body_type::chooser_value;
+                                  body_is_chooser_shaped( w.body );
     const std::size_t n_hidden_for_ln =
         expect_ln_hidden ? hidden_layer_count( w.body, w.layers.size() ) : 0;
     for ( std::size_t i = 0; i < w.layers.size(); ++i )
@@ -1243,7 +1517,7 @@ rl_weights_t load_rlw1( const std::string& path )
 
   // tstl-sylvanas 280-01: chooser_value's w.layers (the trunk then the chooser layer) is a straight
   // chain exactly like mlp's, so it shares this chain check.
-  if ( w.body == rl_body_type::mlp || w.body == rl_body_type::chooser_value )
+  if ( w.body == rl_body_type::mlp || body_is_chooser_shaped( w.body ) )
   {
     // A straight chain: in -> hidden[0] -> hidden[1] -> ... -> out. Interior
     // dimensions must chain -- forward() indexes each hidden scratch entry
@@ -1409,6 +1683,18 @@ rl_weights_t load_rlw1( const std::string& path )
     concat_width += g.per_spell.size() * static_cast<std::size_t>( g.spell_layer.out_features );
     concat_width += g.passthrough.size();
     g.concat_scratch.resize( concat_width );
+  }
+
+  // v218-291F: the load log of a tree-chooser file -- the body, the version, the round that trained it, the label
+  // bank it was trained on and the file's own words about its numbers (its meta, as the file wrote it). One line
+  // on stderr, once per load (a fight list reuses the first load; a forked search copy never loads).
+  if ( w.has_tree_section )
+  {
+    fmt::print( stderr,
+                "rl_policy::load_rlw1: loaded '{}' body={} format_version={} round={} bank_sha256={} "
+                "label_temperature={} window_s={} gamma={} bootstrap={} meta={}\n",
+                path, body_name( w.body ), w.format_version, w.tree.round, w.tree.bank_sha256,
+                w.tree.label_temperature, w.tree.window_s, w.tree.gamma, w.tree.bootstrap, w.tree.meta );
   }
 
   return w;
@@ -1673,7 +1959,7 @@ void forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ], const std::u
   // w.layers for a grouped blob is already [trunk_0 .. trunk_{T-1}, v_head, a_head] (the load-time
   // split in load_rlw1), identically shaped to ln-dueling's own layer list.
   const float* x = obs;
-  if ( w.body == rl_body_type::grouped_ln_dueling || w.body == rl_body_type::chooser_value )   // tstl-sylvanas 280-01
+  if ( body_is_grouped( w.body ) )   // tstl-sylvanas 280-01; v218-291F: bodies 3, 4 and 5
   {
     compute_grouped_input( w, obs );
     x = w.grouped.concat_scratch.data();
@@ -1722,7 +2008,7 @@ void forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ], const std::u
 
   // tstl-sylvanas 280-01: chooser_value writes its final (chooser) layer straight into out_q with NO
   // dueling combine, so masked_argmax reads the chooser row exactly where it read the dueling output.
-  if ( w.body == rl_body_type::mlp || w.body == rl_body_type::chooser_value )
+  if ( w.body == rl_body_type::mlp || body_is_chooser_shaped( w.body ) )   // v218-291F: bodies 4 and 5
   {
     const rl_layer& out_layer = w.layers[ n_hidden ];  // the single output layer
     for ( std::uint32_t o = 0; o < out_layer.out_features; ++o )
@@ -1791,8 +2077,9 @@ double value_forward( const rl_weights_t& w, const float obs[ RL_OBS_DIM ] )
   if ( !w.has_value_head )
   {
     throw sc_runtime_error( fmt::format(
-        "rl_policy::value_forward: these weights (body='{}', format_version={}) carry no CHVL value "
-        "head; only an RLW1 format 7 'chooser-value' blob does",
+        "rl_policy::value_forward: these weights (body='{}', format_version={}) carry no value "
+        "head; only an RLW1 format 7 'chooser-value' blob (CHVL section) or a format 8 'tree-chooser' blob "
+        "(TREE section) does",
         body_name( w.body ), w.format_version ) );
   }
   std::uint8_t all_legal[ RL_ACTION_DIM ];
