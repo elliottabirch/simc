@@ -4130,17 +4130,35 @@ void validate( sim_t* sim )
     {
       refuse( fmt::format( "solver_search_value='{}' cannot be loaded: {}", c.value, e.what() ) );
     }
-    if ( g_value_w->body != rl_policy::rl_body_type::chooser_value || !g_value_w->has_value_head )
-      refuse( fmt::format( "solver_search_value='{}' is not a version-7 chooser-value weights file with a value head "
-                           "(body '{}').",
+    // v218-291F: a value file is a v7 chooser-value file or a v8 tree-chooser file, each with its value head
+    if ( ( g_value_w->body != rl_policy::rl_body_type::chooser_value &&
+           g_value_w->body != rl_policy::rl_body_type::tree_chooser ) ||
+         !g_value_w->has_value_head )
+      refuse( fmt::format( "solver_search_value='{}' is not a version-7 chooser-value or a version-8 tree-chooser "
+                           "weights file with a value head (body '{}').",
                            c.value, rl_policy::body_name( g_value_w->body ) ) );
   }
-  // 284-06: the window-end value term's units
-  if ( c.value_units != "raw" && c.value_units != "shape" )
+  // 284-06: the window-end value term's units. v218-291F: left unset, the value file decides -- a chooser-value
+  // file keeps the default it always had (raw); a tree-chooser file's head is ALREADY in the search's units
+  // (damage over the fight's divisor, value_scale exactly 1.0 -- the file says so in its TREE section), so its term
+  // is the head's own output (shape) and raw, which divides by the divisor a second time, is refused by name.
+  if ( !c.value_units.empty() && c.value_units != "raw" && c.value_units != "shape" )
     refuse( fmt::format( "solver_search_value_units='{}' is not 'raw' or 'shape'.", c.value_units ) );
   if ( c.value_units == "shape" && !g_value_w )
-    refuse( "solver_search_value_units=shape needs solver_search_value=<v7 blob> (there is no value head to read the "
-            "term from)." );
+    refuse( "solver_search_value_units=shape needs solver_search_value=<v7 or v8 blob> (there is no value head to read "
+            "the term from)." );
+  if ( g_value_w && g_value_w->body == rl_policy::rl_body_type::tree_chooser )
+  {
+    if ( c.value_units == "raw" )
+      refuse( fmt::format( "solver_search_value_units=raw cannot be used with solver_search_value='{}': it is a "
+                           "version-8 tree-chooser file whose value head is already in the search's units (damage over "
+                           "the fight's divisor), and raw would divide by the divisor a second time. Leave the option "
+                           "unset or give shape.",
+                           c.value ) );
+    c.value_units = "shape";
+  }
+  else if ( c.value_units.empty() )
+    c.value_units = "raw";
   g_value_shape = c.value_units == "shape";
   {
     std::string bm = c.bootstrap;
