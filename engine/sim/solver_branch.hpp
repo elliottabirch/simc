@@ -110,9 +110,11 @@ void validate( sim_t* sim );
 // Called from solver_control::choose()'s in-process arm for every RL-actor decision, after
 // the q values, q_margin and top_q exist and before RL_ACTIONS[idx] is read. May change idx
 // (branch child: its button; teacher parent: the teacher's pick).
-void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, const std::uint8_t* mask,
-                  const std::uint8_t* select_mask, int legal_count, float q_margin, float top_q,
-                  bool exploratory, bool forced, int& idx );
+// `obs` is the observation the net just read at this decision (the translog's inputs; the same pointer
+// solver_search::on_decision receives): a copy cut at the window end reads the tree-chooser value head on it.
+void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* obs, const float* q,
+                  const std::uint8_t* mask, const std::uint8_t* select_mask, int legal_count, float q_margin,
+                  float top_q, bool exploratory, bool forced, int& idx );
 
 // Called from combat_end() right after rl_translog::record_close().
 void on_combat_end( sim_t* sim );

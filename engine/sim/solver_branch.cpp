@@ -7,8 +7,17 @@
 // where t is the float32-rounded sim time (exactly the translog row's `t`), D is
 // p->solver_damage_so_far (exactly the row's `damage`, the registry's boundaryDamageField),
 // divisor is divisorByFightShape[shape] and gamma the per-second discount. The window ends at
-// the first decision m with t_m >= t_k + W; there boot = pow(gamma, t_m - t_k) * top_q_m is
-// reported as a SEPARATE field (never added into R). If the fight ends first, the last interval
+// the first decision m with t_m >= t_k + W; there boot = pow(gamma, t_m - t_k) * V_m is
+// reported as a SEPARATE field (never added into R). V_m, the window-end term, is chosen by the
+// acting net's body, once, when the options are checked (v218-291V):
+//     a tree-chooser file (RLW1 format 8, body 5): V_m = the file's value head read on the
+//         observation of that decision (rl_policy::value_forward; the head is already in damage
+//         over the fight's divisor, the units of R, value_scale exactly 1.0: nothing rescales it).
+//         Its chooser scores are logits of a probability model, not values, so top_q is not used.
+//     any other body (v284's Q-valued body 3 and the rest): V_m = top_q_m, the net's best legal
+//         score, exactly as before.
+// The batch line and the teacher summary say which term the run used (boot_kind, acting_body).
+// If the fight ends first, the last interval
 // runs to the close value (solver_damage_so_far at record_close), boot = 0, ended = 1.
 //
 // FORK PROTOCOL. The parent (single-threaded: /proc/self/task is checked before every batch)
@@ -26,8 +35,8 @@
 // channeling, 2 casting, 1 inside the GCD, 0 idle), runs the opening of player_ready_event_t::
 // execute() (player.cpp) and then p->execute_action(): the production foreground decision path,
 // whose solver_control::choose() reaches on_decision(), where the child cuts (g_child.cutting) with
-// t = T and boot = pow(gamma, T - t_k) * top_q. cut_state on the pipe line: -1 a decision cut, 0-3
-// the exact cut, 4 the fight's end. FAIL 75 sleeping_at_cut, FAIL 74 cut_not_reached.
+// t = T and boot = pow(gamma, T - t_k) * V_T (V_T chosen by the acting net's body, see WINDOW RETURN
+// above). cut_state on the pipe line: -1 a decision cut, 0-3 the exact cut, 4 the fight's end. FAIL 75 sleeping_at_cut, FAIL 74 cut_not_reached.
 // ==========================================================================
 #include "sim/solver_branch.hpp"
 
@@ -74,6 +83,14 @@ namespace
 {
 config_t g_cfg;
 bool g_any = false;  // set by validate() when one of the three modes is on
+
+// v218-291V: the window-end term of a copy's `boot`, chosen by the acting net's body ONCE, at option time (validate()).
+// g_boot_head is non-null for a tree-chooser file (the term is that file's value head read on the cut's observation) and
+// null for every other body (the term is the net's best legal score, top_q). g_boot_kind / g_acting_body are what the
+// batch line and the teacher summary print, so a reader can refuse a binary whose term is not the one it expects.
+const rl_policy::rl_weights_t* g_boot_head = nullptr;
+std::string g_boot_kind = "top_q";
+std::string g_acting_body;
 
 // ---- child state ---------------------------------------------------------------------------
 struct child_state_t
@@ -202,6 +219,19 @@ std::string make_ok_line( double R, double boot, double t_end, int ended, double
 {
   return fmt::format( "OK {} {} {:.17g} {:.17g} {:.9g} {} {:.17g} {} {}\n", g_child.button, g_child.salt, R, boot,
                       t_end, ended, dwin, n_dec, cut_state );
+}
+
+// The discounted window-end term at the cut (time `t`, float32 sim time): ONE discount expression, used by both bodies.
+//   tree-chooser file: disc * the file's value head on `obs` (already in the units of R: no divisor, no value_scale).
+//   any other body:    disc * top_q, exactly the expression the cut points always had.
+double window_end_boot( double t, const float* obs, float top_q )
+{
+  const double disc = std::pow( g_child.gamma, t - g_child.t_k );
+  if ( !g_boot_head )
+    return disc * static_cast<double>( top_q );
+  if ( !obs )
+    throw sc_runtime_error( "solver_branch: the window-end value head needs the decision's observation and none was passed" );
+  return disc * rl_policy::value_forward( *g_boot_head, obs );
 }
 
 std::string make_fail_line( int code, const std::string& msg )
@@ -960,6 +990,24 @@ void validate( sim_t* sim )
     if ( w->has_aim_section && w->aim.exploration > 0.0f )
       refuse( fmt::format( "{} requires greedy weights: the loaded aim section carries exploration={}.", name,
                            w->aim.exploration ) );
+    // v218-291V: the window-end term by the acting net's body, decided once here. A tree-chooser file's scores are
+    // logits of a probability model, so its copies read the file's own value head on the real window-end state;
+    // without a value head there is nothing to read, and a zero would pass for a value: refused by name.
+    g_acting_body = rl_policy::body_name( w->body );
+    if ( w->body == rl_policy::rl_body_type::tree_chooser )
+    {
+      if ( !w->has_value_head )
+        refuse( fmt::format( "{} with a tree-chooser weights file needs its value head (the window-end term is the head "
+                             "read on the cut's observation) and the loaded file has none.",
+                             name ) );
+      g_boot_head = w.get();
+      g_boot_kind = "value_head";
+    }
+    else
+    {
+      g_boot_head = nullptr;
+      g_boot_kind = "top_q";
+    }
   }
 
   if ( branch && !c.branch_out.empty() )
@@ -992,9 +1040,9 @@ void validate( sim_t* sim )
   std::fflush( stdout );
 }
 
-void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, const std::uint8_t* mask,
-                  const std::uint8_t* select_mask, int legal_count, float q_margin, float top_q, bool exploratory,
-                  bool forced, int& idx )
+void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* obs, const float* q,
+                  const std::uint8_t* mask, const std::uint8_t* select_mask, int legal_count, float q_margin,
+                  float top_q, bool exploratory, bool forced, int& idx )
 {
   if ( !g_any )
     return;
@@ -1011,14 +1059,14 @@ void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
       // 261005-tch2: only the window_cut_event_t ends an exact window (t is T, in float32).
       if ( g_child.cutting )
       {
-        const double boot = std::pow( g_child.gamma, t - g_child.t_k ) * static_cast<double>( top_q );
+        const double boot = window_end_boot( t, obs, top_q );
         child_write_and_exit(
             make_ok_line( g_child.acc, boot, t, 0, D - g_child.D_k, g_child.n_dec, g_child.cut_state ), 0 );
       }
     }
     else if ( g_child.window > 0.0 && t >= g_child.t_k + g_child.window )
     {
-      const double boot = std::pow( g_child.gamma, t - g_child.t_k ) * static_cast<double>( top_q );
+      const double boot = window_end_boot( t, obs, top_q );
       child_write_and_exit( make_ok_line( g_child.acc, boot, t, 0, D - g_child.D_k, g_child.n_dec, -1 ), 0 );
     }
     g_child.last_t = t;
@@ -1070,8 +1118,9 @@ void on_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float* q, co
       }
       *g_branch_out << fmt::format(
           "{{\"batch\":1,\"k\":{},\"buttons\":[{}],\"children\":{},\"child_fail\":{},\"child_cpu_s\":{},"
-          "\"fork_cpu_s\":{},\"wall_s\":{},\"threads_at_fork\":1}}\n",
-          k, blist, br.res.size(), br.child_fail, jnum( br.child_cpu_s ), jnum( br.fork_cpu_s ), jnum( br.wall_s ) );
+          "\"fork_cpu_s\":{},\"wall_s\":{},\"threads_at_fork\":1,\"boot_kind\":\"{}\",\"acting_body\":\"{}\"}}\n",
+          k, blist, br.res.size(), br.child_fail, jnum( br.child_cpu_s ), jnum( br.fork_cpu_s ), jnum( br.wall_s ),
+          g_boot_kind, g_acting_body );
       g_branch_out->flush();
     }
   }
@@ -1313,14 +1362,15 @@ void write_summary( sim_t* sim )
       "\"fd_first\":{},\"fd_last\":{},\"listed\":{},\"listed_reached\":{},\"listed_skipped\":{},\"press\":\"{}\","
       "\"config\":{{\"margin\":{},\"n\":{},\"window\":{},\"topk\":{},"
       "\"bootstrap\":{},\"divisor\":{},\"gamma\":{},\"jobs\":{},\"salt_base\":{},\"fd_isolation\":{},\"cut\":\"{}\","
-      "\"independent_dice\":{},\"redeal\":{}}}}}",
+      "\"independent_dice\":{},\"redeal\":{}}},\"boot_kind\":\"{}\",\"acting_body\":\"{}\"}}",
       g_count.decisions, g_count.near_ties, g_count.branched, g_count.overrides, g_count.skipped_fail, g_count.children,
       g_count.children_reaped, g_count.child_fail, jnum( g_count.child_cpu_s ), jnum( g_count.fork_cpu_s ),
       jnum( g_count.wall_branch_s ), jnum( self_cpu ), jnum( kids_cpu ), g_count.rss_kb_first, g_count.rss_kb_last,
       g_count.fd_first, g_count.fd_last, c.teacher_at_list.size(), g_count.listed_reached, g_count.listed_skipped,
       c.teacher_press_net ? "net" : "best", jnum( c.teacher_margin ), c.teacher_n, jnum( c.teacher_window ), c.teacher_topk,
       c.teacher_bootstrap ? 1 : 0, jnum( c.value_divisor ), jnum( c.gamma ), c.branch_jobs, c.branch_salt_base,
-      c.child_fd_isolation ? 1 : 0, c.cut_exact ? "exact" : "decision", c.independent_dice ? 1 : 0, c.redeal ? 1 : 0 );
+      c.child_fd_isolation ? 1 : 0, c.cut_exact ? "exact" : "decision", c.independent_dice ? 1 : 0, c.redeal ? 1 : 0,
+      g_boot_kind, g_acting_body );
   if ( g_teacher_log )
   {
     *g_teacher_log << js << "\n";
