@@ -2169,9 +2169,12 @@ inline constexpr std::size_t RL_ENEMIES_PICK_COUNT = 11;
 inline constexpr std::size_t RL_ENEMIES_CAPABILITY_COUNT = 139;
 inline constexpr std::size_t RL_ENEMIES_RAID_EVENT_CAP = 24;
 inline constexpr std::size_t RL_ENEMIES_RAID_NAME_BYTES = 24;
-inline constexpr std::size_t RL_ENEMIES_RECORD_SIZE = 1832;
+inline constexpr std::size_t RL_ENEMIES_RECORD_SIZE = 2496;
 inline constexpr std::size_t RL_ENEMIES_HEADER_SIZE = 120;
-inline constexpr const char* RL_ENEMIES_SHA = "enemies-v1:f8cb32933ee4f9b2e6f16ae2630b72663d6160c7c4d8c5918fa7a99038047ad3";
+inline constexpr const char* RL_ENEMIES_SHA = "enemies-v1:a68a2dbc4bea887e57b1ecdb507eb3f608a5aeaab790e419345689bc3616578e";
+// The aura columns (stream FB3): the LAST RL_ENEMIES_AURA_FACT_COUNT rows of RL_ENEMIES_DECISION_MEMBERS, one per row of RL_DECLARED_FACTS in that order,
+// each named by the fact (RL_TARGET_FEATURE_NAMES[ slot ]), RANK_CAP entries of type code 'f': what read_declared_fact gives for that enemy at the decision.
+inline constexpr std::size_t RL_ENEMIES_AURA_FACT_COUNT = 8;
 inline constexpr std::size_t RL_ENEMIES_CLASS_CONSTANT_COUNT = 0;
 inline constexpr const char* RL_ENEMIES_CLASS_CONSTANT_NAMES[1] = {
   "",
@@ -2221,7 +2224,7 @@ inline constexpr rl_enemies_member RL_ENEMIES_FIGHT_MEMBERS[RL_ENEMIES_FIGHT_MEM
   { "raid_name", 'B', 576, 355 },
   { "raid_type", 'B', 576, 931 },
 };
-inline constexpr std::size_t RL_ENEMIES_DECISION_MEMBER_COUNT = 32;
+inline constexpr std::size_t RL_ENEMIES_DECISION_MEMBER_COUNT = 40;
 inline constexpr rl_enemies_member RL_ENEMIES_DECISION_MEMBERS[RL_ENEMIES_DECISION_MEMBER_COUNT] = {
   { "kind", 'I', 1, 0 },
   { "seq", 'I', 1, 4 },
@@ -2230,31 +2233,39 @@ inline constexpr rl_enemies_member RL_ENEMIES_DECISION_MEMBERS[RL_ENEMIES_DECISI
   { "cand_count", 'B', 11, 41 },
   { "cand_mask", 'I', 11, 52 },
   { "actor_index", 'H', 20, 96 },
-  { "spawn_index", 'B', 20, 136 },
-  { "flags", 'B', 20, 156 },
-  { "x", 'd', 20, 176 },
-  { "y", 'd', 20, 336 },
-  { "combat_reach", 'f', 20, 496 },
-  { "health_pct", 'f', 20, 576 },
-  { "time_to_die", 'f', 20, 656 },
-  { "immunity_remaining", 'f', 20, 736 },
-  { "damage_real", 'f', 20, 816 },
-  { "damage_expected", 'f', 20, 896 },
-  { "damage_unranked", 'f', 2, 976 },
-  { "player_x", 'd', 1, 984 },
-  { "player_y", 'd', 1, 992 },
-  { "player_facing_x", 'd', 1, 1000 },
-  { "player_facing_y", 'd', 1, 1008 },
-  { "player_target_actor", 'H', 1, 1016 },
-  { "player_move_distance", 'd', 1, 1024 },
-  { "player_move_remains", 'd', 1, 1032 },
-  { "raid_next_start", 'd', 24, 1040 },
-  { "raid_next_end", 'd', 24, 1232 },
-  { "raid_duration", 'f', 24, 1424 },
-  { "raid_cooldown", 'f', 24, 1520 },
-  { "raid_up", 'B', 24, 1616 },
-  { "raid_duration_mean", 'f', 24, 1640 },
-  { "raid_cooldown_mean", 'f', 24, 1736 },
+  { "spawn_index", 'H', 20, 136 },
+  { "flags", 'B', 20, 176 },
+  { "x", 'd', 20, 200 },
+  { "y", 'd', 20, 360 },
+  { "combat_reach", 'f', 20, 520 },
+  { "health_pct", 'f', 20, 600 },
+  { "time_to_die", 'f', 20, 680 },
+  { "immunity_remaining", 'f', 20, 760 },
+  { "damage_real", 'f', 20, 840 },
+  { "damage_expected", 'f', 20, 920 },
+  { "damage_unranked", 'f', 2, 1000 },
+  { "player_x", 'd', 1, 1008 },
+  { "player_y", 'd', 1, 1016 },
+  { "player_facing_x", 'd', 1, 1024 },
+  { "player_facing_y", 'd', 1, 1032 },
+  { "player_target_actor", 'H', 1, 1040 },
+  { "player_move_distance", 'd', 1, 1048 },
+  { "player_move_remains", 'd', 1, 1056 },
+  { "raid_next_start", 'd', 24, 1064 },
+  { "raid_next_end", 'd', 24, 1256 },
+  { "raid_duration", 'f', 24, 1448 },
+  { "raid_cooldown", 'f', 24, 1544 },
+  { "raid_up", 'B', 24, 1640 },
+  { "raid_duration_mean", 'f', 24, 1664 },
+  { "raid_cooldown_mean", 'f', 24, 1760 },
+  { "rend_remaining", 'f', 20, 1856 },
+  { "deep_wounds_remaining", 'f', 20, 1936 },
+  { "colossus_smash_remaining", 'f', 20, 2016 },
+  { "fatal_mark_stacks", 'f', 20, 2096 },
+  { "overwhelmed_stacks", 'f', 20, 2176 },
+  { "ravaged_remaining", 'f', 20, 2256 },
+  { "venomfang_debuff_stacks", 'f', 20, 2336 },
+  { "wrecked_stacks", 'f', 20, 2416 },
 };
 inline constexpr std::size_t RL_ENEMIES_FOOTER_MEMBER_COUNT = 4;
 inline constexpr rl_enemies_member RL_ENEMIES_FOOTER_MEMBERS[RL_ENEMIES_FOOTER_MEMBER_COUNT] = {

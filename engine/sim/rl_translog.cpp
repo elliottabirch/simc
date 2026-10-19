@@ -648,7 +648,15 @@ void enemies_fill_decision( sim_t* sim, player_t* p, std::uint32_t kind, std::ui
     const bool alive = !t->is_sleeping();
     const bool immune = t->debuffs.invulnerable && t->debuffs.invulnerable->check();
     r.actor_index[ rank ] = static_cast<std::uint16_t>( t->actor_index );
-    r.spawn_index[ rank ] = static_cast<std::uint8_t>( t->actor_spawn_index );
+    // the candidate order of the aim pool is ascending spawn index, so the index must not wrap: -1 (not yet arisen) is NO_SPAWN_INDEX, a value that does not fit refuses
+    if ( t->actor_spawn_index < 0 )
+      r.spawn_index[ rank ] = rl_enemies::NO_SPAWN_INDEX;
+    else if ( t->actor_spawn_index >= static_cast<int>( rl_enemies::NO_SPAWN_INDEX ) )
+      throw sc_runtime_error( fmt::format(
+          "rl_translog: enemy actor {} has spawn index {}, which does not fit the enemies sidecar's 16-bit spawn_index (the aim pool's candidate order is "
+          "ascending spawn index); the registry's rankFields.spawn_index must be wider", t->actor_index, t->actor_spawn_index ) );
+    else
+      r.spawn_index[ rank ] = static_cast<std::uint16_t>( t->actor_spawn_index );
     r.flags[ rank ] = static_cast<std::uint8_t>( ( alive ? rl_enemies::FLAG_ALIVE : 0 ) | ( immune ? rl_enemies::FLAG_IMMUNE : 0 ) |
                                                   ( t->sheet_hazard ? rl_enemies::FLAG_HAZARD : 0 ) |
                                                   ( sheet_fight_do_not_hit( sim, t ) ? rl_enemies::FLAG_DO_NOT_HIT : 0 ) |
@@ -662,6 +670,12 @@ void enemies_fill_decision( sim_t* sim, player_t* p, std::uint32_t kind, std::ui
     r.time_to_die[ rank ] = alive ? static_cast<float>( std::min( t->time_to_percent( 0 ).total_seconds(), 600.0 ) ) : 0.0f;
     r.immunity_remaining[ rank ] =
         t->debuffs.invulnerable ? static_cast<float>( t->debuffs.invulnerable->remains().total_seconds() ) : 0.0f;
+    // Stream FB3: every declared aura fact for this enemy, through the same read the candidate block's facts make (build_enemy_fact's loop over RL_DECLARED_FACTS, the
+    // player as the source), for EVERY enemy actor of the table -- a not-yet-arisen one reads 0 (no dot or debuff object on it holds time). A READ: find_dot / buff_t::find
+    // never create the object, and remains() / check() change nothing the play reads.
+    if constexpr ( rl_enemies::AURA_FACTS > 0 )
+      for ( std::size_t k = 0; k < rl_enemies::AURA_FACTS; ++k )
+        r.aura.value[ k ][ rank ] = static_cast<float>( rl_target_select::read_declared_fact( RL_DECLARED_FACTS[ k ], p, t ) );
   }
   // the damage since the previous decision, then zero it (the next record starts a new step)
   if ( p->rl_enemy_damage_real.size() == rl_enemies::RANK_CAP )

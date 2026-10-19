@@ -1437,6 +1437,9 @@ static_assert( offsetof( footer_record, zero ) == 8 );
 //   raid        per raid event, as the engine holds it at that row: the next start and the end of the occurrence that is up (absolute
 //               seconds, -1 when it holds none), the duration and cooldown drawn for the current occurrence (0 before the first) and the option
 //               means the engine's `raid_event.<name>.duration` / `.cooldown` fall back to when none is drawn yet, whether it is up.
+//   aura        (stream FB3) per declared aura fact (RL_DECLARED_FACTS, in its order), per rank, for EVERY enemy actor of the table at the decision (not
+//               only the candidates): what read_declared_fact gives with the player as the source -- a remaining time in seconds or a stack count --
+//               the last members of the record, named by the fact. `spawn_index` is sixteen bits (NO_SPAWN_INDEX before the enemy arises).
 // Pure observer: nothing here draws a random number, schedules an event or changes a cache the play reads.
 namespace rl_enemies
 {
@@ -1461,6 +1464,8 @@ inline constexpr std::uint32_t KIND_CLOSE = 3u;
 inline constexpr std::uint32_t KIND_FOOTER = 4u;
 inline constexpr std::uint32_t CLOSE_SEQ = 0xFFFFFFFFu;
 inline constexpr std::uint16_t NO_ACTOR = 0xFFFFu;
+inline constexpr std::uint16_t NO_SPAWN_INDEX = 0xFFFFu;   // an enemy that has not arisen yet (the engine's actor_spawn_index is -1)
+inline constexpr std::size_t AURA_FACTS = RL_ENEMIES_AURA_FACT_COUNT;
 inline constexpr double NO_TIME = -1.0;
 // zstd frame cadence in records (the translog's own cadence, rl_translog.cpp ZSTD_TRANSLOG_FRAME_ROWS)
 inline constexpr std::uint32_t ZSTD_FRAME_RECORDS = 64;
@@ -1511,6 +1516,19 @@ static_assert( offsetof( file_header, raid_event_cap ) == 32 );
 static_assert( offsetof( file_header, zero36 ) == 36 );
 static_assert( offsetof( file_header, enemies_sha ) == 40 );
 
+// The per-rank aura columns of a DECISION record (stream FB3): value[ k ][ rank ] is the declared fact k's value (RL_DECLARED_FACTS[ k ]) for the enemy of that rank, what
+// rl_target_select::read_declared_fact gives with the player as the source: a remaining time in seconds, or a stack count. N is the number of declared facts; the registry
+// names column k after the fact (RL_ENEMIES_DECISION_MEMBERS, checked below). A spec that declares none carries an empty block.
+template <std::size_t N>
+struct aura_block
+{
+  float value[ N ][ RANK_CAP ];
+};
+template <>
+struct aura_block<0>
+{
+};
+
 // Once per fight, before that fight's first record: the per-fight constants.
 struct alignas( 8 ) fight_record
 {
@@ -1540,7 +1558,7 @@ struct alignas( 8 ) decision_record
   std::uint8_t cand_count[ PICK_COUNT ];
   std::uint32_t cand_mask[ PICK_COUNT ];
   std::uint16_t actor_index[ RANK_CAP ];
-  std::uint8_t spawn_index[ RANK_CAP ];
+  std::uint16_t spawn_index[ RANK_CAP ];   // actor_spawn_index; NO_SPAWN_INDEX before the enemy arises; a fight reaching 65535 arisings is refused by the writer
   std::uint8_t flags[ RANK_CAP ];
   double x[ RANK_CAP ];
   double y[ RANK_CAP ];
@@ -1565,6 +1583,7 @@ struct alignas( 8 ) decision_record
   std::uint8_t raid_up[ RAID_CAP ];
   float raid_duration_mean[ RAID_CAP ];
   float raid_cooldown_mean[ RAID_CAP ];
+  aura_block<AURA_FACTS> aura;             // stream FB3: per declared aura fact (RL_DECLARED_FACTS order), per rank: read_declared_fact for that enemy at the decision
 };
 
 struct alignas( 8 ) footer_record
@@ -1630,15 +1649,33 @@ constexpr bool same_text( const char* a, const char* b )
   return *a == *b;
 }
 
+// The first N rows of the generated table (the members the registry fixes, which this file lists by name); `generated_count` may be larger by exactly the
+// rows after them (checked by the caller: the aura rows).
 template <std::size_t N>
-constexpr bool members_match( const member_decl ( &ours )[ N ], const rl_enemies_member* generated, std::size_t generated_count )
+constexpr bool members_match( const member_decl ( &ours )[ N ], const rl_enemies_member* generated, std::size_t generated_count, std::size_t trailing = 0 )
 {
-  if ( N != generated_count )
+  if ( N + trailing != generated_count )
     return false;
   for ( std::size_t i = 0; i < N; ++i )
     if ( !same_text( ours[ i ].name, generated[ i ].name ) || ours[ i ].type != generated[ i ].type || ours[ i ].count != generated[ i ].count ||
          ours[ i ].offset != generated[ i ].offset )
       return false;
+  return true;
+}
+
+// The trailing rows are the aura columns: row k is the declared fact k, named by it (the feature name of its slot), a float array of RANK_CAP entries at
+// the offset of the record's aura block plus k columns. Proved against the generated table, as the fixed members are.
+constexpr bool aura_members_match( const rl_enemies_member* generated, std::size_t generated_count )
+{
+  if ( generated_count < AURA_FACTS )
+    return false;
+  for ( std::size_t k = 0; k < AURA_FACTS; ++k )
+  {
+    const rl_enemies_member& row = generated[ generated_count - AURA_FACTS + k ];
+    if ( !same_text( row.name, RL_TARGET_FEATURE_NAMES[ RL_DECLARED_FACTS[ k ].slot ] ) || row.type != elem_code<float>::value || row.count != RANK_CAP ||
+         row.offset != offsetof( decision_record, aura ) + k * RANK_CAP * sizeof( float ) )
+      return false;
+  }
   return true;
 }
 
@@ -1691,7 +1728,7 @@ inline constexpr member_decl DECISION_MEMBERS[] = {
     RL_ENEMIES_DECL( decision_record, raid_up ),
     RL_ENEMIES_DECL( decision_record, raid_duration_mean ),
     RL_ENEMIES_DECL( decision_record, raid_cooldown_mean ),
-};
+};   // the aura columns follow: aura_members_match
 inline constexpr member_decl FOOTER_MEMBERS[] = {
     RL_ENEMIES_DECL( footer_record, kind ),
     RL_ENEMIES_DECL( footer_record, n_fights ),
@@ -1702,8 +1739,11 @@ inline constexpr member_decl FOOTER_MEMBERS[] = {
 
 static_assert( members_match( FIGHT_MEMBERS, RL_ENEMIES_FIGHT_MEMBERS, RL_ENEMIES_FIGHT_MEMBER_COUNT ),
                "rl_enemies::fight_record is not the layout the registry declares (RL_ENEMIES_FIGHT_MEMBERS)" );
-static_assert( members_match( DECISION_MEMBERS, RL_ENEMIES_DECISION_MEMBERS, RL_ENEMIES_DECISION_MEMBER_COUNT ),
+static_assert( members_match( DECISION_MEMBERS, RL_ENEMIES_DECISION_MEMBERS, RL_ENEMIES_DECISION_MEMBER_COUNT, AURA_FACTS ),
                "rl_enemies::decision_record is not the layout the registry declares (RL_ENEMIES_DECISION_MEMBERS)" );
+static_assert( RL_ENEMIES_AURA_FACT_COUNT == RL_DECLARED_FACT_COUNT, "the aura columns are the declared facts (RL_DECLARED_FACTS), one each" );
+static_assert( aura_members_match( RL_ENEMIES_DECISION_MEMBERS, RL_ENEMIES_DECISION_MEMBER_COUNT ),
+               "rl_enemies::decision_record's aura block is not the aura columns the registry declares (the last RL_ENEMIES_AURA_FACT_COUNT rows of RL_ENEMIES_DECISION_MEMBERS)" );
 static_assert( members_match( FOOTER_MEMBERS, RL_ENEMIES_FOOTER_MEMBERS, RL_ENEMIES_FOOTER_MEMBER_COUNT ),
                "rl_enemies::footer_record is not the layout the registry declares (RL_ENEMIES_FOOTER_MEMBERS)" );
 
