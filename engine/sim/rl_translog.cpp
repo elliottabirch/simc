@@ -664,18 +664,18 @@ void enemies_fill_decision( sim_t* sim, player_t* p, std::uint32_t kind, std::ui
                                                   ( rl_target_select::rl_counts_as_enemy( t ) ? rl_enemies::FLAG_COUNTS_AS_ENEMY : 0 ) );
     r.x[ rank ] = t->x_position;
     r.y[ rank ] = t->y_position;
-    r.combat_reach[ rank ] = static_cast<float>( t->combat_reach );
-    r.health_pct[ rank ] = static_cast<float>( t->health_percentage() );
+    r.combat_reach[ rank ] = t->combat_reach;
+    r.health_pct[ rank ] = t->health_percentage();
     // the engine's value, before the observation's clip (build_enemy_fact's own cap of 600 s); a sleeping enemy has none
-    r.time_to_die[ rank ] = alive ? static_cast<float>( std::min( t->time_to_percent( 0 ).total_seconds(), 600.0 ) ) : 0.0f;
+    r.time_to_die[ rank ] = alive ? std::min( t->time_to_percent( 0 ).total_seconds(), 600.0 ) : 0.0;
     r.immunity_remaining[ rank ] =
-        t->debuffs.invulnerable ? static_cast<float>( t->debuffs.invulnerable->remains().total_seconds() ) : 0.0f;
+        t->debuffs.invulnerable ? t->debuffs.invulnerable->remains().total_seconds() : 0.0;
     // Stream FB3: every declared aura fact for this enemy, through the same read the candidate block's facts make (build_enemy_fact's loop over RL_DECLARED_FACTS, the
     // player as the source), for EVERY enemy actor of the table -- a not-yet-arisen one reads 0 (no dot or debuff object on it holds time). A READ: find_dot / buff_t::find
     // never create the object, and remains() / check() change nothing the play reads.
     if constexpr ( rl_enemies::AURA_FACTS > 0 )
       for ( std::size_t k = 0; k < rl_enemies::AURA_FACTS; ++k )
-        r.aura.value[ k ][ rank ] = static_cast<float>( rl_target_select::read_declared_fact( RL_DECLARED_FACTS[ k ], p, t ) );
+        r.aura.value[ k ][ rank ] = rl_target_select::read_declared_fact( RL_DECLARED_FACTS[ k ], p, t );
   }
   // the damage since the previous decision, then zero it (the next record starts a new step)
   if ( p->rl_enemy_damage_real.size() == rl_enemies::RANK_CAP )

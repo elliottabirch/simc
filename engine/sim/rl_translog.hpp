@@ -1522,7 +1522,7 @@ static_assert( offsetof( file_header, enemies_sha ) == 40 );
 template <std::size_t N>
 struct aura_block
 {
-  float value[ N ][ RANK_CAP ];
+  double value[ N ][ RANK_CAP ];           // the engine's double, stored whole (stream P21): the observation divides this double by the slot's clip and rounds once
 };
 template <>
 struct aura_block<0>
@@ -1562,10 +1562,10 @@ struct alignas( 8 ) decision_record
   std::uint8_t flags[ RANK_CAP ];
   double x[ RANK_CAP ];
   double y[ RANK_CAP ];
-  float combat_reach[ RANK_CAP ];
-  float health_pct[ RANK_CAP ];
-  float time_to_die[ RANK_CAP ];
-  float immunity_remaining[ RANK_CAP ];
+  double combat_reach[ RANK_CAP ];         // stream P21: the real-valued columns are the engine's double, not a float cut of it
+  double health_pct[ RANK_CAP ];
+  double time_to_die[ RANK_CAP ];
+  double immunity_remaining[ RANK_CAP ];
   float damage_real[ RANK_CAP ];
   float damage_expected[ RANK_CAP ];
   float damage_unranked[ 2 ];
@@ -1663,7 +1663,7 @@ constexpr bool members_match( const member_decl ( &ours )[ N ], const rl_enemies
   return true;
 }
 
-// The trailing rows are the aura columns: row k is the declared fact k, named by it (the feature name of its slot), a float array of RANK_CAP entries at
+// The trailing rows are the aura columns: row k is the declared fact k, named by it (the feature name of its slot), a double array of RANK_CAP entries at
 // the offset of the record's aura block plus k columns. Proved against the generated table, as the fixed members are.
 constexpr bool aura_members_match( const rl_enemies_member* generated, std::size_t generated_count )
 {
@@ -1672,8 +1672,8 @@ constexpr bool aura_members_match( const rl_enemies_member* generated, std::size
   for ( std::size_t k = 0; k < AURA_FACTS; ++k )
   {
     const rl_enemies_member& row = generated[ generated_count - AURA_FACTS + k ];
-    if ( !same_text( row.name, RL_TARGET_FEATURE_NAMES[ RL_DECLARED_FACTS[ k ].slot ] ) || row.type != elem_code<float>::value || row.count != RANK_CAP ||
-         row.offset != offsetof( decision_record, aura ) + k * RANK_CAP * sizeof( float ) )
+    if ( !same_text( row.name, RL_TARGET_FEATURE_NAMES[ RL_DECLARED_FACTS[ k ].slot ] ) || row.type != elem_code<double>::value || row.count != RANK_CAP ||
+         row.offset != offsetof( decision_record, aura ) + k * RANK_CAP * sizeof( double ) )
       return false;
   }
   return true;
