@@ -153,6 +153,48 @@ double shaman_lava_lash_spread( const enemy_fact& f )
   return static_cast<double>( f.lava_lash_spread_within_12yd );
 }
 
+// Phase 290 stream FB: the shaman's per-fight geometry numbers (resolved spell data, read once per fight by the enemies sidecar's fight record).
+double shaman_voltaic_blaze_radius( player_t* p )
+{
+  return rl_target_select::resolve_vb_lava_lash_geometry( p ).vb_radius;
+}
+
+double shaman_voltaic_blaze_cap( player_t* p )
+{
+  return static_cast<double>( rl_target_select::resolve_vb_lava_lash_geometry( p ).vb_cap );
+}
+
+double shaman_lava_lash_radius( player_t* p )
+{
+  return rl_target_select::resolve_vb_lava_lash_geometry( p ).lava_lash_radius;
+}
+
+double shaman_lava_lash_cap( player_t* p )
+{
+  return static_cast<double>( rl_target_select::resolve_vb_lava_lash_geometry( p ).lava_lash_cap );
+}
+
+double shaman_chain_radius( player_t* p )
+{
+  const action_t* chain = p->find_action( "chain_lightning" );
+  return chain != nullptr ? chain->radius : 0.0;
+}
+
+double shaman_chain_cap( player_t* p )
+{
+  const action_t* chain = p->find_action( "chain_lightning" );   // the hop cap rl_target_select's chain geometry reads: the action's resolved aoe, 1 when none
+  return chain != nullptr && chain->aoe > 0 ? static_cast<double>( chain->aoe ) : 1.0;
+}
+
+const rl_geometry_constant SHAMAN_GEOMETRY_CONSTANTS[] = {
+  { "voltaic_blaze_cleave_radius", shaman_voltaic_blaze_radius },
+  { "voltaic_blaze_cleave_cap", shaman_voltaic_blaze_cap },
+  { "lava_lash_spread_radius", shaman_lava_lash_radius },
+  { "lava_lash_spread_cap", shaman_lava_lash_cap },
+  { "chain_lightning_radius", shaman_chain_radius },
+  { "chain_lightning_cap", shaman_chain_cap },
+};
+
 const rl_geometry_fact SHAMAN_GEOMETRY[] = {
   { "chain_hop_count", shaman_chain_hop_count },
   { "vb_new_flame_shocks_within_10yd", shaman_vb_new_flame_shocks },
@@ -182,6 +224,7 @@ const rl_class_hit_provider SHAMAN_HIT_PROVIDERS[] = {
 const rl_class_rule    NO_RULES[]    = { { nullptr, nullptr } };
 const rl_geometry_fact NO_GEOMETRY[] = { { nullptr, nullptr } };
 const rl_class_hit_provider NO_HIT_PROVIDERS[] = { { nullptr, rl_hit_reading::chain_lightning } };
+const rl_geometry_constant  NO_GEOMETRY_CONSTANTS[] = { { nullptr, nullptr } };
 
 const rl_class_plugin SHAMAN_PLUGIN = { "shaman",
                                         SHAMAN_RULES,
@@ -191,13 +234,15 @@ const rl_class_plugin SHAMAN_PLUGIN = { "shaman",
                                         SHAMAN_GEOMETRY,
                                         sizeof( SHAMAN_GEOMETRY ) / sizeof( SHAMAN_GEOMETRY[ 0 ] ),
                                         SHAMAN_HIT_PROVIDERS,
-                                        sizeof( SHAMAN_HIT_PROVIDERS ) / sizeof( SHAMAN_HIT_PROVIDERS[ 0 ] ) };
+                                        sizeof( SHAMAN_HIT_PROVIDERS ) / sizeof( SHAMAN_HIT_PROVIDERS[ 0 ] ),
+                                        SHAMAN_GEOMETRY_CONSTANTS,
+                                        sizeof( SHAMAN_GEOMETRY_CONSTANTS ) / sizeof( SHAMAN_GEOMETRY_CONSTANTS[ 0 ] ) };
 // Arms' aiming rules and facts are all generic or declared. 271-10 (owner decision H-3): the three hand-written warrior hit
 // providers (cleave, whirlwind, sweeping strikes) are retired; the arms hit columns are the generated "census.<button>" rows,
 // resolved by rl_policy_obs.cpp through rl_action_census and counted with count_engine_hits. The warrior table is therefore the
 // documented zero-row sentinel, like the generic one.
-const rl_class_plugin WARRIOR_PLUGIN = { "warrior", NO_RULES, 0, nullptr, nullptr, NO_GEOMETRY, 0, NO_HIT_PROVIDERS, 0 };
-const rl_class_plugin GENERIC_PLUGIN = { "generic", NO_RULES, 0, nullptr, nullptr, NO_GEOMETRY, 0, NO_HIT_PROVIDERS, 0 };
+const rl_class_plugin WARRIOR_PLUGIN = { "warrior", NO_RULES, 0, nullptr, nullptr, NO_GEOMETRY, 0, NO_HIT_PROVIDERS, 0, NO_GEOMETRY_CONSTANTS, 0 };
+const rl_class_plugin GENERIC_PLUGIN = { "generic", NO_RULES, 0, nullptr, nullptr, NO_GEOMETRY, 0, NO_HIT_PROVIDERS, 0, NO_GEOMETRY_CONSTANTS, 0 };
 
 }  // namespace
 
@@ -235,5 +280,13 @@ const rl_class_hit_provider* rl_class_hit_provider_find( const rl_class_plugin& 
   for ( std::size_t k = 0; k < plugin.n_hit_providers; ++k )
     if ( std::strcmp( plugin.hit_providers[ k ].provider, provider_name ) == 0 )
       return &plugin.hit_providers[ k ];
+  return nullptr;
+}
+
+const rl_geometry_constant* rl_class_geometry_constant_find( const rl_class_plugin& plugin, const char* constant_name )
+{
+  for ( std::size_t k = 0; k < plugin.n_geometry_constants; ++k )
+    if ( std::strcmp( plugin.geometry_constants[ k ].name, constant_name ) == 0 )
+      return &plugin.geometry_constants[ k ];
   return nullptr;
 }

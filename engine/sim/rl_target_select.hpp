@@ -34,6 +34,14 @@ class action_t;
 class player_t;
 struct sim_t;
 
+namespace rl_translog
+{
+namespace rl_enemies
+{
+struct pick_input;  // rl_translog.hpp (Phase 290 stream FB)
+}
+}  // namespace rl_translog
+
 namespace rl_target_select
 {
 
@@ -346,6 +354,12 @@ candidate_block lookup_candidate_block( const action_t* resolved, bool* out_foun
 // deleted action_leaves.*.hit_damage census leaves (R7-4: the live addon can never read a
 // damage amount); stamp_target_fact_hit_damage() is REMOVED alongside them (it was the sole
 // caller of calculate_direct_amount() under engine/sim/rl_*, rl_policy_obs.cpp).
+// Phase 290 stream FB (owner decision 10): the stamped pick and candidate block of one targeted action for the CURRENT decision, as the enemies
+// sidecar's pick row (rl_translog.hpp, rl_enemies::pick_input). A READ accessor over the tables lookup_pick / lookup_candidate_block read -- never
+// a recompute (D-12) -- so the sidecar names the pick the mask, the observation and accept_cast saw. `resolved` null or not a targeted action
+// leaves every field at its default (`resolved` false). Pointers inside `out` stay valid until the next select() for this action.
+void read_pick_input( const action_t* resolved, rl_translog::rl_enemies::pick_input& out );
+
 struct target_fact_snapshot
 {
   bool   has_is_current_target = false;

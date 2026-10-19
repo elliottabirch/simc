@@ -6462,6 +6462,11 @@ void player_t::datacollection_begin()
   rl_fight_first_seq = 0;
   rl_fight_first_seq_set = false;
   rl_attr_pre_fight_real = 0.0;
+  // Phase 290 stream FB: the per-enemy damage accumulators restart with the fight (their sidecar rows are per fight).
+  rl_enemy_damage_real.clear();
+  rl_enemy_damage_expected.clear();
+  rl_enemy_damage_unranked_real     = 0.0;
+  rl_enemy_damage_unranked_expected = 0.0;
   iteration_heal                        = 0;
   iteration_absorb                      = 0.0;
   iteration_absorb_taken                = 0.0;

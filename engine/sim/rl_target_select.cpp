@@ -83,6 +83,10 @@ struct candidate_block_slot
   // rules' pick); run_target_head moves `observed_slot` only when the observation follows the head.
   std::uint8_t           rules_slot    = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
   std::uint8_t           observed_slot = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
+  // Phase 290 stream FB (owner decision 10): where the stamped pick came from -- PICK_SOURCE_RULES when select() picked it, PICK_SOURCE_HEAD when
+  // run_target_head replaced it (the random-aim dial is told apart by the translog's own aim_explored flag, solver_control.cpp). Read by
+  // read_pick_input() for the enemies sidecar; nothing in play reads it.
+  std::uint8_t           pick_source   = rl_translog::rl_enemies::PICK_SOURCE_NONE;
 
   // 240-05 (D1(a)): parallel per-slot actor identity, captured in LOCKSTEP with `features` above
   // by select()'s own per-candidate loop -- zero extra walk. Deliberately NOT part of the public
@@ -1562,6 +1566,7 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
     slot.chosen_slot   = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
     slot.rules_slot    = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
     slot.observed_slot = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
+    slot.pick_source   = rl_translog::rl_enemies::PICK_SOURCE_NONE;   // 290-FB
     slot.stamp        = current_decision_stamp( a->player );
     slot.has_stamp    = true;
   }
@@ -1699,6 +1704,9 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
     chosen_block.rules_slot    = static_cast<std::uint8_t>( best_slot );
     chosen_block.observed_slot = static_cast<std::uint8_t>( best_slot );
   }
+  // Phase 290 stream FB: the rules picked it (also when the block was not captured: more candidates than slots keeps the rules' pick).
+  if ( best != nullptr )
+    g_candidate_block_table[ a ].pick_source = rl_translog::rl_enemies::PICK_SOURCE_RULES;
 
   return best;
 }
@@ -1810,6 +1818,37 @@ candidate_block lookup_candidate_block( const action_t* resolved, bool* out_foun
   block.rules_slot    = it->second.rules_slot;
   block.observed_slot = it->second.observed_slot;
   return block;
+}
+
+// Phase 290 stream FB (owner decision 10): one aimed button's stamped pick and candidate block for the enemies sidecar -- the READ accessor over
+// the same tables lookup_pick / lookup_candidate_block read (D-12: never a recompute), with the staleness check both of them make. `out.known`
+// is false when no pick is stamped for this decision. The block (count, slot mask, slot actors) is filled only when it is current for this
+// decision; a pick with no current block (more candidates than slots) keeps the rules' source and an empty block.
+void read_pick_input( const action_t* resolved, rl_translog::rl_enemies::pick_input& out )
+{
+  out = rl_translog::rl_enemies::pick_input{};
+  if ( !is_targeted_action( resolved ) )
+    return;
+  out.resolved = true;
+  bool            found = false;
+  const player_t* pick  = lookup_pick( resolved, &found );
+  out.known             = found;
+  out.pick              = found ? pick : nullptr;
+  if ( !found || pick == nullptr )
+    return;
+  out.source = rl_translog::rl_enemies::PICK_SOURCE_RULES;
+  auto it = g_candidate_block_table.find( resolved );
+  if ( it == g_candidate_block_table.end() || !it->second.has_stamp )
+    return;
+  auto stamp_it = g_decision_stamp.find( resolved->player );
+  const std::uint64_t current_stamp = ( stamp_it == g_decision_stamp.end() ) ? 0 : stamp_it->second;
+  if ( it->second.stamp != current_stamp )
+    return;
+  out.count       = it->second.count;
+  out.slot_mask   = it->second.mask;
+  out.slot_actors = reinterpret_cast<const player_t* const*>( it->second.actors.data() );
+  if ( it->second.pick_source != rl_translog::rl_enemies::PICK_SOURCE_NONE )
+    out.source = it->second.pick_source;
 }
 
 // 232-04 (OBS-02, R-T): stamps `resolved`'s pre-cast is_current_target for the CURRENT decision.
@@ -1976,12 +2015,16 @@ void run_target_head( const action_t* resolved, const float* context, bool obser
     }
   }
 
-  if ( best != nullptr && apply_head_pick( resolved, best, best_slot ) && observation_follows_head )
+  if ( best != nullptr && apply_head_pick( resolved, best, best_slot ) )
   {
-    // 259-07 (R1, R5): in `aim_obs_source = 1` mode the observation built right after this call
-    // describes the head's pick -- record it as the block's observed slot BEFORE the random-aim
-    // dial can overwrite the chosen slot. `apply_head_pick` just proved the block is current.
-    slot.observed_slot = best_slot;
+    slot.pick_source = rl_translog::rl_enemies::PICK_SOURCE_HEAD;   // Phase 290 stream FB: the head chose it (even when it chose the rules' enemy)
+    if ( observation_follows_head )
+    {
+      // 259-07 (R1, R5): in `aim_obs_source = 1` mode the observation built right after this call
+      // describes the head's pick -- record it as the block's observed slot BEFORE the random-aim
+      // dial can overwrite the chosen slot. `apply_head_pick` just proved the block is current.
+      slot.observed_slot = best_slot;
+    }
   }
 }
 

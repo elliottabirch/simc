@@ -70,6 +70,16 @@ struct rl_class_hit_provider
   rl_hit_reading  reading;
 };
 
+// Phase 290 stream FB (owner decision 3): a per-fight geometry number the class serves by name -- the radius or cap one of the class-provider facts
+// reads. The enemies sidecar writes each fight's values once so a program that re-forms those facts from recorded positions knows the numbers. The
+// spec header's RL_ENEMIES_CLASS_CONSTANT_NAMES lists the names the registry declares; a name the plugin does not serve is refused by name when the
+// fight opens. Pure reads of resolved spell data; nothing here draws, schedules or caches.
+struct rl_geometry_constant
+{
+  const char* name;
+  double ( *get )( player_t* p );
+};
+
 struct rl_class_plugin
 {
   const char*                class_name;
@@ -81,6 +91,8 @@ struct rl_class_plugin
   std::size_t                n_geometry_facts;
   const rl_class_hit_provider* hit_providers;      // may point at a one-row null sentinel when n_hit_providers is 0
   std::size_t                n_hit_providers;
+  const rl_geometry_constant* geometry_constants;  // Phase 290 FB; may point at a one-row null sentinel when n_geometry_constants is 0
+  std::size_t                n_geometry_constants;
 };
 
 // The plugin for a player's class. Never null: a class without a plugin gets the generic one, whose
@@ -95,3 +107,6 @@ const rl_geometry_fact* rl_class_geometry_find( const rl_class_plugin& plugin, c
 
 // The hit provider the plugin holds under a provider name, or nullptr when the plugin has no such provider.
 const rl_class_hit_provider* rl_class_hit_provider_find( const rl_class_plugin& plugin, const char* provider_name );
+
+// Phase 290 stream FB: the geometry constant the plugin serves under a name, or nullptr when it has none.
+const rl_geometry_constant* rl_class_geometry_constant_find( const rl_class_plugin& plugin, const char* constant_name );

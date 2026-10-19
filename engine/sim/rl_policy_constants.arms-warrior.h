@@ -2154,3 +2154,112 @@ inline constexpr rl_declared_aggregate RL_DECLARED_AGGREGATES[RL_DECLARED_AGGREG
   { "execute_passing_count", "execute", nullptr, 0, rl_aggregate_reduce::count },
   { "execute_lowest_health", "execute", "health_pct", 8, rl_aggregate_reduce::min },
 };
+
+// The enemies sidecar (Phase 290 stream FB): next to each translog the simulator writes `<translog>.enemies.zst`, one record per decision with the
+// enemy each aimed button would hit (as an actor index), the table of every enemy actor (position, reach, health, time to die, flags), the damage
+// each enemy took since the previous decision, the player's position and target and the next start and end of every raid event; once per fight
+// the per-fight constants. A rank is an enemy's order among the process's enemy actors by actor index (the event sidecar's `unit`). Every number below
+// is derived from the registry's `enemiesSidecar` block by scripts/rl/enemies_layout.py; a member list is `{ name, type code, count, byte offset }`
+// (type codes B u8, H u16, I u32, f f32, d f64). The writer's structs must match them member for member (a static_assert), and RL_ENEMIES_SHA
+// is written into the file header.
+#define RL_ENEMIES_DEFINED 1
+inline constexpr std::size_t RL_ENEMIES_FORMAT_VERSION = 1;
+inline constexpr std::size_t RL_ENEMIES_RANK_CAP = 20;
+inline constexpr std::size_t RL_ENEMIES_PICK_COUNT = 11;
+inline constexpr std::size_t RL_ENEMIES_CAPABILITY_COUNT = 139;
+inline constexpr std::size_t RL_ENEMIES_RAID_EVENT_CAP = 24;
+inline constexpr std::size_t RL_ENEMIES_RAID_NAME_BYTES = 24;
+inline constexpr std::size_t RL_ENEMIES_RECORD_SIZE = 1832;
+inline constexpr std::size_t RL_ENEMIES_HEADER_SIZE = 120;
+inline constexpr const char* RL_ENEMIES_SHA = "enemies-v1:f8cb32933ee4f9b2e6f16ae2630b72663d6160c7c4d8c5918fa7a99038047ad3";
+inline constexpr std::size_t RL_ENEMIES_CLASS_CONSTANT_COUNT = 0;
+inline constexpr const char* RL_ENEMIES_CLASS_CONSTANT_NAMES[1] = {
+  "",
+};
+inline constexpr std::size_t RL_ENEMIES_PICK_SOURCE_COUNT = 4;
+inline constexpr const char* RL_ENEMIES_PICK_SOURCE_NAMES[RL_ENEMIES_PICK_SOURCE_COUNT] = {
+  "none",
+  "head",
+  "rules",
+  "random_aim",
+};
+inline constexpr std::size_t RL_ENEMIES_RANK_FLAG_COUNT = 6;
+inline constexpr const char* RL_ENEMIES_RANK_FLAG_NAMES[RL_ENEMIES_RANK_FLAG_COUNT] = {
+  "alive",
+  "immune",
+  "hazard",
+  "do_not_hit",
+  "boss",
+  "counts_as_enemy",
+};
+inline constexpr std::size_t RL_ENEMIES_DAMAGE_STREAM_COUNT = 2;
+inline constexpr const char* RL_ENEMIES_DAMAGE_STREAM_NAMES[RL_ENEMIES_DAMAGE_STREAM_COUNT] = {
+  "real",
+  "expected",
+};
+struct rl_enemies_member
+{
+  const char* name;
+  char        type;
+  std::size_t count;
+  std::size_t offset;
+};
+inline constexpr std::size_t RL_ENEMIES_FIGHT_MEMBER_COUNT = 14;
+inline constexpr rl_enemies_member RL_ENEMIES_FIGHT_MEMBERS[RL_ENEMIES_FIGHT_MEMBER_COUNT] = {
+  { "kind", 'I', 1, 0 },
+  { "iteration", 'I', 1, 4 },
+  { "n_decisions", 'I', 1, 8 },
+  { "enemy_actor_count", 'I', 1, 12 },
+  { "rank_over_cap", 'I', 1, 16 },
+  { "raid_event_count", 'I', 1, 20 },
+  { "raid_over_cap", 'I', 1, 24 },
+  { "reserved", 'I', 1, 28 },
+  { "button_range", 'd', 11, 32 },
+  { "button_radius", 'd', 11, 120 },
+  { "class_constant", 'd', 1, 208 },
+  { "capability", 'B', 139, 216 },
+  { "raid_name", 'B', 576, 355 },
+  { "raid_type", 'B', 576, 931 },
+};
+inline constexpr std::size_t RL_ENEMIES_DECISION_MEMBER_COUNT = 32;
+inline constexpr rl_enemies_member RL_ENEMIES_DECISION_MEMBERS[RL_ENEMIES_DECISION_MEMBER_COUNT] = {
+  { "kind", 'I', 1, 0 },
+  { "seq", 'I', 1, 4 },
+  { "pick_actor", 'H', 11, 8 },
+  { "pick_source", 'B', 11, 30 },
+  { "cand_count", 'B', 11, 41 },
+  { "cand_mask", 'I', 11, 52 },
+  { "actor_index", 'H', 20, 96 },
+  { "spawn_index", 'B', 20, 136 },
+  { "flags", 'B', 20, 156 },
+  { "x", 'd', 20, 176 },
+  { "y", 'd', 20, 336 },
+  { "combat_reach", 'f', 20, 496 },
+  { "health_pct", 'f', 20, 576 },
+  { "time_to_die", 'f', 20, 656 },
+  { "immunity_remaining", 'f', 20, 736 },
+  { "damage_real", 'f', 20, 816 },
+  { "damage_expected", 'f', 20, 896 },
+  { "damage_unranked", 'f', 2, 976 },
+  { "player_x", 'd', 1, 984 },
+  { "player_y", 'd', 1, 992 },
+  { "player_facing_x", 'd', 1, 1000 },
+  { "player_facing_y", 'd', 1, 1008 },
+  { "player_target_actor", 'H', 1, 1016 },
+  { "player_move_distance", 'd', 1, 1024 },
+  { "player_move_remains", 'd', 1, 1032 },
+  { "raid_next_start", 'd', 24, 1040 },
+  { "raid_next_end", 'd', 24, 1232 },
+  { "raid_duration", 'f', 24, 1424 },
+  { "raid_cooldown", 'f', 24, 1520 },
+  { "raid_up", 'B', 24, 1616 },
+  { "raid_duration_mean", 'f', 24, 1640 },
+  { "raid_cooldown_mean", 'f', 24, 1736 },
+};
+inline constexpr std::size_t RL_ENEMIES_FOOTER_MEMBER_COUNT = 4;
+inline constexpr rl_enemies_member RL_ENEMIES_FOOTER_MEMBERS[RL_ENEMIES_FOOTER_MEMBER_COUNT] = {
+  { "kind", 'I', 1, 0 },
+  { "n_fights", 'I', 1, 4 },
+  { "reserved0", 'I', 1, 8 },
+  { "reserved1", 'I', 1, 12 },
+};

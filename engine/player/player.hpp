@@ -517,6 +517,14 @@ struct player_t : public actor_t
   // overloading a sentinel value. Reset alongside rl_credit above.
   std::uint64_t rl_fight_first_seq = 0;
   bool rl_fight_first_seq_set = false;
+  // Phase 290 stream FB (owner decision 3, the per-enemy damage record): the damage this player's kit did to each enemy RANK (the enemy's order among
+  // the process's enemy actors by actor index) since the previous decision row, realised and expectation-corrected, fed by rl_credit_route() beside the
+  // credit streams above (every addition to solver_damage_so_far / solver_damage_expected_so_far is paired with one route call) and read and zeroed by
+  // the enemies sidecar's writer (rl_translog.cpp) at each decision row. `*_unranked` holds the damage with no rank (no target, or a rank beyond the cap),
+  // so sum(ranks) + unranked equals the row's damage step exactly. Sized lazily by the writer; reset beside rl_credit in datacollection_begin().
+  // Pure observer: written by nothing that also touches the RNG, an event or a schedule.
+  std::vector<double> rl_enemy_damage_real, rl_enemy_damage_expected;
+  double rl_enemy_damage_unranked_real = 0.0, rl_enemy_damage_unranked_expected = 0.0;
   // Realized-only census (mirrors rl_orphan_damage_by_action's realized-only convention): an
   // own-class cause whose seq is BELOW this fight's first decision seq -- "should not happen"
   // (fights reset the cause stack and every stamp is written at or before its routing site

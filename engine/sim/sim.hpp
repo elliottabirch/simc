@@ -72,6 +72,16 @@ struct rl_weights_t;
 // exactly that pointer type without needing the header.
 struct ZSTD_CCtx_s;
 
+// Phase 290 stream FB: the enemies sidecar's writer (rl_translog.hpp, ENEMIES SIDECAR section). Held through a shared_ptr so this header needs
+// only the name; rl_translog.cpp creates it.
+namespace rl_translog
+{
+namespace rl_enemies
+{
+struct writer_t;
+}
+}  // namespace rl_translog
+
 // Random-roll recorder (tstl-sylvanas phase 250, plan 250-01, REC-01/02/03). Forward
 // declaration only -- sim.hpp must NOT include rl_rng_record.hpp, mirroring the rl_policy
 // forward declaration immediately above. rl_rng_recorder below is a std::unique_ptr (not
@@ -783,6 +793,18 @@ struct sim_t : private sc_thread_t
   ZSTD_CCtx_s* rl_translog_zstd_cstream = nullptr;
   std::vector<unsigned char> rl_translog_zstd_outbuf;
   std::uint32_t rl_translog_zstd_rows_in_frame = 0;
+  // Phase 290 stream FB (owner decisions 3, 5, 10, 46): the per-decision ENEMIES sidecar (`<rl_translog_file_str>.enemies.zst`, see rl_translog.hpp's
+  // ENEMIES SIDECAR section): who each aimed button would hit, the table of every enemy actor, the damage each took, the player and the raid events'
+  // schedule, one record per translog decision row. Opened beside the main stream in open_and_write_header(), appended to per decision, flushed at
+  // each fight's close, closed with a footer in write_footer(). Root-owned, same single-writer reason as every other rl_translog_* member above;
+  // handed from list entry to list entry by release() / adopt(). Null when rl_translog= is unset.
+  std::shared_ptr<rl_translog::rl_enemies::writer_t> rl_translog_enemies;
+  // The process's enemy actors in actor-index order (rank = position here; the event sidecar's `unit`) and the actor-index-to-rank map (-1: not an
+  // enemy of this list). Per sim_t (a fight-list entry has its own actors), built on first use by rl_translog.cpp and rebuilt if actor_list changes
+  // size. Pure observer state: nothing in play reads it.
+  std::vector<player_t*> rl_enemy_rank_actors;
+  std::vector<std::int16_t> rl_enemy_rank_of_actor;
+  std::size_t rl_enemy_rank_built_for = static_cast<std::size_t>( -1 );
   // 261005-fight-list (quick 261005-mix, plan 01; the driver that sets these is plan 02): state of a
   // process driven with `rl_fight_list=` -- several fights, one sim_t each, one translog file. All of it is
   // inert (and every writer path byte-identical to a build without it) while rl_list_active is false.

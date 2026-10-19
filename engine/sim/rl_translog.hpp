@@ -315,6 +315,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 struct sim_t;
@@ -1407,6 +1408,357 @@ static_assert( offsetof( footer_record, zero ) == 8 );
 
 } // namespace rl_apl_choice
 
+// ---- ENEMIES SIDECAR (tstl-sylvanas Phase 290 stream FB; owner decisions 3, 5, 10, 46) ----
+//
+// `<rl_translog_file_str>.enemies.zst`, same directory, opened beside the translog in open_and_write_header(). zstd frames,
+// closed every ZSTD_TRANSLOG_FRAME_ROWS records like the translog (the file header is inside the compressed stream). A SIDECAR, not a
+// translog format change: the translog's record size, version, observation width and fingerprints are untouched, so a simulator move
+// that adds it stays "same-layout" for repin.js. One DECISION record per translog decision row, in the same order, `seq` equal to the
+// row's `seq`; one FIGHT record per fight before that fight's first record; one CLOSE record per fight after its last decision; one
+// FOOTER at the end. Little endian, like the translog (this process only runs on little-endian hosts).
+//
+// The layout is NOT hand-written twice. The registry declares it by name and type (`enemiesSidecar`), scripts/rl/enemies_layout.py derives
+// every offset, scripts/rl/gen_rl_constants.py writes them into rl_policy_constants.h as RL_ENEMIES_* (member tables included), and the
+// structs below must match those tables member for member, name for name, offset for offset: a mismatch does not compile. The
+// per-fight numbers (counts, caps, the aimed-button list) come from the same constants. Nothing here names a button, a spell, a buff or a
+// spec: the aimed buttons are RL_AIM_SPELLS, the class geometry numbers are named by RL_ENEMIES_CLASS_CONSTANT_NAMES and served by the
+// class plugin.
+//
+// What a DECISION record holds (rank = the enemy's order among the process's enemy actors by actor index, the event sidecar's `unit`):
+//   picks       per aimed button: the ACTOR INDEX it would hit (never the candidate slot), where the pick came from (none, head, rules,
+//               random aim), how many candidates it had and which ranks they were (bit r set when rank r was a candidate).
+//   ranks       per rank: actor index, spawn index, flags, position, combat reach, health percent, time to die (the engine's value, before
+//               the observation's clip), immunity time left.
+//   damage      per rank: what the player's kit did to that enemy since the previous decision, realised and expectation-corrected;
+//               damage_unranked holds what had no rank (no target, or a rank beyond the cap), so the sum over ranks plus unranked is
+//               exactly the translog row's `damage` step.
+//   player      position, facing, current target actor index, and the movement state (the distance still to move; the time the engine's
+//               `movement.remains` reports) -- the raid movement fields of the observation read the player, not the raid event.
+//   raid        per raid event, as the engine holds it at that row: the next start and the end of the occurrence that is up (absolute
+//               seconds, -1 when it holds none), the duration and cooldown drawn for the current occurrence (0 before the first) and the option
+//               means the engine's `raid_event.<name>.duration` / `.cooldown` fall back to when none is drawn yet, whether it is up.
+// Pure observer: nothing here draws a random number, schedules an event or changes a cache the play reads.
+namespace rl_enemies
+{
+#ifndef RL_ENEMIES_DEFINED
+#error "the spec header declares no enemies sidecar: add the enemiesSidecar block to the registry entry and regenerate (scripts/rl/gen_rl_constants.py)"
+#endif
+
+inline constexpr char MAGIC[ 4 ] = { 'R', 'L', 'E', 'N' };
+inline constexpr std::uint32_t FORMAT_VERSION = static_cast<std::uint32_t>( RL_ENEMIES_FORMAT_VERSION );
+inline constexpr std::uint32_t RECORD_SIZE = static_cast<std::uint32_t>( RL_ENEMIES_RECORD_SIZE );
+inline constexpr std::uint32_t HEADER_SIZE = static_cast<std::uint32_t>( RL_ENEMIES_HEADER_SIZE );
+inline constexpr std::size_t RANK_CAP = RL_ENEMIES_RANK_CAP;
+inline constexpr std::size_t PICK_COUNT = RL_ENEMIES_PICK_COUNT;
+inline constexpr std::size_t RAID_CAP = RL_ENEMIES_RAID_EVENT_CAP;
+inline constexpr std::size_t RAID_NAME_BYTES = RL_ENEMIES_RAID_NAME_BYTES;
+inline constexpr std::size_t CAPABILITY_SLOTS = RL_ENEMIES_CAPABILITY_COUNT > 0 ? RL_ENEMIES_CAPABILITY_COUNT : 1;
+inline constexpr std::size_t CLASS_CONSTANT_SLOTS = RL_ENEMIES_CLASS_CONSTANT_COUNT > 0 ? RL_ENEMIES_CLASS_CONSTANT_COUNT : 1;
+
+inline constexpr std::uint32_t KIND_FIGHT = 1u;
+inline constexpr std::uint32_t KIND_DECISION = 2u;
+inline constexpr std::uint32_t KIND_CLOSE = 3u;
+inline constexpr std::uint32_t KIND_FOOTER = 4u;
+inline constexpr std::uint32_t CLOSE_SEQ = 0xFFFFFFFFu;
+inline constexpr std::uint16_t NO_ACTOR = 0xFFFFu;
+inline constexpr double NO_TIME = -1.0;
+// zstd frame cadence in records (the translog's own cadence, rl_translog.cpp ZSTD_TRANSLOG_FRAME_ROWS)
+inline constexpr std::uint32_t ZSTD_FRAME_RECORDS = 64;
+inline constexpr int ZSTD_LEVEL = 3;
+
+// pick sources: the positions of the registry's pickSources (checked below)
+inline constexpr std::uint8_t PICK_SOURCE_NONE = 0;
+inline constexpr std::uint8_t PICK_SOURCE_HEAD = 1;
+inline constexpr std::uint8_t PICK_SOURCE_RULES = 2;
+inline constexpr std::uint8_t PICK_SOURCE_RANDOM_AIM = 3;
+// rank flag bits: the positions of the registry's rankFlags (checked below)
+inline constexpr std::uint8_t FLAG_ALIVE = 1u << 0;
+inline constexpr std::uint8_t FLAG_IMMUNE = 1u << 1;
+inline constexpr std::uint8_t FLAG_HAZARD = 1u << 2;
+inline constexpr std::uint8_t FLAG_DO_NOT_HIT = 1u << 3;
+inline constexpr std::uint8_t FLAG_BOSS = 1u << 4;
+inline constexpr std::uint8_t FLAG_COUNTS_AS_ENEMY = 1u << 5;
+// damage streams: real is column 0, expected is column 1 (checked below)
+inline constexpr std::size_t STREAM_REAL = 0;
+inline constexpr std::size_t STREAM_EXPECTED = 1;
+
+// 120 bytes. The bytes of the fingerprint are NUL padded.
+struct alignas( 8 ) file_header
+{
+  char magic[ 4 ];                       // @0   -- MAGIC
+  std::uint32_t format_version;          // @4   -- FORMAT_VERSION
+  std::uint32_t record_size;             // @8   -- RECORD_SIZE
+  std::uint32_t header_size;             // @12  -- HEADER_SIZE
+  std::uint32_t rank_cap;                // @16  -- RL_ENEMIES_RANK_CAP
+  std::uint32_t pick_count;              // @20  -- RL_ENEMIES_PICK_COUNT
+  std::uint32_t class_constant_count;    // @24  -- RL_ENEMIES_CLASS_CONSTANT_COUNT
+  std::uint32_t capability_count;        // @28  -- RL_ENEMIES_CAPABILITY_COUNT
+  std::uint32_t raid_event_cap;          // @32  -- RL_ENEMIES_RAID_EVENT_CAP
+  std::uint32_t zero36;                  // @36
+  char enemies_sha[ 80 ];                // @40  -- RL_ENEMIES_SHA
+};
+static_assert( sizeof( file_header ) == HEADER_SIZE, "rl_enemies::file_header must be exactly HEADER_SIZE bytes" );
+static_assert( alignof( file_header ) == 8, "rl_enemies::file_header must be 8-aligned" );
+static_assert( offsetof( file_header, magic ) == 0 );
+static_assert( offsetof( file_header, format_version ) == 4 );
+static_assert( offsetof( file_header, record_size ) == 8 );
+static_assert( offsetof( file_header, header_size ) == 12 );
+static_assert( offsetof( file_header, rank_cap ) == 16 );
+static_assert( offsetof( file_header, pick_count ) == 20 );
+static_assert( offsetof( file_header, class_constant_count ) == 24 );
+static_assert( offsetof( file_header, capability_count ) == 28 );
+static_assert( offsetof( file_header, raid_event_cap ) == 32 );
+static_assert( offsetof( file_header, zero36 ) == 36 );
+static_assert( offsetof( file_header, enemies_sha ) == 40 );
+
+// Once per fight, before that fight's first record: the per-fight constants.
+struct alignas( 8 ) fight_record
+{
+  std::uint32_t kind;                    // KIND_FIGHT
+  std::uint32_t iteration;               // the `iteration` the translog rows of this fight carry
+  std::uint32_t n_decisions;             // DECISION records this fight wrote (filled at the fight's close)
+  std::uint32_t enemy_actor_count;       // enemy actors of the process (ranks 0 .. count-1 are real)
+  std::uint32_t rank_over_cap;           // enemy actors beyond RANK_CAP (their ranks are not in the tables)
+  std::uint32_t raid_event_count;        // raid events of the fight
+  std::uint32_t raid_over_cap;           // raid events beyond RAID_CAP (not in the tables)
+  std::uint32_t reserved;
+  double button_range[ PICK_COUNT ];     // each aimed button's range (the action's own), yards; 0 when the action does not exist
+  double button_radius[ PICK_COUNT ];    // each aimed button's radius, yards
+  double class_constant[ CLASS_CONSTANT_SLOTS ];  // RL_ENEMIES_CLASS_CONSTANT_NAMES order, served by the class plugin
+  std::uint8_t capability[ CAPABILITY_SLOTS ];    // each capability's effective bit, RL_CAPABILITIES order
+  std::uint8_t raid_name[ RAID_CAP * RAID_NAME_BYTES ];  // each raid event's own name (`name=PackNear`; its type when it has none), NUL padded
+  std::uint8_t raid_type[ RAID_CAP * RAID_NAME_BYTES ];  // each raid event's type (`adds`, `move_enemy`, ...), NUL padded
+};
+
+// One per decision row (KIND_DECISION) and one per fight close (KIND_CLOSE, seq = CLOSE_SEQ): see the section comment above.
+struct alignas( 8 ) decision_record
+{
+  std::uint32_t kind;
+  std::uint32_t seq;
+  std::uint16_t pick_actor[ PICK_COUNT ];
+  std::uint8_t pick_source[ PICK_COUNT ];
+  std::uint8_t cand_count[ PICK_COUNT ];
+  std::uint32_t cand_mask[ PICK_COUNT ];
+  std::uint16_t actor_index[ RANK_CAP ];
+  std::uint8_t spawn_index[ RANK_CAP ];
+  std::uint8_t flags[ RANK_CAP ];
+  double x[ RANK_CAP ];
+  double y[ RANK_CAP ];
+  float combat_reach[ RANK_CAP ];
+  float health_pct[ RANK_CAP ];
+  float time_to_die[ RANK_CAP ];
+  float immunity_remaining[ RANK_CAP ];
+  float damage_real[ RANK_CAP ];
+  float damage_expected[ RANK_CAP ];
+  float damage_unranked[ 2 ];
+  double player_x;
+  double player_y;
+  double player_facing_x;
+  double player_facing_y;
+  std::uint16_t player_target_actor;
+  double player_move_distance;
+  double player_move_remains;
+  double raid_next_start[ RAID_CAP ];
+  double raid_next_end[ RAID_CAP ];
+  float raid_duration[ RAID_CAP ];
+  float raid_cooldown[ RAID_CAP ];
+  std::uint8_t raid_up[ RAID_CAP ];
+  float raid_duration_mean[ RAID_CAP ];
+  float raid_cooldown_mean[ RAID_CAP ];
+};
+
+struct alignas( 8 ) footer_record
+{
+  std::uint32_t kind;                    // KIND_FOOTER
+  std::uint32_t n_fights;                // FIGHT records written (== the root sim_t's rl_translog_fight_count)
+  std::uint32_t reserved0;
+  std::uint32_t reserved1;
+};
+
+static_assert( sizeof( fight_record ) <= RECORD_SIZE && sizeof( decision_record ) <= RECORD_SIZE && sizeof( footer_record ) <= RECORD_SIZE,
+               "every enemies record must fit RL_ENEMIES_RECORD_SIZE" );
+static_assert( sizeof( decision_record ) + 8 > RECORD_SIZE || sizeof( fight_record ) + 8 > RECORD_SIZE,
+               "RL_ENEMIES_RECORD_SIZE is the largest layout rounded up to 8: a bigger constant means the registry declares a member this writer does not have" );
+
+// The compile-time proof that these structs ARE the layout the registry declared: every member's name, element type, element count and byte
+// offset must equal the generated table, in order. A registry edit that adds, removes, retypes or reorders a member does not compile until
+// the structs above follow it.
+template <class T>
+struct elem_count
+{
+  static constexpr std::size_t value = 1;
+};
+template <class T, std::size_t N>
+struct elem_count<T[ N ]>
+{
+  static constexpr std::size_t value = N;
+};
+template <class T>
+struct elem_code;
+template <>
+struct elem_code<std::uint8_t> { static constexpr char value = 'B'; };
+template <>
+struct elem_code<std::uint16_t> { static constexpr char value = 'H'; };
+template <>
+struct elem_code<std::uint32_t> { static constexpr char value = 'I'; };
+template <>
+struct elem_code<float> { static constexpr char value = 'f'; };
+template <>
+struct elem_code<double> { static constexpr char value = 'd'; };
+
+struct member_decl
+{
+  const char* name;
+  char type;
+  std::size_t count;
+  std::size_t offset;
+};
+
+#define RL_ENEMIES_DECL( S, M )                                                                                      \
+  member_decl                                                                                                         \
+  {                                                                                                                   \
+    #M, elem_code<std::remove_all_extents_t<decltype( S::M )>>::value, elem_count<decltype( S::M )>::value, offsetof( S, M ) \
+  }
+
+constexpr bool same_text( const char* a, const char* b )
+{
+  while ( *a != '\0' && *a == *b )
+  {
+    ++a;
+    ++b;
+  }
+  return *a == *b;
+}
+
+template <std::size_t N>
+constexpr bool members_match( const member_decl ( &ours )[ N ], const rl_enemies_member* generated, std::size_t generated_count )
+{
+  if ( N != generated_count )
+    return false;
+  for ( std::size_t i = 0; i < N; ++i )
+    if ( !same_text( ours[ i ].name, generated[ i ].name ) || ours[ i ].type != generated[ i ].type || ours[ i ].count != generated[ i ].count ||
+         ours[ i ].offset != generated[ i ].offset )
+      return false;
+  return true;
+}
+
+inline constexpr member_decl FIGHT_MEMBERS[] = {
+    RL_ENEMIES_DECL( fight_record, kind ),
+    RL_ENEMIES_DECL( fight_record, iteration ),
+    RL_ENEMIES_DECL( fight_record, n_decisions ),
+    RL_ENEMIES_DECL( fight_record, enemy_actor_count ),
+    RL_ENEMIES_DECL( fight_record, rank_over_cap ),
+    RL_ENEMIES_DECL( fight_record, raid_event_count ),
+    RL_ENEMIES_DECL( fight_record, raid_over_cap ),
+    RL_ENEMIES_DECL( fight_record, reserved ),
+    RL_ENEMIES_DECL( fight_record, button_range ),
+    RL_ENEMIES_DECL( fight_record, button_radius ),
+    RL_ENEMIES_DECL( fight_record, class_constant ),
+    RL_ENEMIES_DECL( fight_record, capability ),
+    RL_ENEMIES_DECL( fight_record, raid_name ),
+    RL_ENEMIES_DECL( fight_record, raid_type ),
+};
+inline constexpr member_decl DECISION_MEMBERS[] = {
+    RL_ENEMIES_DECL( decision_record, kind ),
+    RL_ENEMIES_DECL( decision_record, seq ),
+    RL_ENEMIES_DECL( decision_record, pick_actor ),
+    RL_ENEMIES_DECL( decision_record, pick_source ),
+    RL_ENEMIES_DECL( decision_record, cand_count ),
+    RL_ENEMIES_DECL( decision_record, cand_mask ),
+    RL_ENEMIES_DECL( decision_record, actor_index ),
+    RL_ENEMIES_DECL( decision_record, spawn_index ),
+    RL_ENEMIES_DECL( decision_record, flags ),
+    RL_ENEMIES_DECL( decision_record, x ),
+    RL_ENEMIES_DECL( decision_record, y ),
+    RL_ENEMIES_DECL( decision_record, combat_reach ),
+    RL_ENEMIES_DECL( decision_record, health_pct ),
+    RL_ENEMIES_DECL( decision_record, time_to_die ),
+    RL_ENEMIES_DECL( decision_record, immunity_remaining ),
+    RL_ENEMIES_DECL( decision_record, damage_real ),
+    RL_ENEMIES_DECL( decision_record, damage_expected ),
+    RL_ENEMIES_DECL( decision_record, damage_unranked ),
+    RL_ENEMIES_DECL( decision_record, player_x ),
+    RL_ENEMIES_DECL( decision_record, player_y ),
+    RL_ENEMIES_DECL( decision_record, player_facing_x ),
+    RL_ENEMIES_DECL( decision_record, player_facing_y ),
+    RL_ENEMIES_DECL( decision_record, player_target_actor ),
+    RL_ENEMIES_DECL( decision_record, player_move_distance ),
+    RL_ENEMIES_DECL( decision_record, player_move_remains ),
+    RL_ENEMIES_DECL( decision_record, raid_next_start ),
+    RL_ENEMIES_DECL( decision_record, raid_next_end ),
+    RL_ENEMIES_DECL( decision_record, raid_duration ),
+    RL_ENEMIES_DECL( decision_record, raid_cooldown ),
+    RL_ENEMIES_DECL( decision_record, raid_up ),
+    RL_ENEMIES_DECL( decision_record, raid_duration_mean ),
+    RL_ENEMIES_DECL( decision_record, raid_cooldown_mean ),
+};
+inline constexpr member_decl FOOTER_MEMBERS[] = {
+    RL_ENEMIES_DECL( footer_record, kind ),
+    RL_ENEMIES_DECL( footer_record, n_fights ),
+    RL_ENEMIES_DECL( footer_record, reserved0 ),
+    RL_ENEMIES_DECL( footer_record, reserved1 ),
+};
+#undef RL_ENEMIES_DECL
+
+static_assert( members_match( FIGHT_MEMBERS, RL_ENEMIES_FIGHT_MEMBERS, RL_ENEMIES_FIGHT_MEMBER_COUNT ),
+               "rl_enemies::fight_record is not the layout the registry declares (RL_ENEMIES_FIGHT_MEMBERS)" );
+static_assert( members_match( DECISION_MEMBERS, RL_ENEMIES_DECISION_MEMBERS, RL_ENEMIES_DECISION_MEMBER_COUNT ),
+               "rl_enemies::decision_record is not the layout the registry declares (RL_ENEMIES_DECISION_MEMBERS)" );
+static_assert( members_match( FOOTER_MEMBERS, RL_ENEMIES_FOOTER_MEMBERS, RL_ENEMIES_FOOTER_MEMBER_COUNT ),
+               "rl_enemies::footer_record is not the layout the registry declares (RL_ENEMIES_FOOTER_MEMBERS)" );
+
+// The names the writer's constants stand for, proved against the registry's declaration.
+static_assert( RL_ENEMIES_PICK_SOURCE_COUNT == 4 && same_text( RL_ENEMIES_PICK_SOURCE_NAMES[ PICK_SOURCE_NONE ], "none" ) &&
+                   same_text( RL_ENEMIES_PICK_SOURCE_NAMES[ PICK_SOURCE_HEAD ], "head" ) &&
+                   same_text( RL_ENEMIES_PICK_SOURCE_NAMES[ PICK_SOURCE_RULES ], "rules" ) &&
+                   same_text( RL_ENEMIES_PICK_SOURCE_NAMES[ PICK_SOURCE_RANDOM_AIM ], "random_aim" ),
+               "enemiesSidecar.pickSources must be none, head, rules, random_aim (the writer's PICK_SOURCE_* constants)" );
+static_assert( RL_ENEMIES_RANK_FLAG_COUNT == 6 && same_text( RL_ENEMIES_RANK_FLAG_NAMES[ 0 ], "alive" ) &&
+                   same_text( RL_ENEMIES_RANK_FLAG_NAMES[ 1 ], "immune" ) && same_text( RL_ENEMIES_RANK_FLAG_NAMES[ 2 ], "hazard" ) &&
+                   same_text( RL_ENEMIES_RANK_FLAG_NAMES[ 3 ], "do_not_hit" ) && same_text( RL_ENEMIES_RANK_FLAG_NAMES[ 4 ], "boss" ) &&
+                   same_text( RL_ENEMIES_RANK_FLAG_NAMES[ 5 ], "counts_as_enemy" ),
+               "enemiesSidecar.rankFlags must be alive, immune, hazard, do_not_hit, boss, counts_as_enemy (the writer's FLAG_* bits)" );
+static_assert( RL_ENEMIES_DAMAGE_STREAM_COUNT == 2 && same_text( RL_ENEMIES_DAMAGE_STREAM_NAMES[ STREAM_REAL ], "real" ) &&
+                   same_text( RL_ENEMIES_DAMAGE_STREAM_NAMES[ STREAM_EXPECTED ], "expected" ),
+               "enemiesSidecar.damageStreams must be real, expected (the writer's two damage columns)" );
+static_assert( PICK_COUNT == RL_AIM_SPELL_COUNT, "the pick rows are the aimed buttons (RL_AIM_SPELLS)" );
+static_assert( RL_ENEMIES_CAPABILITY_COUNT == RL_CAPABILITY_COUNT, "the capability bytes are the spec's capability table" );
+static_assert( RANK_CAP <= 32, "cand_mask is one 32-bit word: a rank is one bit" );
+
+// One aimed button's pick as rl_target_select holds it for the current decision (read, never recomputed -- D-12). `slot_actors` is the
+// button's candidate block, RL_TARGET_SLOTS entries long, `slot_mask` says which slots are real.
+struct pick_input
+{
+  bool resolved = false;            // the button's action exists for this player and is a targeted action
+  bool known = false;               // a stamped pick exists for this decision (it may be null: no candidate)
+  const player_t* pick = nullptr;
+  std::uint8_t source = PICK_SOURCE_NONE;
+  std::uint8_t count = 0;
+  std::uint16_t slot_mask = 0;
+  const player_t* const* slot_actors = nullptr;
+};
+
+// The writer's state, shared by the root sim_t and a fight-list carry (release() / adopt() move it whole).
+struct writer_t
+{
+  std::unique_ptr<io::ofstream> stream;
+  std::vector<unsigned char> buffer;          // whole records of the fight in progress, flushed at the fight's close
+  ZSTD_CCtx_s* zstd = nullptr;
+  std::vector<unsigned char> zstd_out;
+  std::uint32_t records_in_frame = 0;
+  std::uint32_t record_count = 0;
+  std::uint32_t fight_records = 0;
+  std::uint32_t decision_records = 0;         // of the fight in progress
+  bool fight_open = false;                    // the fight in progress has its FIGHT record in `buffer`
+  std::size_t fight_record_at = static_cast<std::size_t>( -1 );  // byte offset of that record in `buffer`, -1 once flushed
+  writer_t() = default;
+  writer_t( const writer_t& ) = delete;
+  writer_t& operator=( const writer_t& ) = delete;
+  ~writer_t();
+};
+
+} // namespace rl_enemies
+
 // ---- Writer interface. All five are no-ops when rl_translog= is unset. ----
 
 // Root only -- called once, from sim_t::setup(). Opens the stream and
@@ -1502,6 +1854,11 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq,
                        // is an inconsistency that throws), nullptr otherwise (format 1, unchanged).
                        const rl_stock_eval::pick_t* stock_pick = nullptr );
 
+// Phase 290 stream FB (owner decision 3): called from rl_credit_route() for every damage amount routed to `p` (a player's kit, a pet's routed to its
+// owner) with the enemy it struck (`hit_target`, null when none). Adds it to p's per-enemy-rank accumulators for the enemies sidecar; one pointer test
+// and a return while no sidecar is open. Observer only.
+void enemies_note_damage( player_t* p, const player_t* hit_target, double amount, bool expected );
+
 // Called from sim_t::combat_end(), after datacollection_end(). Builds and
 // appends the close row, then flushes the buffered rows for this fight to
 // disk in one write (D-13 -- syscall cost, not crash-loss bounding; a
@@ -1559,6 +1916,7 @@ struct carry_t
   std::unique_ptr<io::ofstream> attr_stream;
   std::unique_ptr<io::ofstream> apl_stream;
   std::uint32_t apl_decisions = 0;
+  std::shared_ptr<rl_enemies::writer_t> enemies;   // Phase 290 FB: the enemies sidecar's writer, handed from entry to entry whole
   ZSTD_CCtx_s* zstd_cstream = nullptr;
   std::vector<unsigned char> zstd_outbuf;
   std::uint32_t zstd_rows_in_frame = 0;

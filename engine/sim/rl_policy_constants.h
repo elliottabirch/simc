@@ -2,7 +2,7 @@
 // GENERATED FILE -- DO NOT EDIT (XPORT-04, D-09).
 //
 // Produced by:      scripts/rl/gen_rl_constants.py
-// Registry source:  scripts/rl/specs/enhancement.json
+// Registry source:  data/specs/enhancement.json
 // Spec id:          'enhancement'
 //
 // D-09's regenerate-and-diff freshness check treats any difference between a
@@ -2112,4 +2112,118 @@ inline constexpr rl_hit_provider RL_HIT_PROVIDERS[RL_HIT_PROVIDER_COUNT] = {
   { "hits", "voltaic_blaze.cleave", "shaman.voltaic_blaze_cleave" },
   { "hits", "voltaic_blaze.new_flame_shocks", "shaman.voltaic_blaze_new_flame_shocks" },
   { "hits", "fire_nova", "shaman.fire_nova" },
+};
+
+// The enemies sidecar (Phase 290 stream FB): next to each translog the simulator writes `<translog>.enemies.zst`, one record per decision with the
+// enemy each aimed button would hit (as an actor index), the table of every enemy actor (position, reach, health, time to die, flags), the damage
+// each enemy took since the previous decision, the player's position and target and the next start and end of every raid event; once per fight
+// the per-fight constants. A rank is an enemy's order among the process's enemy actors by actor index (the event sidecar's `unit`). Every number below
+// is derived from the registry's `enemiesSidecar` block by scripts/rl/enemies_layout.py; a member list is `{ name, type code, count, byte offset }`
+// (type codes B u8, H u16, I u32, f f32, d f64). The writer's structs must match them member for member (a static_assert), and RL_ENEMIES_SHA
+// is written into the file header.
+#define RL_ENEMIES_DEFINED 1
+inline constexpr std::size_t RL_ENEMIES_FORMAT_VERSION = 1;
+inline constexpr std::size_t RL_ENEMIES_RANK_CAP = 20;
+inline constexpr std::size_t RL_ENEMIES_PICK_COUNT = 7;
+inline constexpr std::size_t RL_ENEMIES_CAPABILITY_COUNT = 71;
+inline constexpr std::size_t RL_ENEMIES_RAID_EVENT_CAP = 24;
+inline constexpr std::size_t RL_ENEMIES_RAID_NAME_BYTES = 24;
+inline constexpr std::size_t RL_ENEMIES_RECORD_SIZE = 1800;
+inline constexpr std::size_t RL_ENEMIES_HEADER_SIZE = 120;
+inline constexpr const char* RL_ENEMIES_SHA = "enemies-v1:92984eec96894665aef65d7be08c486fd521d054636949e89174fcb0f9c136fb";
+inline constexpr std::size_t RL_ENEMIES_CLASS_CONSTANT_COUNT = 6;
+inline constexpr const char* RL_ENEMIES_CLASS_CONSTANT_NAMES[RL_ENEMIES_CLASS_CONSTANT_COUNT] = {
+  "voltaic_blaze_cleave_radius",
+  "voltaic_blaze_cleave_cap",
+  "lava_lash_spread_radius",
+  "lava_lash_spread_cap",
+  "chain_lightning_radius",
+  "chain_lightning_cap",
+};
+inline constexpr std::size_t RL_ENEMIES_PICK_SOURCE_COUNT = 4;
+inline constexpr const char* RL_ENEMIES_PICK_SOURCE_NAMES[RL_ENEMIES_PICK_SOURCE_COUNT] = {
+  "none",
+  "head",
+  "rules",
+  "random_aim",
+};
+inline constexpr std::size_t RL_ENEMIES_RANK_FLAG_COUNT = 6;
+inline constexpr const char* RL_ENEMIES_RANK_FLAG_NAMES[RL_ENEMIES_RANK_FLAG_COUNT] = {
+  "alive",
+  "immune",
+  "hazard",
+  "do_not_hit",
+  "boss",
+  "counts_as_enemy",
+};
+inline constexpr std::size_t RL_ENEMIES_DAMAGE_STREAM_COUNT = 2;
+inline constexpr const char* RL_ENEMIES_DAMAGE_STREAM_NAMES[RL_ENEMIES_DAMAGE_STREAM_COUNT] = {
+  "real",
+  "expected",
+};
+struct rl_enemies_member
+{
+  const char* name;
+  char        type;
+  std::size_t count;
+  std::size_t offset;
+};
+inline constexpr std::size_t RL_ENEMIES_FIGHT_MEMBER_COUNT = 14;
+inline constexpr rl_enemies_member RL_ENEMIES_FIGHT_MEMBERS[RL_ENEMIES_FIGHT_MEMBER_COUNT] = {
+  { "kind", 'I', 1, 0 },
+  { "iteration", 'I', 1, 4 },
+  { "n_decisions", 'I', 1, 8 },
+  { "enemy_actor_count", 'I', 1, 12 },
+  { "rank_over_cap", 'I', 1, 16 },
+  { "raid_event_count", 'I', 1, 20 },
+  { "raid_over_cap", 'I', 1, 24 },
+  { "reserved", 'I', 1, 28 },
+  { "button_range", 'd', 7, 32 },
+  { "button_radius", 'd', 7, 88 },
+  { "class_constant", 'd', 6, 144 },
+  { "capability", 'B', 71, 192 },
+  { "raid_name", 'B', 576, 263 },
+  { "raid_type", 'B', 576, 839 },
+};
+inline constexpr std::size_t RL_ENEMIES_DECISION_MEMBER_COUNT = 32;
+inline constexpr rl_enemies_member RL_ENEMIES_DECISION_MEMBERS[RL_ENEMIES_DECISION_MEMBER_COUNT] = {
+  { "kind", 'I', 1, 0 },
+  { "seq", 'I', 1, 4 },
+  { "pick_actor", 'H', 7, 8 },
+  { "pick_source", 'B', 7, 22 },
+  { "cand_count", 'B', 7, 29 },
+  { "cand_mask", 'I', 7, 36 },
+  { "actor_index", 'H', 20, 64 },
+  { "spawn_index", 'B', 20, 104 },
+  { "flags", 'B', 20, 124 },
+  { "x", 'd', 20, 144 },
+  { "y", 'd', 20, 304 },
+  { "combat_reach", 'f', 20, 464 },
+  { "health_pct", 'f', 20, 544 },
+  { "time_to_die", 'f', 20, 624 },
+  { "immunity_remaining", 'f', 20, 704 },
+  { "damage_real", 'f', 20, 784 },
+  { "damage_expected", 'f', 20, 864 },
+  { "damage_unranked", 'f', 2, 944 },
+  { "player_x", 'd', 1, 952 },
+  { "player_y", 'd', 1, 960 },
+  { "player_facing_x", 'd', 1, 968 },
+  { "player_facing_y", 'd', 1, 976 },
+  { "player_target_actor", 'H', 1, 984 },
+  { "player_move_distance", 'd', 1, 992 },
+  { "player_move_remains", 'd', 1, 1000 },
+  { "raid_next_start", 'd', 24, 1008 },
+  { "raid_next_end", 'd', 24, 1200 },
+  { "raid_duration", 'f', 24, 1392 },
+  { "raid_cooldown", 'f', 24, 1488 },
+  { "raid_up", 'B', 24, 1584 },
+  { "raid_duration_mean", 'f', 24, 1608 },
+  { "raid_cooldown_mean", 'f', 24, 1704 },
+};
+inline constexpr std::size_t RL_ENEMIES_FOOTER_MEMBER_COUNT = 4;
+inline constexpr rl_enemies_member RL_ENEMIES_FOOTER_MEMBERS[RL_ENEMIES_FOOTER_MEMBER_COUNT] = {
+  { "kind", 'I', 1, 0 },
+  { "n_fights", 'I', 1, 4 },
+  { "reserved0", 'I', 1, 8 },
+  { "reserved1", 'I', 1, 12 },
 };

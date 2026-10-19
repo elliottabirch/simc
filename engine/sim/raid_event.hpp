@@ -91,6 +91,21 @@ public:
   timespan_t until_next() const;
   virtual timespan_t remains() const;
   bool up() const;
+  // Phase 290 stream FB (owner decision 5, the raid draw): read-only views of the schedule the engine holds right now, for the enemies sidecar.
+  // Pure observers: they read the scheduled events and the drawn durations, schedule nothing, draw nothing.
+  //   rl_next_start_seconds: the absolute time of the next start as next_time() reports it (what `raid_event.<name>.in` counts down to), or -1 when
+  //                          the engine holds none (until_next() is timespan_t::max()).
+  //   rl_current_end_seconds: the absolute time the occurrence that is up ends (the duration event's time), or -1 when none is up.
+  //   rl_saved_duration_seconds / rl_saved_cooldown_seconds: the duration and cooldown drawn for the current occurrence (0 before the first).
+  double rl_next_start_seconds() const;
+  double rl_current_end_seconds() const;
+  double rl_saved_duration_seconds() const;
+  double rl_saved_cooldown_seconds() const;
+  //   rl_duration_mean_seconds / rl_cooldown_mean_seconds: the profile's option means (`duration=`, `cooldown=`), which the engine's
+  //                          `raid_event.<name>.duration` / `.cooldown` expressions answer with while nothing is drawn yet.
+  double rl_duration_mean_seconds() const;
+  double rl_cooldown_mean_seconds() const;
+  bool rl_is_up() const;
   void schedule();
   void deactivate( util::string_view reason );
   virtual void reset();

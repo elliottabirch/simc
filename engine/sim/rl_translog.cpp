@@ -11,15 +11,21 @@
 
 #include "sim/rl_translog.hpp"
 
+#include "action/action.hpp"
+#include "buff/buff.hpp"
 #include "player/pet.hpp"
 #include "player/player.hpp"
+#include "sim/raid_event.hpp"
 #include "sim/rl_buff_credit.hpp"
 #include "sim/rl_buff_ledger.hpp"
+#include "sim/rl_class_plugins.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_rng_record.hpp"
 #include "sim/rl_stock_eval.hpp"
 #include "sim/rl_target_select.hpp"
+#include "sim/sheet_fight.hpp"
 #include "sim/sim.hpp"
+#include "sim/solver_control.hpp"
 #include "util/io.hpp"
 #include "util/util.hpp"
 
@@ -126,6 +132,11 @@ void rl_credit_route( player_t* p, rl_cause_t cause, std::uint64_t now_seq, doub
                        const player_t* hit_target, const char* action_name )
 {
   if ( p == nullptr ) return;
+
+  // Phase 290 stream FB (owner decision 3): the per-enemy-rank damage record of the enemies sidecar. Every addition to solver_damage_so_far /
+  // solver_damage_expected_so_far is paired with a call here (stats.cpp, action.cpp), so this sees the same amounts. One shared_ptr test when the
+  // sidecar is off; observer only.
+  rl_translog::enemies_note_damage( p, hit_target, amount, expected );
 
   // A cause can never be stamped with a decision seq that lies in the future of the CURRENT
   // decision boundary -- the stamp is always written at or before the routing site runs.
@@ -429,6 +440,391 @@ player_t* solo_actor( sim_t* s )
 
 } // anonymous namespace
 
+// ---- ENEMIES SIDECAR writer (Phase 290 stream FB; see rl_translog.hpp's ENEMIES SIDECAR section) ----
+
+rl_enemies::writer_t::~writer_t()
+{
+  if ( zstd != nullptr )
+    ZSTD_freeCStream( reinterpret_cast<ZSTD_CStream*>( zstd ) );
+}
+
+namespace
+{
+
+// The process's enemy actors in actor-index order: rank = position. Every enemy actor counts, the main target, its clones and the raid events' adds
+// (enemy pets: they are in actor_list, not in target_list), asleep or not. Built per sim_t on first use and rebuilt if actor_list changes size (a new
+// actor always has the highest actor index, so earlier ranks never move). The rank is the event sidecar's `unit` for an enemy.
+void enemies_ensure_ranks( sim_t* sim )
+{
+  if ( sim->rl_enemy_rank_built_for == sim->actor_list.size() )
+    return;
+  sim->rl_enemy_rank_actors.clear();
+  for ( player_t* t : sim->actor_list )
+    if ( t != nullptr && t->is_enemy() )
+      sim->rl_enemy_rank_actors.push_back( t );
+  std::sort( sim->rl_enemy_rank_actors.begin(), sim->rl_enemy_rank_actors.end(),
+             []( const player_t* a, const player_t* b ) { return a->actor_index < b->actor_index; } );
+  std::size_t max_index = 0;
+  for ( const player_t* t : sim->rl_enemy_rank_actors )
+    max_index = std::max<std::size_t>( max_index, t->actor_index );
+  sim->rl_enemy_rank_of_actor.assign( max_index + 1, static_cast<std::int16_t>( -1 ) );
+  for ( std::size_t r = 0; r < sim->rl_enemy_rank_actors.size(); ++r )
+    sim->rl_enemy_rank_of_actor[ sim->rl_enemy_rank_actors[ r ]->actor_index ] = static_cast<std::int16_t>( r );
+  sim->rl_enemy_rank_built_for = sim->actor_list.size();
+}
+
+// -1 for an actor that is not an enemy of this sim's list.
+int enemies_rank_of( sim_t* sim, const player_t* t )
+{
+  enemies_ensure_ranks( sim );
+  if ( t == nullptr || t->actor_index >= sim->rl_enemy_rank_of_actor.size() )
+    return -1;
+  return sim->rl_enemy_rank_of_actor[ t->actor_index ];
+}
+
+// One zstd input chunk to completion, written to the sidecar's own stream (the translog's zstd_drive_stream, on the sidecar's state).
+void enemies_zstd_drive( rl_enemies::writer_t& w, const unsigned char* data, std::size_t n_bytes, ZSTD_EndDirective op )
+{
+  auto* cstream = reinterpret_cast<ZSTD_CStream*>( w.zstd );
+  if ( w.zstd_out.empty() )
+    w.zstd_out.resize( ZSTD_CStreamOutSize() );
+  ZSTD_inBuffer in{ data, n_bytes, 0 };
+  for ( ;; )
+  {
+    ZSTD_outBuffer out{ w.zstd_out.data(), w.zstd_out.size(), 0 };
+    const std::size_t ret = ZSTD_compressStream2( cstream, &out, &in, op );
+    if ( ZSTD_isError( ret ) )
+      throw sc_runtime_error( fmt::format( "rl_translog: zstd compression of the enemies sidecar failed: {}", ZSTD_getErrorName( ret ) ) );
+    if ( out.pos > 0 )
+      w.stream->write( reinterpret_cast<const char*>( out.dst ), static_cast<std::streamsize>( out.pos ) );
+    const bool done = ( op == ZSTD_e_continue ) ? ( in.pos == in.size ) : ( ret == 0 );
+    if ( done )
+      break;
+  }
+}
+
+void enemies_assert_stream_ok( sim_t* root, const char* where )
+{
+  if ( !*root->rl_translog_enemies->stream )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_translog: write to '{}.enemies.zst' failed in {} after {} records -- the stream entered a failed state (disk full, permissions, or "
+        "similar); refusing to continue silently, the file on disk is now incomplete and the reader will refuse it whole.",
+        root->rl_translog_file_str, where, root->rl_translog_enemies->record_count ) );
+  }
+}
+
+// The buffered whole records through the sidecar's zstd stream, one record at a time so a frame closes every ZSTD_FRAME_RECORDS records.
+void enemies_flush_buffer( sim_t* root, const char* where )
+{
+  rl_enemies::writer_t& w = *root->rl_translog_enemies;
+  if ( w.buffer.empty() )
+    return;
+  assert( w.buffer.size() % rl_enemies::RECORD_SIZE == 0 );
+  const std::size_t n_records = w.buffer.size() / rl_enemies::RECORD_SIZE;
+  for ( std::size_t i = 0; i < n_records; ++i )
+  {
+    ++w.records_in_frame;
+    const bool end_frame = w.records_in_frame >= rl_enemies::ZSTD_FRAME_RECORDS;
+    enemies_zstd_drive( w, w.buffer.data() + i * rl_enemies::RECORD_SIZE, rl_enemies::RECORD_SIZE, end_frame ? ZSTD_e_end : ZSTD_e_continue );
+    if ( end_frame )
+      w.records_in_frame = 0;
+  }
+  w.stream->flush();
+  enemies_assert_stream_ok( root, where );
+  w.buffer.clear();
+  w.fight_record_at = static_cast<std::size_t>( -1 );
+}
+
+// Appends `bytes` of a record struct to the buffer, zero-filled to RECORD_SIZE. Returns the record's byte offset in the buffer.
+std::size_t enemies_append( rl_enemies::writer_t& w, const void* record, std::size_t bytes )
+{
+  assert( bytes <= rl_enemies::RECORD_SIZE );
+  const std::size_t at = w.buffer.size();
+  w.buffer.resize( at + rl_enemies::RECORD_SIZE, 0 );
+  std::memcpy( w.buffer.data() + at, record, bytes );
+  ++w.record_count;
+  return at;
+}
+
+bool enemies_is_rl_actor( const player_t* p )
+{
+  return std::strcmp( p->name(), RL_ACTOR_NAME ) == 0 && !p->is_pet();
+}
+
+// The per-fight record: the constants of this fight (each aimed button's range and radius, the class geometry numbers, the effective capability
+// bits, the raid events' names). Written once, with the fight's first record.
+void enemies_open_fight( sim_t* root, sim_t* sim, player_t* p )
+{
+  rl_enemies::writer_t& w = *root->rl_translog_enemies;
+  enemies_ensure_ranks( sim );
+  rl_enemies::fight_record f{};
+  f.kind = rl_enemies::KIND_FIGHT;
+  f.iteration = static_cast<std::uint32_t>( fight_index( sim ) );
+  f.n_decisions = 0;
+  const std::size_t enemy_count = sim->rl_enemy_rank_actors.size();
+  f.enemy_actor_count = static_cast<std::uint32_t>( enemy_count );
+  f.rank_over_cap = static_cast<std::uint32_t>( enemy_count > rl_enemies::RANK_CAP ? enemy_count - rl_enemies::RANK_CAP : 0 );
+  f.raid_event_count = static_cast<std::uint32_t>( sim->raid_events.size() );
+  f.raid_over_cap = static_cast<std::uint32_t>( sim->raid_events.size() > rl_enemies::RAID_CAP ? sim->raid_events.size() - rl_enemies::RAID_CAP : 0 );
+  for ( std::size_t i = 0; i < rl_enemies::PICK_COUNT; ++i )
+  {
+    const action_t* a = enemies_is_rl_actor( p ) ? solver_control::resolve_action( p, RL_AIM_SPELLS[ i ] ) : nullptr;
+    f.button_range[ i ] = a != nullptr ? a->range : 0.0;
+    f.button_radius[ i ] = a != nullptr ? a->radius : 0.0;
+  }
+  if ( RL_ENEMIES_CLASS_CONSTANT_COUNT > 0 )
+  {
+    const rl_class_plugin& plugin = rl_class_plugin_for( p );
+    for ( std::size_t k = 0; k < RL_ENEMIES_CLASS_CONSTANT_COUNT; ++k )
+    {
+      const rl_geometry_constant* c = rl_class_geometry_constant_find( plugin, RL_ENEMIES_CLASS_CONSTANT_NAMES[ k ] );
+      if ( c == nullptr )
+      {
+        throw sc_runtime_error( fmt::format(
+            "rl_translog: the registry declares the enemies-sidecar class constant '{}' but player '{}' (class plugin '{}') serves none by that name "
+            "(bind-time refusal)", RL_ENEMIES_CLASS_CONSTANT_NAMES[ k ], p->name(), plugin.class_name ) );
+      }
+      f.class_constant[ k ] = c->get( p );
+    }
+  }
+  for ( std::size_t c = 0; c < RL_ENEMIES_CAPABILITY_COUNT; ++c )
+    f.capability[ c ] = rl_policy::capability_effective_bit( p, c ) ? 1u : 0u;
+  for ( std::size_t e = 0; e < sim->raid_events.size() && e < rl_enemies::RAID_CAP; ++e )
+  {
+    // the event's own name when the profile gave one (`name=PackNear`), else its type (`adds`)
+    const std::string& label = sim->raid_events[ e ]->name.empty() ? sim->raid_events[ e ]->type : sim->raid_events[ e ]->name;
+    const std::size_t n = std::min<std::size_t>( label.size(), rl_enemies::RAID_NAME_BYTES - 1 );
+    std::memcpy( f.raid_name + e * rl_enemies::RAID_NAME_BYTES, label.data(), n );
+    const std::string& type = sim->raid_events[ e ]->type;
+    std::memcpy( f.raid_type + e * rl_enemies::RAID_NAME_BYTES, type.data(), std::min<std::size_t>( type.size(), rl_enemies::RAID_NAME_BYTES - 1 ) );
+  }
+  w.fight_record_at = enemies_append( w, &f, sizeof( f ) );
+  w.fight_open = true;
+  w.decision_records = 0;
+}
+
+// One DECISION (or CLOSE) record. `picks` is PICK_COUNT entries or nullptr (a CLOSE record has none). `pressed` is the aimed-button index the row
+// pressed, or -1; `aim_explored` marks the random-aim dial having moved that button's pick.
+void enemies_fill_decision( sim_t* sim, player_t* p, std::uint32_t kind, std::uint32_t seq, const rl_enemies::pick_input* picks, int pressed,
+                            bool aim_explored, rl_enemies::decision_record& r )
+{
+  enemies_ensure_ranks( sim );
+  r.kind = kind;
+  r.seq = seq;
+  for ( std::size_t i = 0; i < rl_enemies::PICK_COUNT; ++i )
+  {
+    r.pick_actor[ i ] = rl_enemies::NO_ACTOR;
+    if ( picks == nullptr )
+      continue;
+    const rl_enemies::pick_input& in = picks[ i ];
+    if ( in.known && in.pick != nullptr )
+    {
+      r.pick_actor[ i ] = static_cast<std::uint16_t>( in.pick->actor_index );
+      r.pick_source[ i ] = static_cast<int>( i ) == pressed && aim_explored ? rl_enemies::PICK_SOURCE_RANDOM_AIM : in.source;
+    }
+    r.cand_count[ i ] = in.count;
+    std::uint32_t mask = 0;
+    if ( in.slot_actors != nullptr )
+      for ( std::size_t slot = 0; slot < RL_TARGET_SLOTS; ++slot )
+      {
+        if ( !( in.slot_mask & ( 1u << slot ) ) || in.slot_actors[ slot ] == nullptr )
+          continue;
+        const int rank = enemies_rank_of( sim, in.slot_actors[ slot ] );
+        if ( rank >= 0 && static_cast<std::size_t>( rank ) < rl_enemies::RANK_CAP )
+          mask |= 1u << rank;
+      }
+    r.cand_mask[ i ] = mask;
+  }
+  const std::size_t n = std::min( sim->rl_enemy_rank_actors.size(), rl_enemies::RANK_CAP );
+  for ( std::size_t rank = 0; rank < rl_enemies::RANK_CAP; ++rank )
+  {
+    if ( rank >= n )
+    {
+      r.actor_index[ rank ] = rl_enemies::NO_ACTOR;
+      continue;
+    }
+    player_t* t = sim->rl_enemy_rank_actors[ rank ];
+    const bool alive = !t->is_sleeping();
+    const bool immune = t->debuffs.invulnerable && t->debuffs.invulnerable->check();
+    r.actor_index[ rank ] = static_cast<std::uint16_t>( t->actor_index );
+    r.spawn_index[ rank ] = static_cast<std::uint8_t>( t->actor_spawn_index );
+    r.flags[ rank ] = static_cast<std::uint8_t>( ( alive ? rl_enemies::FLAG_ALIVE : 0 ) | ( immune ? rl_enemies::FLAG_IMMUNE : 0 ) |
+                                                  ( t->sheet_hazard ? rl_enemies::FLAG_HAZARD : 0 ) |
+                                                  ( sheet_fight_do_not_hit( sim, t ) ? rl_enemies::FLAG_DO_NOT_HIT : 0 ) |
+                                                  ( rl_target_select::obs_is_boss( t ) ? rl_enemies::FLAG_BOSS : 0 ) |
+                                                  ( rl_target_select::rl_counts_as_enemy( t ) ? rl_enemies::FLAG_COUNTS_AS_ENEMY : 0 ) );
+    r.x[ rank ] = t->x_position;
+    r.y[ rank ] = t->y_position;
+    r.combat_reach[ rank ] = static_cast<float>( t->combat_reach );
+    r.health_pct[ rank ] = static_cast<float>( t->health_percentage() );
+    // the engine's value, before the observation's clip (build_enemy_fact's own cap of 600 s); a sleeping enemy has none
+    r.time_to_die[ rank ] = alive ? static_cast<float>( std::min( t->time_to_percent( 0 ).total_seconds(), 600.0 ) ) : 0.0f;
+    r.immunity_remaining[ rank ] =
+        t->debuffs.invulnerable ? static_cast<float>( t->debuffs.invulnerable->remains().total_seconds() ) : 0.0f;
+  }
+  // the damage since the previous decision, then zero it (the next record starts a new step)
+  if ( p->rl_enemy_damage_real.size() == rl_enemies::RANK_CAP )
+    for ( std::size_t rank = 0; rank < rl_enemies::RANK_CAP; ++rank )
+    {
+      r.damage_real[ rank ] = static_cast<float>( p->rl_enemy_damage_real[ rank ] );
+      r.damage_expected[ rank ] = static_cast<float>( p->rl_enemy_damage_expected[ rank ] );
+      p->rl_enemy_damage_real[ rank ] = 0.0;
+      p->rl_enemy_damage_expected[ rank ] = 0.0;
+    }
+  r.damage_unranked[ rl_enemies::STREAM_REAL ] = static_cast<float>( p->rl_enemy_damage_unranked_real );
+  r.damage_unranked[ rl_enemies::STREAM_EXPECTED ] = static_cast<float>( p->rl_enemy_damage_unranked_expected );
+  p->rl_enemy_damage_unranked_real = 0.0;
+  p->rl_enemy_damage_unranked_expected = 0.0;
+  r.player_x = p->x_position;
+  r.player_y = p->y_position;
+  r.player_facing_x = p->facing_x;
+  r.player_facing_y = p->facing_y;
+  r.player_target_actor = p->target != nullptr ? static_cast<std::uint16_t>( p->target->actor_index ) : rl_enemies::NO_ACTOR;
+  // the engine's own `movement.remains` expression (player.cpp, create_expression "movement"): the distance left over the movement speed while moving, else the movement buff's time
+  r.player_move_distance = p->current.distance_to_move;
+  r.player_move_remains = p->current.distance_to_move > 0 ? p->current.distance_to_move / p->composite_movement_speed()
+                                                          : p->buffs.movement->remains().total_seconds();
+  for ( std::size_t e = 0; e < rl_enemies::RAID_CAP; ++e )
+  {
+    if ( e >= sim->raid_events.size() )
+    {
+      r.raid_next_start[ e ] = rl_enemies::NO_TIME;
+      r.raid_next_end[ e ] = rl_enemies::NO_TIME;
+      continue;
+    }
+    const raid_event_t& ev = *sim->raid_events[ e ];
+    r.raid_next_start[ e ] = ev.rl_next_start_seconds();
+    r.raid_next_end[ e ] = ev.rl_current_end_seconds();
+    r.raid_duration[ e ] = static_cast<float>( ev.rl_saved_duration_seconds() );
+    r.raid_cooldown[ e ] = static_cast<float>( ev.rl_saved_cooldown_seconds() );
+    r.raid_up[ e ] = ev.rl_is_up() ? 1u : 0u;
+    r.raid_duration_mean[ e ] = static_cast<float>( ev.rl_duration_mean_seconds() );
+    r.raid_cooldown_mean[ e ] = static_cast<float>( ev.rl_cooldown_mean_seconds() );
+  }
+}
+
+// Called from record_decision() for the row just appended.
+void enemies_record_decision( sim_t* root, sim_t* sim, player_t* p, std::uint64_t seq, int action_index, bool aim_explored )
+{
+  rl_enemies::writer_t& w = *root->rl_translog_enemies;
+  if ( !w.fight_open )
+    enemies_open_fight( root, sim, p );
+  rl_enemies::pick_input picks[ rl_enemies::PICK_COUNT ];
+  int pressed = -1;
+  if ( sim->target_select_enabled && enemies_is_rl_actor( p ) )
+  {
+    for ( std::size_t i = 0; i < rl_enemies::PICK_COUNT; ++i )
+      rl_target_select::read_pick_input( solver_control::resolve_action( p, RL_AIM_SPELLS[ i ] ), picks[ i ] );
+    if ( action_index >= 0 && static_cast<std::size_t>( action_index ) < RL_ACTION_DIM && RL_ACTIONS[ action_index ].kind == rl_action_kind::cast &&
+         RL_ACTIONS[ action_index ].token != nullptr )
+      for ( std::size_t i = 0; i < rl_enemies::PICK_COUNT; ++i )
+        if ( std::strcmp( RL_ACTIONS[ action_index ].token, RL_AIM_SPELLS[ i ] ) == 0 )
+          pressed = static_cast<int>( i );
+  }
+  rl_enemies::decision_record r{};
+  enemies_fill_decision( sim, p, rl_enemies::KIND_DECISION, static_cast<std::uint32_t>( seq ), picks, pressed, aim_explored, r );
+  enemies_append( w, &r, sizeof( r ) );
+  ++w.decision_records;
+}
+
+// Called from record_close(): the fight's tail (the damage since the last decision, the table and the player at the end), then the whole fight
+// goes through the stream.
+void enemies_record_close( sim_t* root, sim_t* sim, player_t* p )
+{
+  rl_enemies::writer_t& w = *root->rl_translog_enemies;
+  if ( !w.fight_open )
+    enemies_open_fight( root, sim, p );
+  rl_enemies::decision_record r{};
+  enemies_fill_decision( sim, p, rl_enemies::KIND_CLOSE, rl_enemies::CLOSE_SEQ, nullptr, -1, false, r );
+  enemies_append( w, &r, sizeof( r ) );
+  if ( w.fight_record_at != static_cast<std::size_t>( -1 ) )
+  {
+    rl_enemies::fight_record f;
+    std::memcpy( &f, w.buffer.data() + w.fight_record_at, sizeof( f ) );
+    f.n_decisions = w.decision_records;
+    // the enemy count as the fight ended (an actor made after the fight's first record is counted)
+    f.enemy_actor_count = static_cast<std::uint32_t>( sim->rl_enemy_rank_actors.size() );
+    f.rank_over_cap = static_cast<std::uint32_t>( sim->rl_enemy_rank_actors.size() > rl_enemies::RANK_CAP ? sim->rl_enemy_rank_actors.size() - rl_enemies::RANK_CAP : 0 );
+    std::memcpy( w.buffer.data() + w.fight_record_at, &f, sizeof( f ) );
+  }
+  ++w.fight_records;
+  enemies_flush_buffer( root, "record_close" );
+  w.fight_open = false;
+  w.decision_records = 0;
+}
+
+void enemies_open( sim_t* root )
+{
+  const std::string path = root->rl_translog_file_str + ".enemies.zst";
+  auto w = std::make_shared<rl_enemies::writer_t>();
+  w->stream = std::make_unique<io::ofstream>();
+  w->stream->open( path, std::ios::out | std::ios::trunc | std::ios::binary );
+  if ( !w->stream->is_open() )
+    throw sc_runtime_error( fmt::format( "rl_translog=: unable to open '{}' for writing.", path ) );
+  w->zstd = reinterpret_cast<ZSTD_CCtx_s*>( ZSTD_createCStream() );
+  if ( w->zstd == nullptr )
+    throw sc_runtime_error( fmt::format( "rl_translog=: unable to create a zstd compression stream for '{}'.", path ) );
+  const std::size_t level_ret = ZSTD_CCtx_setParameter( reinterpret_cast<ZSTD_CStream*>( w->zstd ), ZSTD_c_compressionLevel, rl_enemies::ZSTD_LEVEL );
+  if ( ZSTD_isError( level_ret ) )
+    throw sc_runtime_error( fmt::format( "rl_translog=: unable to set the zstd level of '{}': {}", path, ZSTD_getErrorName( level_ret ) ) );
+
+  rl_enemies::file_header h{};
+  std::memcpy( h.magic, rl_enemies::MAGIC, sizeof( rl_enemies::MAGIC ) );
+  h.format_version = rl_enemies::FORMAT_VERSION;
+  h.record_size = rl_enemies::RECORD_SIZE;
+  h.header_size = rl_enemies::HEADER_SIZE;
+  h.rank_cap = static_cast<std::uint32_t>( rl_enemies::RANK_CAP );
+  h.pick_count = static_cast<std::uint32_t>( rl_enemies::PICK_COUNT );
+  h.class_constant_count = static_cast<std::uint32_t>( RL_ENEMIES_CLASS_CONSTANT_COUNT );
+  h.capability_count = static_cast<std::uint32_t>( RL_ENEMIES_CAPABILITY_COUNT );
+  h.raid_event_cap = static_cast<std::uint32_t>( rl_enemies::RAID_CAP );
+  std::strncpy( h.enemies_sha, RL_ENEMIES_SHA, sizeof( h.enemies_sha ) - 1 );
+  enemies_zstd_drive( *w, reinterpret_cast<const unsigned char*>( &h ), sizeof( h ), ZSTD_e_continue );
+  w->stream->flush();
+  root->rl_translog_enemies = std::move( w );
+  enemies_assert_stream_ok( root, "open_and_write_header" );
+}
+
+void enemies_write_footer( sim_t* root )
+{
+  rl_enemies::writer_t& w = *root->rl_translog_enemies;
+  rl_enemies::footer_record fr{};
+  fr.kind = rl_enemies::KIND_FOOTER;
+  fr.n_fights = w.fight_records;
+  enemies_append( w, &fr, sizeof( fr ) );
+  enemies_flush_buffer( root, "write_footer" );
+  // force-close the final frame, even short of the cadence
+  if ( w.records_in_frame != 0 )
+  {
+    enemies_zstd_drive( w, nullptr, 0, ZSTD_e_end );
+    w.records_in_frame = 0;
+  }
+  w.stream->flush();
+  enemies_assert_stream_ok( root, "write_footer" );
+  w.stream->close();
+  root->rl_translog_enemies.reset();
+}
+
+} // anonymous namespace
+
+void enemies_note_damage( player_t* p, const player_t* hit_target, double amount, bool expected )
+{
+  sim_t* root = root_of( p->sim );
+  if ( !root->rl_translog_enemies )
+    return;
+  if ( p->rl_enemy_damage_real.size() != rl_enemies::RANK_CAP )
+  {
+    p->rl_enemy_damage_real.assign( rl_enemies::RANK_CAP, 0.0 );
+    p->rl_enemy_damage_expected.assign( rl_enemies::RANK_CAP, 0.0 );
+  }
+  const int rank = hit_target != nullptr ? enemies_rank_of( p->sim, hit_target ) : -1;
+  if ( rank >= 0 && static_cast<std::size_t>( rank ) < rl_enemies::RANK_CAP )
+    ( expected ? p->rl_enemy_damage_expected : p->rl_enemy_damage_real )[ static_cast<std::size_t>( rank ) ] += amount;
+  else
+    ( expected ? p->rl_enemy_damage_unranked_expected : p->rl_enemy_damage_unranked_real ) += amount;
+}
+
 void open_and_write_header( sim_t* sim )
 {
   sim_t* root = root_of( sim );
@@ -638,6 +1034,10 @@ void open_and_write_header( sim_t* sim )
           "rl_translog=: write to '{}' failed writing the header.", attr_path ) );
     }
   }
+
+  // Phase 290 stream FB: the `.enemies.zst` sidecar -- opened here beside the main stream (same "a bad path refuses at startup" rationale),
+  // always, like `.attr`.
+  enemies_open( root );
 
   // 260927-d1 (D1 census, Stage 1 Task 2): the `.apl` sidecar -- opened here, ONLY when
   // solver_record_apl_choice=1, alongside the main stream and the `.attr` sidecar above (same "a
@@ -857,6 +1257,11 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float ob
     }
     ++root->rl_translog_apl_decisions;
   }
+
+  // Phase 290 stream FB: the enemies sidecar's record for this row (picks of every aimed button, the enemy table, the damage step, the player, the
+  // raid schedule). Appends only; flushed with the fight's close.
+  if ( root->rl_translog_enemies )
+    enemies_record_decision( root, sim, p, seq, action_index, aim_explored );
 }
 
 void record_close( sim_t* sim )
@@ -1138,6 +1543,9 @@ void record_close( sim_t* sim )
   // the credit module folds the fight's hits per decision over the translog's own decisions. No-op unless rl_buff_credit=nobody|full.
   if ( root->rl_bc_on )
     rl_buff_credit::write_fight( *root->rl_bc_state, r.iteration, collected, root->solver_funnel_mode, root->rl_translog_pending_seqs );
+  // Phase 290 stream FB: the enemies sidecar's CLOSE record and the whole fight through its stream.
+  if ( root->rl_translog_enemies )
+    enemies_record_close( root, sim, p );
   root->rl_translog_pending_seqs.clear();
 
   root->rl_translog_pending_decisions = 0;
@@ -1176,6 +1584,9 @@ void flush_pending( sim_t* sim )
   sim_t* root = root_of( sim );
   if ( root->rl_translog_file_str.empty() )
     return;
+  // Phase 290 stream FB: the enemies sidecar's pending records go out too (the abort path keeps what the fight wrote, like the main stream).
+  if ( root->rl_translog_enemies )
+    enemies_flush_buffer( root, "flush_pending" );
   if ( root->rl_translog_buffer.empty() )
     return;
 
@@ -1198,6 +1609,9 @@ void branch_child_disable( sim_t* sim )
   (void)root->rl_translog_stream.release();
   (void)root->rl_translog_attr_stream.release();
   (void)root->rl_translog_apl_stream.release();
+  // Phase 290 stream FB: the enemies writer too -- moved to the heap and never freed, so its destructor and stream never run in the child.
+  if ( root->rl_translog_enemies )
+    (void)new std::shared_ptr<rl_enemies::writer_t>( std::move( root->rl_translog_enemies ) );
   root->rl_translog_zstd_cstream = nullptr;
   root->rl_translog_file_str.clear();
 }
@@ -1214,10 +1628,24 @@ void branch_child_reopen( sim_t* sim, const std::string& base )
   (void)root->rl_translog_stream.release();
   (void)root->rl_translog_attr_stream.release();
   (void)root->rl_translog_apl_stream.release();
+  // Phase 290 stream FB: the enemies writer holds the fight in progress in its buffer, like the main row buffer (which this function keeps). The
+  // child's new writer takes that buffer and the fight's state; the parent's writer is leaked, never freed or flushed.
+  std::shared_ptr<rl_enemies::writer_t> parent_enemies = std::move( root->rl_translog_enemies );
   root->rl_translog_zstd_cstream = nullptr;
   root->rl_translog_zstd_rows_in_frame = 0;
   root->rl_translog_file_str = base;
   open_and_write_header( sim );
+  if ( parent_enemies )
+  {
+    rl_enemies::writer_t& child = *root->rl_translog_enemies;
+    child.buffer = parent_enemies->buffer;
+    child.record_count = parent_enemies->record_count;
+    child.fight_records = parent_enemies->fight_records;
+    child.decision_records = parent_enemies->decision_records;
+    child.fight_open = parent_enemies->fight_open;
+    child.fight_record_at = parent_enemies->fight_record_at;
+    (void)new std::shared_ptr<rl_enemies::writer_t>( std::move( parent_enemies ) );
+  }
 }
 
 void write_footer( sim_t* sim )
@@ -1333,6 +1761,10 @@ void write_footer( sim_t* sim )
     root->rl_translog_attr_stream->close();
   }
 
+  // Phase 290 stream FB: the enemies sidecar's FOOTER, the last frame and the close.
+  if ( root->rl_translog_enemies )
+    enemies_write_footer( root );
+
   // 260927-d1 (D1 census, Stage 1 Task 2): the `.apl` sidecar's own FOOTER record, then close it
   // -- mirrors the `.attr` sidecar's own footer-then-close sequence immediately above.
   // n_decisions is the count of DECISION records this run actually wrote (root->
@@ -1411,7 +1843,7 @@ void end_entry( sim_t* sim )
 void release( sim_t* sim, carry_t& carry )
 {
   sim_t* root = root_of( sim );
-  if ( carry.stream || carry.attr_stream || carry.apl_stream || carry.zstd_cstream != nullptr )
+  if ( carry.stream || carry.attr_stream || carry.apl_stream || carry.enemies || carry.zstd_cstream != nullptr )
   {
     throw sc_runtime_error( "rl_translog: release refused -- the carry already holds a writer." );
   }
@@ -1425,6 +1857,7 @@ void release( sim_t* sim, carry_t& carry )
   carry.summed_close_damage = root->rl_translog_summed_close_damage;
   carry.attr_stream = std::move( root->rl_translog_attr_stream );
   carry.apl_stream = std::move( root->rl_translog_apl_stream );
+  carry.enemies = std::move( root->rl_translog_enemies );   // Phase 290 FB
   carry.apl_decisions = root->rl_translog_apl_decisions;
   carry.zstd_cstream = root->rl_translog_zstd_cstream;
   carry.zstd_outbuf = std::move( root->rl_translog_zstd_outbuf );
@@ -1437,6 +1870,7 @@ void release( sim_t* sim, carry_t& carry )
   root->rl_translog_stream.reset();
   root->rl_translog_attr_stream.reset();
   root->rl_translog_apl_stream.reset();
+  root->rl_translog_enemies.reset();   // Phase 290 FB (moved into the carry above)
   root->rl_translog_zstd_cstream = nullptr;
   root->rl_translog_buffer.clear();
   root->rl_translog_pending_seqs.clear();
@@ -1456,7 +1890,7 @@ void release( sim_t* sim, carry_t& carry )
 void adopt( sim_t* sim, carry_t& carry )
 {
   sim_t* root = root_of( sim );
-  if ( root->rl_translog_stream || root->rl_translog_attr_stream || root->rl_translog_apl_stream ||
+  if ( root->rl_translog_stream || root->rl_translog_attr_stream || root->rl_translog_apl_stream || root->rl_translog_enemies ||
        root->rl_translog_zstd_cstream != nullptr || root->rl_translog_fight_count != 0 ||
        root->rl_translog_row_count != 0 )
   {
@@ -1472,6 +1906,7 @@ void adopt( sim_t* sim, carry_t& carry )
   root->rl_translog_summed_close_damage = carry.summed_close_damage;
   root->rl_translog_attr_stream = std::move( carry.attr_stream );
   root->rl_translog_apl_stream = std::move( carry.apl_stream );
+  root->rl_translog_enemies = std::move( carry.enemies );   // Phase 290 FB
   root->rl_translog_apl_decisions = carry.apl_decisions;
   root->rl_translog_zstd_cstream = carry.zstd_cstream;
   root->rl_translog_zstd_outbuf = std::move( carry.zstd_outbuf );
@@ -1483,6 +1918,7 @@ void adopt( sim_t* sim, carry_t& carry )
   carry.stream.reset();
   carry.attr_stream.reset();
   carry.apl_stream.reset();
+  carry.enemies.reset();
   carry.zstd_cstream = nullptr;
   carry.buffer.clear();
   carry.pending_seqs.clear();

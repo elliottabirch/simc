@@ -2547,6 +2547,43 @@ timespan_t raid_event_t::remains() const
   return duration_event ? duration_event->remains() : timespan_t::max();
 }
 
+// Phase 290 stream FB: read-only views for the enemies sidecar (see raid_event.hpp).
+double raid_event_t::rl_next_start_seconds() const
+{
+  const timespan_t until = until_next();
+  return until == timespan_t::max() ? -1.0 : ( sim->current_time() + until ).total_seconds();
+}
+
+double raid_event_t::rl_current_end_seconds() const
+{
+  return duration_event ? duration_event->occurs().total_seconds() : -1.0;
+}
+
+double raid_event_t::rl_saved_duration_seconds() const
+{
+  return saved_duration.total_seconds();
+}
+
+double raid_event_t::rl_saved_cooldown_seconds() const
+{
+  return saved_cooldown.total_seconds();
+}
+
+double raid_event_t::rl_duration_mean_seconds() const
+{
+  return duration.mean.total_seconds();
+}
+
+double raid_event_t::rl_cooldown_mean_seconds() const
+{
+  return cooldown.mean.total_seconds();
+}
+
+bool raid_event_t::rl_is_up() const
+{
+  return is_up;
+}
+
 /**
  * Check if raid event is currently up.
  */
