@@ -62,6 +62,17 @@ endif()
 
 target_compile_definitions(engine PRIVATE "SC_GIT_REV=\"${GIT_COMMIT_HASH}\"" "SC_GIT_BRANCH=\"${GIT_BRANCH}\"")
 
+# Phase 268 (G268-2): which registry spec's RL constants header this build compiles. The default keeps the
+# generated enhancement header (engine/sim/rl_policy_constants.h); any other id selects
+# engine/sim/rl_policy_constants.<spec>.h through sim/rl_policy_constants_select.h. One build directory per spec.
+set(RL_SPEC "enhancement" CACHE STRING "Registry spec id whose RL constants header this build compiles")
+if(NOT RL_SPEC STREQUAL "enhancement")
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/sim/rl_policy_constants.${RL_SPEC}.h")
+        message(FATAL_ERROR "RL_SPEC=${RL_SPEC}: engine/sim/rl_policy_constants.${RL_SPEC}.h does not exist")
+    endif()
+    target_compile_definitions(engine PUBLIC "RL_SPEC_HEADER=\"sim/rl_policy_constants.${RL_SPEC}.h\"")
+endif()
+
 add_custom_target(file_toucher
         COMMAND ${CMAKE_COMMAND} -E touch_nocreate ${CMAKE_CURRENT_SOURCE_DIR}/util/git_info.cpp)
 

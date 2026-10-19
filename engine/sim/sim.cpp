@@ -32,6 +32,10 @@
 #include "sim/option.hpp"
 #include "sim/profileset.hpp"
 #include "sim/rl_policy.hpp"
+#include "sim/rl_action_census.hpp"
+#include "sim/rl_buff_census.hpp"
+#include "sim/rl_button_bind.hpp"
+#include "sim/rl_stock_eval.hpp"
 #include "sim/rl_target_select.hpp"
 #include "sim/rl_translog.hpp"
 #include "sim/rl_rng_record.hpp"
@@ -54,6 +58,7 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <map>
 #include <random>
 #include <sstream>
 #ifdef SC_WINDOWS
@@ -2440,6 +2445,52 @@ void sim_t::combat_end()
   // close row is written on BOTH transports and with neither (D-08).
   // No-op when rl_translog= is unset.
   rl_translog::record_close( this );
+  // Phase 268 (268-05, G268-8): opt-in credit census, one JSON line per non-enemy player (observer only).
+  if ( rl_credit_census )
+  {
+    auto by_action_json = []( const std::unordered_map<std::string, double>& m ) {
+      std::map<std::string, double> sorted( m.begin(), m.end() );
+      std::string out = "{";
+      bool first = true;
+      for ( const auto& kv : sorted )
+      {
+        if ( !( kv.second > 0.0 ) )
+          continue;
+        if ( !first )
+          out += ",";
+        first = false;
+        out += fmt::format( "\"{}\":{}", kv.first, kv.second );
+      }
+      return out + "}";
+    };
+    auto array_json = []( const double* v ) {
+      std::string out = "[";
+      for ( std::uint32_t i = 0; i < rl_credit::STREAM_COUNT; ++i )
+        out += fmt::format( "{}{}", i ? "," : "", v[ i ] );
+      return out + "]";
+    };
+    std::string names = "[";
+    for ( std::uint32_t i = 0; i < rl_credit::STREAM_COUNT; ++i )
+      names += fmt::format( "{}\"{}\"", i ? "," : "", rl_credit::NAMES[ i ] );
+    names += "]";
+    for ( player_t* p : player_no_pet_list )
+    {
+      if ( p->is_enemy() )
+        continue;
+      fmt::print( stderr,
+                  "{{\"rl_credit_census\":1,\"iteration\":{},\"actor\":\"{}\",\"streams\":{},\"real\":{},"
+                  "\"exp\":{},\"total_real\":{},\"orphan_by_action\":{},\"background_by_action\":{}}}\n",
+                  current_iteration, p->name(), names, array_json( p->rl_credit.real ), array_json( p->rl_credit.exp ),
+                  p->solver_damage_so_far, by_action_json( p->rl_orphan_damage_by_action ),
+                  by_action_json( p->rl_background_damage_by_action ) );
+    }
+  }
+  // Phase 271 (271-04, H-3): rewrite the action discovery census with the fight's own evidence
+  // (initMatchesEnd, proc-only children). No-op unless rl_action_census=<path>; reads actions only.
+  rl_action_census::on_combat_end( this );
+  // 261014-bufx (class A1): rewrite the engine buff table with the enemy buffs and dots the fight produced. No-op unless
+  // rl_buff_census=<path>; reads buffs and dots only.
+  rl_buff_census::on_combat_end( this );
   // 261005-branch-teacher: a branch child closes its window here (no-op otherwise).
   solver_branch::on_combat_end( this );
   // tstl-sylvanas 280-03: a search copy closes its window here (no-op otherwise).
@@ -3440,6 +3491,19 @@ void sim_t::init()
         "Disable this warning by adding 'use_item' actions into the action priority list for the actor(s), or set "
         "'use_item_verification=0' in your SimulationCraft input." );
     }
+
+    // Phase 271 (271-04, H-3): opt-in action discovery census, written once every actor is initialised.
+    // No-op unless rl_action_census=<path>; reads actions only.
+    rl_action_census::on_init_finished( this );
+    // 261014-bufx (class A1): the engine buff table of the actor, written once every actor is initialised. No-op unless
+    // rl_buff_census=<path>; reads buffs only.
+    rl_buff_census::on_init_finished( this );
+    // Phase 271.3 (271.3-01, BIND-01/BIND-02): bind every cast button to its catalog line in the default list
+    // (identity of list and line, never a name); refuses by name when a decision-maker is attached and the bind fails.
+    rl_button_bind::on_init_finished( this );
+    // Phase 271.4 (271.4-03, AGREE-01): the dry stock-rotation pick (solver_apl_stock_list=); refuses by name when the
+    // preserved copy is missing or misnamed. No-op unless the option is set and solver_record_apl_choice=1.
+    rl_stock_eval::on_init_finished( this );
   }
 
   // If save= option is used, don't bother initializing profilesets or plots as the main thread is going to
@@ -4672,6 +4736,19 @@ void sim_t::create_options()
   add_option( opt_bool( "rl_capability_selftest", rl_capability_selftest ) );
   // 261009-spd (T3): see sim.hpp's rl_huge_pages doc comment.
   add_option( opt_bool( "rl_huge_pages", rl_huge_pages ) );
+  // Phase 268 (268-05, G268-8): see sim.hpp's rl_credit_census doc comment. Default off.
+  add_option( opt_bool( "rl_credit_census", rl_credit_census ) );
+  // Phase 271 (271-04, H-3): see rl_action_census.hpp. The path lives in that module (a sim_t member would
+  // rebuild every file); the RL rigs run one sim per process. Default empty: nothing is read or written.
+  add_option( opt_string( "rl_action_census", rl_action_census::path_storage() ) );
+  // 261014-bufx (class A1): see rl_buff_census.hpp. Same storage reasoning as rl_action_census. Default empty: nothing is written.
+  add_option( opt_string( "rl_buff_census", rl_buff_census::path_storage() ) );
+  // Phase 271.3 (271.3-01): see rl_button_bind.hpp. The bind report path lives in that module for the same reason
+  // (a sim_t member would rebuild every file). Default empty: no report is written.
+  add_option( opt_string( "rl_bind_report", rl_button_bind::report_path_storage() ) );
+  // Phase 271.4 (271.4-03): names the preserved stock list the recorder walks dry at each net decision; turns the `.apl`
+  // sidecar to format 2. The name lives in rl_stock_eval (a sim_t member would rebuild every file). Default empty: off.
+  add_option( opt_string( "solver_apl_stock_list", rl_stock_eval::list_name_storage() ) );
   add_option( opt_bool( "sequence_soft_fail", sequence_soft_fail ) );
   add_option( opt_bool( "sequence_queue_delay", sequence_queue_delay ) );
   // Deterministic proc-roll option (simc-offline-evaluation-pipeline phase
@@ -5795,6 +5872,24 @@ void sim_t::setup( sim_control_t* c )
     throw sc_runtime_error(
         "solver_record_apl_choice=1 requires rl_translog= (the .apl sidecar has no base path of "
         "its own)." );
+  }
+
+  // Phase 271.4 (271.4-03): solver_apl_stock_list=<name> asks the in-process arm to walk the preserved stock list at
+  // each decision and write both picks into the `.apl` sidecar (format 2). It therefore needs the sidecar
+  // (solver_record_apl_choice=1 with rl_translog=) and the in-process arm (solver_policy=), the only writer of
+  // decision rows. Refuse by name rather than silently doing nothing.
+  if ( !rl_stock_eval::list_name_storage().empty() )
+  {
+    if ( !solver_record_apl_choice )
+    {
+      throw sc_runtime_error(
+          "solver_apl_stock_list= requires solver_record_apl_choice=1 (the picks are written to the .apl sidecar)." );
+    }
+    if ( solver_policy_str.empty() )
+    {
+      throw sc_runtime_error(
+          "solver_apl_stock_list= requires solver_policy= (only the in-process arm writes decision rows)." );
+    }
   }
 
   // 261005-fight-list (quick 261005-mix, plan 01): rl_fight_tags=<setup>:<stat>:<slot>. Empty (the default, and

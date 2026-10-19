@@ -7,6 +7,7 @@
 #include "simulationcraft.hpp"
 #include "class_modules/apl/apl_warrior.hpp"
 #include "action/parse_effects.hpp"
+#include "sim/rl_action_census.hpp"
 
 namespace
 {  // UNNAMED NAMESPACE
@@ -923,6 +924,7 @@ public:
   void parse_assisted_combat_step( const assisted_combat_step_data_t& step, action_priority_list_t* assisted_combat ) override;
   parsed_assisted_combat_rule_t parse_assisted_combat_rule( const assisted_combat_rule_data_t& rule, const assisted_combat_step_data_t& step ) const override;
   std::vector<std::string> action_names_from_spell_id( unsigned int spell_id ) const override;
+  std::vector<unsigned> channel_lock_aura_spell_ids() const override;
 
   action_t* create_action( util::string_view name, util::string_view options ) override;
   void activate() override;
@@ -989,9 +991,19 @@ public:
 
 namespace
 {  // UNNAMED NAMESPACE
+// Phase 268 (268-05, G268-8, FORK-05): the cause of whatever the player is executing right now, promoted
+// to its PROC_OF_* class, for a delayed event to carry and re-push when its damage finally lands (the
+// sc_shaman.cpp lightning-rod / stormflurry idiom). Called while the triggering action's own dispatch frame
+// is still on the cause stack; an empty stack gives the default (orphan) cause. Pure bookkeeping: reads the
+// stack, touches no roll, schedule or ordering.
+inline rl_cause_t warrior_rl_capture_cause( const player_t* p )
+{
+  return p->rl_cause_stack.empty() ? rl_cause_t{} : rl_credit::promote( p->rl_cause_stack.back().cause );
+}
+
 // Template for common warrior action code. See priest_action_t.
 template <class Base>
-struct warrior_action_t : public parse_action_effects_t<Base>
+struct warrior_action_t : public parse_action_effects_t<Base>, public rl_action_census::shape_provider_t
 {
   struct affected_by_t
   {
@@ -1263,6 +1275,43 @@ public:
     return ab::n_targets();
   }
 
+  // PROVISIONAL (owner decision H-4, 2026-10-07): Sweeping Strikes' extra targets come from enemies within the
+  // buff tooltip's 8 yards of the player (spell 260708: "hit 1 additional target within 8 yds"), not from each
+  // action's own melee reach (Mortal Strike 5 yards, Rend / Slam / Heroic Strike 5 yards round the target).
+  // ASSUMPTION: the tooltip's 8 yards is measured from the player plus each enemy's own reach, the same
+  // convention as the engine's "within reach of the player" rule. Unproven in game; see
+  // .planning/todos/pending/2026-10-07-aoe-shape-verification-system-and-live-mismatch-census.md.
+  // The list is cached by the engine and does not follow the buff, so it is always the wide list for an
+  // affected action; the live n_targets() cap (1 without the buff) still keeps single-target play unchanged.
+  static constexpr double RL_SWEEPING_STRIKES_REACH_YARDS = 8.0;
+
+  bool rl_census_distance_override( rl_action_census::distance_override_t& o ) const override
+  {
+    if ( !affected_by.sweeping_strikes )
+      return false;
+    o.active = true;
+    o.shape  = rl_action_census::shape_t::REACH;
+    o.radius = 0.0;
+    o.range  = RL_SWEEPING_STRIKES_REACH_YARDS;
+    return true;
+  }
+
+  std::vector<player_t*>& check_distance_targeting( std::vector<player_t*>& tl ) const override
+  {
+    if ( !affected_by.sweeping_strikes || !ab::sim->distance_targeting_enabled )
+      return ab::check_distance_targeting( tl );
+
+    size_t i = tl.size();
+    while ( i > 0 )
+    {
+      --i;
+      player_t* t = tl[ i ];
+      if ( t != ab::target && t->get_player_distance( *ab::player ) > RL_SWEEPING_STRIKES_REACH_YARDS + t->combat_reach )
+        tl.erase( tl.begin() + i );
+    }
+    return tl;
+  }
+
   double composite_da_multiplier( const action_state_t* s ) const override
   {
     double dm = ab::composite_da_multiplier( s );
@@ -1340,10 +1389,17 @@ public:
     if ( p()->current.distance_to_move > ab::range && ab::range != -1 )
       return false;
 
-    if ( ( p()->channeling || p()->buff.bladestorm->check() ) && !usable_while_channeling )
+    if ( ( p()->channeling || p()->buff.bladestorm->check() ) && refused_while_channel_locked() )
       return false;
 
     return true;
+  }
+
+  // Phase 271.6 plan 18 (G271.6-37): the engine's own answer to "does the channel lock refuse this button". ready() above reads
+  // this same query, so the action census's answer and the engine's refusal are one expression.
+  bool refused_while_channel_locked() const override
+  {
+    return !usable_while_channeling;
   }
 
   bool action_ready() override
@@ -1596,9 +1652,11 @@ public:
   {
     action_t* action;
     player_t* target;
+    // Phase 268 (268-05, G268-8): the cause active when the delay was scheduled (Rampage's later hits).
+    rl_cause_t rl_captured_cause;
 
     delayed_execute_event_t( warrior_t* p, action_t* a, player_t* t, timespan_t delay )
-      : event_t( *p->sim, delay ), action( a ), target( t )
+      : event_t( *p->sim, delay ), action( a ), target( t ), rl_captured_cause( warrior_rl_capture_cause( p ) )
     {
       assert( action->background );
     }
@@ -1612,6 +1670,7 @@ public:
     {
       if ( !target->is_sleeping() )
       {
+        rl_cause_scope_t rl_cause_guard( action->player, rl_captured_cause );
         action->set_target( target );
         action->execute();
       }
@@ -1771,6 +1830,9 @@ struct avatar_t : public warrior_spell_t
     parse_options( options_str );
     harmful   = false;
     target    = p;
+    // 271.6-07 (G271.6-3, G271.6-13): an instant self buff with no range line can be used while running; range -1 is the
+    // warrior convention for "any distance" (the distance rule in warrior_action_t::ready() skips it).
+    range     = -1;
 
     if ( p->talents.mountain_thane.avatar_of_the_storm->ok() )
       avatar_of_the_storm_duration = timespan_t::from_seconds( p->talents.mountain_thane.avatar_of_the_storm->effectN( 3 ).base_value() );
@@ -3197,6 +3259,24 @@ struct bladestorm_tick_t : public warrior_attack_t
     }
   }
 
+  // 271.6-07 (G271.6-21, arms only, distance targeting on): a primary target beyond the strike's own reach is dropped,
+  // on the model of ravager_tick_t::check_distance_targeting, so the spin never hits an enemy it cannot reach.
+  std::vector<player_t*>& check_distance_targeting( std::vector<player_t*>& tl ) const override
+  {
+    if ( p()->specialization() != WARRIOR_ARMS || !sim->distance_targeting_enabled )
+      return warrior_attack_t::check_distance_targeting( tl );
+
+    warrior_attack_t::check_distance_targeting( tl );  // the stock rules edit tl in place
+    for ( auto it = tl.begin(); it != tl.end(); )
+    {
+      if ( *it == target && target->get_player_distance( *player ) > radius + target->combat_reach )
+        it = tl.erase( it );
+      else
+        ++it;
+    }
+    return tl;
+  }
+
   double composite_da_multiplier( const action_state_t* state ) const override
   {
     double m = warrior_attack_t::composite_da_multiplier( state );
@@ -3239,6 +3319,10 @@ struct bladestorm_t : public warrior_attack_t
     interrupt_auto_attack = false;
     travel_speed                      = 0;
     internal_cooldown->duration = 0_s; // allow Anger Management to reduce the cd properly due to having both charges and cooldown entries
+    // 271.6-07 (G271.6-13, G271.6-15): the spell has no range line, so the warrior distance rule must not refuse it while
+    // running (range -1); the reach rule in ready() below is what keeps it honest: legal only with an enemy in the strike
+    // radius where the player actually is.
+    range = -1;
 
     bladestorm_mh->weapon             = &( player->main_hand_weapon );
     add_child( bladestorm_mh );
@@ -3266,6 +3350,17 @@ struct bladestorm_t : public warrior_attack_t
         add_child( bloodbath );
       }
     }
+  }
+
+  // 271.6-07 (G271.6-15 a and b; owner ~16:00Z 2026-10-11: "it might be smart to mask aoe spells that dont have a target,
+  // if they dont have any units in range."): the one legality producer for Bladestorm. The hand-written action list reaches
+  // it through action_ready(), the net's mask through read_action_gate_bits (which calls ready()), so both deciders obey
+  // the same rule. The generic action_t::ready() deliberately does NOT carry it (it would reach enhancement's play).
+  bool ready() override
+  {
+    if ( !warrior_attack_t::ready() )
+      return false;
+    return rl_action_census::any_enemy_around_player( player, bladestorm_mh->radius );
   }
 
   void execute() override
@@ -3310,7 +3405,24 @@ struct bladestorm_t : public warrior_attack_t
       return;
     }
 
+    // Phase 268 (268-05, G268-8): every strike this tick fires (the unhinged Mortal Strike / Bloodthirst
+    // and the main-hand / off-hand strikes below) is credited to the Bladestorm press that started the
+    // dot, as a dot tick, whichever path calls tick() (a scheduled tick, the final partial tick, tick zero).
+    // Same stamp the generic dot tick scope builds (dot.cpp dot_tick_event_t::execute()).
+    rl_cause_scope_t rl_cause_guard(
+        p(),
+        rl_cause_t{ d->state->rl_cause_seq, rl_credit::dot_tick_class( d->state->rl_cause_class ),
+                    d->state->rl_cause_press, d->state->rl_cause_launch },
+        /*owner=*/nullptr, "tick", this );
+
     warrior_attack_t::tick( d );
+
+    // 271.6-07 (G271.6-15, the tick rule "no enemy in reach, no strike"): with nobody inside the strike radius where the
+    // player actually is (a gust has set yards still to run, or every enemy is out of reach) the spin strikes nothing.
+    // The dot keeps ticking, so the buff and its bookkeeping are unchanged.
+    if ( !rl_action_census::any_enemy_around_player( player, bladestorm_mh->radius ) )
+      return;
+
     // As of TWW, since bladestorm has an initial tick, unhinged procs on odd ticks
     if ( ( mortal_strike || bloodthirst || bloodbath ) && ( d->current_tick % 2 == 1 ) )
     {
@@ -3321,7 +3433,14 @@ struct bladestorm_t : public warrior_attack_t
       if ( t )
       {
         if ( mortal_strike )
-          mortal_strike->execute_on_target( t );
+        {
+          // 271.6-07 (G271.6-21, arms only, distance targeting on): the Unhinged Mortal Strike is skipped when its target
+          // is beyond that strike's own reach.
+          const bool in_reach = !sim->distance_targeting_enabled || mortal_strike->range <= 0.0 ||
+                                t->get_player_distance( *player ) <= mortal_strike->range + t->combat_reach;
+          if ( in_reach )
+            mortal_strike->execute_on_target( t );
+        }
         if ( bloodthirst || bloodbath )
         {
           if ( bloodbath && p()->talents.fury.reckless_abandon->ok() && p()->buff.recklessness->check() )
@@ -3617,6 +3736,12 @@ struct cleave_t : public warrior_attack_t
   double rage_from_frothing_berserker;
   action_t* reap_the_storm;
   warrior_attack_t* rend;
+  rl_action_census::filter_descriptor_t rl_cone;  // Phase 271 (271-04): the census explains the filter above
+  bool rl_census_filter( rl_action_census::filter_descriptor_t& f ) const override
+  {
+    f = rl_cone;
+    return rl_cone.kind != rl_action_census::filter_kind_t::NONE;
+  }
   cleave_t( warrior_t* p, util::string_view options_str )
     : warrior_attack_t( "cleave", p, p->talents.arms.cleave ),
     fervor_slam( nullptr ),
@@ -3629,6 +3754,27 @@ struct cleave_t : public warrior_attack_t
     weapon = &( player->main_hand_weapon );
     aoe = -1;
     reduced_aoe_targets = p->talents.arms.cleave->effectN( 2 ).base_value();
+
+    // PROVISIONAL (owner decision H-4, 2026-10-07): Cleave is a cone from the player toward its target, not a circle
+    // round the target. ASSUMPTION: spell 845's "Cone Angle : 102 degrees" and effect target "Enemies in Cone to
+    // Targeted Enemy (104)" mean a 102 degree cone centred on the player-to-target direction, out to the effect
+    // radius (8 yards) plus each enemy's own reach ("Add Target (Dest) Combat Reach to AOE"). Unproven in game; see
+    // .planning/todos/pending/2026-10-07-aoe-shape-verification-system-and-live-mismatch-census.md.
+    // Same filter-callback mechanism as the Crash Lightning cone. The engine's own around-the-target limit
+    // (radius 8, no reach) still applies on top; the census lists that as a remaining disagreement.
+    const double cone_degrees = std::fabs( data().cone_degrees() );
+    if ( cone_degrees > 0.0 )
+    {
+      rl_cone.kind           = rl_action_census::filter_kind_t::CONE;
+      rl_cone.axis           = rl_action_census::filter_axis_t::TOWARD_TARGET;
+      rl_cone.cos_half_angle = std::cos( 0.5 * cone_degrees * 3.14159265358979323846 / 180.0 );
+      rl_cone.radius         = radius;
+      target_filter_callback = [ this ]( const action_t*, player_t* candidate ) {
+        if ( !sim->distance_targeting_enabled || candidate == target )
+          return true;
+        return rl_action_census::filter_contains( rl_cone, player, target, candidate );
+      };
+    }
 
     proc_slayers_strike = true;
     proc_slayers_strike_per_target = true;
@@ -3739,6 +3885,44 @@ struct colossus_smash_t : public warrior_attack_t
     weapon = &( player->main_hand_weapon );
     aoe = -1;
     reduced_aoe_targets = p->talents.arms.colossus_smash->effectN( 3 ).base_value();
+
+    // PROVISIONAL (owner decision H-4, 2026-10-07): Colossus Smash hits an area in FRONT of the player, not a full
+    // circle round the player. ASSUMPTION: spell 167105's effect target "Front of Self (47) -> at Enemy in Area (16)"
+    // with "Radius: 1.5 - 10 yards" means the half circle ahead of the player (the side facing its target) out to
+    // the maximum radius (10 yards, the action's own radius) plus each enemy's reach; the 1.5 yard minimum is the
+    // near edge of the area and is NOT modelled (an enemy closer than that, in front, is still hit). Unproven in
+    // game; see .planning/todos/pending/2026-10-07-aoe-shape-verification-system-and-live-mismatch-census.md.
+    rl_front.kind           = rl_action_census::filter_kind_t::CONE;
+    rl_front.axis           = rl_action_census::filter_axis_t::TOWARD_TARGET;
+    rl_front.cos_half_angle = 0.0;  // 90 degrees either side of the player-to-target direction: the front half plane
+    rl_front.radius         = radius;
+    // 271.6-07 (G271.6-24, owner ~16:00Z 2026-10-11 "mask aoe spells that dont have a target, if they dont have any units
+    // in range"): the aimed target is no longer exempt, so a target outside the front half circle is dropped like any other
+    // enemy outside it, and the strike lands on the enemies inside the half circle only. `range` stays 0 on purpose: the
+    // aim binder refuses at bind time any aimed action whose range differs from the generated table (rl_target_select.cpp),
+    // and a range of 0 keeps the warrior distance rule refusing the button while running, as before this phase.
+    target_filter_callback  = [ this ]( const action_t*, player_t* candidate ) {
+      if ( !sim->distance_targeting_enabled )
+        return true;
+      return rl_action_census::filter_contains( rl_front, player, target, candidate );
+    };
+  }
+
+  // 271.6-07 (G271.6-15, G271.6-24): the reach rule. The game's range check cannot gate this button (its spell has no range
+  // line), so it is legal only when at least one enemy stands inside its front half circle where the player actually is
+  // (false while the player has more yards still to run than the radius; true with distance targeting off).
+  bool ready() override
+  {
+    if ( !warrior_attack_t::ready() )
+      return false;
+    return rl_action_census::any_enemy_in_player_shape( player, target, rl_front, radius );
+  }
+
+  rl_action_census::filter_descriptor_t rl_front;  // Phase 271 (271-04): the census explains the filter above
+  bool rl_census_filter( rl_action_census::filter_descriptor_t& f ) const override
+  {
+    f = rl_front;
+    return rl_front.kind != rl_action_census::filter_kind_t::NONE;
   }
 
   void impact( action_state_t* s ) override
@@ -5282,6 +5466,8 @@ struct sweeping_strikes_t : public warrior_spell_t
   {
     parse_options( options_str );
     callbacks = false;
+    // 271.6-07 (G271.6-3, G271.6-13): an instant self buff with no range line can be used while running (range -1).
+    range     = -1;
   }
 
   void execute() override
@@ -5821,6 +6007,59 @@ struct ravager_tick_t : public warrior_attack_t
 {
   double rage_from_ravager;
   timespan_t ravaged_debuff_duration;
+  // Phase 268 (268-05, G268-8): the cause of the Ravager press, captured by ravager_t::execute() and
+  // re-pushed around every pulse (the pulses fire from ground_aoe_event_t events with an empty cause
+  // stack). One slot per tick action: a new press replaces it, and Ravager's duration is shorter than
+  // its cooldown, so pulses of two presses never overlap.
+  rl_cause_t rl_captured_cause;
+
+  // PROVISIONAL (owner decision H-4, 2026-10-07): the arms Ravager's pulses hit enemies around the GROUND POINT where it
+  // was placed (the target's position at the press), not around whichever target the pulse is aimed at.
+  // ASSUMPTION: spell 156287's effect target "at Area (87) -> at Enemy in Area (16)" with radius 0 - 8 yards means an
+  // 8 yard circle (plus each enemy's reach) round a fixed point. The in-game Ravager also "chases nearby enemies"
+  // (spell 228920 text); that movement is NOT modelled. Unproven in game; see
+  // .planning/todos/pending/2026-10-07-aoe-shape-verification-system-and-live-mismatch-census.md.
+  // Only the arms Ravager button turns this on (rl_ground_enabled); the Whirling Blade copy keeps the stock rule.
+  bool   rl_ground_enabled = false;
+  bool   rl_has_ground     = false;
+  double rl_ground_x       = 0.0;
+  double rl_ground_y       = 0.0;
+
+  void rl_place_ground( double x, double y )
+  {
+    rl_ground_x   = x;
+    rl_ground_y   = y;
+    rl_has_ground = true;
+    target_cache.is_valid = false;  // a new press places a new point: the cached hit list is stale
+  }
+
+  bool rl_census_distance_override( rl_action_census::distance_override_t& o ) const override
+  {
+    if ( !rl_ground_enabled )
+      return warrior_attack_t::rl_census_distance_override( o );
+    o.active = true;
+    o.shape  = rl_action_census::shape_t::GROUND;
+    o.radius = radius;
+    o.range  = range;
+    return true;
+  }
+
+  std::vector<player_t*>& check_distance_targeting( std::vector<player_t*>& tl ) const override
+  {
+    if ( !rl_ground_enabled || !rl_has_ground || !sim->distance_targeting_enabled )
+      return warrior_attack_t::check_distance_targeting( tl );
+
+    size_t i = tl.size();
+    while ( i > 0 )
+    {
+      --i;
+      player_t* t = tl[ i ];
+      if ( t != target && t->get_position_distance( rl_ground_x, rl_ground_y ) > radius + t->combat_reach )
+        tl.erase( tl.begin() + i );
+    }
+    return tl;
+  }
+
   ravager_tick_t( warrior_t* p, util::string_view name, timespan_t ravaged_debuff_duration )
     : warrior_attack_t( name, p, p->find_spell( 156287 ) ),
       rage_from_ravager( p->specialization() == WARRIOR_PROTECTION ? p->find_spell( 334934 )->effectN( 1 ).resource( RESOURCE_RAGE ) : 0 ),
@@ -5847,6 +6086,8 @@ struct ravager_tick_t : public warrior_attack_t
 
   void execute() override
   {
+    // Pulse: credit the damage to the Ravager press that created the ground effect.
+    rl_cause_scope_t rl_cause_guard( p(), rl_captured_cause );
     warrior_attack_t::execute();
 
     if ( execute_state->n_targets > 0 )
@@ -5892,6 +6133,7 @@ struct ravager_t : public warrior_attack_t
     }
 
     add_child( ravager );
+    ravager->rl_ground_enabled = true;  // PROVISIONAL (owner decision H-4, 2026-10-07): see ravager_tick_t
   }
 
   // This background version is strictly for use with whirling blade talent
@@ -5945,6 +6187,11 @@ struct ravager_t : public warrior_attack_t
   void execute() override
   {
     warrior_attack_t::execute();
+
+    // Phase 268 (268-05, G268-8): this press's dispatch frame is still on the cause stack here.
+    ravager->rl_captured_cause = warrior_rl_capture_cause( p() );
+    if ( ravager->rl_ground_enabled )
+      ravager->rl_place_ground( target->x_position, target->y_position );  // the point the pulses below are placed at
 
     if ( sim->dbc->wowv() < wowv_t( 12, 1, 0 ) )
     {
@@ -6635,12 +6882,14 @@ struct fury_whirlwind_parent_t : public warrior_attack_t
     if ( oh_first_attack )
       oh_first_attack->execute_on_target( target );
 
-    make_event( *sim, timespan_t::from_millis(data().effectN( 6 ).misc_value1()), [ this ]() { mh_other_attack->execute_on_target( target ); } );
-    make_event( *sim, timespan_t::from_millis(data().effectN( 8 ).misc_value1()), [ this ]() { mh_other_attack->execute_on_target( target ); } );
+    // Phase 268 (268-05, G268-8): the follow-up strikes carry this press's cause (captured by value).
+    const rl_cause_t rl_c = warrior_rl_capture_cause( p() );
+    make_event( *sim, timespan_t::from_millis(data().effectN( 6 ).misc_value1()), [ this, rl_c ]() { rl_cause_scope_t rl_cause_guard( player, rl_c ); mh_other_attack->execute_on_target( target ); } );
+    make_event( *sim, timespan_t::from_millis(data().effectN( 8 ).misc_value1()), [ this, rl_c ]() { rl_cause_scope_t rl_cause_guard( player, rl_c ); mh_other_attack->execute_on_target( target ); } );
     if ( oh_other_attack )
     {
-      make_event( *sim, timespan_t::from_millis(data().effectN( 7 ).misc_value1()), [ this ]() { oh_other_attack->execute_on_target( target ); } );
-      make_event( *sim, timespan_t::from_millis(data().effectN( 9 ).misc_value1()), [ this ]() { oh_other_attack->execute_on_target( target ); } );
+      make_event( *sim, timespan_t::from_millis(data().effectN( 7 ).misc_value1()), [ this, rl_c ]() { rl_cause_scope_t rl_cause_guard( player, rl_c ); oh_other_attack->execute_on_target( target ); } );
+      make_event( *sim, timespan_t::from_millis(data().effectN( 9 ).misc_value1()), [ this, rl_c ]() { rl_cause_scope_t rl_cause_guard( player, rl_c ); oh_other_attack->execute_on_target( target ); } );
     }
   }
 
@@ -6720,16 +6969,25 @@ struct arms_whirlwind_parent_t : public warrior_attack_t
       first_attack->weapon = &( p->main_hand_weapon );
       first_attack->radius = radius;
       add_child( first_attack );
+      // PROVISIONAL (owner decision H-4, 2026-10-07): the three strikes are centred on the PLAYER. add_child copied the
+      // button's range (100 yards) onto the strike, which made the engine count round the TARGET; a range of 0 with
+      // a radius makes it count round the player plus each enemy's reach. ASSUMPTION: spell 199658's effect target
+      // "at Self (18) -> at Enemy in Area (16)" with radius 0 - 8 yards means the 8 yard circle round the player.
+      // Unproven in game; see
+      // .planning/todos/pending/2026-10-07-aoe-shape-verification-system-and-live-mismatch-census.md.
+      first_attack->range = 0.0;
 
       second_attack         = new whirlwind_arms_damage_t( "whirlwind_2", p, data().effectN( 2 ).trigger() );
       second_attack->weapon = &( p->main_hand_weapon );
       second_attack->radius = radius;
       add_child( second_attack );
+      second_attack->range = 0.0;  // PROVISIONAL (owner decision H-4, 2026-10-07): centred on the player, see first strike
 
       third_attack         = new whirlwind_arms_damage_t( "whirlwind_3", p, data().effectN( 3 ).trigger() );
       third_attack->weapon = &( p->main_hand_weapon );
       third_attack->radius = radius;
       add_child( third_attack );
+      third_attack->range = 0.0;  // PROVISIONAL (owner decision H-4, 2026-10-07): centred on the player, see first strike
 
       if ( p->talents.arms.fervor_of_battle->ok() )
       {
@@ -6749,8 +7007,10 @@ struct arms_whirlwind_parent_t : public warrior_attack_t
     if ( p() -> talents.arms.fervor_of_battle.ok() && first_attack->num_targets_hit >= p() -> talents.arms.fervor_of_battle -> effectN( 1 ).base_value() )
       fervor_slam->execute_on_target( target );
 
-    make_event( *sim, timespan_t::from_millis(data().effectN( 2 ).misc_value1()), [ this ]() { second_attack->execute_on_target( target ); } );
-    make_event( *sim, timespan_t::from_millis(data().effectN( 3 ).misc_value1()), [ this ]() { third_attack->execute_on_target( target ); } );
+    // Phase 268 (268-05, G268-8): the follow-up strikes carry this press's cause (captured by value).
+    const rl_cause_t rl_c = warrior_rl_capture_cause( p() );
+    make_event( *sim, timespan_t::from_millis(data().effectN( 2 ).misc_value1()), [ this, rl_c ]() { rl_cause_scope_t rl_cause_guard( player, rl_c ); second_attack->execute_on_target( target ); } );
+    make_event( *sim, timespan_t::from_millis(data().effectN( 3 ).misc_value1()), [ this, rl_c ]() { rl_cause_scope_t rl_cause_guard( player, rl_c ); third_attack->execute_on_target( target ); } );
   }
 
   bool ready() override
@@ -8962,6 +9222,17 @@ std::vector<std::string> warrior_t::action_names_from_spell_id( unsigned int spe
 {
   // If we need to do spell id replacements for blizz apl, see DK module for an example
   return player_t::action_names_from_spell_id( spell_id );
+}
+
+// warrior_t::channel_lock_aura_spell_ids ==============================
+// Phase 271.6 plan 18 (G271.6-37): the buff that warrior_action_t::ready() reads as the lock is Bladestorm's; its spell is the
+// Slayer variant (446035) with Unrelenting Onslaught and the talent's own otherwise. Listed only when the buff exists and its
+// spell data is enabled.
+std::vector<unsigned> warrior_t::channel_lock_aura_spell_ids() const
+{
+  if ( buff.bladestorm && buff.bladestorm->data().ok() )
+    return { buff.bladestorm->data().id() };
+  return {};
 }
 
 // warrior_t::arise() ======================================================

@@ -28,6 +28,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "sim/rl_policy_constants_select.h"
+
 class action_t;
 class player_t;
 struct sim_t;
@@ -53,14 +55,17 @@ bool rl_counts_as_enemy( const player_t* t );
 // against its owner's tag). nullptr when there is none (a non-RL-actor player never gets one).
 player_t* rl_chosen_enemy_of( const player_t* p );
 
-// "Can be hit": `rl_counts_as_enemy( t )`, awake, not invulnerable, not an untargetable enemy
-// (hazard or bystander), and legal under `generic_filter` for p's own Lightning Bolt (harmful). Throws
-// by name when p has no lightning_bolt action. Reuses the two existing helpers; never a third copy.
+// "Can be hit": `rl_counts_as_enemy( t )`, awake, not invulnerable, not an untargetable enemy (hazard or bystander), and legal
+// under `generic_filter` for AT LEAST ONE of p's aimed actions (RL_TARGETED_TOKENS; 271-10, owner decision T-2: there is no probe
+// spell any more). An aimed action with no range line (range <= 0) has no distance test of its own and is left out of that test
+// unless no aimed action has a range line. Throws by name (at the actor's first bind) when an aimed action's range disagrees with
+// the header's generated RL_AIMED_SPELL_RANGE_YARDS, or when p has none of the aimed actions. Reuses the existing helpers; never
+// a third copy.
 bool rl_can_be_hit( const player_t* p, const player_t* t );
 
-// The chooser. Keeps the tag while it can be hit; otherwise, if some enemy can be hit, picks the first
-// in `sim->target_non_sleeping_list` order among those also legal for p's Stormstrike (else the first
-// that can be hit); with nothing hittable the old tag is kept. REFUSES (throws) any player that is not
+// The chooser. Keeps the tag while it can be hit; otherwise (271-10, owner decision T-3) picks the NEAREST enemy within melee
+// reach (the registry's RL_TAG_MELEE_ACTION, else the shortest-range aimed action), falling back to the nearest enemy that can
+// be hit at all when none is in melee reach; with nothing hittable the old tag is kept. REFUSES (throws) any player that is not
 // the RL actor: every call site must carry the RL-actor gate itself.
 void refresh_chosen( player_t* p );
 
@@ -82,6 +87,12 @@ struct enemy_fact
   double    health_pct              = 0.0;
   bool      is_boss                 = false;
   bool      hazard{ false };                  // tstl-sylvanas 262-04 (R-6): the actor's own sheet-fight hazard flag (floor patch, ghost). Always false by construction (262-09, review IN-01): every candidate that reaches build_enemy_fact has already passed rl_counts_as_enemy, which refuses a hazard, so a hazard is never a target and never counted. Kept as documentation of that rule, not as a net column (R-6: a per-spell pick never sees a hazard, so it would be a constant zero). The brace form dates from target_features_derive.py, which parsed every `name = default;` line of this struct as a per-target feature; Phase 259 deleted that script (feature names now come from the registry), so `= false` would be safe too.
+  // Phase 268 plan 03 (G268-6, FORK-03, owner D6): one value per row of the spec header's RL_DECLARED_FACTS, filled by ONE generic loop
+  // in build_enemy_fact (read_declared_fact below) -- a dot's remaining time, or a debuff's remaining time or stacks, of an aura the
+  // actor itself put on the candidate, 0 when absent. Sized max(count, 1): a zero-length array is not valid C++, and readers iterate
+  // by RL_DECLARED_FACT_COUNT. The named aura fields below stay for the shaman scorers and the decision dump; the shaman class
+  // plugin fills them FROM this array, so a named field and its declared value come from one lookup and cannot disagree.
+  double    declared[ RL_DECLARED_FACT_COUNT > 0 ? RL_DECLARED_FACT_COUNT : 1 ] = {};
   double    flame_shock_remaining   = 0.0;    // candidate->get_dot("flame_shock", a->player)->remains() -- works on ANY enemy, not only the current target (P-5's fix point)
   int       neighbours_within_radius = 0;     // OBS-03/R-U: live enemies within the CALLING action's own `a->radius` (+ `combat_reach`) of the candidate -- deterministic geometry, never a target-cache read. Replaces the always-equal splash/jump neighbour-count pair this struct used to carry (OBS-01/03 landed together, tstl-sylvanas 232-02).
   bool      is_current_target       = false;  // candidate == p->target
@@ -182,12 +193,34 @@ int count_hits_within_radius( player_t* caster, player_t* candidate, double radi
 int count_new_flame_shock_neighbours( player_t* caster, player_t* candidate, double radius, int cap,
                                        bool include_pick );
 
+// Phase 268 plan 03 (G268-6, FORK-03): the value of ONE declared fact for one candidate. `source` is the actor that put the aura
+// on the candidate (a->player). dot_remaining: the remaining seconds of the candidate's dot of that engine name when such a dot
+// exists, else the remaining seconds of its debuff of that name, else 0.0. debuff_stacks: the debuff's current stacks (check(),
+// never up(), which mutates benefit bookkeeping) when such a debuff exists, else the dot's current stack count, else 0.0. Both
+// lookups are the non-creating find / find_dot (never get / get_dot, which would create the object on a candidate that never had it).
+double read_declared_fact( const rl_declared_fact& fact, player_t* source, player_t* candidate );
+
+// The index in RL_DECLARED_FACTS of the row whose slot names the feature `feature_name` in RL_TARGET_FEATURE_NAMES, or
+// RL_DECLARED_FACT_COUNT when the header declares no such fact. A class plugin resolves its named fields through this once.
+std::size_t declared_fact_index_for_feature( const char* feature_name );
+
 // The four-clause generic filter (D-09), checked in the SAME order action_t::target_ready checks
 // them (alive, immune-while-harmful, reach, front) -- generic_filter and target_ready must never
 // disagree about what counts as reachable, or the mask and the cast drift apart (T-228-02-01).
 // `harmful` is a real parameter, not read off `a`, so a future non-harmful targeted action does
 // not silently skip the immunity clause by construction (R-E's guard, mirrored here).
 bool generic_filter( const action_t* a, player_t* candidate, bool harmful );
+
+// 261013-aimx class A: is this aimed action's button flagged by the generated header as carrying a target-health gate
+// (RL_TARGETED_TOKEN_HEALTH_GATED)? False for every action of a header without the table. When true, the candidate list of the
+// button (select(), build_candidate_facts) holds only the enemies for which the engine's own target_ready answers yes.
+bool aimed_action_health_gated( const action_t* a );
+
+// 261013-aimx class A, the bind-time check (the model is rl_action_census::check_header_reach_classes): for each aimed button the actor
+// has, the engine's own answer to "does target_ready refuse an enemy at full health that generic_filter lets through" must equal the
+// header's RL_TARGETED_TOKEN_HEALTH_GATED entry, else the run is refused at the first decision by name. A button with no such probe
+// enemy (nobody at full health within its reach) says nothing. A header without the table is not asked. Reads only.
+void check_header_health_gates( player_t* p );
 
 // Builds the fact record for one candidate against the given resolved action. OBS-01/R5-5
 // (tstl-sylvanas 232-02) dropped the `previous_pick` parameter entirely -- the sticky tie-break
@@ -405,10 +438,20 @@ bool is_targeted_action( const action_t* resolved );
 std::size_t targeted_action_token_count();
 const char* const* targeted_action_tokens();
 
-// Dispatches a resolved targeted action to its own preference function by name_str. Returns
-// nullptr for anything is_targeted_action() would refuse (never called in that case by
-// read_action_gate_bits, but kept total rather than partial for safety).
+// The aiming rule of a resolved targeted action: the rule the spec header's RL_RULE_PREFS names for its
+// token, resolved once per actor through the generic rules (current_target, shortest_ttd) or the
+// actor's class plugin (rl_class_plugins.hpp). An action whose name has no row uses current_target.
+// Returns nullptr only for a null argument. An unknown rule name was refused at the actor's arise.
 preference_fn preference_for( const action_t* resolved );
+
+// The generic rule current_target: the same score for every candidate, so select()'s tie ladder
+// (the player's current target first, then the stable actor order) picks the current target whenever
+// it is a legal candidate.
+double preference_current_target( const action_t* a, const enemy_fact& fact );
+
+// The Thorim's-aware strike rule, chosen per decision between the shortest-time-to-die, Tempest and
+// Chain Lightning scorers. Exposed for the shaman class plugin's rule table (rl_class_plugins.cpp).
+preference_fn preference_for_thorims_aware_strike( const action_t* resolved, bool is_stormstrike );
 
 // ---------------------------------------------------------------------------------------------
 // The eight preferences (D-10, R-B). Exposed individually (rather than only through

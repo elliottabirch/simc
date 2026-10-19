@@ -305,7 +305,7 @@
 #pragma once
 
 #include "sim/rl_credit.hpp"
-#include "sim/rl_policy_constants.h"
+#include "sim/rl_policy_constants_select.h"
 #include "sim/rl_proc_counters.hpp"
 
 #include "util/io.hpp"
@@ -320,6 +320,12 @@
 struct sim_t;
 struct player_t;
 struct ZSTD_CCtx_s;
+
+// 271.4-03: the dry stock-rotation pick the `.apl` sidecar (format 2) is written from.
+namespace rl_stock_eval
+{
+struct pick_t;
+} // namespace rl_stock_eval
 
 namespace rl_translog
 {
@@ -372,7 +378,17 @@ inline constexpr std::uint32_t LIST_WORD_SENTINEL = 0xFFFFFFFFu;
 // compile (tstl 220-03, OBS-06; formula updated 260901-pb1 Task 3 for version 5, updated again
 // 228-09 for version 6, updated again 230-04 for version 7, updated again 260917-pcn for
 // version 9 -- see top-of-file comment).
+#ifdef RL_SPEC_HEADER
+// Phase 268 plan 06 (FORK-06): a build with a non-default spec header (-DRL_SPEC=<spec>) has that spec's own observation width, so
+// its row size is COMPUTED from the very formula the static_assert below states (the literal in the #else branch is enhancement's
+// pinned value, and the only declaration of RECORD_SIZE that obs_transport_coupling.selftest.py's source parse sees).
+inline constexpr std::uint32_t RECORD_SIZE =
+    ( ( 45u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) +
+        4u * static_cast<std::uint32_t>( RL_TARGET_SLOTS ) * static_cast<std::uint32_t>( RL_TARGET_FEATURES ) + 7u + 7u ) / 8u ) * 8u +
+    8u * rl_proc::COUNT + 8u * 2u * rl_credit::STREAM_COUNT + ( 16u + 8u * 2u * rl_credit::STREAM_COUNT );
+#else
 inline constexpr std::uint32_t RECORD_SIZE = 3568u;  // 261002-8rv (format 14, 2026-10-02): 3192 -> 3568 at width
+#endif
                                                        // 419: roundup8(45 + 4*419 + 4*16*23 + 7 + 7) = 3200,
                                                        // + 160 proc + 96 credit = 3456, + 112 chosen = 3568.
                                                        // (3192 was width 324/325, formats 12 and 13.)
@@ -503,11 +519,13 @@ inline constexpr std::uint32_t PROC_BLOCK_OFFSET =
         7u + 7u ) / 8u ) * 8u;  // 266-21: +7 (was +5) -- chosen_enemy_actor_index takes two more bytes
                                 // (259-05: +5 was +4 -- observed_candidate_slot took one more byte)
 inline constexpr std::uint32_t PROC_BLOCK_SIZE = 8u * rl_proc::COUNT;
+#ifndef RL_SPEC_HEADER   // 268-06: enhancement's width pin; another spec's row size is the formula's value, checked below
 static_assert( PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE == 3360u,
                "PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE must equal the version-14 pre-credit row size at "
                "width 419 (RL_OBS_DIM=419) and 16 target slots (3360; was 2984 at width 324/325, "
                "version 12/13, 2960 at width 319, version 11, and 2224 at 8 slots and 260928-tb9's "
                "width, version 10) -- CREDIT_BLOCK_OFFSET below is pinned to that exact value" );
+#endif
 // 260918-cbc: the version-9 row size (unchanged formula) is where the new credit-by-cause
 // block starts; CREDIT_BLOCK_SIZE is the block's own byte count (two double[STREAM_COUNT]
 // arrays -- see rl_credit.hpp's rl_credit_streams_t). Declared after PROC_BLOCK_SIZE so the
@@ -524,9 +542,11 @@ inline constexpr std::uint32_t CHOSEN_BLOCK_SIZE = 16u + 8u * 2u * rl_credit::ST
 static_assert( RECORD_SIZE == CHOSEN_BLOCK_OFFSET + CHOSEN_BLOCK_SIZE,
                "RECORD_SIZE must be roundup8(45 + 4*RL_OBS_DIM + 4*RL_TARGET_SLOTS*RL_TARGET_FEATURES + 7) + "
                "8*rl_proc::COUNT + 16*rl_credit::STREAM_COUNT + 16 + 16*rl_credit::STREAM_COUNT" );
+#ifndef RL_SPEC_HEADER   // 268-06: enhancement's width pin (see above)
 static_assert( RECORD_SIZE == 3568u && CHOSEN_BLOCK_OFFSET == 3456u && CHOSEN_BLOCK_SIZE == 112u,
                "version 14 at width 419 and 16 target slots: RECORD_SIZE 3568 = 3456 + a 112-byte "
                "chosen block at offset 3456 (261002-8rv)" );
+#endif
 static_assert( RL_OBS_DIM >= 2, "footer_record's zero40[RL_OBS_DIM-1] needs at least one element" );
 inline constexpr std::uint32_t HEADER_SIZE = 272u;  // 266-01: 264 -> 272 (funnel_mode @264, chooser_state @268)
                                                       // 259-05: 256 -> 264 (aim_exploration @256, aim_state @260)
@@ -1285,6 +1305,15 @@ inline constexpr std::uint32_t HEADER_SIZE = 32u;
 inline constexpr std::uint32_t KIND_DECISION = 1u;
 inline constexpr std::uint32_t KIND_FOOTER = 2u;
 
+// Phase 271.4 (271.4-03, AGREE-01): FORMAT 2. Written ONLY when `solver_apl_stock_list=` names a list (with
+// solver_record_apl_choice=1): the decision record then carries the dry stock-rotation pick (rl_stock_eval.hpp) instead of
+// the engine's catalog `apl_choice` name. Format 1 (the option absent) is unchanged byte for byte: same header, same
+// 64-byte record, same footer; FORMAT_VERSION stays 1u. The header, the footer and the record size are shared; only the
+// decision record's body differs (decision_record_v2 below). A format-1 reader refuses a format-2 file by its version
+// field (fail closed). The offsets below are contract AG-1 of plan 271.4-01 and are pinned by static_asserts.
+inline constexpr std::uint32_t FORMAT_VERSION_STOCK = 2u;
+inline constexpr std::size_t STOCK_NAME_BUF_SIZE = 48u;
+
 // Longest name observed across the enhancement Stormbringer profile's own action list is
 // "use_item_voracious_heart_of_ulatek" (35 chars) -- 47 bytes leaves headroom for any
 // equal-or-shorter-length action name in any other profile this sidecar might ever run against,
@@ -1333,6 +1362,33 @@ static_assert( alignof( decision_record ) == 8, "rl_apl_choice::decision_record 
 static_assert( offsetof( decision_record, kind ) == 0 );
 static_assert( offsetof( decision_record, seq ) == 4 );
 static_assert( offsetof( decision_record, name ) == 8 );
+
+// Format 2 decision record (64 bytes, same size as format 1). `mapped_index`: button index of the first ready stock leaf the
+// registry has a button for, -1 none. `strict_index`: the first ready stock leaf, its button index, -1 none ready, -2 it has
+// no button. `boundary`: 0 foreground, 1 off-global-cooldown poll, 2 cast-while-casting poll. `flags`: rl_stock_eval::F_*
+// (1 refused, 2 strict leaf triggers no global cooldown, 4 went through a run/swap list, 8 non-set variable ran, 16 depth
+// limit, 32 name truncated). `strict_name`: the strict leaf's engine name, NUL-terminated, empty when none ready.
+struct alignas( 8 ) decision_record_v2
+{
+  std::uint32_t kind;                       // @0  -- KIND_DECISION
+  std::uint32_t seq;                        // @4  -- the decision row's own seq
+  std::int16_t mapped_index;                // @8
+  std::int16_t strict_index;                // @10
+  std::uint8_t boundary;                    // @12
+  std::uint8_t flags;                       // @13
+  std::uint16_t zero;                       // @14
+  char strict_name[ STOCK_NAME_BUF_SIZE ];  // @16
+};
+static_assert( sizeof( decision_record_v2 ) == RECORD_SIZE, "rl_apl_choice::decision_record_v2 must be exactly RECORD_SIZE bytes" );
+static_assert( alignof( decision_record_v2 ) == 8, "rl_apl_choice::decision_record_v2 must be 8-aligned" );
+static_assert( offsetof( decision_record_v2, kind ) == 0 );
+static_assert( offsetof( decision_record_v2, seq ) == 4 );
+static_assert( offsetof( decision_record_v2, mapped_index ) == 8 );
+static_assert( offsetof( decision_record_v2, strict_index ) == 10 );
+static_assert( offsetof( decision_record_v2, boundary ) == 12 );
+static_assert( offsetof( decision_record_v2, flags ) == 13 );
+static_assert( offsetof( decision_record_v2, zero ) == 14 );
+static_assert( offsetof( decision_record_v2, strict_name ) == 16 );
 
 // Once, at translog close (write_footer()). Mirrors rl_attr::footer_record's own zero-fill
 // convention for every field besides the count.
@@ -1440,7 +1496,11 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq,
                        // tag, `p->rl_chosen_enemy`) at this boundary, caller-resolved (this file is a
                        // writer, not a decision-maker), or CHOSEN_TARGET_SENTINEL_NO_PICK when no tag is
                        // set. Both solver_control.cpp call sites pass it explicitly.
-                       std::uint16_t chosen_enemy_actor_index = CHOSEN_TARGET_SENTINEL_NO_PICK );
+                       std::uint16_t chosen_enemy_actor_index = CHOSEN_TARGET_SENTINEL_NO_PICK,
+                       // 271.4-03 (AGREE-01): the dry stock-rotation pick at this decision, caller-resolved; non-null
+                       // exactly when solver_apl_stock_list= is set (the `.apl` sidecar is then format 2 and a null pick
+                       // is an inconsistency that throws), nullptr otherwise (format 1, unchanged).
+                       const rl_stock_eval::pick_t* stock_pick = nullptr );
 
 // Called from sim_t::combat_end(), after datacollection_end(). Builds and
 // appends the close row, then flushes the buffered rows for this fight to

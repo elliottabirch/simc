@@ -13,6 +13,8 @@
 #include "decision_dump.hpp"
 #include "player/player.hpp"
 #include "sim/event.hpp"
+#include "sim/rl_button_bind.hpp"
+#include "sim/rl_stock_eval.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_target_select.hpp"
 #include "sim/rl_translog.hpp"
@@ -26,6 +28,7 @@
 #include "fmt/format.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -61,68 +64,22 @@ constexpr double WAIT_END_OF_FIGHT_EPSILON_SECONDS = 0.001;
   throw std::runtime_error( "solver_control protocol violation: " + msg );
 }
 
-// Resolves a SimC internal action name (`name_str`) to one of the actor's
-// already-constructed action_t objects. Never constructs a new action --
-// solver_control only selects among what the actor's action list already
-// built at init time (every solver-catalog spell has an unconditional
-// actions+= entry in the generated episode .simc for exactly this reason).
-// Scans p->action_list for the first entry whose name_str matches `name`,
-// preferring a player-CASTABLE (non-background) action_t over a same-name
-// background one. action_t::action_t() (action.cpp) unconditionally
-// self-registers EVERY constructed action into player->action_list --
-// including internal `background = true` helper actions class modules build
-// for buff-triggering/bookkeeping (e.g. sc_paladin.cpp's
-// `active.background_avenging_wrath`, constructed once per talent-init
-// regardless of whether the player's own APL/solver catalog also carries a
-// real, player-castable `avenging_wrath` actions+= entry) -- so a same-name
-// collision is possible whenever a class module ships both a background
-// helper and a real spell under identical name_str. A plain first-match
-// linear scan can therefore return the background helper (construction
-// order is init-sequence-dependent, not alphabetical or list-position
-// stable), which is never `ready()` the way solver_control's caller expects
-// and stalls the episode. Found live: sc_paladin.cpp:3327 constructs
-// `background_avenging_wrath` ahead of the player's real `avenging_wrath`
-// action in the action_list, so a `{"type":"cast","action":"avenging_wrath"}`
-// reply resolved to the background helper and never advanced. This
-// preference is deliberately general (no spell special-case): ANY class
-// module with a background/foreground name_str collision hits the same
-// fix.
-action_t* resolve_action_prefer_castable( player_t* p, const std::string& name )
-{
-  action_t* background_match = nullptr;
-  for ( action_t* a : p->action_list )
-  {
-    if ( a->name_str != name )
-      continue;
-    if ( !a->background )
-      return a;
-    if ( !background_match )
-      background_match = a;
-  }
-  // No player-castable match under this exact name -- fall back to a
-  // same-name background action rather than reporting unresolvable, in case
-  // some class module legitimately has no foreground counterpart for this
-  // token (keeps prior behavior for that case; resolved->ready() downstream
-  // still fails closed if it truly can't be cast).
-  return background_match;
-}
-
-// resolve_action() itself is DECLARED in solver_control.hpp and DEFINED
-// below, inside `namespace solver_control` (221-01, Pattern 2) -- moved out
-// of this anonymous namespace so `rl_policy_obs.cpp`'s engine-truth handle
-// table (read_action_gate_bits) and this file's own accept_cast() below
-// resolve a name to the SAME action_t*, by construction, never by two
-// independently-maintained loops that could drift. It still calls
-// resolve_action_prefer_castable() above unqualified -- an anonymous
-// namespace's members are visible, unqualified, throughout this whole
-// translation unit regardless of which named namespace surrounds the call
-// site, so no qualification is needed for that call.
+// The shared action resolver is solver_control::resolve_action(), DEFINED below inside `namespace solver_control`
+// (221-01, Pattern 2) so `rl_policy_obs.cpp`'s engine-truth handle table (read_action_gate_bits) and this file's
+// own accept_cast() resolve a token to the SAME action_t*, by construction, never by two independently-maintained
+// loops that could drift. Phase 271.3: it reads the bound table of rl_button_bind (the action whose list is the
+// actor's default list and whose recorded line declares the token, fixed once at sim init), and never scans the
+// action list by name.
 
 // Shared 'cast' epilogue (210-05R Task 1) -- both transports resolve their
 // chosen action-name token through the same resolve_action()/ready() gate,
 // so a not-ready cast hits the identical protocol_abort() on either arm
 // (criterion 1's "zero not-ready FATALs" is one grep regardless of which
 // transport answered the boundary).
+//
+// Phase 271.3: the shared resolver returns the action bound to the token at sim init (identity of list and
+// line), or null; a token outside the header resolves to null. The existing unresolvable and not-ready aborts
+// below are unchanged.
 action_t* accept_cast( player_t* p, const std::string& action_name, std::uint64_t seq )
 {
   action_t* resolved = solver_control::resolve_action( p, action_name );
@@ -156,6 +113,15 @@ action_t* accept_cast( player_t* p, const std::string& action_name, std::uint64_
                        "' (seq=" + std::to_string( seq ) +
                        ") with no pick stamped for this decision -- refusing rather than "
                        "recomputing (228-02, D-12)" );
+
+    // 261013-aimx class A, the loud invariant: a button the header flags as health-gated is aimed only among the enemies that pass its
+    // gate (rl_target_select's candidate list), so its final pick must pass the engine's own target_ready. A pick that escaped the
+    // filter (a future exploration path, a head pick outside the stamped block) would otherwise cast silently on an enemy the engine
+    // would refuse, which is how the defect lived for months. Abort by name, never repair.
+    if ( rl_target_select::aimed_action_health_gated( resolved ) && !resolved->target_ready( pick ) )
+      protocol_abort( "'cast' reply named health-gated targeted action '" + action_name + "' (seq=" + std::to_string( seq ) +
+                       ") whose pick fails the engine's own target gate -- the aim candidate list must hold only enemies that pass it "
+                       "(261013-aimx class A)" );
 
     // WR-07 (260902/cr4): the ONE retarget function this call site and the mid-cast re-resolution
     // ladder's fallback arm (action.cpp) both call -- see rl_target_select.hpp's own doc comment.
@@ -350,37 +316,18 @@ namespace solver_control
 // handle table (read_action_gate_bits) and accept_cast() above resolve a
 // token to the SAME action_t* -- this is the single seam that makes
 // "mask/engine agreement" true by construction rather than by census.
-// resolve_action_prefer_castable() stays file-local (anonymous namespace,
-// unchanged) and is called here unqualified.
+//
+// Phase 271.3 (BIND-01): the token resolves through rl_button_bind, which fixed
+// at sim init, for every cast button of the registry header, the one action
+// whose action list is the actor's default list and whose recorded line
+// declares the token. Nothing here scans the action list by name, so a
+// same-name line in any other list (a hand-written sub-list, a precombat line,
+// a class module's helper) can never be a button, whatever order the lists
+// were constructed in. Returns nullptr for a token outside the header, for an
+// actor that is not the registry's actor, and for an unbound actor.
 action_t* resolve_action( player_t* p, const std::string& name )
 {
-  if ( action_t* resolved = resolve_action_prefer_castable( p, name ) )
-    return resolved;
-
-  // Fallback for spells whose *constructed* action_t renames its own
-  // name_str based on live talent state, even though the APL/sequence
-  // CONSTRUCTOR token stays fixed (found live during 116-01 smoke testing:
-  // sc_paladin_retribution.cpp's templars_verdict_t sets name_str to
-  // "final_verdict" once the Final Verdict talent is active, even though
-  // "templars_verdict" remains the only registered create_action() factory
-  // token -- there is no "final_verdict" branch in create_action at all).
-  // scripts/simc-eval/name-map.json intentionally emits ONLY the canonical
-  // constructor-token name ("templars_verdict", never "final_verdict" --
-  // writing the display name as a sequence entry fails SILENTLY, per that
-  // file's own landmine note), so this alias is tried only when the exact
-  // match above fails, keeping the driver/worker/name-map unaware of the
-  // live rename.
-  static const std::unordered_map<std::string, std::string> NAME_STR_RENAME_ALIASES = {
-    { "templars_verdict", "final_verdict" },
-  };
-  auto alias_it = NAME_STR_RENAME_ALIASES.find( name );
-  if ( alias_it != NAME_STR_RENAME_ALIASES.end() )
-  {
-    if ( action_t* resolved = resolve_action_prefer_castable( p, alias_it->second ) )
-      return resolved;
-  }
-
-  return nullptr;
+  return rl_button_bind::bound_action_for_token( p, name );
 }
 
 // 266-21 (funnel mode, record format 13): the actor index of the chosen enemy (the tag) a decision row
@@ -393,20 +340,16 @@ static std::uint16_t chosen_enemy_index_of( const player_t* p )
                                        : rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK;
 }
 
-// 261005-tch2 (solver_mask_no_enemy): true when no enemy can be attacked -- every enemy on the
-// non-sleeping list is invulnerable (an `invulnerable` raid event, e.g. a route layout's immune boss)
-// or a sheet hazard (never an active enemy, player.cpp's arise), or the list is empty. Read live at
-// the boundary, so a pack that arrived earlier in the same millisecond counts.
-static bool no_attackable_enemy( sim_t* sim )
+// 261005-tch2 (solver_mask_no_enemy): true when no enemy can be attacked. 271-10 (owner decision T-2): "attackable" is now "can be
+// hit by some aimed action" (rl_target_select::rl_can_be_hit: alive, a counted enemy, not invulnerable, not untargetable, and
+// within the range of at least one aimed spell), so the walk between packs is when NO aimed spell can hit anything -- an immune
+// boss, a hazard, or every enemy out of every aimed spell's range. Read live at the boundary, so a pack that arrived earlier in
+// the same millisecond counts. `p` is the RL actor (both call sites are past choose()'s actor gate).
+static bool no_attackable_enemy( player_t* p )
 {
-  for ( player_t* t : sim->target_non_sleeping_list )
-  {
-    if ( t->sheet_hazard )
-      continue;
-    if ( t->debuffs.invulnerable && t->debuffs.invulnerable->check() )
-      continue;
-    return false;
-  }
+  for ( player_t* t : p->sim->target_non_sleeping_list )
+    if ( rl_target_select::rl_can_be_hit( p, t ) )
+      return false;
   return true;
 }
 
@@ -648,7 +591,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
   // not a decision at all -- nothing executes, and it returns BEFORE the seq increment below so the
   // decision count and the translog's seq stay contiguous. One bool test when the option is off.
   // (Only the in-process transport reaches here with the option on: setup() refuses solver_control=.)
-  if ( sim->solver_mask_no_enemy && et != execute_type::FOREGROUND && no_attackable_enemy( sim ) )
+  if ( sim->solver_mask_no_enemy && et != execute_type::FOREGROUND && no_attackable_enemy( p ) )
     return nullptr;
 
   // Shared across both transports (210-05R Task 1) -- incremented exactly
@@ -864,6 +807,12 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
   {
     const bool foreground = ( et == execute_type::FOREGROUND );
 
+    // Phase 271.4 (271.4-03, G271.4-8): the dry stock-rotation pick, evaluated BEFORE bind_slots, read_state, the aim pick
+    // and every exploration draw, so the list sees the state the net sees and the net's aim (p->target) never leaks into
+    // the list's target selection. Nothing runs and no random number is drawn (rl_stock_eval.hpp). Off: one bool test.
+    const rl_stock_eval::pick_t stock_pick =
+        rl_stock_eval::enabled( sim ) ? rl_stock_eval::evaluate( p, et ) : rl_stock_eval::pick_t{};
+
     // tstl-sylvanas phase 220, plan 220-01 (OBS-07), REORDERED by
     // 260831-mk7 (D-3, mask-as-input): rl_obs_timing=1 still wraps
     // read_state+build_obs -- and ONLY that pair, not build_mask/forward --
@@ -969,7 +918,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // condition true (the background case returned before the seq increment), and at a foreground
     // boundary the unanchored wait stays legal, so this cannot manufacture an all-illegal mask on
     // its own. Off (default): one bool test, byte-identical to a run built before this option.
-    if ( sim->solver_mask_no_enemy && no_attackable_enemy( sim ) )
+    if ( sim->solver_mask_no_enemy && no_attackable_enemy( p ) )
     {
       for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
         if ( RL_ACTIONS[ i ].kind != rl_action_kind::wait )
@@ -1004,6 +953,30 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       bool any_legal = false;
       for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
         any_legal = any_legal || ( mask[ i ] != 0 );
+      // Phase 268 fix pass (WR-05, ruling G268-11): at an off-GCD / cast-while-casting boundary build_mask makes every
+      // wait illegal (R1), so a spec whose casts are all unavailable there (arms) legitimately has NOTHING legal. That
+      // is a decline, not an error: answer it with the protocol's no-op exactly as the FIFO path does for a "noop"
+      // reply (nothing executes, the pending-wait fields stay clear, the dump reports solver_reply_type "noop").
+      // Only a FOREGROUND boundary, where the unanchored wait is always legal, keeps the fail-closed abort below.
+      if ( !any_legal && !foreground )
+      {
+        // 271.1 credit-conservation fix (readout 271.1-CREDIT-CONSERVATION-READOUT.md, 2026-10-10): this boundary is not
+        // a decision (nothing executes, no translog row is written), so it must not consume a decision number -- the
+        // same invariant the solver_mask_no_enemy return above the increment keeps. A number with no row strands every
+        // own-stream credit stamped while it is current (an auto swing's AUTO stamp, ticking as DOT_TICK through
+        // dot_tick_class): the close row counts it, the .attr has no DECISION record to put it in, and the replay's
+        // conservation check refuses. Nothing between the increment above and here reads or stamps the number
+        // (bind_slots, read_state, build_mask and the mask edits only), and the return precedes every exploration draw,
+        // so play is unchanged.
+        assert( sim->solver_control_seq == seq );
+        --sim->solver_control_seq;
+        sim->solver_control_last_reply_type = "noop";
+        sim->solver_control_has_requested_wait_sec = false;
+        sim->solver_control_last_requested_wait_sec = 0.0;
+        sim->solver_control_last_wait_anchor_label.clear();
+        sim->solver_control_last_wait_source.clear();
+        return nullptr;
+      }
       if ( !any_legal )
       {
         protocol_abort( fmt::format(
@@ -1475,7 +1448,9 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
                                      // 266-21 (funnel mode, record format 13): the chosen enemy (the tag)
                                      // at this boundary, read from the field the chooser wrote, never
                                      // recomputed here.
-                                     chosen_enemy_index_of( p ) );
+                                     chosen_enemy_index_of( p ),
+                                     // 271.4-03: the dry stock-rotation pick (null when the option is off).
+                                     rl_stock_eval::enabled( sim ) ? &stock_pick : nullptr );
       // 212-CR-FIX WR-06: accept_cast() can refuse a not-ready action via
       // protocol_abort() (a throw), which unwinds past combat_end()'s
       // record_close() hook entirely for this fight -- without this catch,
@@ -1549,7 +1524,9 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
                                    false, rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
                                    rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
                                    // 266-21: the tag at this boundary, same as the cast branch above.
-                                   chosen_enemy_index_of( p ) );
+                                   chosen_enemy_index_of( p ),
+                                   // 271.4-03: the dry stock-rotation pick, same as the cast branch above.
+                                   rl_stock_eval::enabled( sim ) ? &stock_pick : nullptr );
     // 212-CR-FIX WR-06: same reasoning as the cast branch above -- flush on
     // an abort out of accept_wait() so the decision row already appended
     // survives it.

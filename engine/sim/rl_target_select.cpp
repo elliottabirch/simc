@@ -12,6 +12,8 @@
 #include "fmt/format.h"
 #include "player/pet.hpp"
 #include "player/player.hpp"
+#include "sim/rl_button_bind.hpp"
+#include "sim/rl_class_plugins.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_translog.hpp"
 #include "sim/sheet_fight.hpp"  // tstl-sylvanas 264-05 (O4): sheet_fight_do_not_hit
@@ -26,7 +28,9 @@
 #include <cstring>
 #include <limits>
 #include <tuple>
+#include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace rl_target_select
@@ -34,51 +38,14 @@ namespace rl_target_select
 namespace
 {
 
-// The nine targeted registry tokens this plan governs (228-02-PLAN.md's TARGETED constant,
-// re-derived from scripts/rl/specs/enhancement.json's specs.enhancement.actions[] at planning
-// time). SHAPED (crash_lightning, sundering) is plan 228-03's, deliberately absent here.
-// 261002-8rv adds flame_shock (a button from width 419), aimed by preference_voltaic_blaze (item
-// 261002-8rs, see preference_for); the aiming head's own spell list (RL_AIM_SPELLS) is unchanged.
+// The targeted registry tokens (the actions that get a per-spell pick) come from the spec header:
+// RL_TARGETED_TOKENS / RL_TARGETED_TOKEN_COUNT, in the header's own order. Plan 268-02 moved the list
+// out of this file. The compile-time check that every aimed spell is a targeted token now lives in
+// rl_header_contract.hpp (it was the 259-05b check), so a spec header that violates it does not build.
 //
-// 230-02 (CK1-1, owner ruling Q1): this is also the target head's own one-hot registry (240-05
-// Task 2) -- run_target_head (below) walks this SAME array for its aiming-spell one-hot, so the
-// shaped pair can never reach the head either. Settled once, not a run-time discovery: Crash
-// Lightning and Sundering cast in the current facing direction only, have no selector and never
-// turn, so they have no pick to score and no column to occupy.
-constexpr const char* TARGETED_TOKENS[] = {
-  "stormstrike", "lightning_bolt", "chain_lightning", "tempest",
-  "windstrike",  "lava_lash",      "voltaic_blaze",   "primordial_storm",
-  "flame_shock",
-};
-
-// 259-05b (fork open question 3): every spell the aim head's one-hot names (RL_AIM_SPELLS, the
-// registry-generated list) must be one of the targeted tokens above -- the head can only ever
-// aim a spell this module resolves a pick for. Proved at COMPILE time (strictly stronger than a
-// load-time assert: a build that violates it does not exist). The loader separately pins the
-// file's declared count and registry sha against the same generated tables.
-constexpr bool aim_token_equal( const char* a, const char* b )
-{
-  while ( *a != '\0' && *a == *b )
-  {
-    ++a;
-    ++b;
-  }
-  return *a == *b;
-}
-constexpr bool aim_spells_all_targeted()
-{
-  for ( std::size_t k = 0; k < RL_AIM_SPELL_COUNT; ++k )
-  {
-    bool found = false;
-    for ( const char* token : TARGETED_TOKENS )
-      found = found || aim_token_equal( RL_AIM_SPELLS[ k ], token );
-    if ( !found )
-      return false;
-  }
-  return true;
-}
-static_assert( aim_spells_all_targeted(),
-               "every RL_AIM_SPELLS token must appear in TARGETED_TOKENS (259-05b)" );
+// 230-02 (CK1-1, owner ruling Q1): the list is also the target head's own one-hot registry (240-05
+// Task 2) -- run_target_head (below) walks this SAME list for its aiming-spell one-hot, so the
+// shaped pair can never reach the head either.
 
 // Per-player monotonic decision counter (228-02's own stamp -- see rl_target_select.hpp's header
 // comment for why neither the handle cache's key nor solver_control's `seq` can serve this role).
@@ -495,13 +462,42 @@ bool generic_filter( const action_t* a, player_t* candidate, bool harmful )
   return true;
 }
 
+// ---- 261013-aimx class A: a gated button is aimed only among the enemies that pass its gate ---------------------------------
+// The registry declares a target-health gate on a button (maskRules.targetHealthGates: below a percent, a talent override, a bypass
+// aura). The legality mask already asks the engine's own target_ready about the rules pick, but the aim head chose among every
+// enemy in reach, so it could aim a gated press at an enemy the cast is refused on while another enemy qualified. The generated
+// header flags the aimed buttons that carry such a row (RL_TARGETED_TOKEN_HEALTH_GATED); for a flagged button the candidate list
+// is the pool run through generic_filter AND the engine's own target_ready, so the list the aim head scores, the dump lists and the
+// random-aim draw reads never holds an enemy the cast would be refused on. No threshold is copied into this file: target_ready is
+// the one definition (a bypass aura up makes every enemy pass, a talent override raises the line, both inside the class module).
+// It is deliberately NOT inside generic_filter: that function is also the reach predicate of rl_can_be_hit and the tag chooser,
+// and it must keep agreeing with target_ready about REACH only. A header without the table (enhancement's) compiles all of this to
+// nothing, so that build's behaviour is unchanged.
+bool aimed_action_health_gated( const action_t* a )
+{
+#ifdef RL_TARGETED_TOKEN_HEALTH_GATED_DEFINED
+  for ( std::size_t k = 0; k < RL_TARGETED_TOKEN_COUNT; ++k )
+    if ( a->name_str == RL_TARGETED_TOKENS[ k ] )
+      return RL_TARGETED_TOKEN_HEALTH_GATED[ k ];
+#else
+  (void)a;
+#endif
+  return false;
+}
+
+bool passes_aim_gate( const action_t* a, bool gated, player_t* candidate )
+{
+  // target_ready reads only (the engine's action API is non-const throughout, as at the other const_cast sites of this module).
+  return !gated || const_cast<action_t*>( a )->target_ready( candidate );
+}
+
 // ---- tstl-sylvanas 264-05 (O4) + 261006-dnh-F1: the sheet-declared do-not-hit rule (STRICT) --------------------------------
 // A boss the sheet declares do-not-hit (for a phase or a window; see sheet_fight_do_not_hit) is NEVER a candidate for a
 // single-target AIMED press while the declaration is active -- even when it is the only enemy an aimed spell can reach, and even
 // when every candidate is do-not-hit (owner ruling 2026-10-06: "we should also mask immune targets as eligible, so we cant ever
 // choose them as targets", and "Drop him too" for the lone case; this reverses O4's old keep-when-alone exception). When the drop
 // empties the set, select() returns nullptr: the aimed button's legality bit goes to 0, exactly as for any other empty set.
-// Keyed on the declaration only, so it covers every aimed token whatever TARGETED_TOKENS holds (the eight at width 325, the ninth
+// Keyed on the declaration only, so it covers every aimed token whatever RL_TARGETED_TOKENS holds (the eight at width 325, the ninth
 // after the talent build). generic_filter, rl_counts_as_enemy and every enemy count are untouched, an area spell still reaches the
 // boss, and the rule never looks at a shield. It reads the controller's state and draws nothing. With no entry (every non-sheet
 // fight, a /1 spec, a /2 spec without an entry, or solver_sheet_do_not_hit=0) none of the functions below changes anything.
@@ -572,6 +568,322 @@ player_t* rl_chosen_enemy_of( const player_t* p )
   return p->rl_chosen_enemy;
 }
 
+namespace
+{
+
+// Phase 268 plan 02 (G268-4, G268-5): everything the chooser and the aiming rules read from the spec
+// header, resolved ONCE per actor at bind time (the actor's arise, through refresh_chosen) and read per
+// decision without name compares or find_action walks. A bad header (a missing probe action, an unknown
+// rule name) is refused right there with the registry id in the message, never at a decision.
+using rule_row_t = std::pair<std::string, rule_resolver_fn>;
+
+// Phase 268 plan 03 (G268-6, FORK-03; research Pitfall 6): where each of the RL_TARGET_FEATURES per-candidate facts comes from,
+// decided ONCE per actor at bind time for every index of RL_TARGET_FEATURE_NAMES. A fact is one of three kinds: one of the 12
+// generic facts of enemy_fact, a declared fact (a row of RL_DECLARED_FACTS whose slot is this index), or a per-class geometry
+// fact the class plugin serves by name. A name none of the three can serve is refused at bind. The candidate block is then
+// filled BY INDEX from this table, never by expanding a list of C++ member names, so a spec whose fact names are not enemy_fact
+// members still compiles.
+enum class generic_fact_id : std::uint8_t
+{
+  distance, in_reach, in_range, in_front, alive, immune, immunity_remaining, time_to_die, health_pct, is_boss,
+  neighbours_within_radius, is_current_target
+};
+
+enum class fact_source_kind : std::uint8_t { generic, declared, geometry };
+
+struct feature_source_t
+{
+  fact_source_kind kind    = fact_source_kind::generic;
+  generic_fact_id  generic = generic_fact_id::distance;  // kind == generic
+  std::size_t      declared = 0;                         // kind == declared: the index into RL_DECLARED_FACTS
+  double ( *geometry )( const enemy_fact& ) = nullptr;   // kind == geometry
+};
+
+using feature_sources_t = std::array<feature_source_t, RL_TARGET_FEATURES>;
+
+// The 12 generic facts, by the name they carry in RL_TARGET_FEATURE_NAMES. Returns false for any other name.
+bool generic_fact_by_name( const char* name, generic_fact_id& out )
+{
+  struct row { const char* name; generic_fact_id id; };
+  static const row ROWS[] = {
+    { "distance", generic_fact_id::distance },
+    { "in_reach", generic_fact_id::in_reach },
+    { "in_range", generic_fact_id::in_range },
+    { "in_front", generic_fact_id::in_front },
+    { "alive", generic_fact_id::alive },
+    { "immune", generic_fact_id::immune },
+    { "immunity_remaining", generic_fact_id::immunity_remaining },
+    { "time_to_die", generic_fact_id::time_to_die },
+    { "health_pct", generic_fact_id::health_pct },
+    { "is_boss", generic_fact_id::is_boss },
+    { "neighbours_within_radius", generic_fact_id::neighbours_within_radius },
+    { "is_current_target", generic_fact_id::is_current_target },
+  };
+  for ( const row& r : ROWS )
+    if ( std::strcmp( r.name, name ) == 0 )
+    {
+      out = r.id;
+      return true;
+    }
+  return false;
+}
+
+// The generic fact as a double: a bool or an int widens exactly (so the later cast to float gives the float the old direct
+// cast gave), a double is read as it is.
+double generic_fact_value( const enemy_fact& f, generic_fact_id id )
+{
+  switch ( id )
+  {
+    case generic_fact_id::distance:                 return f.distance;
+    case generic_fact_id::in_reach:                 return f.in_reach ? 1.0 : 0.0;
+    case generic_fact_id::in_range:                 return f.in_range ? 1.0 : 0.0;
+    case generic_fact_id::in_front:                 return f.in_front ? 1.0 : 0.0;
+    case generic_fact_id::alive:                    return f.alive ? 1.0 : 0.0;
+    case generic_fact_id::immune:                   return f.immune ? 1.0 : 0.0;
+    case generic_fact_id::immunity_remaining:       return f.immunity_remaining;
+    case generic_fact_id::time_to_die:              return f.time_to_die;
+    case generic_fact_id::health_pct:               return f.health_pct;
+    case generic_fact_id::is_boss:                  return f.is_boss ? 1.0 : 0.0;
+    case generic_fact_id::neighbours_within_radius: return static_cast<double>( f.neighbours_within_radius );
+    case generic_fact_id::is_current_target:        return f.is_current_target ? 1.0 : 0.0;
+  }
+  return 0.0;
+}
+
+feature_sources_t build_feature_sources( const player_t* p )
+{
+  const rl_class_plugin& plugin = rl_class_plugin_for( p );
+  feature_sources_t      out;
+  for ( std::size_t i = 0; i < RL_TARGET_FEATURES; ++i )
+  {
+    feature_source_t src;
+    bool             resolved = false;
+    for ( std::size_t k = 0; k < RL_DECLARED_FACT_COUNT && !resolved; ++k )
+      if ( RL_DECLARED_FACTS[ k ].slot == i )
+      {
+        src.kind     = fact_source_kind::declared;
+        src.declared = k;
+        resolved     = true;
+      }
+    if ( !resolved && generic_fact_by_name( RL_TARGET_FEATURE_NAMES[ i ], src.generic ) )
+    {
+      src.kind = fact_source_kind::generic;
+      resolved = true;
+    }
+    if ( !resolved )
+    {
+      if ( const rl_geometry_fact* g = rl_class_geometry_find( plugin, RL_TARGET_FEATURE_NAMES[ i ] ) )
+      {
+        src.kind     = fact_source_kind::geometry;
+        src.geometry = g->get;
+        resolved     = true;
+      }
+    }
+    if ( !resolved )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_target_select: registry '{}' names per-candidate feature '{}' (index {}) that is neither a generic fact, a declared "
+          "fact nor a geometry fact of player '{}' (class plugin '{}') (bind-time refusal)",
+          RL_REGISTRY_ID, RL_TARGET_FEATURE_NAMES[ i ], i, p->name(), plugin.class_name ) );
+    }
+    out[ i ] = src;
+  }
+  return out;
+}
+
+struct actor_binding_t
+{
+  // 271-10 (owner decisions T-2, T-3): the chooser's probe and melee actions are gone. An enemy "can be hit" when ANY aimed action's
+  // own range test passes; the tag moves to the nearest enemy in melee reach.
+  std::vector<const action_t*>                          hit_actions;      // the aimed actions an enemy is tested against (see actor_binding_for)
+  const action_t*                                       melee = nullptr;  // the melee-reach action: RL_TAG_MELEE_ACTION, else the shortest-range aimed action
+  double                                                widest_range = 0.0;   // the widest RL_AIMED_SPELL_RANGE_YARDS entry (0: no aimed spell has a range line)
+  std::vector<rule_row_t>                               rule_rows;        // RL_RULE_PREFS: token -> resolver
+  std::unordered_map<const action_t*, rule_resolver_fn> by_action;        // filled on the first decision of each action
+  feature_sources_t                                     feature_sources;  // the per-candidate fact source of each feature index
+};
+
+std::unordered_map<const player_t*, actor_binding_t> g_actor_binding_cache;
+
+// The generic rules, available to every class. current_target scores every candidate the same, so the
+// tie ladder in candidate_is_better (the player's current target first, then the stable actor order)
+// decides: the pick is the player's current target whenever it is a legal candidate.
+preference_fn resolve_generic_current_target( const action_t* )
+{
+  return preference_current_target;
+}
+
+preference_fn resolve_generic_shortest_ttd( const action_t* )
+{
+  return preference_shortest_time_to_die;
+}
+
+rule_resolver_fn resolve_rule_name( const player_t* p, const char* token, const char* rule )
+{
+  if ( std::strcmp( rule, "current_target" ) == 0 )
+    return resolve_generic_current_target;
+  if ( std::strcmp( rule, "shortest_ttd" ) == 0 )
+    return resolve_generic_shortest_ttd;
+  const rl_class_plugin& plugin   = rl_class_plugin_for( p );
+  rule_resolver_fn       resolver = rl_class_rule_find( plugin, rule );
+  if ( resolver == nullptr )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_target_select: registry '{}' names aiming rule '{}' for token '{}' but player '{}' (class plugin '{}') "
+        "has no such rule (bind-time refusal)",
+        RL_REGISTRY_ID, rule, token, p->name(), plugin.class_name ) );
+  }
+  return resolver;
+}
+
+// What the per-actor binding cache holds, for process_cache_entries() (Pitfall 11 of the Phase 268 research).
+std::size_t actor_binding_entries()
+{
+  std::size_t n = g_actor_binding_cache.size();
+  for ( const auto& kv : g_actor_binding_cache )
+    n += kv.second.by_action.size();
+  return n;
+}
+
+// 271.3-05 (BIND-01): the action an aimed token or the tag melee token means for actor `p`. A button reads the bound table
+// (list and line identity, never a name). An actor whose buttons are not bound (a scripted run of a hand-written list, no
+// decision-maker, so no legality bit and no net decision) has no bound table; its aim geometry keeps reading the engine
+// action of that name, exactly as before, because the geometry feeds only dump facts. A token that is not a cast button of
+// the header is an engine fact by name and keeps find_action.
+bool is_cast_token( const char* token )
+{
+  for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+    if ( RL_ACTIONS[ i ].kind == rl_action_kind::cast && std::strcmp( RL_ACTIONS[ i ].token, token ) == 0 )
+      return true;
+  return false;
+}
+
+action_t* geometry_action_for( const player_t* p, const char* token )
+{
+  if ( is_cast_token( token ) && rl_button_bind::is_bound( p ) )
+    return rl_button_bind::bound_action_for_token( p, token );
+  return p->find_action( token );
+}
+
+actor_binding_t& actor_binding_for( const player_t* p )
+{
+  auto it = g_actor_binding_cache.find( p );
+  if ( it != g_actor_binding_cache.end() )
+    return it->second;
+
+  actor_binding_t b;
+  // 271-10 (T-2, T-3). Resolve every aimed action (RL_TARGETED_TOKENS) once. The generated range table and the engine must agree:
+  // an aimed action whose own `range` differs from RL_AIMED_SPELL_RANGE_YARDS aborts here, by name (the table is what the addon
+  // and the header contract were generated from). An aimed token the actor has no action for (an untaken talent) is skipped.
+  // An action with NO range line (range <= 0: Colossus Smash) has no distance test of its own, so it says nothing about whether
+  // an enemy is within reach and is left out of `hit_actions`, unless no aimed action has a range line at all.
+  std::vector<const action_t*> ranged;
+  std::vector<const action_t*> unranged;
+  double                       shortest_range = 0.0;
+  const action_t*              shortest_action = nullptr;
+  for ( std::size_t k = 0; k < RL_TARGETED_TOKEN_COUNT; ++k )
+  {
+    const double table_range = RL_AIMED_SPELL_RANGE_YARDS[ k ];
+    b.widest_range           = std::max( b.widest_range, table_range );
+    const action_t* a        = geometry_action_for( p, RL_TARGETED_TOKENS[ k ] );
+    if ( a == nullptr )
+      continue;
+    // 2026-10-10 arms run: a deal without the Colossus Smash talent still carries the base action (range 5), because the
+    // action is built from an untaken talent whose spell data is not_found, so it is flagged background and can never be
+    // pressed (the legality mask reads !background), while the generated table reads the talented spell's range 0. That
+    // refused 221 of 9,600 fights at bind time. An action whose spell data is not enabled for this player is skipped here,
+    // before the range comparison, exactly like an aimed token with no action at all.
+    if ( !a->data().ok() )
+      continue;
+    if ( std::fabs( a->range - table_range ) > 1.0e-6 )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_target_select: registry '{}' lists aimed range {} yards for token '{}' but player '{}' has an action with range {} "
+          "(bind-time refusal: the generated range table and the engine must agree)",
+          RL_REGISTRY_ID, table_range, RL_TARGETED_TOKENS[ k ], p->name(), a->range ) );
+    }
+    if ( a->range > 0.0 )
+    {
+      ranged.push_back( a );
+      if ( shortest_action == nullptr || a->range < shortest_range )
+      {
+        shortest_range  = a->range;
+        shortest_action = a;
+      }
+    }
+    else
+      unranged.push_back( a );
+  }
+  b.hit_actions = ranged.empty() ? unranged : ranged;
+  if ( b.hit_actions.empty() )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_target_select: registry '{}' lists {} aimed tokens but player '{}' has none of those actions (bind-time refusal)",
+        RL_REGISTRY_ID, RL_TARGETED_TOKEN_COUNT, p->name() ) );
+  }
+  // Melee reach: the registry's optional tag melee action, else the shortest-range aimed action.
+  b.melee = ( RL_TAG_MELEE_ACTION != nullptr ) ? geometry_action_for( p, RL_TAG_MELEE_ACTION ) : shortest_action;
+  if ( b.melee == nullptr )
+    b.melee = b.hit_actions.front();
+  b.feature_sources = build_feature_sources( p );  // refuses a feature no source can serve, here, at arise
+  b.rule_rows.reserve( RL_RULE_PREF_COUNT );
+  for ( std::size_t k = 0; k < RL_RULE_PREF_COUNT; ++k )
+    b.rule_rows.emplace_back( RL_RULE_PREFS[ k ].token, resolve_rule_name( p, RL_RULE_PREFS[ k ].token, RL_RULE_PREFS[ k ].rule ) );
+  return g_actor_binding_cache.emplace( p, std::move( b ) ).first->second;
+}
+
+// ---- 271-10 (owner decision T-2): the aim candidate pool ----
+// The pool is the engaged enemies within the widest aimed range plus each enemy's own combat reach (no bound when distance
+// targeting is off or no aimed spell has a range line), at most RL_TARGET_SLOTS of them, the player's current target first and
+// then the others nearest first (a stable sort, so equal distances keep the engine's list order). Every aimed action's candidate
+// set is this pool run through that action's own generic_filter, so a spell's slots are always a subset of the pool and an overflow
+// of the slot count cannot happen. The addon builds the same pool (enemyFactFrame.ts), so slot order agrees on both sides.
+// Memoised per decision stamp: the pool is built once at the first selector call of a decision, before the cast can retarget the
+// player, and the decision dump's later candidate rebuild (build_candidate_facts) reads the same list. A stamp of 0 (the
+// threads>1 degrade) is never memoised.
+struct aim_pool_cache_t
+{
+  std::uint64_t          stamp = 0;
+  bool                   valid = false;
+  std::vector<player_t*> pool;
+};
+std::unordered_map<const player_t*, aim_pool_cache_t> g_aim_pool_cache;
+std::vector<std::pair<double, player_t*>>             g_aim_pool_scratch;
+
+const std::vector<player_t*>& aim_pool_for( const player_t* p )
+{
+  aim_pool_cache_t&   cache = g_aim_pool_cache[ p ];
+  const std::uint64_t stamp = current_decision_stamp( p );
+  if ( cache.valid && stamp != 0 && cache.stamp == stamp )
+    return cache.pool;
+
+  const double widest  = actor_binding_for( p ).widest_range;
+  const bool   bounded = p->sim->distance_targeting_enabled && widest > 0.0;
+  g_aim_pool_scratch.clear();
+  for ( player_t* t : p->sim->target_non_sleeping_list )
+  {
+    if ( !t->is_enemy() || !rl_counts_as_enemy( t ) )
+      continue;
+    const double dist = p->get_player_distance( *t );
+    if ( bounded && dist > widest + t->combat_reach )
+      continue;
+    g_aim_pool_scratch.emplace_back( t == p->target ? -1.0 : dist, t );
+  }
+  std::stable_sort( g_aim_pool_scratch.begin(), g_aim_pool_scratch.end(),
+                    []( const std::pair<double, player_t*>& l, const std::pair<double, player_t*>& r ) { return l.first < r.first; } );
+  if ( g_aim_pool_scratch.size() > RL_TARGET_SLOTS )
+    g_aim_pool_scratch.resize( RL_TARGET_SLOTS );
+  cache.pool.clear();
+  for ( const auto& e : g_aim_pool_scratch )
+    cache.pool.push_back( e.second );
+  cache.stamp = stamp;
+  cache.valid = stamp != 0;
+  return cache.pool;
+}
+
+}  // namespace
+
+
 bool rl_can_be_hit( const player_t* p, const player_t* t )
 {
   if ( t == nullptr || !rl_counts_as_enemy( t ) )
@@ -583,17 +895,13 @@ bool rl_can_be_hit( const player_t* p, const player_t* t )
   if ( t->sim->is_untargetable_enemy( t ) )
     return false;
 
-  const action_t* bolt = p->find_action( "lightning_bolt" );
-  if ( bolt == nullptr )
-  {
-    throw sc_runtime_error( fmt::format(
-        "rl_target_select::rl_can_be_hit: player '{}' has no lightning_bolt action -- refusing rather than "
-        "guessing whether '{}' can be hit (the chosen enemy is judged by the legality of Lightning Bolt)",
-        p->name(), t->name() ) );
-  }
-  // generic_filter takes a non-const candidate (it is the same function the per-spell selector calls);
-  // it only reads from it.
-  return generic_filter( bolt, const_cast<player_t*>( t ), /*harmful=*/true );
+  // 271-10 (T-2): hittable by ANY aimed action. generic_filter is the same function the per-spell selector calls (alive, not a
+  // hazard, not immune, within that action's own range plus the candidate's combat reach, in front); it takes a non-const
+  // candidate and only reads from it.
+  for ( const action_t* a : actor_binding_for( p ).hit_actions )
+    if ( generic_filter( a, const_cast<player_t*>( t ), /*harmful=*/true ) )
+      return true;
+  return false;
 }
 
 // 2026-10-02, 266-09 (research R5, owner F9): in a funnel-mode fight the RL actor's own target and both weapon
@@ -630,6 +938,10 @@ void refresh_chosen( player_t* p )
         p->name(), RL_ACTOR_NAME ) );
   }
 
+  // Bind this actor's header-driven actions and aiming rules now (its arise), so a header whose aimed ranges disagree with the
+  // actor's actions, or that names a rule no class plugin knows, is refused before any decision.
+  const actor_binding_t& binding = actor_binding_for( p );
+
   // Keep the tag while it can still be hit.
   // tstl-sylvanas 264-05 (O4): ... unless the sheet declares it do-not-hit right now and another enemy that can be hit is not
   // do-not-hit; then the tag is dropped here and re-picked below.
@@ -650,25 +962,38 @@ void refresh_chosen( player_t* p )
     return;
   }
 
-  // Otherwise pick among the enemies that can be hit AND are legal for this player's Stormstrike; failing
-  // that, among those that can be hit at all (R3). With the random option off the pick is the first in the
-  // list order. With it on (266-09, R7) and two or more eligible, the pick is uniform at random, one draw
-  // from the chooser's own per-fight stream (solver_target_rng): never the exploration stream, never the
-  // engine's. With fewer than two eligible there is no draw. It acts whatever the funnel flag is.
-  const action_t*        stormstrike = p->find_action( "stormstrike" );
-  std::vector<player_t*> hittable;
-  std::vector<player_t*> melee_legal;
+  // Otherwise (271-10, owner decision T-3) pick the NEAREST enemy within melee reach: among the enemies that can be hit by some
+  // aimed action, those that pass the melee action's own range test (the registry's RL_TAG_MELEE_ACTION, else the shortest-range
+  // aimed action; engine range plus the enemy's combat reach, in front, not immune). When none is in melee reach the nearest
+  // enemy that can be hit at all is picked (the old R3 fallback; the redesign text does not say what to do then, and leaving the
+  // tag on an enemy nothing can hit is the one outcome it exists to prevent). With the random option off the pick is the nearest
+  // (ties keep the engine's list order). With it on (266-09, R7) and two or more eligible, the pick is uniform at random, one
+  // draw from the chooser's own per-fight stream (solver_target_rng): never the exploration stream, never the engine's. With
+  // fewer than two eligible there is no draw. It acts whatever the funnel flag is.
+  const action_t*        melee = binding.melee;
+  std::vector<std::pair<double, player_t*>> hittable_by_distance;
+  std::vector<std::pair<double, player_t*>> melee_by_distance;
   for ( player_t* t : p->sim->target_non_sleeping_list )
   {
     if ( !t->is_enemy() || !rl_can_be_hit( p, t ) )
       continue;
-    hittable.push_back( t );
-    if ( stormstrike != nullptr && generic_filter( stormstrike, t, /*harmful=*/true ) )
-      melee_legal.push_back( t );
+    const double dist = p->get_player_distance( *t );
+    hittable_by_distance.emplace_back( dist, t );
+    if ( melee != nullptr && generic_filter( melee, t, /*harmful=*/true ) )
+      melee_by_distance.emplace_back( dist, t );
   }
-  // tstl-sylvanas 264-05 (O4) + 261006-dnh-F1 (strict): a do-not-hit enemy is never re-picked as the tag. The Stormstrike-legal list
-  // is stripped first; when nothing is left of it, the hittable list is stripped instead (R3's fallback, still without a do-not-hit
-  // boss). With nothing else hittable the pick is nullptr and the old tag is kept (R2).
+  auto nearest_first = []( const std::pair<double, player_t*>& l, const std::pair<double, player_t*>& r ) { return l.first < r.first; };
+  std::stable_sort( hittable_by_distance.begin(), hittable_by_distance.end(), nearest_first );
+  std::stable_sort( melee_by_distance.begin(), melee_by_distance.end(), nearest_first );
+  std::vector<player_t*> hittable;
+  std::vector<player_t*> melee_legal;
+  for ( const auto& e : hittable_by_distance )
+    hittable.push_back( e.second );
+  for ( const auto& e : melee_by_distance )
+    melee_legal.push_back( e.second );
+  // tstl-sylvanas 264-05 (O4) + 261006-dnh-F1 (strict): a do-not-hit enemy is never re-picked as the tag. The melee-reach list is
+  // stripped first; when nothing is left of it, the hittable list is stripped instead (still without a do-not-hit boss). With
+  // nothing else hittable the pick is nullptr and the old tag is kept (R2).
   std::vector<player_t*>        dnh_kept;
   std::vector<player_t*>        dnh_kept_hittable;
   const std::vector<player_t*>* eligible_ptr = &melee_legal;
@@ -706,6 +1031,54 @@ bool obs_is_boss( const player_t* enemy )
   return enemy->is_boss() && enemy->sim->fight_style != FIGHT_STYLE_TRASH_PACK;
 }
 
+// Phase 268 plan 03 (G268-6, FORK-03, owner D6): declared per-candidate facts. See the declaration in the header for the two
+// kinds. Both read the aura the actor itself (`source`) put on the candidate, by its engine name, with the non-creating
+// find_dot / buff_t::find idiom (WR-04: get_dot / buff_t::get CREATE the object on a candidate that never had it).
+double read_declared_fact( const rl_declared_fact& fact, player_t* source, player_t* candidate )
+{
+  switch ( fact.kind )
+  {
+    // WR-04 (268 fix pass): names collide between a dot object and a debuff (lightning_rod is an enhancement action and a
+    // debuff; arms colossus_smash is an action and the target debuff). find_dot keeps returning an expired dot object, so a
+    // plain "dot found, return its remains" read answered 0 for a live debuff of the same name. Each kind therefore prefers
+    // its own object type while that object is ACTIVE, and falls through to the other type when it is not. The float layout
+    // of the declared facts is unchanged.
+    case rl_fact_kind::dot_remaining:
+    {
+      double       dot_seconds = 0.0;
+      const dot_t* d           = candidate->find_dot( fact.name, source );
+      if ( d != nullptr )
+        dot_seconds = d->remains().total_seconds();
+      if ( dot_seconds > 0.0 )
+        return dot_seconds;
+      if ( buff_t* b = buff_t::find( candidate, fact.name, source ) )
+        return b->remains().total_seconds();
+      return dot_seconds;
+    }
+    case rl_fact_kind::debuff_stacks:
+    {
+      // check(), never up(): up() mutates benefit bookkeeping (see rl_policy_obs.cpp's note on buff reads).
+      double stacks = 0.0;
+      if ( buff_t* b = buff_t::find( candidate, fact.name, source ) )
+        stacks = static_cast<double>( b->check() );
+      if ( stacks > 0.0 )
+        return stacks;
+      if ( dot_t* d = candidate->find_dot( fact.name, source ) )
+        return static_cast<double>( d->current_stack() );
+      return stacks;
+    }
+  }
+  return 0.0;
+}
+
+std::size_t declared_fact_index_for_feature( const char* feature_name )
+{
+  for ( std::size_t k = 0; k < RL_DECLARED_FACT_COUNT; ++k )
+    if ( std::strcmp( RL_TARGET_FEATURE_NAMES[ RL_DECLARED_FACTS[ k ].slot ], feature_name ) == 0 )
+      return k;
+  return RL_DECLARED_FACT_COUNT;
+}
+
 enemy_fact build_enemy_fact( const action_t* a, player_t* candidate )
 {
   enemy_fact f;
@@ -735,15 +1108,12 @@ enemy_fact build_enemy_fact( const action_t* a, player_t* candidate )
   f.is_boss     = obs_is_boss( candidate );  // tstl-sylvanas 260928-tb8
   f.hazard      = candidate->sheet_hazard;  // tstl-sylvanas 262-04 (IN-02, R-6): the actor's own flag, beside is_boss
 
-  // WR-04 (260902/cr4): `find_dot` -- a non-allocating scan of the candidate's existing dot_list --
-  // instead of `get_dot`, which CREATES a dot_t on every candidate that has never been Flame
-  // Shocked, growing `dot_list` on what this function's own callers treat as a read-only query.
-  // Flame Shock on an ARBITRARY enemy, not only the current target (P-5's fix point).
-  // 261009-spd: the six handle lookups of this function (this one and the five below) come from
-  // resolve_enemy_debuff_lookup()'s per-(candidate, source) cache; every remains()/check() read stays live.
-  const enemy_debuff_lookup_t& lookup = resolve_enemy_debuff_lookup( candidate, a->player );
-  dot_t* fs = lookup.flame_shock;
-  f.flame_shock_remaining = fs ? fs->remains().total_seconds() : 0.0;
+  // Declared facts (Phase 268 plan 03, G268-6): ONE generic loop over the spec header's RL_DECLARED_FACTS, in place of the eight
+  // literal aura reads this function used to hold. Every lookup is the non-creating find / find_dot idiom (WR-04), `source` is
+  // always `a->player` -- these are auras THIS actor puts on the candidate, on ANY enemy, not only the current target (P-5's fix point).
+  // 0.0 is "absent", matching every other *_remaining field's own convention on this struct.
+  for ( std::size_t k = 0; k < RL_DECLARED_FACT_COUNT; ++k )
+    f.declared[ k ] = read_declared_fact( RL_DECLARED_FACTS[ k ], a->player, candidate );
 
   // OBS-03/R-U (tstl-sylvanas 232-02): deterministic geometry, never a target-cache read --
   // count of alive enemies within THIS action's OWN resolved radius of the candidate (a->radius:
@@ -769,51 +1139,13 @@ enemy_fact build_enemy_fact( const action_t* a, player_t* candidate )
   f.actor_index        = candidate->actor_index;
   f.actor_spawn_index  = candidate->actor_spawn_index;
 
-  // 228-10 Task 1 Step 1 (D-03/D-16): the missing per-enemy facts, added ONCE here and read from
-  // here by the dump (and later the observation) -- never a second copy. Every lookup uses the
-  // non-allocating `find`/`find_dot` idiom (WR-04's own convention above): buff_t::find() scans
-  // buff_list without creating; player_t::find_dot() scans dot_list without creating. `source`
-  // is always `a->player` -- these are debuffs THIS actor puts on the candidate, mirroring
-  // flame_shock_remaining's own `a->player` source above.
-  if ( buff_t* bc = lookup.burning_core )
-    f.burning_core_remaining = bc->remains().total_seconds();
-  if ( buff_t* lr = lookup.lightning_rod )
-  {
-    f.lightning_rod_stacks    = lr->check();
-    f.lightning_rod_remaining = lr->remains().total_seconds();
-  }
-  if ( dot_t* vf = lookup.venomfang )
-    f.venomfang_remaining = vf->remains().total_seconds();
-  if ( buff_t* vfd = lookup.venomfang_debuff )
-  {
-    f.venomfang_debuff_stacks    = vfd->check();
-    f.venomfang_debuff_remaining = vfd->remains().total_seconds();
-  }
-  if ( dot_t* ruf = lookup.rune_of_unleashed_fire_lingering )
-    f.rune_of_unleashed_fire_lingering_remaining = ruf->remains().total_seconds();
-
-  // 260914-rbp Task 1 Step 6 (R15, rulings Q16): the targeting-lens fields -- see enemy_fact's
-  // own per-field comments (rl_target_select.hpp) for exactly what each counts and why the
-  // ordering is fixed. Computed for EVERY caller (this is the FULL builder, "every field
-  // filled" per this function's own header comment), unlike build_enemy_fact_for_scoring's own
-  // pref-conditional lite computation below.
-  // 260914-rbp Task 2c (NOTE-1): the stash lookup itself is the gate -- chain_hop_count_for_start
-  // already returns 0 when `a` has no stash entry or the entry's stamp is stale (its own doc
-  // comment above), so the `a->name_str == "chain_lightning"` name check this used to require was
-  // a second, redundant gate that additionally (silently) zeroed a Thorim's-routed melee strike's
-  // real hop count -- compute_chain_hop_counts fills the stash keyed on whatever action_t* select()
-  // resolved geometry for (line ~797), not only literal chain_lightning casts.
-  f.chain_hop_count = chain_hop_count_for_start( a, candidate );
-  {
-    const vb_lava_lash_geometry_t& geo = resolve_vb_lava_lash_geometry( a->player );
-    // Task 2b (Q17 review, A2): VB's cleave always hits (and can Flame-Shock) its own pick
-    // (include_pick=true); Lava Lash's spread pick is the SOURCE carrier, never a spread target
-    // (include_pick=false, unchanged).
-    f.vb_new_flame_shocks_within_10yd =
-        count_new_flame_shock_neighbours( a->player, candidate, geo.vb_radius, geo.vb_cap, true );
-    f.lava_lash_spread_within_12yd = count_new_flame_shock_neighbours(
-        a->player, candidate, geo.lava_lash_radius, geo.lava_lash_cap, false );
-  }
+  // The class's own part of the full fact (Phase 268 plan 03, G268-5): the named aura fields completed FROM the declared values
+  // above and the class's geometry counts (shaman: chain hop count, Voltaic Blaze new Flame Shocks, Lava Lash spread -- see
+  // rl_class_plugins.cpp). Computed for EVERY caller (this is the FULL builder, "every field filled"), unlike
+  // build_enemy_fact_for_scoring's own pref-conditional lite computation below. A class with nothing to add has no hook.
+  const rl_class_plugin& plugin = rl_class_plugin_for( a->player );
+  if ( plugin.fill_class_fields != nullptr )
+    plugin.fill_class_fields( a, candidate, f );
 
   return f;
 }
@@ -829,8 +1161,9 @@ std::vector<enemy_fact> build_candidate_facts( const action_t* a, bool harmful )
   // tstl-sylvanas 264-05 (O4) + 261006-dnh-F1: the set the aim exploration draws from and the dump lists is the SAME set select() blocks (same
   // strict do-not-hit pass, no counting here), so its order and size match the stamped block's slots.
   std::vector<player_t*> gathered, kept;
-  for ( player_t* t : a->sim->target_non_sleeping_list )
-    if ( t->is_enemy() && rl_counts_as_enemy( t ) && generic_filter( a, t, harmful ) )
+  const bool gated = aimed_action_health_gated( a );   // 261013-aimx class A: the same conjunct select() applies, so the two lists agree
+  for ( player_t* t : aim_pool_for( a->player ) )   // 271-10 (T-2): the pool, in its order (current target first, then nearest)
+    if ( generic_filter( a, t, harmful ) && passes_aim_gate( a, gated, t ) )
       gathered.push_back( t );
   const std::vector<player_t*>& legal = dnh_split( a->sim, gathered, kept ) ? kept : gathered;
   for ( player_t* t : legal )
@@ -933,26 +1266,12 @@ enemy_fact build_enemy_fact_for_scoring( const action_t* a, player_t* candidate,
   f.candidate   = candidate;
   f.time_to_die = std::min( candidate->time_to_percent( 0 ).total_seconds(), 600.0 );  // WR-10
 
-  if ( pref == preference_lava_lash || pref == preference_voltaic_blaze )
-  {
-    dot_t* fs = candidate->find_dot( "flame_shock", a->player );  // WR-04
-    f.flame_shock_remaining = fs ? fs->remains().total_seconds() : 0.0;
-
-    // 260914-rbp Task 1 Step 6 (R15, rulings Q16): only the ONE new targeting-lens field the
-    // DISPATCHED preference actually reads -- WR-05's own "skip what the dispatched preference
-    // doesn't need" discipline, applied here exactly like flame_shock_remaining just above.
-    // 260914-rbp Task 2c (LO-3): named `vb_ll_geo`, not `geo` -- this function's own parameter
-    // (`const chain_geometry* geo`, the Thorim's branch geometry above) is a DIFFERENT type this
-    // local used to shadow.
-    const vb_lava_lash_geometry_t& vb_ll_geo = resolve_vb_lava_lash_geometry( a->player );
-    // Task 2b (Q17 review, A2): same include_pick convention as build_enemy_fact above.
-    if ( pref == preference_voltaic_blaze )
-      f.vb_new_flame_shocks_within_10yd = count_new_flame_shock_neighbours(
-          a->player, candidate, vb_ll_geo.vb_radius, vb_ll_geo.vb_cap, true );
-    else  // preference_lava_lash
-      f.lava_lash_spread_within_12yd = count_new_flame_shock_neighbours(
-          a->player, candidate, vb_ll_geo.lava_lash_radius, vb_ll_geo.lava_lash_cap, false );
-  }
+  // The scorer-specific part (Phase 268 plan 03, G268-5): only what the DISPATCHED preference reads, filled by the class plugin
+  // (WR-05's own "skip what the dispatched preference doesn't need" discipline). Shaman: Flame Shock remaining and the one
+  // Voltaic Blaze / Lava Lash geometry count. A class with no class-specific scorer has no hook.
+  const rl_class_plugin& plugin = rl_class_plugin_for( a->player );
+  if ( plugin.fill_scoring_fields != nullptr )
+    plugin.fill_scoring_fields( a, candidate, pref, f );
 
   // BL-01 (232-13) / ME-4 (232-15b): the neighbour count is computed at the MODELLED spell's own
   // resolved radius -- Tempest's or Chain Lightning's -- never the caller's (`a`'s) own radius,
@@ -985,7 +1304,7 @@ enemy_fact build_enemy_fact_for_scoring( const action_t* a, player_t* candidate,
   }
   else if ( a->radius > 0.0 )
   {
-    // Defensive generality only -- no token in TARGETED_TOKENS reaches this branch today (every
+    // Defensive generality only -- no token in RL_TARGETED_TOKENS reaches this branch today (every
     // OTHER registry preference is single-target, so `a->radius` stays 0); kept so a future
     // radius-bearing registry action does not silently skip the neighbour count.
     int neighbours = 0;
@@ -1076,6 +1395,10 @@ void compute_chain_hop_counts( double radius, int cap, const std::vector<player_
 struct aim_fact_gate
 {
   std::array<bool, RL_TARGET_FEATURES> governed_off{};
+  // Phase 268 plan 03: the per-index source of each fact, copied once per actor from the actor binding (built, and any unknown
+  // feature refused, at the actor's arise). Lives here so the per-decision gate lookup also hands the fill its source table
+  // without a second map lookup per candidate; cleared and counted with g_aim_fact_gate_cache.
+  feature_sources_t sources{};
 };
 std::unordered_map<const player_t*, aim_fact_gate> g_aim_fact_gate_cache;
 
@@ -1085,6 +1408,7 @@ const aim_fact_gate& aim_fact_gate_for( player_t* p )
   if ( it != g_aim_fact_gate_cache.end() )
     return it->second;
   aim_fact_gate gate;
+  gate.sources = actor_binding_for( p ).feature_sources;
   for ( std::size_t i = 0; i < RL_TARGET_FEATURES; ++i )
   {
     const int capability = RL_AIM_FACT_DESCS[ i ].capability;
@@ -1112,38 +1436,38 @@ float scaled_fact( float raw, std::size_t i, const aim_fact_gate& gate )
 // (230-02; folded into run_target_head, 240-05 Task 2) so the rules path can fill its own scratch
 // buffer with it too -- pure, no rl_scorer_t dependency.
 //
-// 259-07: the fill order is now the registry's own declaration, `RL_TARGET_FACT_LIST` (generated
-// into rl_policy_constants.h): expanding it below makes the compiler prove every declared fact is
-// a real `enemy_fact` member, in declared order -- a reorder or a rename in the registry fails to
-// compile here rather than silently mis-ordering a wire. Each fact is SCALED into the registry's
-// range and capability-gated (see scaled_fact above); the rules never read this scaled block (they
-// rank on `enemy_fact`'s raw values -- build_enemy_fact's 600 s time-to-die cap stays, the 60 s
-// cap lives only in the scaling's clipDiv).
+// Phase 268 plan 03 (research Pitfall 6): the fill is BY INDEX from the actor's bind-time source table (gate.sources) -- the
+// registry's own declaration order, RL_TARGET_FEATURE_NAMES. Each fact is read as a double (a bool or an int widens exactly)
+// from its generic enemy_fact field, its declared value or its class geometry provider, then SCALED into the registry's
+// range and capability-gated (see scaled_fact above). The generated fact-list macro in the constants header is generated
+// content and no code expands it any more. The rules never read this scaled block (they rank on `enemy_fact`'s raw values --
+// build_enemy_fact's 600 s time-to-die cap stays, the 60 s cap lives only in the scaling's clipDiv).
 void fill_candidate_features( const action_t*, const enemy_fact& fact, float* out,
                               const aim_fact_gate& gate )
 {
-  std::size_t i = 0;
-#define RL_FILL_TARGET_FACT( NAME )                                              \
-  out[ i ] = scaled_fact( static_cast<float>( fact.NAME ), i, gate );           \
-  ++i;
-  RL_TARGET_FACT_LIST( RL_FILL_TARGET_FACT )
-#undef RL_FILL_TARGET_FACT
-
-  assert( i == RL_TARGET_FEATURES &&
-          "fill_candidate_features's fill order does not match RL_TARGET_FEATURES" );
+  for ( std::size_t i = 0; i < RL_TARGET_FEATURES; ++i )
+  {
+    const feature_source_t& src = gate.sources[ i ];
+    double                  value = 0.0;
+    switch ( src.kind )
+    {
+      case fact_source_kind::generic:
+        value = generic_fact_value( fact, src.generic );
+        break;
+      case fact_source_kind::declared:
+        value = fact.declared[ src.declared ];
+        break;
+      case fact_source_kind::geometry:
+        value = src.geometry( fact );
+        break;
+    }
+    out[ i ] = scaled_fact( static_cast<float>( value ), i, gate );
+  }
 }
 
-// The number of facts the registry's X-macro list declares must equal the compiled width.
-constexpr std::size_t aim_fact_list_count()
-{
-  std::size_t n = 0;
-#define RL_COUNT_TARGET_FACT( NAME ) ++n;
-  RL_TARGET_FACT_LIST( RL_COUNT_TARGET_FACT )
-#undef RL_COUNT_TARGET_FACT
-  return n;
-}
-static_assert( aim_fact_list_count() == RL_TARGET_FEATURES,
-               "RL_TARGET_FACT_LIST must declare exactly RL_TARGET_FEATURES facts (259-07)" );
+// The registry's feature-name list must have exactly the compiled width (replaces the old count check of the generated fact-list macro).
+static_assert( sizeof( RL_TARGET_FEATURE_NAMES ) / sizeof( RL_TARGET_FEATURE_NAMES[ 0 ] ) == RL_TARGET_FEATURES,
+               "RL_TARGET_FEATURE_NAMES must list exactly RL_TARGET_FEATURES features (268-03)" );
 
 // 240-05 Task 2 (must_haves: "the head's argmax must reuse this, not invent one"): the ONE tie
 // ladder both select()'s own rule pick (below) and run_target_head's head pick use -- extracted
@@ -1176,8 +1500,9 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
   std::vector<player_t*>& candidates = g_candidate_buffer;
   candidates.clear();
   candidates.reserve( a->sim->target_non_sleeping_list.size() );
-  for ( player_t* t : a->sim->target_non_sleeping_list )
-    if ( t->is_enemy() && rl_counts_as_enemy( t ) && generic_filter( a, t, harmful ) )
+  const bool gated = aimed_action_health_gated( a );   // 261013-aimx class A: a gated button is aimed only among the enemies that pass its gate
+  for ( player_t* t : aim_pool_for( a->player ) )   // 271-10 (T-2): the pool, in its order (current target first, then nearest)
+    if ( generic_filter( a, t, harmful ) && passes_aim_gate( a, gated, t ) )
       candidates.push_back( t );
 
   // TGT-02 edge: empty -- no pick, legality bit goes to 0, the unanchored wait stays legal.
@@ -1692,6 +2017,14 @@ void reset( sim_t* )
   // five tables above.
   g_vb_lava_lash_geometry_cache.clear();
   g_enemy_debuff_lookup.clear();  // 261009-spd
+  // Phase 268 fix pass (WR-01): the per-actor binding cache holds raw action_t* pointers (the chooser probe, the melee
+  // action and the by_action keys) that point into the actor's own action list, so an entry must never outlive its actor.
+  // A later iteration's player_t* can reuse a torn-down actor's address; clearing here (the same place and for the same
+  // reason as the geometry cache above) makes the next lookup rebuild from the live actor. The rebuild is a handful of
+  // find_action calls per actor per iteration, off the per-decision path. g_aim_fact_gate_cache copies only the
+  // feature_sources value table (indices and plain function pointers, no action pointer), so it does not share this hazard.
+  g_actor_binding_cache.clear();
+  g_aim_pool_cache.clear();  // 271-10 (T-2): stamps restart at 1 each iteration, so a cached pool must not survive
   // 260914-rbp Task 2c (ADD-2): the sibling per-actor find_action() handle cache
   // rl_policy_obs.cpp owns (a DIFFERENT translation unit) -- same stale-address hazard, same
   // per-iteration clear, routed through this file's own reset() since sim.cpp's sim_t::reset()
@@ -1712,6 +2045,9 @@ void clear_process_caches()
   g_candidate_buffer.clear();
   g_unpruned_candidate_buffer.clear();
   g_rules_feature_scratch.clear();
+  g_actor_binding_cache.clear();
+  g_aim_pool_cache.clear();
+  g_aim_pool_scratch.clear();
 }
 
 // How many entries the process-wide state of this file holds right now: the keyed tables, the scratch
@@ -1721,7 +2057,7 @@ std::size_t process_cache_entries()
   return g_decision_stamp.size() + g_pick_table.size() + g_candidate_block_table.size() +
          g_target_fact_snapshot_table.size() + g_chain_hop_stash.size() + g_vb_lava_lash_geometry_cache.size() +
          g_enemy_debuff_lookup.size() + g_aim_fact_gate_cache.size() + g_candidate_buffer.size() + g_unpruned_candidate_buffer.size() +
-         g_rules_feature_scratch.size() +
+         g_rules_feature_scratch.size() + actor_binding_entries() + g_aim_pool_cache.size() + g_aim_pool_scratch.size() +
          ( ( g_reresolution_counts.kept_the_pick != 0 || g_reresolution_counts.fell_back_to_player_target != 0 ||
              g_reresolution_counts.left_no_op_boundary != 0 )
                ? 1u
@@ -1729,12 +2065,50 @@ std::size_t process_cache_entries()
          ( g_every_targeted_action_illegal != 0 ? 1u : 0u ) + ( g_target_head_no_block_count != 0 ? 1u : 0u );
 }
 
+void check_header_health_gates( player_t* p )
+{
+#ifdef RL_TARGETED_TOKEN_HEALTH_GATED_DEFINED
+  for ( std::size_t k = 0; k < RL_TARGETED_TOKEN_COUNT; ++k )
+  {
+    const action_t* a = geometry_action_for( p, RL_TARGETED_TOKENS[ k ] );
+    // An aimed button the actor does not have, or built from an untaken talent (its spell data is not enabled for this player, so it can
+    // never be pressed), says nothing; the aimed-range binder skips the same actions.
+    if ( a == nullptr || !a->data().ok() )
+      continue;
+    // The probe: an enemy at full health that the generic filter lets through (alive, in reach, in front). An engine gate on health
+    // refuses it (no bypass aura is up at the first decision), so target_ready's answer on it IS the engine's answer to "is this button
+    // gated on enemy health". No such enemy (everyone hurt, or nobody in reach) means no probe for this button this fight.
+    player_t* probe = nullptr;
+    for ( player_t* t : p->sim->target_non_sleeping_list )
+      if ( rl_counts_as_enemy( t ) && t->health_percentage() >= 99.99 && generic_filter( a, t, /*harmful=*/true ) )
+      {
+        probe = t;
+        break;
+      }
+    if ( probe == nullptr )
+      continue;
+    const bool engine_gated = !const_cast<action_t*>( a )->target_ready( probe );
+    if ( engine_gated != RL_TARGETED_TOKEN_HEALTH_GATED[ k ] )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_target_select: registry '{}' header says aimed button '{}' {} a target-health gate but player '{}' answers it {} "
+          "(bind-time refusal: the generated gate table and the engine must agree; the gate is the registry's "
+          "maskRules.targetHealthGates row, regenerate the header)",
+          RL_REGISTRY_ID, RL_TARGETED_TOKENS[ k ], RL_TARGETED_TOKEN_HEALTH_GATED[ k ] ? "has" : "does not have", p->name(),
+          engine_gated ? "does" : "does not" ) );
+    }
+  }
+#else
+  (void)p;
+#endif
+}
+
 bool is_targeted_action( const action_t* resolved )
 {
   if ( !resolved )
     return false;
-  for ( const char* token : TARGETED_TOKENS )
-    if ( resolved->name_str == token )
+  for ( std::size_t k = 0; k < RL_TARGETED_TOKEN_COUNT; ++k )
+    if ( resolved->name_str == RL_TARGETED_TOKENS[ k ] )
       return true;
   return false;
 }
@@ -1742,16 +2116,14 @@ bool is_targeted_action( const action_t* resolved )
 // 228-09 (D-23/TGT-08, dump half) -- see rl_target_select.hpp's own doc comment.
 std::size_t targeted_action_token_count()
 {
-  return sizeof( TARGETED_TOKENS ) / sizeof( TARGETED_TOKENS[ 0 ] );
+  return RL_TARGETED_TOKEN_COUNT;
 }
 
 const char* const* targeted_action_tokens()
 {
-  return TARGETED_TOKENS;
+  return RL_TARGETED_TOKENS;
 }
 
-namespace
-{
 // 233.1-02 Task 2 (R6-15, R6-20): the Thorim's-aware strike SUBSTITUTION -- called once per
 // decision from preference_for() below, for the two strike tokens only (windstrike, stormstrike).
 // primordial_storm and lightning_bolt stay routed to preference_shortest_time_to_die directly by
@@ -1810,65 +2182,54 @@ preference_fn preference_for_thorims_aware_strike( const action_t* resolved, boo
 
   return preference_chain_lightning;
 }
-} // anonymous namespace
 
+// 268-02 (G268-5): the aiming rule of each targeted token is the one the spec header's RL_RULE_PREFS
+// names for it, resolved through the generic rules or the actor's class plugin (the bind is above,
+// actor_binding_for). The per-spell reasoning for each scorer stays with the scorer's own definition below.
+// A resolved action whose name has no row uses current_target (the generic default of contract C-A), so
+// this never returns null for a real action.
+//
+// 261002-8rs (batch 261002-8rq, item 2), kept from the old name chain: the Flame Shock button is aimed by the
+// Voltaic Blaze rule (the header row for it names that rule). That rule's score is (new Flame Shocks inside
+// Voltaic Blaze's cleave) x 1e12 + (1e9 if the candidate lacks THIS caster's Flame Shock) + time to die. For
+// Flame Shock the first term is always 0 (the button is not ready whenever Voltaic Blaze is taken, and without
+// the talent the cleave radius stays 0), so what remains is "an enemy without this caster's Flame Shock first,
+// the longest-lived first within each group". Rejected: the shortest-time-to-die rule (re-applies on a target
+// that already carries it), the Lava Lash rule (prefers carriers), the chain and tempest rules (no Flame Shock
+// state read).
+//
+// Phase 230-02 (SCOR-01, D-01/D-02/R-K) added a run-time switch here -- the PRESENCE of a
+// scorer section in the loaded weights used to swap the rule out for a ninth "scorer"
+// preference entirely. REMOVED 240-05 Task 2 (D1(a)/D8(a)): the rule now runs UNCONDITIONALLY,
+// on every decision, for every arm -- rules, comparator, and both learning arms alike. This is
+// what makes the RULES comparator free (the same binary, the same rule, differing only in
+// whether a loaded head's own overwrite -- run_target_head, called separately from
+// rl_policy_obs.cpp after this rule has already run -- is allowed to touch the pick this
+// function's caller stamped). `preference_for` has no branch returning a scorer
+// preference; there is no `sim`/`solver_policy_weights` read left in this function.
 preference_fn preference_for( const action_t* resolved )
 {
   if ( !resolved )
     return nullptr;
-  const std::string& n = resolved->name_str;
-  preference_fn rule = nullptr;
-  if ( n == "stormstrike" || n == "windstrike" )
-    rule = preference_for_thorims_aware_strike( resolved, n == "stormstrike" );
-  else if ( n == "primordial_storm" || n == "lightning_bolt" )
-    rule = preference_shortest_time_to_die;
-  else if ( n == "lava_lash" )
-    rule = preference_lava_lash;
-  else if ( n == "voltaic_blaze" )
-    rule = preference_voltaic_blaze;
-  else if ( n == "chain_lightning" )
-    rule = preference_chain_lightning;
-  else if ( n == "tempest" )
-    rule = preference_tempest;
-  else if ( n == "flame_shock" )
+  actor_binding_t& binding = actor_binding_for( resolved->player );
+  auto             it      = binding.by_action.find( resolved );
+  if ( it == binding.by_action.end() )
   {
-    // 261002-8rs (batch 261002-8rq, item 2): the aim rule for the Flame Shock button. It was written
-    // while the token was NOT in TARGETED_TOKENS (width 325: joining it adds a `flame_shock` block to
-    // every decision-dump row and decision-channel request and turns `chosen_pick` into an object for
-    // any chosen flame_shock, decision_dump.cpp:915-1088 -- not dormant). The token joined the list in
-    // 261002-8rv, in the same fork commit as the header that offers the flame_shock button, so this
-    // branch is reached from width 419 on.
-    //
-    // Why preference_voltaic_blaze. Its score is (new Flame Shocks inside Voltaic Blaze's cleave) x
-    // 1e12 + (1e9 if the candidate lacks THIS caster's Flame Shock) + time to die. For flame_shock the
-    // first term is always 0: flame_shock_t::ready() is false whenever Voltaic Blaze is taken
-    // (sc_shaman.cpp:8940-8947), and without the talent the cleave radius stays 0
-    // (rl_target_select.hpp:148, sc_shaman.cpp:10602 guard), so count_new_flame_shock_neighbours
-    // returns 0 on its radius <= 0 early exit (above). What remains is "an enemy without this
-    // caster's Flame Shock first, the longest-lived first within each group": put the
-    // damage-over-time effect where it is missing, on the enemy that lives to take every tick.
-    // build_enemy_fact_for_scoring already reads flame_shock_remaining for this rule.
-    //
-    // Rejected: preference_shortest_time_to_die parks on the SHORTEST-lived enemy and never reads
-    // Flame Shock state, so it re-applies on a target that already carries it and puts the effect on
-    // the enemy that dies first; preference_lava_lash prefers enemies that ALREADY carry Flame Shock
-    // (it spreads from a carrier); preference_chain_lightning / preference_tempest score neighbour and
-    // hop counts and read no Flame Shock state; the Thorim's routing above is for the two strikes only.
-    rule = preference_voltaic_blaze;
+    rule_resolver_fn resolver = resolve_generic_current_target;
+    for ( const rule_row_t& row : binding.rule_rows )
+      if ( row.first == resolved->name_str )
+      {
+        resolver = row.second;
+        break;
+      }
+    it = binding.by_action.emplace( resolved, resolver ).first;
   }
-  else
-    return nullptr;
+  return it->second( resolved );
+}
 
-  // Phase 230-02 (SCOR-01, D-01/D-02/R-K) added a run-time switch here -- the PRESENCE of a
-  // scorer section in the loaded weights used to swap the rule out for a ninth "scorer"
-  // preference entirely. REMOVED 240-05 Task 2 (D1(a)/D8(a)): the rule now runs UNCONDITIONALLY,
-  // on every decision, for every arm -- rules, comparator, and both learning arms alike. This is
-  // what makes the RULES comparator free (the same binary, the same rule, differing only in
-  // whether a loaded head's own overwrite -- run_target_head, called separately from
-  // rl_policy_obs.cpp after this rule has already run -- is allowed to touch the pick this
-  // function's caller stamped). `preference_for` no longer has any branch returning a scorer
-  // preference; there is no `sim`/`solver_policy_weights` read left in this function.
-  return rule;
+double preference_current_target( const action_t*, const enemy_fact& )
+{
+  return 0.0;
 }
 
 double preference_shortest_time_to_die( const action_t* a, const enemy_fact& fact )

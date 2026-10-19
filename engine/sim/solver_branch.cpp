@@ -45,7 +45,7 @@
 #include "sim/event.hpp"
 #include "sim/proc_rng.hpp"
 #include "sim/rl_policy.hpp"
-#include "sim/rl_policy_constants.h"
+#include "sim/rl_policy_constants_select.h"
 #include "sim/rl_translog.hpp"
 #include "sim/sim.hpp"
 #include "util/util.hpp"

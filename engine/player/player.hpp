@@ -487,6 +487,10 @@ struct player_t : public actor_t
   // print name exactly which actions land with no cause context, rather
   // than a bare aggregate percentage. Reset alongside solver_damage_so_far.
   std::unordered_map<std::string, double> rl_orphan_damage_by_action;
+  // Phase 268 (268-05, G268-8): the same census for the BACKGROUND stream (auto-attacks and procs off
+  // them by design), filled only while sim->rl_credit_census is on. Realised-only, reset beside the
+  // orphan map. Observer only: nothing in play reads it.
+  std::unordered_map<std::string, double> rl_background_damage_by_action;
   // tstl-sylvanas quick task 260918-atr, stage F1: per-decision own credit, feeding the .attr
   // sidecar (rl_translog.hpp's ATTR SIDECAR section). Indexed by (seq - rl_fight_first_seq);
   // own_real[idx]/own_exp[idx] accumulate exactly the same class predicate rl_credit_route()
@@ -1270,6 +1274,13 @@ public:
   virtual void init_action_list() {}
   virtual void init_blizzard_action_list();
   virtual std::vector<std::string> action_names_from_spell_id( unsigned int spell_id ) const;
+  /// The spell ids of the buffs whose presence locks this actor's class-module actions (Phase 271.6 plan 18, G271.6-37): while one
+  /// is up, every action whose refused_while_channel_locked() is true is refused by the class module. The generic default lists
+  /// none. Read only by the RL action census and the bind-time lock check, never per decision.
+  virtual std::vector<unsigned> channel_lock_aura_spell_ids() const
+  {
+    return {};
+  }
   virtual std::string aura_expr_from_spell_id( unsigned int spell_id, bool on_self = true ) const;
   virtual void parse_assisted_combat_step( const assisted_combat_step_data_t& step, action_priority_list_t* assisted_combat );
 

@@ -354,8 +354,11 @@ const char* const FIGHT_LIST_PROCESS_OPTIONS[] = {
 const char* const FIGHT_LIST_REFUSED_PREFIXES[] = {
     "solver_branch", "solver_teacher", "solver_search", "solver_bench", "rl_buff_", "rl_rng_", "rl_forward_probe", "rl_obs_names_out", "rl_fight_list" };
 
-// Options refused in any entry, by exact name.
-const char* const FIGHT_LIST_REFUSED_NAMES[] = { "solver_control", "decision_dump" };
+// Options refused in any entry, by exact name. rl_bind_report (Phase 271.3) is a one-shot per-process report, like
+// rl_obs_names_out: one path, rewritten by each entry's init, would keep only the last fight's bind.
+// solver_apl_stock_list (Phase 271.4) is a per-process option (one list name would apply to every entry of the fight
+// list, and the .apl format is chosen once per process), so an entry may not set it.
+const char* const FIGHT_LIST_REFUSED_NAMES[] = { "solver_control", "decision_dump", "rl_bind_report", "solver_apl_stock_list" };
 
 // The LAST value an entry's options give `name` (later options win in sim_t, as here), or nullptr when absent.
 const std::string* fight_list_option( const sim_control_t& control, const std::string& name )

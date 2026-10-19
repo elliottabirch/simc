@@ -35,6 +35,9 @@
 #include "sim/event.hpp"
 #include "sim/expressions.hpp"
 #include "sim/raid_event.hpp"
+#include "sim/rl_action_census.hpp"
+#include "sim/rl_button_bind.hpp"
+#include "sim/rl_class_plugins.hpp"
 #include "sim/rl_target_select.hpp"
 #include "sim/sheet_fight.hpp"  // tstl-sylvanas 262-04: sheet_fight_forecast
 #include "sim/sim.hpp"
@@ -69,6 +72,31 @@ namespace
 // declaration precede first use in the same translation unit.
 std::unordered_map<const player_t*, std::vector<action_t*>> g_action_handle_cache;
 
+// 271.6-07 (owner ~16:00Z 2026-10-11: "it might be smart to mask aoe spells that dont have a target, if they dont have any
+// units in range."; G271.6-15 a, G271.6-24, keyed on the gate class by G271.6-28 as revised after the owner's words of ~19:20Z,
+// "crash lightning doesn not require a target, so correct that class discovery, and ensure similar classes dont get labeled the
+// same", and ~19:35Z, "why is cleave shape gated? it needs a target"): the generic mask conjunct of the reach rule. Per actor, per
+// registry action, the strike radius and front filter of a button whose generated header row says it needs NO unit
+// (`RL_HIT_ROW_NEEDS_UNIT` false: class SHAPE, whether by the spell data or by an owner's recorded override, which the header
+// carries as the final class). The header's class is the only key: a UNIT row (Mortal Strike, and Cleave by the owner's word)
+// gets no reach rule here because the game's own range check gates its unit, and an action with no hit row is not asked. A SHAPE
+// row whose counted node is not centred on the player is refused at bind by name (the conjunct has no test for it yet). Radius -1
+// means "no reach rule for this button". A header with no census provider (enhancement) gets an empty table, so the conjunct is
+// never taken for it. Same lifetime as g_action_handle_cache (filled together with it, emptied by clear_process_caches()).
+struct reach_gate_t
+{
+  double                                    radius = -1.0;
+  rl_action_census::filter_descriptor_t     filter;
+};
+std::unordered_map<const player_t*, std::vector<reach_gate_t>> g_reach_gate_cache;
+
+// The one conjunct: true when the button has no reach rule, else when some enemy stands inside its strike shape where the
+// player actually is. `axis` is the enemy the strike faces (the pick of an aimed button), used only by a filtered shape.
+inline bool reach_rule_allows( const player_t* p, const reach_gate_t& g, const player_t* axis )
+{
+  return g.radius < 0.0 || rl_action_census::any_enemy_in_player_shape( p, axis, g.filter, g.radius );
+}
+
 // 260914-rbp Task 2b (A3, perf; recommended by the plan, small): per-actor cache of the hits.*
 // family's OWN find_action() handles -- chain_lightning/tempest/lava_lash/voltaic_blaze/
 // fire_nova_explosion -- resolved at most once per actor (ACT-02 pattern, mirrors
@@ -84,6 +112,7 @@ struct hits_action_handles_t
   action_t* lava_lash           = nullptr;
   action_t* voltaic_blaze       = nullptr;
   action_t* fire_nova_explosion = nullptr;
+  // (Plan 268-05's warrior handles were retired in 271-10 with the three hand-written warrior hit providers.)
 };
 std::unordered_map<const player_t*, hits_action_handles_t> g_hits_action_handle_cache;
 
@@ -101,6 +130,155 @@ const hits_action_handles_t& resolve_hits_action_handles( const player_t* p )
   handles.fire_nova_explosion = p->find_action( "fire_nova_explosion" );
   return g_hits_action_handle_cache.emplace( p, handles ).first->second;
 }
+
+// 271-10 (owner decision H-3, scheme A): the generated "census.<button>" hit columns. A header row {family "hits", member <button>,
+// provider "census.<button>"} is bound here, once per actor, to the button's node of the action discovery census
+// (rl_action_census::walk_classified: the same node classification the committed census file records as `chosenNode`), and read
+// per decision with rl_action_census::count_engine_hits. The walk runs at bind regardless of the rl_action_census=<path> option.
+// Lifetime: the same as the slot table that holds the indexes (g_slot_table_cache); both are emptied by clear_process_caches(),
+// never per iteration, because the slot table persists across a sim's iterations and so must the rows its bindings index.
+constexpr std::size_t CENSUS_HIT_ROWS_MAX = 32;   // the per-decision memo in build_obs is sized by this; bind refuses more
+struct census_hit_row_t
+{
+  rl_action_census::token_t census;          // the button's classified walk (nodes, chosen_node)
+  const action_t*           aimed = nullptr; // the resolved action of an AIMED button (its stamped pick is the centre), else null
+  // 261013-aimx class B: the census node this row counts, by NAME (the header's RL_HIT_ROW_NODE entry): a button's own row counts its
+  // unconditional node, a conditional row counts the button's proc node (what it would hit if it fires). Empty = the header names none (a
+  // header cut before this table): the walk's own chosen_node, as before. node_index is the position of that name in the walk's nodes, -1
+  // when this build's walk has no node of that name (a build without the proc talent), which reads 0 like a button the build cannot press.
+  std::string node_name;
+  int         node_index = -1;
+};
+struct census_hit_actor_t
+{
+  std::vector<rl_action_census::token_t> walk;   // the whole classified walk, taken once
+  std::vector<census_hit_row_t>          rows;   // the rows bound so far, in bind order
+};
+std::unordered_map<const player_t*, census_hit_actor_t> g_census_hit_actors;
+
+std::size_t census_hit_row_for( player_t* p, const char* token, const char* node_name )
+{
+  census_hit_actor_t& actor = g_census_hit_actors[ p ];
+  if ( actor.walk.empty() )
+    actor.walk = rl_action_census::walk_classified( p );
+  const std::string wanted_node = node_name != nullptr ? node_name : "";
+  for ( std::size_t k = 0; k < actor.rows.size(); ++k )
+    if ( actor.rows[ k ].census.token == token && actor.rows[ k ].node_name == wanted_node )
+      return k;
+  if ( actor.rows.size() >= CENSUS_HIT_ROWS_MAX )
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::census_hit_row_for: registry '{}' binds more than {} census hit columns on player '{}' (token '{}')",
+        RL_REGISTRY_ID, CENSUS_HIT_ROWS_MAX, p->name(), token ) );
+  const rl_action_census::token_t* found = nullptr;
+  for ( const rl_action_census::token_t& t : actor.walk )
+    if ( t.token == token )
+    {
+      found = &t;
+      break;
+    }
+  if ( found == nullptr )
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::census_hit_row_for: registry '{}' hit provider 'census.{}' names a button that is not a cast token of the "
+        "header (player '{}') (bind-time refusal)",
+        RL_REGISTRY_ID, token, p->name() ) );
+  census_hit_row_t row;
+  row.census    = *found;
+  row.node_name = wanted_node;
+  if ( !wanted_node.empty() )
+    for ( std::size_t n = 0; n < row.census.nodes.size(); ++n )
+      if ( row.census.nodes[ n ].name == wanted_node )
+      {
+        row.node_index = static_cast<int>( n );
+        break;
+      }
+  for ( std::size_t k = 0; k < RL_TARGETED_TOKEN_COUNT; ++k )
+    if ( std::strcmp( RL_TARGETED_TOKENS[ k ], token ) == 0 )
+      row.aimed = solver_control::resolve_action( p, token );
+  actor.rows.push_back( std::move( row ) );
+  return actor.rows.size() - 1;
+}
+
+// How many enemies the pressed button hits right now. Side-effect free: count_engine_hits reads positions, reach and the live
+// n_targets(), never target_list(), never a random draw. The centre is the enemy the press is aimed at: the stamped pick of an
+// aimed button (0 when it has none this decision), else the tag (the chosen enemy), else the current target. A button this
+// build cannot press reads 0; a button whose walk found no multi-target node hits its one target.
+double census_hit_count( const player_t* p, const census_hit_row_t& row )
+{
+  if ( !row.census.found )
+    return 0.0;
+  const player_t* centre = nullptr;
+  if ( row.aimed != nullptr )
+  {
+    bool      found = false;
+    player_t* pick  = rl_target_select::lookup_pick( row.aimed, &found );
+    centre          = found ? pick : nullptr;
+  }
+  else
+    centre = p->rl_chosen_enemy != nullptr ? p->rl_chosen_enemy : p->target;
+  if ( centre == nullptr || centre->is_sleeping() || !centre->is_enemy() || !rl_target_select::rl_counts_as_enemy( centre ) )
+    return 0.0;
+  // 261013-aimx class B: a header that names the node counts THAT node. A build whose walk has no node of that name (a conditional proc
+  // node of a talent this build does not take) hits nothing through it: 0, like a button the build cannot press.
+  if ( !row.node_name.empty() )
+  {
+    if ( row.node_index < 0 )
+      return 0.0;
+    return static_cast<double>( rl_action_census::count_engine_hits( row.census.nodes[ static_cast<std::size_t>( row.node_index ) ], centre ) );
+  }
+  if ( row.census.chosen_node < 0 || static_cast<std::size_t>( row.census.chosen_node ) >= row.census.nodes.size() )
+    return 1.0;
+  return static_cast<double>( rl_action_census::count_engine_hits( row.census.nodes[ static_cast<std::size_t>( row.census.chosen_node ) ], centre ) );
+}
+
+#ifdef RL_DECLARED_AGGREGATES_DEFINED
+// 261013-aimx (class C): one declared aggregate, reduced over the candidate block the aim head scores for the row's aimed button. The block is
+// the button's candidate list of THIS decision (alive, not immune, in front, in its own reach, and, for a button with a declared target-health
+// gate, only the enemies that pass it), already stamped by select() before the observation is built; read through the same stale-checked access
+// the aim head uses, never recomputed. The reading is the RAW fact: the stored scaled value is inverted by the fact's own scale (a clipped-seconds
+// fact reads back clamped to its clip, every other fact in its own unit), exactly as the addon's aggregates family inverts the head's scaling, so a
+// capability-gated fact (which stores its fixed value) reads the same on both sides. No candidate (no block this decision, or none passing): a
+// count reads 0 and a minimum reads the leaf's `missing` value (the saturated end of its scale). Reads only; no allocation.
+double read_declared_aggregate( const rl_declared_aggregate& row, const rl_leaf_desc& leaf, const action_t* action )
+{
+  std::size_t count = 0;
+  const float* features = nullptr;
+  if ( action != nullptr )
+  {
+    bool found = false;
+    const rl_target_select::candidate_block block = rl_target_select::lookup_candidate_block( action, &found );
+    // More candidates than slots stores no rows (the engine records no block for such a decision either): it reads like no candidate.
+    if ( found && block.count <= RL_TARGET_SLOTS )
+    {
+      count    = block.count;
+      features = block.features;
+    }
+  }
+  if ( row.reduce == rl_aggregate_reduce::count )
+    return static_cast<double>( count );
+  const rl_aim_fact_desc& d = RL_AIM_FACT_DESCS[ row.fact_slot ];
+  const bool   clipped_seconds = d.kind == rl_kind::k_seconds && d.has_clip_div && d.clip_div > 0.0;
+  const double unscale         = clipped_seconds ? d.clip_div : ( d.has_div ? d.div : 1.0 );
+  std::size_t  zeros   = 0;
+  bool         found_min = false;
+  double       lowest  = leaf.missing;
+  for ( std::size_t k = 0; k < count; ++k )
+  {
+    const double raw = static_cast<double>( features[ k * RL_TARGET_FEATURES + row.fact_slot ] ) * unscale;
+    if ( row.reduce == rl_aggregate_reduce::count_zero )
+    {
+      if ( raw == 0.0 )
+        ++zeros;
+      continue;
+    }
+    if ( ( row.reduce == rl_aggregate_reduce::min || raw > 0.0 ) && ( !found_min || raw < lowest ) )
+    {
+      lowest    = raw;
+      found_min = true;
+    }
+  }
+  return row.reduce == rl_aggregate_reduce::count_zero ? static_cast<double>( zeros ) : lowest;
+}
+#endif
 
 // 260902/cr4 (CR-02): the two output arrays a BOUNDARY read_action_gate_bits call computed for
 // the CURRENT decision stamp, cached so the later non-boundary call (decision_dump::record(),
@@ -385,6 +563,27 @@ shape_hit_result_t compute_sundering_shape( player_t* p )
 }
 
 // ---------------------------------------------------------------------------
+// Phase 268 plan 04 (G268-7): the spec's own resource. RL_RESOURCE_NAME is the engine's name for it (what
+// util::parse_resource_type accepts: "maelstrom" for enhancement, "rage" for arms). Parsed once per process (the name is a
+// compile-time constant of the header, so the answer never changes); a name the engine does not know is refused here, by name,
+// instead of reading an empty resource.
+// ---------------------------------------------------------------------------
+
+resource_e rl_spec_resource()
+{
+  static const resource_e resource = []() {
+    const resource_e parsed = util::parse_resource_type( RL_RESOURCE_NAME );
+    if ( parsed == RESOURCE_NONE )
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::rl_spec_resource: registry '{}' names resource '{}' (RL_RESOURCE_NAME), which "
+          "util::parse_resource_type does not know",
+          RL_REGISTRY_ID, RL_RESOURCE_NAME ) );
+    return parsed;
+  }();
+  return resource;
+}
+
+// ---------------------------------------------------------------------------
 // Stage 1: read_state -- needs the engine, not exercised by the standalone
 // test executable (plan 210-07).
 // ---------------------------------------------------------------------------
@@ -430,6 +629,14 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground, bool is_d
   // not a re-derived expression, so the two can never drift.
   s.gcd_remains = decision_dump::clamp_nonneg( ( p->gcd_ready - sim->current_time() ).total_seconds() );
   s.has_gcd_remains = true;
+
+  // Phase 268 plan 04 (G268-7, D5): the spec resource's current value, read ONCE here for build_mask's resource_threshold wait
+  // rule (never re-read at the mask site).
+  {
+    const resource_e spec_resource = rl_spec_resource();
+    s.has_resource_current = p->resources.is_active( spec_resource );
+    s.resource_current = s.has_resource_current ? p->resources.current[ spec_resource ] : 0.0;
+  }
 
   // FORK-04b (260902/226-07) -- gcd_length/auto_attack_interval, read ONCE
   // here (the "one reader" rule) so build_wait's re-ask-period cap and the
@@ -591,7 +798,8 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground, bool is_d
   // real decision already cast and must read the SAME cached, non-re-bumping legality/pick state
   // write_state_fields' own adjacent read_action_gate_bits call already correctly does. Now
   // threaded straight from this function's own parameter -- see rl_policy.hpp's own doc comment.
-  read_action_gate_bits( p, s.action_resolvable, s.action_ready, is_decision_boundary );
+  read_action_gate_bits( p, s.action_resolvable, s.action_ready, is_decision_boundary, nullptr,
+                         boundary_is_foreground );
 
   return s;
 }
@@ -950,7 +1158,10 @@ void rl_capability_selftest_run( const player_t* p )
 // ---------------------------------------------------------------------------
 // read_action_gate_bits -- 221-01 (ACT-02, Pattern 1/2). Resolves each
 // `kind == cast` action's token to an action_t* through
-// solver_control::resolve_action (the SAME resolver accept_cast uses, via a
+// solver_control::resolve_action (the SAME resolver accept_cast uses; Phase
+// 271.3: it reads the bound table rl_button_bind fixed at sim init, the action
+// whose list is the default list and whose recorded line declares the token,
+// never a name scan), via a
 // handle table cached ONCE per actor -- g_action_handle_cache above, filled
 // lazily on first use, never during actor init) and computes two bits per
 // action: `resolvable` (`!background` ALONE -- see the comment on that line
@@ -963,9 +1174,32 @@ void rl_capability_selftest_run( const player_t* p )
 // default 0 and `build_mask` never reads them for a wait candidate.
 // ---------------------------------------------------------------------------
 
+// Phase 270 fork fix (verifier warning W2): the boundary this decision belongs to decides which presses the engine will
+// really execute. At an OFF_GCD or CAST_WHILE_CASTING poll, player.cpp's special_execute_event_t::execute_action()
+// drops a chosen action silently unless `a->usable_during_current_gcd()` (respectively `usable_during_current_cast()`)
+// holds (the `usable( a )` test after choose(), with the two overrides in player_gcd_event_t and player_cwc_event_t). Plain `ready()` says nothing
+// about the running GCD, so before this fix every GCD-bound spell read legal at an off-GCD boundary and pressing it did
+// nothing (arms smoke: 1996 off-GCD decisions, no press produced a cast). A foreground boundary is untouched. The
+// boundary kind comes from player_t::current_execute_type, which the poll event itself is only scheduled under
+// (schedule_off_gcd_ready returns unless it is OFF_GCD); any other value leaves the bit as ready() computed it.
+static bool pressable_at_boundary( const player_t* p, const action_t* a, bool boundary_is_foreground )
+{
+  if ( boundary_is_foreground )
+    return true;
+  switch ( p->current_execute_type )
+  {
+    case execute_type::OFF_GCD:
+      return a->usable_during_current_gcd();
+    case execute_type::CAST_WHILE_CASTING:
+      return a->usable_during_current_cast();
+    default:
+      return true;
+  }
+}
+
 void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_ACTION_DIM ],
                              std::uint8_t out_ready[ RL_ACTION_DIM ], bool is_decision_boundary,
-                             bool* out_used_dump_time_compute )
+                             bool* out_used_dump_time_compute, bool boundary_is_foreground )
 {
   if ( out_used_dump_time_compute )
     *out_used_dump_time_compute = false;
@@ -1039,8 +1273,83 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
                               ? solver_control::resolve_action( mutable_p, a.token )
                               : nullptr );
     }
+    // 271.6-18 (G271.6-37): the engine's channel-lock answers for these handles must equal the header's lock table (a
+    // build-dependent row skipped), else the run is refused here, by name, at the first decision. Runs for every actor that
+    // reaches this fill, enhancement included, where it refuses nothing.
+    rl_action_census::check_header_lock_table( mutable_p, handles );
+    // 261013-aimx class A: the engine's answer to "is this aimed button gated on enemy health" must equal the header's
+    // RL_TARGETED_TOKEN_HEALTH_GATED table (a header without the table, enhancement's, is not asked), else the run is refused here, by
+    // name, at the first decision.
+    rl_target_select::check_header_health_gates( mutable_p );
+    // 271.6-07: the reach table, taken once beside the handles (reads only). Empty unless the header declares census hit
+    // providers, so enhancement never walks the census here.
+    std::vector<reach_gate_t> gates( RL_ACTION_DIM );
+    bool                      header_has_census = false;
+    for ( std::size_t k = 0; k < RL_HIT_PROVIDER_COUNT; ++k )
+      if ( std::strncmp( RL_HIT_PROVIDERS[ k ].provider, "census.", 7 ) == 0 )
+        header_has_census = true;
+    if ( header_has_census )
+    {
+      const std::vector<rl_action_census::token_t> walk = rl_action_census::walk_classified( mutable_p );
+      // 271.6-07 (G271.6-28 as revised): the engine's reading of each hit row's class from the spell data must equal the header's
+      // (or the header marks it as the owner's recorded override), else the run is refused here, by name, at the first decision.
+      rl_action_census::check_header_gate_classes( mutable_p, walk );
+      // 271.7-05 (NXTB-01): the engine's answer to "does this press need an enemy within melee reach" for each cast button must equal the
+      // header's RL_ACTION_NEEDS_MELEE_REACH table (a header without the table, enhancement's, is not asked), else the run is refused
+      // here, by name, at the first decision.
+      rl_action_census::check_header_reach_classes( mutable_p, walk );
+      for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+      {
+        const rl_action_desc& a = RL_ACTIONS[ i ];
+#ifdef RL_ACTION_NEEDS_MELEE_REACH_DEFINED
+        // 271.7 class A (NXTB-01; the owner, 2026-10-12 about 05:45Z: "we should also mask avatar until we are in melee range of the
+        // boss ... same as the trinkets"): a press that needs no unit and has no hit shape (the header table says so) is offered only
+        // while some enemy stands within the melee reach, through the same conjunct as the shape rule: mask only, never ready(). This
+        // runs BEFORE the spell-data skip below because an on-use trinket's action has no spell data (use_item_t) and would otherwise
+        // be passed over. Radius MELEE_RANGE_YARDS plus the enemy's combat reach, no front filter.
+        if ( a.kind == rl_action_kind::cast && a.token != nullptr && handles[ i ] != nullptr && RL_ACTION_NEEDS_MELEE_REACH[ i ] )
+        {
+          gates[ i ].radius = rl_target_select::MELEE_RANGE_YARDS;
+          continue;
+        }
+#endif
+        if ( a.kind != rl_action_kind::cast || a.token == nullptr || handles[ i ] == nullptr || !handles[ i ]->data().ok() )
+          continue;
+        int row = -1;
+        for ( std::size_t k = 0; k < RL_HIT_PROVIDER_COUNT; ++k )
+          if ( std::strncmp( RL_HIT_PROVIDERS[ k ].provider, "census.", 7 ) == 0 &&
+               std::strcmp( RL_HIT_PROVIDERS[ k ].provider + 7, a.token ) == 0 )
+            row = static_cast<int>( k );
+        if ( row < 0 )
+          continue;
+#ifdef RL_HIT_ROW_NEEDS_UNIT_DEFINED
+        if ( RL_HIT_ROW_NEEDS_UNIT[ static_cast<std::size_t>( row ) ] )
+          continue;  // class UNIT: the game's own range check gates this button's unit (Mortal Strike; Cleave by the owner's word)
+#endif
+        for ( const rl_action_census::token_t& t : walk )
+        {
+          if ( t.token != a.token || !t.found )
+            continue;
+          if ( t.chosen_node < 0 || static_cast<std::size_t>( t.chosen_node ) >= t.nodes.size() )
+            throw sc_runtime_error( fmt::format(
+                "rl_policy: hit row '{}' is SHAPE class but player '{}' has no counted node for it (bind-time refusal, 271.6-07)",
+                a.token, p->name() ) );
+          const rl_action_census::node_t& node = t.nodes[ static_cast<std::size_t>( t.chosen_node ) ];
+          if ( node.underlying != rl_action_census::shape_t::AROUND_PLAYER || node.radius <= 0.0 )
+            throw sc_runtime_error( fmt::format(
+                "rl_policy: hit row '{}' is SHAPE class but its counted node's shape '{}' has no mask test yet for player '{}' "
+                "(bind-time refusal, 271.6-07 planner default 6: fail closed rather than leave the button ungated)",
+                a.token, rl_action_census::shape_name( node.underlying ), p->name() ) );
+          gates[ i ].radius = node.radius;
+          gates[ i ].filter = node.filter;
+          break;
+        }
+      }
+    }
+    g_reach_gate_cache.emplace( p, std::move( gates ) );
     cached = g_action_handle_cache.emplace( p, std::move( handles ) ).first;
   }
+  const std::vector<reach_gate_t>& reach_gates = g_reach_gate_cache[ p ];
 
   // CR-04 (260902/cr4): tracks whether this decision offered at least one legal registry action
   // to the RL-controlled actor, and whether any registry action existed to offer at all -- feeds
@@ -1106,7 +1415,9 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
         assert( found &&
                 "rl_target_select: a pick just filled for this decision must be immediately "
                 "readable (228-02, D-12)" );
-        out_ready[ i ] = ( a->ready() && pick != nullptr && a->target_ready( pick ) ) ? 1 : 0;
+        out_ready[ i ] = ( a->ready() && pick != nullptr && a->target_ready( pick ) &&
+                           reach_rule_allows( p, reach_gates[ i ], pick ) &&
+                           pressable_at_boundary( p, a, boundary_is_foreground ) ) ? 1 : 0;
         // 240-05 Task 2: record this action for the target head's own pass, immediately after
         // this loop -- see that pass's own comment (below) for why identical gating matters.
         targeted_actions_this_decision[ targeted_actions_count++ ] = a;
@@ -1118,7 +1429,9 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
         // boundary path) -- compute the plain gate bits off the action's CURRENT target rather
         // than a per-decision selector pick, since none was ever stamped for this decision. No
         // stamp bump, no fill_pick -- both would corrupt a stamp a boundary call never opened.
-        out_ready[ i ] = ( a->ready() && a->target != nullptr && a->target_ready( a->target ) ) ? 1 : 0;
+        out_ready[ i ] = ( a->ready() && a->target != nullptr && a->target_ready( a->target ) &&
+                           reach_rule_allows( p, reach_gates[ i ], a->target ) &&
+                           pressable_at_boundary( p, a, boundary_is_foreground ) ) ? 1 : 0;
       }
       if ( out_ready[ i ] )
         any_targeted_action_ready = true;
@@ -1136,7 +1449,9 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
     // against dereferencing a null target inside `target_ready`'s first
     // line (`candidate_target->is_sleeping()`).
     out_ready[ i ] = ( out_resolvable[ i ] && a->ready() && a->target != nullptr &&
-                        a->target_ready( a->target ) ) ? 1 : 0;
+                        a->target_ready( a->target ) &&
+                        reach_rule_allows( p, reach_gates[ i ], a->target ) &&
+                        pressable_at_boundary( p, a, boundary_is_foreground ) ) ? 1 : 0;
   }
 
   // 246.1-05 (CAP-02): freshly computed this call (never on the cache-hit early return above,
@@ -1339,7 +1654,7 @@ constexpr double RL_SATURATED_SECONDS = 600.0;
 
 enum class direct_id
 {
-  active_enemies, t, maelstrom,
+  active_enemies, t, resource,   // `resource`: the spec's resource (plan 268-04; was the shaman-only `maelstrom`)
   // stats
   stats_attack_haste, stats_attack_crit_chance, stats_mastery_value,
   // 260923-lrc stage 1D (PLAN.md D24): stats_attack_power REMOVED -- the live in-game addon can
@@ -1391,8 +1706,13 @@ enum class direct_id
   hits_chain_lightning, hits_tempest, hits_crash_lightning,
   hits_lava_lash_flame_shock_spread, hits_voltaic_blaze_cleave, hits_voltaic_blaze_new_flame_shocks,
   hits_fire_nova,
+  // 271-10 (H-3): every generated "census.<button>" hit column (the slot's `census_row` names which); replaces plan 268-05's three
+  // hand-written warrior providers.
+  hits_census,
   // 261002-8rs: the Lashing Flames carrier count, appended LAST so no existing enumerator value shifts.
-  fw_lashing_flames_carrier_count
+  fw_lashing_flames_carrier_count,
+  // 261013-aimx (class C): a registry-declared aggregate, `aggregates.<name>` (the slot's `aggregate_row` names the RL_DECLARED_AGGREGATES row).
+  declared_aggregate
   // 260914-rbp Task 1's R14 (crash_lightning_next_expiry/crash_lightning_stack_seconds, two
   // ad-hoc scalar direct_ids) is MIGRATED and REMOVED here (Task 2b, Q17): the ASYNC STACK
   // PROFILE is now a generic `player_buffs.<b>.*` buff-family leaf (buff_leaf_kind::next_expiry/
@@ -1462,14 +1782,17 @@ enum class action_leaf_kind
 enum class target_fact_leaf_kind
 {
   found, distance, in_front, in_reach, alive, immune, time_to_die, health_pct,
-  is_boss, flame_shock_remaining, is_current_target,
+  is_boss, is_current_target,
   actor_index, actor_spawn_index,
   // 228-11 (D-16 full inventory, TGT-04/TGT-06): the leaves D-16 names beyond what 228-09 wired
   // in -- every one already a field on enemy_fact (228-02/228-10), read the same way every
   // existing leaf above is (build_enemy_fact() -- never a fresh select() call, D-12).
-  in_range, immunity_remaining, burning_core_remaining, lightning_rod_stacks,
-  lightning_rod_remaining, venomfang_remaining, venomfang_debuff_stacks,
-  venomfang_debuff_remaining, rune_of_unleashed_fire_lingering_remaining,
+  in_range, immunity_remaining,
+  // Phase 268 plan 03 (G268-6, FORK-03): a declared fact -- an aura of the actor on the candidate, named by a row of the spec
+  // header's RL_DECLARED_FACTS. Bound by the leaf's feature name (RL_TARGET_FEATURE_NAMES[ row.slot ]); the read side returns
+  // fact.declared[ the bound row index ]. This one kind replaces the eight shaman aura leaf kinds (flame_shock_remaining,
+  // burning_core_remaining, lightning_rod_*, venomfang_*, rune_of_unleashed_fire_lingering_remaining).
+  declared,
   // OBS-01 (232-02): the previous-pick boolean leaf is REMOVED (the tie-break that consumed it
   // is gone from select()). OBS-03 (232-02) collapsed the always-equal neighbour pair to one
   // leaf, renamed to name the rule it encodes.
@@ -1494,6 +1817,10 @@ struct slot_binding
   buff_t* buff = nullptr;               // kind == buff
   buff_leaf_kind buff_leaf = buff_leaf_kind::stacks;   // kind == buff
   direct_id direct = direct_id::t;      // kind == direct
+  std::size_t census_row = 0;           // kind == direct, direct == direct_id::hits_census: the index into g_census_hit_actors[p].rows
+  std::size_t aggregate_row = 0;        // kind == direct, direct == direct_id::declared_aggregate: the index into RL_DECLARED_AGGREGATES
+  const action_t* aggregate_action = nullptr;  // that row's aimed button, resolved once at bind (its candidate block is the list reduced)
+  resource_e resource = RESOURCE_NONE;  // kind == direct, direct == direct_id::resource: which engine resource to read (bound once)
   expr_t* expr = nullptr;               // kind == expression -- non-owning; owned by slot_table::owned_expressions
   cooldown_t* cooldown = nullptr;                        // kind == cooldown
   cooldown_leaf_kind cooldown_leaf = cooldown_leaf_kind::remains;  // kind == cooldown
@@ -1513,6 +1840,7 @@ struct slot_binding
   // this leaf reads -- resolved ONCE at bind time from the leaf name, never re-parsed per
   // decision.
   target_fact_leaf_kind target_fact_leaf = target_fact_leaf_kind::found;
+  std::size_t target_fact_declared = 0;   // target_fact_leaf == declared: the index into RL_DECLARED_FACTS
 
   // kind == shape_fact (228-11, D-16): which SHAPED action and which of its three descriptive
   // leaves -- both resolved ONCE at bind time from the member/leaf name, never re-parsed per
@@ -1785,7 +2113,7 @@ std::string hits_switch_parent_name( const char* leaf )
 // shaman ever reaches this path, so there is no other actor's absent
 // resource to accidentally read as zero. Applies identically to the
 // cooldowns family's own `charges_fractional` when plan 220-05 binds it.
-slot_binding resolve_scalar_leaf( const rl_leaf_desc& leaf )
+slot_binding resolve_scalar_leaf( const player_t* p, const rl_leaf_desc& leaf )
 {
   slot_binding b;
   b.leaf = &leaf;
@@ -1812,10 +2140,47 @@ slot_binding resolve_scalar_leaf( const rl_leaf_desc& leaf )
     b.direct = direct_id::t;
     return b;
   }
-  if ( std::strcmp( leaf.leaf, "maelstrom" ) == 0 )
+  // 261013-aimx (class C): `aggregates.<name>` binds to the header's RL_DECLARED_AGGREGATES row of that name and to the row's aimed button,
+  // resolved once here. A leaf with no row (a header cut before the table, or a stale census) is refused at bind by name, never read as zero.
+  if ( std::strncmp( leaf.leaf, "aggregates.", 11 ) == 0 )
+  {
+#ifdef RL_DECLARED_AGGREGATES_DEFINED
+    for ( std::size_t k = 0; k < RL_DECLARED_AGGREGATE_COUNT; ++k )
+      if ( std::strcmp( RL_DECLARED_AGGREGATES[ k ].name, leaf.leaf + 11 ) == 0 )
+      {
+        b.kind             = slot_binding_kind::direct;
+        b.direct           = direct_id::declared_aggregate;
+        b.aggregate_row    = k;
+        b.aggregate_action = solver_control::resolve_action( const_cast<player_t*>( p ), RL_DECLARED_AGGREGATES[ k ].button );
+        return b;
+      }
+#endif
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::resolve_scalar_leaf: registry '{}' scalar leaf '{}' names a declared aggregate that the header's RL_DECLARED_AGGREGATES "
+        "does not list (bind-time refusal: regenerate the header from the registry's targeting.aggregates)",
+        RL_REGISTRY_ID, leaf.leaf ) );
+  }
+  // Phase 268 plan 04 (G268-7): the resource scalar is generic. `resource.<name>` binds the engine resource util::parse_resource_type
+  // names; a bare leaf equal to RL_RESOURCE_NAME binds the header's own resource (enhancement's wire leaf `maelstrom` keeps its
+  // name and its bytes). An unknown resource name is refused here, at bind, with the registry id.
+  if ( std::strncmp( leaf.leaf, "resource.", 9 ) == 0 )
+  {
+    const resource_e named = util::parse_resource_type( leaf.leaf + 9 );
+    if ( named == RESOURCE_NONE )
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::resolve_scalar_leaf: registry '{}' scalar leaf '{}' names resource '{}', which "
+          "util::parse_resource_type does not know",
+          RL_REGISTRY_ID, leaf.leaf, leaf.leaf + 9 ) );
+    b.kind = slot_binding_kind::direct;
+    b.direct = direct_id::resource;
+    b.resource = named;
+    return b;
+  }
+  if ( std::strcmp( leaf.leaf, RL_RESOURCE_NAME ) == 0 )
   {
     b.kind = slot_binding_kind::direct;
-    b.direct = direct_id::maelstrom;
+    b.direct = direct_id::resource;
+    b.resource = rl_spec_resource();
     return b;
   }
   if ( std::strcmp( leaf.leaf, "raid_event_next_in" ) == 0 )
@@ -1902,46 +2267,46 @@ slot_binding resolve_scalar_leaf( const rl_leaf_desc& leaf )
   // binds to the identical direct_id as its magnitude sibling -- the plain parent name (no
   // suffix) keeps binding the magnitude row exactly as before.
   const std::string hits_dispatch_name = hits_switch_parent_name( leaf.leaf );
-  if ( hits_dispatch_name == "hits.chain_lightning" )
+  // Phase 268 plan 04 (G268-7, FORK-04): every `hits.<member>` scalar binds through the header's RL_HIT_PROVIDERS and the acting
+  // player's class plugin. The row names the provider (spelled <class>.<name>); the plugin maps it to its reading. A provider
+  // the plugin does not have is refused here, at bind, with the registry id, the leaf and the provider. A hits leaf with no
+  // provider row keeps the old behaviour (falls through, ends unresolved; the caller decides what that means).
+  for ( std::size_t k = 0; k < RL_HIT_PROVIDER_COUNT; ++k )
   {
+    const rl_hit_provider& row = RL_HIT_PROVIDERS[ k ];
+    if ( hits_dispatch_name != std::string( row.family ) + "." + row.member )
+      continue;
+    // 271-10 (H-3): a generated census row is not a class plugin's provider; it binds to the action discovery census.
+    if ( std::strncmp( row.provider, "census.", 7 ) == 0 )
+    {
+      b.kind       = slot_binding_kind::direct;
+      b.direct     = direct_id::hits_census;
+#ifdef RL_HIT_ROW_NODE_DEFINED
+      // 261013-aimx class B: the header names the census node each row counts (parallel to RL_HIT_PROVIDERS); a class-provider row reads null.
+      b.census_row = census_hit_row_for( const_cast<player_t*>( p ), row.provider + 7, RL_HIT_ROW_NODE[ k ] );
+#else
+      b.census_row = census_hit_row_for( const_cast<player_t*>( p ), row.provider + 7, nullptr );
+#endif
+      return b;
+    }
+    const rl_class_plugin& plugin = rl_class_plugin_for( p );
+    const rl_class_hit_provider* provider = rl_class_hit_provider_find( plugin, row.provider );
+    if ( provider == nullptr )
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::resolve_scalar_leaf: registry '{}' scalar leaf '{}' names hit provider '{}', which the class plugin '{}' "
+          "of player '{}' does not provide",
+          RL_REGISTRY_ID, leaf.leaf, row.provider, plugin.class_name, p->name() ) );
     b.kind = slot_binding_kind::direct;
-    b.direct = direct_id::hits_chain_lightning;
-    return b;
-  }
-  if ( hits_dispatch_name == "hits.tempest" )
-  {
-    b.kind = slot_binding_kind::direct;
-    b.direct = direct_id::hits_tempest;
-    return b;
-  }
-  if ( hits_dispatch_name == "hits.crash_lightning" )
-  {
-    b.kind = slot_binding_kind::direct;
-    b.direct = direct_id::hits_crash_lightning;
-    return b;
-  }
-  if ( hits_dispatch_name == "hits.lava_lash.flame_shock_spread" )
-  {
-    b.kind = slot_binding_kind::direct;
-    b.direct = direct_id::hits_lava_lash_flame_shock_spread;
-    return b;
-  }
-  if ( hits_dispatch_name == "hits.voltaic_blaze.cleave" )
-  {
-    b.kind = slot_binding_kind::direct;
-    b.direct = direct_id::hits_voltaic_blaze_cleave;
-    return b;
-  }
-  if ( hits_dispatch_name == "hits.voltaic_blaze.new_flame_shocks" )
-  {
-    b.kind = slot_binding_kind::direct;
-    b.direct = direct_id::hits_voltaic_blaze_new_flame_shocks;
-    return b;
-  }
-  if ( hits_dispatch_name == "hits.fire_nova" )
-  {
-    b.kind = slot_binding_kind::direct;
-    b.direct = direct_id::hits_fire_nova;
+    switch ( provider->reading )
+    {
+      case rl_hit_reading::chain_lightning:                  b.direct = direct_id::hits_chain_lightning; break;
+      case rl_hit_reading::tempest:                          b.direct = direct_id::hits_tempest; break;
+      case rl_hit_reading::crash_lightning:                  b.direct = direct_id::hits_crash_lightning; break;
+      case rl_hit_reading::lava_lash_flame_shock_spread:     b.direct = direct_id::hits_lava_lash_flame_shock_spread; break;
+      case rl_hit_reading::voltaic_blaze_cleave:             b.direct = direct_id::hits_voltaic_blaze_cleave; break;
+      case rl_hit_reading::voltaic_blaze_new_flame_shocks:   b.direct = direct_id::hits_voltaic_blaze_new_flame_shocks; break;
+      case rl_hit_reading::fire_nova:                        b.direct = direct_id::hits_fire_nova; break;
+    }
     return b;
   }
   // 260914-rbp Task 1's R14 (crash_lightning_next_expiry/crash_lightning_stack_seconds, two
@@ -2099,11 +2464,11 @@ slot_binding resolve_action_expression_leaf( action_t* action, const std::string
 // `cooldown.<name>.full_recharge_time` is not a real generic-cooldown
 // expression (verified empirically) and a cooldown NAME does not always
 // equal its action's name -- in this schema `full_recharge_time` appears
-// ONLY on the `strike` member (the shared Stormstrike/Windstrike cooldown
-// row), whose real action is named "stormstrike", not "strike"; that one
-// mapping is hardcoded here rather than assumed identical to every other
-// cooldown member (which never need it -- no OTHER member in this census
-// declares a `full_recharge_time` leaf).
+// ONLY on enhancement's shared Stormstrike/Windstrike cooldown row, whose
+// real action has a different name than the row; that mapping is the header's
+// RL_COOLDOWN_ROW_ACTION table (plan 268-04, G268-7) rather than assumed
+// identical to every other cooldown member (a row with no alias maps to
+// itself).
 //
 // Deliberately does NOT gate `charges_fractional` on
 // `p->resources.is_active(RESOURCE_MAELSTROM)` (the SC-5 byte-neutrality
@@ -2117,7 +2482,15 @@ slot_binding resolve_cooldown_leaf( player_t* p, cooldown_t* cd, const std::stri
 {
   if ( std::strcmp( leaf.leaf, "full_recharge_time" ) == 0 )
   {
-    const std::string action_token = ( cooldown_token == "strike" ) ? "stormstrike" : cooldown_token;
+    // Phase 268 plan 04 (G268-7): the cooldown-row to action alias comes from the header (RL_COOLDOWN_ROW_ACTION); a row with no
+    // alias maps to itself.
+    std::string action_token = cooldown_token;
+    for ( std::size_t k = 0; k < RL_COOLDOWN_ROW_ACTION_COUNT; ++k )
+      if ( cooldown_token == RL_COOLDOWN_ROW_ACTION[ k ].cooldown_row )
+      {
+        action_token = RL_COOLDOWN_ROW_ACTION[ k ].action_token;
+        break;
+      }
     return resolve_action_expression_leaf( p->find_action( action_token ), "full_recharge_time", leaf, table );
   }
 
@@ -2576,7 +2949,16 @@ slot_binding resolve_target_fact_leaf( player_t* p, const std::string& engine_to
 
   const std::string& leaf_name = leaf.leaf;
   target_fact_leaf_kind fk;
-  if ( leaf_name == "found" )                       fk = target_fact_leaf_kind::found;
+  // Phase 268 plan 03 (G268-6): a declared fact first -- the leaf named after the feature a RL_DECLARED_FACTS row fills.
+  std::size_t declared_row = RL_DECLARED_FACT_COUNT;
+  for ( std::size_t k = 0; k < RL_DECLARED_FACT_COUNT; ++k )
+    if ( leaf_name == RL_TARGET_FEATURE_NAMES[ RL_DECLARED_FACTS[ k ].slot ] )
+    {
+      declared_row = k;
+      break;
+    }
+  if ( declared_row < RL_DECLARED_FACT_COUNT )       fk = target_fact_leaf_kind::declared;
+  else if ( leaf_name == "found" )                   fk = target_fact_leaf_kind::found;
   else if ( leaf_name == "distance" )                fk = target_fact_leaf_kind::distance;
   else if ( leaf_name == "in_front" )                fk = target_fact_leaf_kind::in_front;
   else if ( leaf_name == "in_reach" )                fk = target_fact_leaf_kind::in_reach;
@@ -2585,7 +2967,6 @@ slot_binding resolve_target_fact_leaf( player_t* p, const std::string& engine_to
   else if ( leaf_name == "time_to_die" )             fk = target_fact_leaf_kind::time_to_die;
   else if ( leaf_name == "health_pct" )               fk = target_fact_leaf_kind::health_pct;
   else if ( leaf_name == "is_boss" )                  fk = target_fact_leaf_kind::is_boss;
-  else if ( leaf_name == "flame_shock_remaining" )    fk = target_fact_leaf_kind::flame_shock_remaining;
   else if ( leaf_name == "is_current_target" )        fk = target_fact_leaf_kind::is_current_target;
   else if ( leaf_name == "actor_index" )              fk = target_fact_leaf_kind::actor_index;
   else if ( leaf_name == "actor_spawn_index" )        fk = target_fact_leaf_kind::actor_spawn_index;
@@ -2593,13 +2974,6 @@ slot_binding resolve_target_fact_leaf( player_t* p, const std::string& engine_to
   // (228-02/228-10) -- see target_fact_leaf_kind's own comment.
   else if ( leaf_name == "in_range" )                                     fk = target_fact_leaf_kind::in_range;
   else if ( leaf_name == "immunity_remaining" )                           fk = target_fact_leaf_kind::immunity_remaining;
-  else if ( leaf_name == "burning_core_remaining" )                       fk = target_fact_leaf_kind::burning_core_remaining;
-  else if ( leaf_name == "lightning_rod_stacks" )                         fk = target_fact_leaf_kind::lightning_rod_stacks;
-  else if ( leaf_name == "lightning_rod_remaining" )                      fk = target_fact_leaf_kind::lightning_rod_remaining;
-  else if ( leaf_name == "venomfang_remaining" )                          fk = target_fact_leaf_kind::venomfang_remaining;
-  else if ( leaf_name == "venomfang_debuff_stacks" )                      fk = target_fact_leaf_kind::venomfang_debuff_stacks;
-  else if ( leaf_name == "venomfang_debuff_remaining" )                   fk = target_fact_leaf_kind::venomfang_debuff_remaining;
-  else if ( leaf_name == "rune_of_unleashed_fire_lingering_remaining" )   fk = target_fact_leaf_kind::rune_of_unleashed_fire_lingering_remaining;
   else if ( leaf_name == "neighbours_within_radius" )                     fk = target_fact_leaf_kind::neighbours_within_radius;
   else
   {
@@ -2610,6 +2984,7 @@ slot_binding resolve_target_fact_leaf( player_t* p, const std::string& engine_to
   b.kind = slot_binding_kind::target_fact;
   b.bound_action = a;
   b.target_fact_leaf = fk;
+  b.target_fact_declared = declared_row;
   return b;
 }
 
@@ -2798,7 +3173,7 @@ const slot_table& bind_slots( player_t* p )
               binding.constant_value = effective ? 1.0 : 0.0;
               break;
             }
-            binding = resolve_scalar_leaf( leaf );
+            binding = resolve_scalar_leaf( p, leaf );
             // 260914-rbp Task 2c (ME-4 fork half): an `unresolved` binding for a `scalars`-family
             // leaf is FATAL, by name -- unlike a family with a legitimate "not present on this
             // profile" absence path (deck/pets/items), every `scalars` leaf name is a literal
@@ -3292,6 +3667,22 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
     return hits_values;
   };
 
+  // 271-10 (H-3): the census hit columns, each computed AT MOST ONCE per build_obs() call (the same discipline as hits_values above;
+  // an `at_least_k` switch row of the same button reads the memo too).
+  double        census_hit_value[ CENSUS_HIT_ROWS_MAX ] = {};
+  std::uint32_t census_hit_done = 0;
+  auto get_census_hit = [ & ]( std::size_t row_index ) -> double
+  {
+    assert( row_index < CENSUS_HIT_ROWS_MAX );
+    const std::uint32_t bit = 1u << static_cast<std::uint32_t>( row_index );
+    if ( ( census_hit_done & bit ) == 0 )
+    {
+      census_hit_done |= bit;
+      census_hit_value[ row_index ] = census_hit_count( p, g_census_hit_actors[ p ].rows[ row_index ] );
+    }
+    return census_hit_value[ row_index ];
+  };
+
   // 260923-lrc stage 1D (PLAN.md D24): the shared-snapshot cache for
   // crit_pct_current/persistent_multiplier/da_multiplier (220-06 Task 3, OBS-07;
   // `multiplier` added 221-07 WR-01; hit_damage REMOVED 260923-lrc, PLAN.md D11) is DELETED
@@ -3412,11 +3803,12 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
               raw = s.t;
               status = lookup_status::present;
               break;
-            case direct_id::maelstrom:
+            case direct_id::resource:
               // Read directly off the engine, not off rl_state_t -- there
               // is no POD field for it (see resolve_scalar_leaf's own
-              // comment on why that gate is unnecessary here).
-              raw = p->resources.current[ RESOURCE_MAELSTROM ];
+              // comment on why that gate is unnecessary here). The resource
+              // was bound once, at resolve_scalar_leaf (plan 268-04).
+              raw = p->resources.current[ b.resource ];
               status = lookup_status::present;
               break;
 
@@ -3849,6 +4241,22 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
               status = lookup_status::present;
               break;
 
+            // 261013-aimx (class C): a declared aggregate, reduced from its button's stamped candidate block (see read_declared_aggregate).
+            case direct_id::declared_aggregate:
+#ifdef RL_DECLARED_AGGREGATES_DEFINED
+              raw = read_declared_aggregate( RL_DECLARED_AGGREGATES[ b.aggregate_row ], *b.leaf, b.aggregate_action );
+              status = lookup_status::present;
+#else
+              status = lookup_status::absent;
+#endif
+              break;
+
+            // 271-10 (H-3): a generated census hit column, read from its own per-decision memo.
+            case direct_id::hits_census:
+              raw = get_census_hit( b.census_row );
+              status = lookup_status::present;
+              break;
+
             // 260914-rbp Task 1's R14 (crash_lightning_next_expiry/crash_lightning_stack_seconds
             // direct_id cases, reading a hardcoded t.bindings[10] slot index) is MIGRATED and
             // REMOVED here (Task 2b, Q17) -- the ASYNC STACK PROFILE is now a generic
@@ -4055,7 +4463,6 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
             case target_fact_leaf_kind::time_to_die:            raw = fact.time_to_die; break;
             case target_fact_leaf_kind::health_pct:             raw = fact.health_pct; break;
             case target_fact_leaf_kind::is_boss:                raw = fact.is_boss ? 1.0 : 0.0; break;
-            case target_fact_leaf_kind::flame_shock_remaining:  raw = fact.flame_shock_remaining; break;
             case target_fact_leaf_kind::is_current_target:      raw = effective_is_current_target ? 1.0 : 0.0; break;
             case target_fact_leaf_kind::actor_index:            raw = static_cast<double>( fact.actor_index ); break;
             case target_fact_leaf_kind::actor_spawn_index:      raw = static_cast<double>( fact.actor_spawn_index ); break;
@@ -4064,13 +4471,9 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
             // every leaf above already uses.
             case target_fact_leaf_kind::in_range:                            raw = fact.in_range ? 1.0 : 0.0; break;
             case target_fact_leaf_kind::immunity_remaining:                  raw = fact.immunity_remaining; break;
-            case target_fact_leaf_kind::burning_core_remaining:              raw = fact.burning_core_remaining; break;
-            case target_fact_leaf_kind::lightning_rod_stacks:                raw = static_cast<double>( fact.lightning_rod_stacks ); break;
-            case target_fact_leaf_kind::lightning_rod_remaining:             raw = fact.lightning_rod_remaining; break;
-            case target_fact_leaf_kind::venomfang_remaining:                 raw = fact.venomfang_remaining; break;
-            case target_fact_leaf_kind::venomfang_debuff_stacks:             raw = static_cast<double>( fact.venomfang_debuff_stacks ); break;
-            case target_fact_leaf_kind::venomfang_debuff_remaining:          raw = fact.venomfang_debuff_remaining; break;
-            case target_fact_leaf_kind::rune_of_unleashed_fire_lingering_remaining: raw = fact.rune_of_unleashed_fire_lingering_remaining; break;
+            // Phase 268 plan 03: a declared fact reads the value build_enemy_fact's generic loop stored (a double carries an int
+            // stack count exactly, so the raw value is the one the retired per-aura cases produced).
+            case target_fact_leaf_kind::declared:                             raw = fact.declared[ b.target_fact_declared ]; break;
             case target_fact_leaf_kind::neighbours_within_radius:            raw = static_cast<double>( fact.neighbours_within_radius ); break;
             default:
               matched = false;
@@ -4343,6 +4746,36 @@ double clamp_anchored_wait_pre_floor( const rl_state_t& s, double raw )
     seconds_pre_floor = s.raid_event_next_in;
   return seconds_pre_floor;
 }
+
+// Phase 268 plan 04 (D5, FORK-04): the RL_WAIT_DEFS row of each wait action, matched once per process by the action's label (the
+// header contract pins every row's label to a wait row of RL_ACTIONS). Built from constexpr header data only, so it is not a
+// per-player cache and needs no clearing. nullptr for a non-wait action or a wait with no row.
+//
+// resource_threshold wait semantics (the one place they are written down; Phase 267's mask.py mirrors them): a wait whose
+// RL_ACTIONS anchor kind is `none` and whose RL_WAIT_DEFS row is `resource_threshold` is legal only while the bound spec
+// resource (rl_spec_resource()) is strictly below the row's threshold, on top of every rule a plain next-event wait already has
+// (foreground boundary, illegal-at-buff-cap), and it lasts exactly as long as wait_next_event (build_wait's none-anchor branch,
+// which this reuses unchanged). A wait whose anchor kind is not `none` keeps its legacy anchor whatever its row says
+// (enhancement's wait_maelstrom stays the earlier of the two swings, research Pitfall 12).
+const rl_wait_def* wait_def_for_action( std::size_t i )
+{
+  static const std::array<const rl_wait_def*, RL_ACTION_DIM> table = []() {
+    std::array<const rl_wait_def*, RL_ACTION_DIM> t{};
+    for ( std::size_t a = 0; a < RL_ACTION_DIM; ++a )
+    {
+      if ( RL_ACTIONS[ a ].kind != rl_action_kind::wait || RL_ACTIONS[ a ].label == nullptr )
+        continue;
+      for ( std::size_t k = 0; k < RL_WAIT_DEF_COUNT; ++k )
+        if ( std::strcmp( RL_WAIT_DEFS[ k ].label, RL_ACTIONS[ a ].label ) == 0 )
+        {
+          t[ a ] = &RL_WAIT_DEFS[ k ];
+          break;
+        }
+    }
+    return t;
+  }();
+  return table[ i ];
+}
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -4403,6 +4836,13 @@ void build_mask( const rl_state_t& s, std::uint8_t out_mask[ RL_ACTION_DIM ] )
       }
       if ( a.wait_anchor.kind == rl_wait_anchor_kind::none )
       {
+        // Phase 268 plan 04 (D5): a resource_threshold row on an unanchored wait adds one rule (see wait_def_for_action above).
+        const rl_wait_def* def = wait_def_for_action( i );
+        if ( def != nullptr && def->kind == rl_wait_kind::resource_threshold )
+        {
+          out_mask[ i ] = ( s.has_resource_current && s.resource_current < def->threshold ) ? 1 : 0;
+          continue;
+        }
         out_mask[ i ] = 1;
         continue;
       }
@@ -4423,7 +4863,9 @@ void build_mask( const rl_state_t& s, std::uint8_t out_mask[ RL_ACTION_DIM ] )
     // the prior 221-01 AND). `s.action_resolvable`/`s.action_ready` were
     // computed ONCE in read_state() via read_action_gate_bits(), through
     // the SAME resolver (solver_control::resolve_action) that
-    // accept_cast() uses before its own not-ready FATAL. `build_mask`
+    // accept_cast() uses before its own not-ready FATAL (Phase 271.3: that resolver
+    // returns the action bound by identity of list and line, never a same-name stock
+    // line). `build_mask`
     // stays PURE over the rl_state_t POD (no player_t* parameter,
     // unchanged) -- these bits are READ from the POD, never computed here.
     //
@@ -4697,20 +5139,23 @@ wait_result build_wait( const rl_state_t& s, const rl_wait_anchor& anchor )
 // may not set rl_obs_names_out (the driver refuses it).
 void clear_process_caches()
 {
+  rl_button_bind::clear();  // Phase 271.3: the bound table is pointer-keyed like the caches below
   g_action_handle_cache.clear();
+  g_reach_gate_cache.clear();
   g_hits_action_handle_cache.clear();
   g_gate_bits_cache.clear();
   g_aim_context_pending = aim_context_pending_t{};
   g_capability_bits.clear();
   g_slot_table_cache.clear();
   g_enemy_handle_cache.clear();
+  g_census_hit_actors.clear();
 }
 
 // How many entries the caches above hold right now (a set aim-context-pending record counts as one).
 std::size_t process_cache_entries()
 {
-  return g_action_handle_cache.size() + g_hits_action_handle_cache.size() + g_gate_bits_cache.size() +
+  return rl_button_bind::entries() + g_action_handle_cache.size() + g_reach_gate_cache.size() + g_hits_action_handle_cache.size() + g_gate_bits_cache.size() +
          ( ( g_aim_context_pending.valid || g_aim_context_pending.p != nullptr ) ? 1u : 0u ) +
-         g_capability_bits.size() + g_slot_table_cache.size() + g_enemy_handle_cache.size();
+         g_capability_bits.size() + g_slot_table_cache.size() + g_enemy_handle_cache.size() + g_census_hit_actors.size();
 }
 } // namespace rl_policy
