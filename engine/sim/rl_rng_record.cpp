@@ -651,6 +651,7 @@ public:
   void fight_begin();
   void fight_end();
   void write_footer();
+  void branch_child_disown();
   void mark_resalt();
   std::uint32_t register_roller( rng::rng_t& stream, std::string_view key, roller_class_e cls,
                                   const action_t* action );
@@ -2805,6 +2806,16 @@ void recorder_t::write_sidecar()
   }
 }
 
+// Phase 290 stream C, stage C2: see the free function's comment in rl_rng_record.hpp. Runs in a forked copy only.
+void recorder_t::branch_child_disown()
+{
+  // The parent owns the stream, the file and the rows buffered so far. Release (never destroy) the stream: a destructor would flush and close a descriptor
+  // that shares its open file description with the parent's.
+  (void)stream_.release();
+  buffer_.clear();
+  writing_ = false;
+}
+
 void recorder_t::write_footer()
 {
   if ( writing_ )
@@ -2941,6 +2952,14 @@ void write_footer( sim_t* sim )
   // Clears rng::rl_draw_sink (recorder_t's destructor) and frees the object -- nothing may draw
   // into a closed recorder.
   root->rl_rng_recorder.reset();
+}
+
+void branch_child_disown( sim_t* sim )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder )
+    return;
+  root->rl_rng_recorder->branch_child_disown();
 }
 
 void mark_resalt( sim_t* sim )

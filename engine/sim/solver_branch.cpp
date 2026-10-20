@@ -36,6 +36,7 @@
 #include "sim/event.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_policy_constants_select.h"
+#include "sim/rl_rng_record.hpp"
 #include "sim/rl_translog.hpp"
 #include "sim/sim.hpp"
 #include "util/util.hpp"
@@ -411,6 +412,10 @@ void become_child( sim_t* sim, player_t* p, std::uint64_t seq, int button, std::
   {
     rl_translog::branch_child_disable( sim );
   }
+  // Phase 290 stream C, stage C2: the roll recorder belongs to the parent. This copy keeps counting draws (the recorder still tracks
+  // press frames and rollers, as it does for a replay-only run) but writes no record, no sidecar and no footer, and never touches
+  // the parent's file descriptor: see rl_rng_record::branch_child_disown().
+  rl_rng_record::branch_child_disown( sim );
   sim->rl_iteration_out.clear();
   sim->rl_bc_on = false;
   sim->rl_bl_on = false;
@@ -816,7 +821,10 @@ void validate( sim_t* sim )
     const char* opt;
   } const conflicts[] = {
     { !sim->decision_dump_file_str.empty(), "decision_dump" },
-    { !sim->rl_rng_record_file_str.empty(), "rl_rng_record" },
+    // Phase 290 stream C, stage C2: rl_rng_record is NOT in this table any more. The roll recorder writes the PARENT's fight only:
+    // become_child() hands every forked copy's recorder over to rl_rng_record::branch_child_disown() (it writes nothing, closes
+    // nothing, flushes nothing), so a copy can never write into the parent's file. The decision-anchored re-salt mode forks no copy and
+    // records its RESALT entry exactly as the clock form does. The search's and the bench's own tables (solver_search.cpp) are unchanged.
     { !sim->rl_rng_replay_file_str.empty(), "rl_rng_replay" },
     { !sim->rl_swing_pin_file_str.empty(), "rl_swing_pin" },
     { !sim->rl_swing_trace_file_str.empty(), "rl_swing_trace" },
