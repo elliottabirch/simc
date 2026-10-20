@@ -5,10 +5,12 @@
 #include "sim/rl_buff_census.hpp"
 
 #include "action/action.hpp"
+#include "action/dbc_proc_callback.hpp"
 #include "action/dot.hpp"
 #include "buff/buff.hpp"
 #include "dbc/dbc.hpp"
 #include "fmt/format.h"
+#include "item/special_effect.hpp"
 #include "player/player.hpp"
 #include "sim/cooldown.hpp"
 #include "sim/proc_rng.hpp"
@@ -18,6 +20,7 @@
 #include <cmath>
 #include <cstdio>
 #include <map>
+#include <set>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -178,6 +181,78 @@ std::string row_json( const row_t& r )
   return o + "}";
 }
 
+// 290-C4: the other engine objects that mark a buff as chance-applied, written beside the buff rows (additive top-level keys; schemaVersion stays 1,
+// the buff reader ignores keys it does not name). They are what a buff row cannot say about itself: an item or enchant callback that applies the
+// buff (`callbacks`), the player's rolled-chance objects (`procObjects`) and its cooldowns with the owner of each (`cooldowns`). Names are the engine's
+// own; nothing here is selected or named by this module -- scripts/rl/proc_buff_selector.py reads them.
+//   callbacks[]    one per dbc_proc_callback_t of the actor: driverSpellId, driverName, hasRppm, rppmValue, ppm, procChance, cooldownSeconds,
+//                  procBuff / customBuff (a name or ""), buffs (names in the special effect's buff list)
+//   procObjects[]  one per entry of the actor's proc_rng_list: name, type (rng_type_e as an integer)
+//   cooldowns[]    one per entry of the actor's cooldown_list: name, durationSeconds, heldByAction (some action of the actor holds it),
+//                  heldByBuff (some buff of the actor holds it as its cooldown)
+std::string buff_name_of( const buff_t* b )
+{
+  return b ? b->name_str : std::string();
+}
+
+std::string proc_objects_json( const player_t* actor )
+{
+  std::string o = ",\"callbacks\":[";
+  bool        first = true;
+  for ( action_callback_t* base : actor->callbacks.all_callbacks )
+  {
+    const auto* cb = dynamic_cast<const dbc_proc_callback_t*>( base );
+    if ( !cb )
+      continue;
+    const special_effect_t& e      = cb->effect;
+    const spell_data_t*     driver = e.driver();
+    std::string             buffs  = "[";
+    bool                    first_buff = true;
+    for ( const buff_t* b : e.buff_list )
+    {
+      buffs += ( first_buff ? "" : "," ) + esc( buff_name_of( b ) );
+      first_buff = false;
+    }
+    buffs += "]";
+    o += ( first ? "" : "," ) +
+         fmt::format( "{{\"driverSpellId\":{},\"driverName\":{},\"hasRppm\":{},\"rppmValue\":{},\"ppm\":{},\"procChance\":{},"
+                      "\"cooldownSeconds\":{},\"procBuff\":{},\"customBuff\":{},\"buffs\":{}}}",
+                      e.spell_id, esc( driver && driver->ok() && driver->name_cstr() ? driver->name_cstr() : "" ),
+                      cb->rppm != nullptr ? "true" : "false", num( e.rppm() ), num( cb->ppm ), num( cb->proc_chance ),
+                      num( e.cooldown().total_seconds() ), esc( buff_name_of( cb->proc_buff ) ), esc( buff_name_of( e.custom_buff ) ), buffs );
+    first = false;
+  }
+  o += "],\"procObjects\":[";
+  first = true;
+  for ( const proc_rng_t* r : actor->proc_rng_list )
+  {
+    if ( !r )
+      continue;
+    o += ( first ? "" : "," ) + fmt::format( "{{\"name\":{},\"type\":{}}}", esc( std::string( r->name() ) ), static_cast<int>( r->type() ) );
+    first = false;
+  }
+  std::set<const cooldown_t*> held_by_action;
+  for ( const action_t* a : actor->action_list )
+    if ( a && a->cooldown )
+      held_by_action.insert( a->cooldown );
+  std::set<const cooldown_t*> held_by_buff;
+  for ( const buff_t* b : actor->buff_list )
+    if ( b && b->cooldown )
+      held_by_buff.insert( b->cooldown );
+  o += "],\"cooldowns\":[";
+  first = true;
+  for ( const cooldown_t* c : actor->cooldown_list )
+  {
+    if ( !c )
+      continue;
+    o += ( first ? "" : "," ) +
+         fmt::format( "{{\"name\":{},\"durationSeconds\":{},\"heldByAction\":{},\"heldByBuff\":{}}}", esc( c->name_str ),
+                      num( c->duration.total_seconds() ), held_by_action.count( c ) ? "true" : "false", held_by_buff.count( c ) ? "true" : "false" );
+    first = false;
+  }
+  return o + "]";
+}
+
 void write_table( sim_t* sim, bool fight_played )
 {
   player_t* actor = census_actor( sim );
@@ -212,7 +287,9 @@ void write_table( sim_t* sim, bool fight_played )
     body += ( first ? "" : "," ) + row_json( kv.second );
     first = false;
   }
-  body += "]}\n";
+  body += "]";
+  body += proc_objects_json( actor );
+  body += "}\n";
 
   std::FILE* f = std::fopen( g_path.c_str(), "wb" );
   if ( !f )
