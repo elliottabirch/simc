@@ -528,6 +528,11 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   }
   out << "}";
 
+  // 290-C3: the since-applied timers of the buffs the observation reads (down buffs too). Written only when the
+  // observation schema has such a leaf, so every other schema's dump is byte-identical.
+  if ( rl_policy::schema_has_since_applied() )
+    rl_policy::write_since_applied_json( out, p );
+
   // Target debuffs - same active-only convention, read off the actor's
   // current target (single-target Patchwerk profile - see spike plan §7).
   out << ",\"target_debuffs\":{";
