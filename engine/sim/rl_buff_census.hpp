@@ -16,6 +16,10 @@
 // path (the two hooks run once per fight, at init-finished and at combat end). It changes no decision, no random draw and no
 // damage. Enemies are walked from the simulator's actor list, not from its non-sleeping list, because every enemy has demised
 // by the combat-end hook.
+//
+// 290-C4: beside the buff rows the file also carries three top-level arrays that a buff row cannot say about itself, for the same actor: `callbacks`
+// (the item/enchant proc callbacks and the buffs they apply), `procObjects` (the actor's rolled-chance objects) and `cooldowns` (its cooldowns and who
+// holds each). The proc-buff selector (scripts/rl/proc_buff_selector.py) reads them; the schema number is unchanged (the keys are additive).
 // ==========================================================================
 
 #pragma once
