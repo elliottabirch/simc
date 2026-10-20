@@ -1634,7 +1634,13 @@ enum class slot_binding_kind
 // remaining time, read off buff_t::expiration, oldest-first) and stack_seconds (their sum) --
 // bound ONLY for a member whose stack_behavior() is ASYNCHRONOUS on this build
 // (resolve_buff_leaf's own bind-time refusal enforces this; see its comment below).
-enum class buff_leaf_kind { stacks, remains, next_expiry, expiry_2, expiry_3, stack_seconds };
+// 290-C3 (decision 61): `since_applied` is the TIME SINCE THE BUFF WAS LAST APPLIED (seconds, counts UP;
+// refreshes and extra stacks count, because every successful trigger goes through buff_t::execute, which
+// sets buff_t::last_trigger). It is read BEFORE build_obs' down-means-absent test: the reading is only
+// interesting while the buff is DOWN. Never applied this fight (last_trigger is timespan_t::min() after the
+// fight reset, buff.cpp reset()) reads the leaf's own `missing`, which resolve_buff_leaf refuses to bind
+// unless it encodes to exactly 1.0 (the saturated reading), see its comment.
+enum class buff_leaf_kind { stacks, remains, next_expiry, expiry_2, expiry_3, stack_seconds, since_applied };
 
 // The `scalars` pseudo-family's `direct`-kind leaves this task resolves,
 // PLUS (220-05 Task 2) the `stats`/`swing_cast`/`position` families' own
@@ -2060,6 +2066,35 @@ slot_binding resolve_buff_leaf( buff_t* member_buff, const rl_leaf_desc& leaf )
       b.buff_leaf = buff_leaf_kind::expiry_3;
     else
       b.buff_leaf = buff_leaf_kind::stack_seconds;
+  }
+  else if ( std::strcmp( leaf.leaf, "since_applied" ) == 0 )
+  {
+    // 290-C3. BIND-TIME REFUSALS, by name (a registry/build mismatch, never a quietly wrong column):
+    //  - the leaf must be a clipped seconds leaf: the cap is the leaf's own `clipDiv`, so "saturated" is
+    //    the encoded value 1.0 and a reading past the cap cannot exceed it;
+    //  - its `missing` (the reading for "never applied this fight") must ENCODE to exactly 1.0, i.e. the
+    //    raw `missing` equals the cap in seconds. A raw missing of 1.0 under a 30 s cap would encode to
+    //    1/30 and read "applied one second ago" for a buff that was never applied.
+    if ( leaf.kind != rl_kind::k_seconds || !leaf.has_clip_div || !( leaf.clip_div > 0.0 ) )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::resolve_buff_leaf: leaf 'since_applied' for buff '{}' must be a seconds leaf with a clipDiv "
+          "(the cap is the leaf's own clipDiv) -- registry/build mismatch",
+          member_buff != nullptr ? member_buff->name() : std::string( "<unbound>" ) ) );
+    }
+    const double encoded_missing =
+        apply_leaf_scale( leaf.missing, leaf.kind, leaf.has_div, leaf.div, leaf.has_clip_div, leaf.clip_div );
+    if ( encoded_missing != 1.0 )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::resolve_buff_leaf: leaf 'since_applied' for buff '{}' has missing={} which encodes to {} under "
+          "clipDiv={}; the never-applied reading must be the saturated 1.0, so missing must equal clipDiv "
+          "-- registry/build mismatch",
+          member_buff != nullptr ? member_buff->name() : std::string( "<unbound>" ), leaf.missing, encoded_missing,
+          leaf.clip_div ) );
+    }
+    b.kind = slot_binding_kind::buff;
+    b.buff_leaf = buff_leaf_kind::since_applied;
   }
   else
   {
@@ -3409,6 +3444,34 @@ const slot_table& bind_slots( player_t* p )
     }
   }
 
+  // 290-C3: the `since_applied` bind-time refusals that need the FINAL table. A since_applied slot a zero-bit
+  // capability governs has just been rebound to the fixed constant above (an untalented buff, a raid-event-gated
+  // buff), which is the one legitimate way for its buff handle to be absent. A slot that is STILL bound to a null
+  // buff here names a buff this build never created although nothing governs it away, and a since_applied leaf that
+  // no family resolved is a generator/engine mismatch: both throw by name, instead of reading `missing` for the
+  // life of the schema (research 2026-10-12, section 2.2 item 3; the Q17 refusal's style).
+  for ( std::size_t si = 0; si < table.bindings.size(); ++si )
+  {
+    const slot_binding& sb = table.bindings[ si ];
+    if ( sb.leaf == nullptr || std::strcmp( sb.leaf->leaf, "since_applied" ) != 0 )
+      continue;
+    if ( sb.kind == slot_binding_kind::unresolved )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::bind_slots: leaf 'since_applied' (slot {} '{}') resolved to unresolved -- no family resolves "
+          "this leaf for that member; generator/engine mismatch",
+          si, table.composed_names[ si ] ) );
+    }
+    if ( sb.kind == slot_binding_kind::buff && sb.buff == nullptr )
+    {
+      throw sc_runtime_error( fmt::format(
+          "rl_policy::bind_slots: leaf 'since_applied' (slot {} '{}') is bound to a buff this build never created, "
+          "and no capability governs it away -- registry/build mismatch (a misspelt buff name, or a buff that needs "
+          "a capability governance entry)",
+          si, table.composed_names[ si ] ) );
+    }
+  }
+
   write_names_out_if_requested( p, table );
 
   auto [ inserted, ok ] = g_slot_table_cache.emplace( p, std::move( table ) );
@@ -3481,6 +3544,53 @@ void compute_aim_context_indicators( const player_t* p, float out[ RL_AIM_CONTEX
                                : apply_scale( raw, f.kind, f );
     out[ j ] = static_cast<float>( encoded ) > 0.0f ? 1.0f : 0.0f;
   }
+}
+
+// 290-C3: see rl_policy.hpp. Scans the compiled-in table once; no actor, no engine type.
+bool schema_has_since_applied()
+{
+  static const bool has = []
+  {
+    for ( std::size_t fi = 0; fi < RL_OBS_FAMILY_COUNT; ++fi )
+    {
+      const rl_obs_family& fam = RL_OBS_FAMILIES[ fi ];
+      if ( fam.kind != rl_family_kind::buff )
+        continue;
+      for ( std::size_t mi = 0; mi < fam.n_members; ++mi )
+        for ( std::size_t li = 0; li < fam.members[ mi ].n_leaves; ++li )
+          if ( std::strcmp( fam.members[ mi ].leaves[ li ].leaf, "since_applied" ) == 0 )
+            return true;
+    }
+    return false;
+  }();
+  return has;
+}
+
+// 290-C3: one object, keyed by buff name, value = seconds since the buff's last successful application (the raw
+// number, uncapped, the SAME subtraction build_obs does) or null when it was never applied this fight. Down buffs
+// are included (the decision dump's "buffs" object lists only buffs that are up). Reads the bound table, so the
+// buffs listed are exactly the since_applied slots the observation reads (a slot a capability governs away is a
+// constant and is not listed).
+void write_since_applied_json( std::ostream& out, player_t* p )
+{
+  const slot_table& t = bind_slots( p );
+  out << ",\"buff_since_applied\":{";
+  bool first = true;
+  for ( const slot_binding& b : t.bindings )
+  {
+    if ( b.kind != slot_binding_kind::buff || b.buff_leaf != buff_leaf_kind::since_applied || b.buff == nullptr )
+      continue;
+    if ( !first )
+      out << ",";
+    first = false;
+    out << "\"" << b.buff->name() << "\":";
+    const timespan_t last_applied = b.buff->last_trigger_time();
+    if ( last_applied == timespan_t::min() )
+      out << "null";
+    else
+      out << std::max( 0.0, ( p->sim->current_time() - last_applied ).total_seconds() );
+  }
+  out << "}";
 }
 
 // ---------------------------------------------------------------------------
@@ -3735,7 +3845,25 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
         case slot_binding_kind::buff:
         {
           buff_t* buff = b.buff;
-          if ( buff == nullptr || buff->check() <= 0 )
+          if ( b.buff_leaf == buff_leaf_kind::since_applied )
+          {
+            // 290-C3: BEFORE the down-means-absent test below (that test would make this leaf useless: the
+            // reading matters while the buff is down). seconds since the last successful application;
+            // timespan_t::min() = never applied since the fight reset = absent = the leaf's `missing`, which
+            // the bind refused to accept unless it encodes to the saturated 1.0. buff is non-null here: the
+            // post-rebind pass in bind_slots refused a null handle by name.
+            const timespan_t last_applied = buff->last_trigger_time();
+            if ( last_applied == timespan_t::min() )
+            {
+              status = lookup_status::absent;
+            }
+            else
+            {
+              raw = std::max( 0.0, ( p->sim->current_time() - last_applied ).total_seconds() );
+              status = lookup_status::present;
+            }
+          }
+          else if ( buff == nullptr || buff->check() <= 0 )
           {
             // Not up (or unresolved) -- absent for every leaf of this member (stacks/remains
             // and, since Task 2b, the four ASYNC STACK PROFILE leaves alike), matching the

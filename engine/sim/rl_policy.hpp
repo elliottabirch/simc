@@ -43,6 +43,7 @@
 #include "sim/rl_policy_constants_select.h"
 #include <cstddef>
 #include <cstdint>
+#include <iosfwd>
 #include <string>
 #include <vector>
 
@@ -359,6 +360,14 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground, bool is_d
 // request via `rl_obs_names_out=` share one source of truth by
 // construction, never a second hand-copied name list (OBS-02).
 const slot_table& bind_slots( player_t* p );
+
+// 290-C3: the time-since-applied reading of a buff, for the decision dump. `schema_has_since_applied()` is true
+// only when the compiled-in observation table carries at least one `since_applied` leaf on a buff family, so a
+// schema without one keeps the decision dump byte-identical (the key is not written, bind_slots is not called
+// from the dump). `write_since_applied_json` writes `,"buff_since_applied":{"<buff>":<seconds>|null,...}` (a
+// leading comma, like the other state fields) for every since_applied slot bound to a buff, down buffs included.
+bool schema_has_since_applied();
+void write_since_applied_json( std::ostream& out, player_t* p );
 
 // 259-07 (Q2, R3, R6): three seams the aim head shares with the observation so the two can never
 // drift.
