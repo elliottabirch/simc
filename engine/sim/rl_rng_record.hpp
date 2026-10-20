@@ -23,6 +23,75 @@
 // Read with scripts/rl/probes/rng_record.py (plan 250-02, built in parallel with this plan).
 //
 // ==========================================================================================
+// FORMAT 2 (tstl-sylvanas phase 290, stream C, stage C1, v218-event-times): THE WHOLE FILE, AND THE PER-MINUTE ROLL VALUES
+//
+// FORMAT_VERSION is 2. A reader refuses a file whose header says any other version BY NAME (format 1 files have no per-minute values and are
+// not read by a format-2 reader; a format-1 reader refuses a format-2 file for the same reason). RECORD_SIZE stays 80: the two new values sit in the
+// 8 bytes a roll record always left zero.
+//
+// FILE: one 64-byte header, then whole 80-byte records to the end of the file (the last record is KIND_FOOTER). All integers little-endian.
+//   HEADER (64 bytes)
+//     @0  char[4]  magic            "RLRR"
+//     @4  uint32   format_version   2
+//     @8  uint32   record_size      80
+//     @12 uint32   header_size      64
+//     @16 uint64   sim_seed
+//     @24 uint32   flags            bit 0 per_source_rng, bit 1 deterministic, bit 2 rl_iteration_seeds set, bit 3 average_range
+//     @28 uint32   thread_index
+//     @32 uint32   iterations       iterations requested
+//     @36 uint32   zero             0
+//     @40 uint8[24] reserved        all 0
+//   RECORD (80 bytes; the struct `record` below, field by field)
+//     @0  float64  raw              the number real() returned; 0 for a record that is not a roll (a KIND_EVENT record reuses these 8 bytes: see EVENT RECORDS)
+//     @8  float64  chance           the chance the roll was checked against, CHANCE_NONE (-1.0) when it was not a chance roll
+//     @16 int64    time_ms          simulation time in whole milliseconds
+//     @24 uint64   draw_ordinal     the physical stream's draw count after this draw
+//     @32 uint32   roller           the logical roller (the override if one is active, else the stream)
+//     @36 uint32   stream           the physical stream's own roller number
+//     @40 uint32   trigger          the outer press's triggering roller
+//     @44 uint32   press            the outer press's 1-based press number
+//     @48 uint32   position         0-based position within (trigger_kind, trigger, press, roller)
+//     @52 uint32   inner_trigger    the inner press's roller
+//     @56 uint32   inner_press      the inner press's number
+//     @60 uint32   inner_position   position within the inner window
+//     @64 uint16   iteration        ITERATION_NONE (0xFFFF) before the first fight
+//     @66 uint8    kind             KIND_* (1 roll, 2 fight begin, 3 fight end, 4 counter, 5 resalt, 6 footer, 7 event); never 0
+//     @67 uint8    trigger_kind     TRIGGER_KIND_* of the outer press
+//     @68 uint8    inner_trigger_kind  TRIGGER_KIND_* of the inner press
+//     @69 uint8    outcome          OUTCOME_FAIL 0, OUTCOME_SUCCESS 1, OUTCOME_NOT_A_ROLL 2 (a roll the chance never decided keeps 2)
+//     @70 uint8    label            LABEL_NONE 0, an rl_proc id + 1, or LABEL_SWING_TABLE 255 (a KIND_EVENT record: its event class)
+//     @71 uint8    flags            FLAG_* bits (below); bits above 0x0F are never set
+//     @72 uint8[8] reserved         KIND_ROLL: the two per-minute values below; KIND_EVENT: values A and B (see EVENT RECORDS); every other kind: all 0
+//
+// FLAGS (the record's flags byte): FLAG_AFTER_RESALT 0x01 (a roll written after the fight's re-salt), FLAG_LOGICAL_ONLY 0x02 (a counter of a raid-event
+// roller that has no stream of its own), FLAG_ANNOTATED 0x04 (a swing-table roll annotated after the draw), FLAG_NO_PER_MINUTE 0x08 (NEW in format 2, a
+// KIND_ROLL record only: this roll is not a per-minute roll, so the reserved bytes hold no per-minute values and are all 0).
+//
+// THE PER-MINUTE ROLL VALUES (KIND_ROLL only). A per-minute roll is the roll of a real-procs-per-minute source (proc_rng.cpp real_ppm_t::trigger, the
+// stock engine's own driver). Its chance is not a constant: the engine computes it from the source's own state, and that state is what the two values
+// carry. They are written into the roll's reserved bytes:
+//   @72 int32   bad_luck_accumulated_ms   the roller's accumulated bad-luck time, in whole milliseconds, exactly as the chance formula reads it:
+//                                         min( accumulated_blp, 1000 s ) AFTER the engine added this attempt's gap to it and BEFORE the roll's own
+//                                         update (a success sets it to 0 afterwards, a failure keeps it). For a source whose bad-luck protection is
+//                                         disabled the formula reads no bad luck: the field is 0, which is the formula's neutral value.
+//   @76 int32   previous_attempt_gap_ms   the time since this roller's previous attempt, in whole milliseconds, capped as the engine caps it:
+//                                         min( now - last_trigger_attempt, 3500 ms ), read before the roll's own update of last_trigger_attempt.
+//                                         The engine sets last_trigger_attempt to 0 at the start of every fight, so the FIRST attempt of a fight carries
+//                                         min( its own time, 3500 ms ): the value the chance formula itself consumed, not an invented one.
+// A reader converts both to seconds as ms * 0.001 (the engine's own conversion: ms * (1.0/1000)); both are whole milliseconds, so nothing is lost.
+// To rebuild the chance a reader needs, besides these two, the source's average interval and scaling (the player's haste, crit and attack speed at the
+// roll, which are not in this file), as the formula reads them:
+//   old_chance = rppm * coeff * ( previous_attempt_gap / 60 s )
+//   chance     = max( 1, 1 + ( ( bad_luck_accumulated / ( 60 s / ( rppm * coeff ) ) - 1.5 ) * 3 ) ) * old_chance           (bad-luck protection enabled)
+//   chance     = old_chance                                                                                              (disabled: bad_luck_accumulated is 0, so the same formula)
+// WHICH ROLLS CARRY THEM: a roll that drew a number (0 < chance < 1; a roll the chance decided without a draw writes no record at all, as before) and was
+// made by real_ppm_t::trigger, and nothing else: FLAG_NO_PER_MINUTE is CLEAR on exactly those records. Every other KIND_ROLL record has FLAG_NO_PER_MINUTE
+// SET and its reserved bytes all 0, so a zero gap is never mistaken for a real one: a reader reads the two values only when the flag is clear.
+// A per-minute attempt in the same millisecond as the previous attempt of the same roller makes no roll (the engine returns before it) and so writes
+// no record.
+// The recorder is a pure observer here too: the values are computed from the source's own members just before the roll and written, just after it,
+// by one patch of the last roll record (the same way a swing-table roll is annotated), and nothing in the engine, no random stream and no event changes because of it.
+// ==========================================================================================
 // EVENT RECORDS (tstl-sylvanas phase 288.7, v218-event-times): a new record kind, KIND_EVENT
 // (7), written into the SAME 80-byte record beside the rolls. A roll record says WHEN a random
 // number was drawn; an event record says WHEN the simulation changed something a decision-time
@@ -39,7 +108,7 @@
 //   2. An event is NOT a row of the roll accounting: it does not count toward the footer's total
 //      (FOOTER position field) or any COUNTER, so a recording with every KIND_EVENT record
 //      removed is byte-equal to the recording a build without this code would have written.
-//      Events are also invisible to the three patch-the-last-roll functions (on_roll_outcome,
+//      Events are also invisible to the patch-the-last-roll functions (on_roll_outcome,
 //      annotate_draw, label_last_roll): those patch the last ROLL record by its remembered
 //      offset, not whatever sits at the tail of the buffer.
 //   3. rl_rng_record_events=0 (default 1) turns the writer off entirely: the recording and its
@@ -221,7 +290,7 @@ namespace rl_rng_record
 {
 
 inline constexpr char MAGIC[ 4 ] = { 'R', 'L', 'R', 'R' };
-inline constexpr std::uint32_t FORMAT_VERSION = 1u;
+inline constexpr std::uint32_t FORMAT_VERSION = 2u;   // 290-C1: 2 = the per-minute roll values (see FORMAT 2 at the top of this file)
 inline constexpr std::uint32_t RECORD_SIZE = 80u;
 inline constexpr std::uint32_t HEADER_SIZE = 64u;
 
@@ -313,6 +382,9 @@ inline constexpr std::uint8_t LABEL_SWING_TABLE = 255u;
 inline constexpr std::uint8_t FLAG_AFTER_RESALT = 0x01u;
 inline constexpr std::uint8_t FLAG_LOGICAL_ONLY = 0x02u;
 inline constexpr std::uint8_t FLAG_ANNOTATED = 0x04u;
+// 290-C1: a KIND_ROLL record that is NOT a per-minute roll: its reserved bytes carry no per-minute values (all 0). Set on every roll when it is written, cleared
+// only by per_minute_roll() below.
+inline constexpr std::uint8_t FLAG_NO_PER_MINUTE = 0x08u;
 
 inline constexpr std::uint32_t ROLLER_SIM_SHARED = 0u;
 inline constexpr std::uint32_t ROLLER_SIM_EXPLORE = 1u;
@@ -399,7 +471,7 @@ struct alignas( 8 ) record
   std::uint8_t outcome;            // @69 -- one of OUTCOME_*
   std::uint8_t label;              // @70 -- LABEL_NONE, an rl_proc::id + 1, or LABEL_SWING_TABLE
   std::uint8_t flags;              // @71 -- FLAG_* bits
-  std::uint8_t reserved[ 8 ];      // @72
+  std::uint8_t reserved[ 8 ];      // @72 -- KIND_ROLL: int32 bad_luck_accumulated_ms @72, int32 previous_attempt_gap_ms @76 (valid when FLAG_NO_PER_MINUTE is clear); KIND_EVENT: values A, B
 };
 static_assert( sizeof( record ) == RECORD_SIZE, "rl_rng_record::record must be exactly RECORD_SIZE bytes" );
 static_assert( alignof( record ) == 8, "rl_rng_record::record must be 8-aligned" );
@@ -607,6 +679,12 @@ void annotate_draw( sim_t* sim, rng::rng_t& stream, std::uint64_t before, double
 // one matched or unmatched call against `label` in the sidecar's labelCalls regardless. No-op
 // when the recorder is off (the tally is per-recording, so nothing to tally either).
 void label_last_roll( sim_t* sim, std::uint8_t label, double chance, bool success );
+
+// 290-C1 (FORMAT 2): writes the two per-minute values into the LAST ROLL entry written for `stream` and clears its FLAG_NO_PER_MINUTE -- ONLY when exactly one
+// draw happened on `stream` since `before` (a chance the engine decides without a draw writes no entry, so nothing is patched) and that entry's own
+// (stream, draw_ordinal) still matches, the contract annotate_draw() keeps. `bad_luck_accumulated_ms` and `previous_attempt_gap_ms` are the real_ppm_t values the
+// chance formula consumed (see FORMAT 2). No-op when the recorder is off.
+void per_minute_roll( sim_t* sim, rng::rng_t& stream, std::uint64_t before, std::int32_t bad_luck_accumulated_ms, std::int32_t previous_attempt_gap_ms );
 
 // ---- Writer interface. Every function is a no-op (one pointer check) when rl_rng_record= is unset. ----
 
