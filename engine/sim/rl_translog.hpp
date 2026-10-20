@@ -1435,7 +1435,10 @@ static_assert( offsetof( footer_record, zero ) == 8 );
 //   picks       per aimed button: the ACTOR INDEX it would hit (never the candidate slot), where the pick came from (none, head, rules,
 //               random aim), how many candidates it had and which ranks they were (bit r set when rank r was a candidate).
 //   ranks       per rank: actor index, spawn index, flags, position, combat reach, health percent, time to die (the engine's value, before
-//               the observation's clip), immunity time left.
+//               the observation's clip), then (stream C8) the rule that answers for the enemy and every number it reads (current, maximum and base
+//               health, the damage taken so far this fight, the death percent, where the current life began and its damage base, the summon
+//               duration of an add); immunity time left. The FIGHT record adds the two per-fight numbers the rules read: the expected iteration
+//               time and the fixed-time flag (the registry's enemiesSidecar $comment says what each rule reads).
 //   damage      per rank: what the player's kit did to that enemy since the previous decision, realised and expectation-corrected;
 //               damage_unranked holds what had no rank (no target, or a rank beyond the cap), so the sum over ranks plus unranked is
 //               exactly the translog row's `damage` step.
@@ -1490,6 +1493,7 @@ inline constexpr std::uint8_t FLAG_HAZARD = 1u << 2;
 inline constexpr std::uint8_t FLAG_DO_NOT_HIT = 1u << 3;
 inline constexpr std::uint8_t FLAG_BOSS = 1u << 4;
 inline constexpr std::uint8_t FLAG_COUNTS_AS_ENEMY = 1u << 5;
+// health rules: the positions of the registry's healthRules (checked below, against player_t's own enum in rl_translog.cpp)
 // damage streams: real is column 0, expected is column 1 (checked below)
 inline constexpr std::size_t STREAM_REAL = 0;
 inline constexpr std::size_t STREAM_EXPECTED = 1;
@@ -1553,6 +1557,8 @@ struct alignas( 8 ) fight_record
   std::uint8_t capability[ CAPABILITY_SLOTS ];    // each capability's effective bit, RL_CAPABILITIES order
   std::uint8_t raid_name[ RAID_CAP * RAID_NAME_BYTES ];  // each raid event's own name (`name=PackNear`; its type when it has none), NUL padded
   std::uint8_t raid_type[ RAID_CAP * RAID_NAME_BYTES ];  // each raid event's type (`adds`, `move_enemy`, ...), NUL padded
+  double expected_iteration_time;        // stream C8: sim_t::expected_iteration_time in seconds (max_time times the iteration's length adjust), the fight length the stock and respawn rules read
+  std::uint8_t fixed_time;               // stream C8: sim_t::fixed_time (1 when the fight is fixed-time)
 };
 
 // One per decision row (KIND_DECISION) and one per fight close (KIND_CLOSE, seq = CLOSE_SEQ): see the section comment above.
@@ -1572,6 +1578,16 @@ struct alignas( 8 ) decision_record
   double combat_reach[ RANK_CAP ];         // stream P21: the real-valued columns are the engine's double, not a float cut of it
   double health_pct[ RANK_CAP ];
   double time_to_die[ RANK_CAP ];
+  // Stream C8: what health_pct and time_to_die read (the registry's enemiesSidecar $comment says, rule by rule). health_rule is a position in RL_ENEMIES_HEALTH_RULE_NAMES.
+  std::uint8_t health_rule[ RANK_CAP ];    // player_t::rl_health_inputs().rule: which rule answers for this enemy
+  double current_health[ RANK_CAP ];       // resources.current[ RESOURCE_HEALTH ]
+  double max_health[ RANK_CAP ];           // resources.max[ RESOURCE_HEALTH ], the denominator of the stock health percent
+  double base_health[ RANK_CAP ];          // resources.base[ RESOURCE_HEALTH ], which the stock time to die tests (> 0)
+  double damage_taken[ RANK_CAP ];         // iteration_dmg_taken: every point of damage the enemy has taken this fight from any source, cumulative
+  double death_pct[ RANK_CAP ];            // player_t::death_pct (the engine sets it on the sim's target only; every other enemy holds 0)
+  double life_start_time[ RANK_CAP ];      // seconds: when the current life began (rl_health_inputs().life_start_time)
+  double life_damage_base[ RANK_CAP ];     // damage_taken when that life began
+  double life_span[ RANK_CAP ];            // seconds: the summon duration of an expiry add, else 0
   double immunity_remaining[ RANK_CAP ];
   float damage_real[ RANK_CAP ];
   float damage_expected[ RANK_CAP ];
@@ -1701,6 +1717,8 @@ inline constexpr member_decl FIGHT_MEMBERS[] = {
     RL_ENEMIES_DECL( fight_record, capability ),
     RL_ENEMIES_DECL( fight_record, raid_name ),
     RL_ENEMIES_DECL( fight_record, raid_type ),
+    RL_ENEMIES_DECL( fight_record, expected_iteration_time ),
+    RL_ENEMIES_DECL( fight_record, fixed_time ),
 };
 inline constexpr member_decl DECISION_MEMBERS[] = {
     RL_ENEMIES_DECL( decision_record, kind ),
@@ -1717,6 +1735,15 @@ inline constexpr member_decl DECISION_MEMBERS[] = {
     RL_ENEMIES_DECL( decision_record, combat_reach ),
     RL_ENEMIES_DECL( decision_record, health_pct ),
     RL_ENEMIES_DECL( decision_record, time_to_die ),
+    RL_ENEMIES_DECL( decision_record, health_rule ),
+    RL_ENEMIES_DECL( decision_record, current_health ),
+    RL_ENEMIES_DECL( decision_record, max_health ),
+    RL_ENEMIES_DECL( decision_record, base_health ),
+    RL_ENEMIES_DECL( decision_record, damage_taken ),
+    RL_ENEMIES_DECL( decision_record, death_pct ),
+    RL_ENEMIES_DECL( decision_record, life_start_time ),
+    RL_ENEMIES_DECL( decision_record, life_damage_base ),
+    RL_ENEMIES_DECL( decision_record, life_span ),
     RL_ENEMIES_DECL( decision_record, immunity_remaining ),
     RL_ENEMIES_DECL( decision_record, damage_real ),
     RL_ENEMIES_DECL( decision_record, damage_expected ),

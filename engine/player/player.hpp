@@ -1486,6 +1486,27 @@ public:
   virtual double max_health() const;
   virtual double current_health() const;
   virtual timespan_t time_to_percent( double percent ) const;
+  // Phase 290 stream C8 (an observer; nothing the play reads): which rule this actor's health_percentage() and time_to_percent() follow, and the numbers that rule reads which no stock member
+  // holds. health_percentage() and time_to_percent() are virtual and the kinds of actor answer differently (a plain enemy: player.cpp; an enemy of a solver_respawn_health fight: a per-life
+  // damage rate; an add with a summon duration: its time left; an add without one: the clock; a sheet-fight boss or add, a pull mob, a fixed or timeline health: a script or a number). The enemies sidecar writes the answer
+  // of this function beside the health and the time to die (rl_translog.cpp), so a reader can tell which formula the two numbers come from and has its inputs. The default is the stock rule.
+  enum rl_health_rule_e : unsigned char
+  {
+    RL_HEALTH_RULE_STOCK = 0,      // player_t::time_to_percent (a plain enemy)
+    RL_HEALTH_RULE_RESPAWN = 1,    // enemy_t of a fight run with solver_respawn_health: the life's own damage rate
+    RL_HEALTH_RULE_EXPIRY = 2,     // an add with a summon duration: the share of the duration left
+    RL_HEALTH_RULE_CLOCK = 3,      // an add with no summon duration (not summoned yet, or expired): the health percent is the share of the fight left, the time to die the stock rule's
+    RL_HEALTH_RULE_SCRIPTED = 4    // answered from a script or a number the sidecar does not hold (a sheet-fight boss or add, a pull mob, a fixed or timeline health)
+  };
+  struct rl_health_inputs_t
+  {
+    rl_health_rule_e rule = RL_HEALTH_RULE_STOCK;
+    double life_start_time = 0.0;   // seconds: when the current life began (respawn: enemy_t::life_start_time; expiry: when the add was summoned); 0 for a stock actor
+    double life_damage_base = 0.0;  // iteration_dmg_taken when that life began (respawn only)
+    double life_span = 0.0;         // seconds: the add's summon duration (expiry only)
+  };
+  virtual rl_health_inputs_t rl_health_inputs() const
+  { return {}; }
   virtual void cost_reduction_gain( school_e school, double amount, gain_t* g = nullptr, action_t* a = nullptr );
   virtual void cost_reduction_loss( school_e school, double amount, action_t* a = nullptr );
   virtual void collect_resource_timeline_information();

@@ -831,6 +831,14 @@ struct sheet_mob_t : public pet_t
   void init_resources( bool force ) override { player_t::init_resources( force ); }
   resource_e primary_resource() const override { return RESOURCE_HEALTH; }
 
+  // Phase 290 stream C8: a sheet-fight add answers from the damage it has taken since it spawned (below), a rule the enemies sidecar does not hold: scripted.
+  rl_health_inputs_t rl_health_inputs() const override
+  {
+    rl_health_inputs_t inputs;
+    inputs.rule = RL_HEALTH_RULE_SCRIPTED;
+    return inputs;
+  }
+
   // Time to a health percent from the damage THIS add has taken since it spawned.
   timespan_t time_to_percent( double percent ) const override
   {

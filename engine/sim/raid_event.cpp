@@ -436,6 +436,14 @@ struct pull_event_t final : raid_event_t
     {
     }
 
+    // Phase 290 stream C8: a pull mob answers from its wave's damage rate (below), a rule the enemies sidecar does not hold: scripted.
+    rl_health_inputs_t rl_health_inputs() const override
+    {
+      rl_health_inputs_t inputs;
+      inputs.rule = RL_HEALTH_RULE_SCRIPTED;
+      return inputs;
+    }
+
     timespan_t time_to_percent( double percent ) const override
     {
       double target_hp = resources.initial[ RESOURCE_HEALTH ] * (percent / 100);

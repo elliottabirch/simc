@@ -98,6 +98,7 @@ struct enemy_t : public player_t
   void create_pets() override;
   double health_percentage() const override;
   timespan_t time_to_percent( double ) const override;
+  rl_health_inputs_t rl_health_inputs() const override;   // Phase 290 stream C8: which rule the two above follow for this enemy, and the life numbers the respawn rule reads
   void combat_begin() override;
   void combat_end() override;
   virtual void recalculate_health();
@@ -1110,6 +1111,22 @@ struct add_t : public pet_t
     return remainder / divisor * 100.0;
   }
 
+  // Phase 290 stream C8: with a summon duration this add answers from its time left (the two overrides above). Without one (not summoned yet, or expired) its health percent is the share of the
+  // fight left, whatever fixed_time says, and its time to die is the stock rule's (pet_t::time_to_percent).
+  rl_health_inputs_t rl_health_inputs() const override
+  {
+    rl_health_inputs_t inputs;
+    if ( duration > timespan_t::zero() && expiration != nullptr )
+    {
+      inputs.rule            = RL_HEALTH_RULE_EXPIRY;
+      inputs.life_span       = duration.total_seconds();
+      inputs.life_start_time = ( expiration->occurs() - duration ).total_seconds();
+    }
+    else
+      inputs.rule = RL_HEALTH_RULE_CLOCK;
+    return inputs;
+  }
+
   timespan_t time_to_percent( double percent ) const override
   {
     if ( duration > timespan_t::zero() )
@@ -1938,6 +1955,31 @@ timespan_t enemy_t::time_to_percent( double percent ) const
   }
 
   return player_t::time_to_percent( percent );
+}
+
+// enemy_t::rl_health_inputs() ==============================================
+
+// Phase 290 stream C8: the rule enemy_t::health_percentage() and enemy_t::time_to_percent() follow, in the order time_to_percent tries them. A sheet-fight boss answers from its own life
+// (a script), a respawn fight from the life's damage rate, and a fixed or timeline health from a number the sidecar does not hold; everything else is the stock rule (player.cpp), which for a
+// plain enemy in a fixed-time fight reads the share of the fight left as the health percent.
+player_t::rl_health_inputs_t enemy_t::rl_health_inputs() const
+{
+  rl_health_inputs_t inputs;
+  if ( sim->sheet_fight && sim->sheet_fight->boss_time_to_percent( this, 0.0 ) )
+  {
+    inputs.rule = RL_HEALTH_RULE_SCRIPTED;
+    return inputs;
+  }
+  if ( respawns() )
+  {
+    inputs.rule             = RL_HEALTH_RULE_RESPAWN;
+    inputs.life_start_time  = life_start_time.total_seconds();
+    inputs.life_damage_base = life_dmg_taken_base;
+    return inputs;
+  }
+  if ( !custom_health_timeline.empty() || fixed_health_percentage > 0 || initial_health_percentage != 100.0 )
+    inputs.rule = RL_HEALTH_RULE_SCRIPTED;
+  return inputs;
 }
 
 // enemy_t::recalculate_health ==============================================

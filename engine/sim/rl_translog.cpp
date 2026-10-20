@@ -41,6 +41,14 @@
 #include <utility>
 #include <vector>
 
+// Stream C8: the health rules the registry names (enemiesSidecar.healthRules) are player_t's own enum, in the same order; a health_rule byte is a position in that list.
+static_assert( RL_ENEMIES_HEALTH_RULE_COUNT == 5 && rl_translog::rl_enemies::same_text( RL_ENEMIES_HEALTH_RULE_NAMES[ player_t::RL_HEALTH_RULE_STOCK ], "stock" ) &&
+                   rl_translog::rl_enemies::same_text( RL_ENEMIES_HEALTH_RULE_NAMES[ player_t::RL_HEALTH_RULE_RESPAWN ], "respawn" ) &&
+                   rl_translog::rl_enemies::same_text( RL_ENEMIES_HEALTH_RULE_NAMES[ player_t::RL_HEALTH_RULE_EXPIRY ], "expiry" ) &&
+                   rl_translog::rl_enemies::same_text( RL_ENEMIES_HEALTH_RULE_NAMES[ player_t::RL_HEALTH_RULE_CLOCK ], "clock" ) &&
+                   rl_translog::rl_enemies::same_text( RL_ENEMIES_HEALTH_RULE_NAMES[ player_t::RL_HEALTH_RULE_SCRIPTED ], "scripted" ),
+               "enemiesSidecar.healthRules must be stock, respawn, expiry, clock, scripted (player_t::rl_health_rule_e)" );
+
 // Pure observer for the RL transition log's per-proc counter block
 // (tstl-sylvanas quick task 260917-pcn). Routes a pet's roll to its owner,
 // mirroring stats.cpp's own solver_damage_so_far pet->owner rule; ignores
@@ -590,6 +598,10 @@ void enemies_open_fight( sim_t* root, sim_t* sim, player_t* p )
   }
   for ( std::size_t c = 0; c < RL_ENEMIES_CAPABILITY_COUNT; ++c )
     f.capability[ c ] = rl_policy::capability_effective_bit( p, c ) ? 1u : 0u;
+  // Stream C8: the two per-fight numbers the health rules read off the simulator (player.cpp time_to_percent, sc_enemy.cpp enemy_t::time_to_percent): the fight length they fall back to or are
+  // capped by, and whether the fight is fixed-time.
+  f.expected_iteration_time = sim->expected_iteration_time.total_seconds();
+  f.fixed_time = sim->fixed_time ? 1u : 0u;
   for ( std::size_t e = 0; e < sim->raid_events.size() && e < rl_enemies::RAID_CAP; ++e )
   {
     // the event's own name when the profile gave one (`name=PackNear`), else its type (`adds`)
@@ -668,6 +680,19 @@ void enemies_fill_decision( sim_t* sim, player_t* p, std::uint32_t kind, std::ui
     r.health_pct[ rank ] = t->health_percentage();
     // the engine's value, before the observation's clip (build_enemy_fact's own cap of 600 s); a sleeping enemy has none
     r.time_to_die[ rank ] = alive ? std::min( t->time_to_percent( 0 ).total_seconds(), 600.0 ) : 0.0;
+    // Stream C8: the rule that answers for this enemy and every number the rules read (see the registry's enemiesSidecar $comment): health_percentage() above is resources.pct for most enemies,
+    // the share of the fight left for a plain enemy in a fixed-time fight; time_to_percent( 0 ) reads current health, base health, iteration_dmg_taken and death_pct (player.cpp), or the
+    // life numbers (sc_enemy.cpp, enemy_t of a respawn fight), or the add's duration (add_t). Written for every actor of the table, asleep or not, as the engine holds them.
+    const player_t::rl_health_inputs_t health = t->rl_health_inputs();
+    r.health_rule[ rank ] = static_cast<std::uint8_t>( health.rule );
+    r.current_health[ rank ] = t->resources.current[ RESOURCE_HEALTH ];
+    r.max_health[ rank ] = t->resources.max[ RESOURCE_HEALTH ];
+    r.base_health[ rank ] = t->resources.base[ RESOURCE_HEALTH ];
+    r.damage_taken[ rank ] = t->iteration_dmg_taken;
+    r.death_pct[ rank ] = t->death_pct;
+    r.life_start_time[ rank ] = health.life_start_time;
+    r.life_damage_base[ rank ] = health.life_damage_base;
+    r.life_span[ rank ] = health.life_span;
     r.immunity_remaining[ rank ] =
         t->debuffs.invulnerable ? t->debuffs.invulnerable->remains().total_seconds() : 0.0;
     // Stream FB3: every declared aura fact for this enemy, through the same read the candidate block's facts make (build_enemy_fact's loop over RL_DECLARED_FACTS, the

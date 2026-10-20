@@ -2163,15 +2163,15 @@ inline constexpr rl_declared_aggregate RL_DECLARED_AGGREGATES[RL_DECLARED_AGGREG
 // (type codes B u8, H u16, I u32, f f32, d f64). The writer's structs must match them member for member (a static_assert), and RL_ENEMIES_SHA
 // is written into the file header.
 #define RL_ENEMIES_DEFINED 1
-inline constexpr std::size_t RL_ENEMIES_FORMAT_VERSION = 2;
+inline constexpr std::size_t RL_ENEMIES_FORMAT_VERSION = 3;
 inline constexpr std::size_t RL_ENEMIES_RANK_CAP = 20;
 inline constexpr std::size_t RL_ENEMIES_PICK_COUNT = 11;
 inline constexpr std::size_t RL_ENEMIES_CAPABILITY_COUNT = 139;
 inline constexpr std::size_t RL_ENEMIES_RAID_EVENT_CAP = 24;
 inline constexpr std::size_t RL_ENEMIES_RAID_NAME_BYTES = 24;
-inline constexpr std::size_t RL_ENEMIES_RECORD_SIZE = 3456;
+inline constexpr std::size_t RL_ENEMIES_RECORD_SIZE = 4760;
 inline constexpr std::size_t RL_ENEMIES_HEADER_SIZE = 120;
-inline constexpr const char* RL_ENEMIES_SHA = "enemies-v2:71be1de227288472fe22d55c6fc2d4709b7dc1ebf82a0c3ead1f10515b66b187";
+inline constexpr const char* RL_ENEMIES_SHA = "enemies-v3:7d3abf94565389b9d7e1b1a7a810a94e5dd05d648b50f9a9587950a14fad2b9b";
 // The aura columns (stream FB3): the LAST RL_ENEMIES_AURA_FACT_COUNT rows of RL_ENEMIES_DECISION_MEMBERS, one per row of RL_DECLARED_FACTS in that order,
 // each named by the fact (RL_TARGET_FEATURE_NAMES[ slot ]), RANK_CAP entries of type code 'd': what read_declared_fact gives for that enemy at the decision.
 inline constexpr std::size_t RL_ENEMIES_AURA_FACT_COUNT = 8;
@@ -2200,6 +2200,15 @@ inline constexpr const char* RL_ENEMIES_DAMAGE_STREAM_NAMES[RL_ENEMIES_DAMAGE_ST
   "real",
   "expected",
 };
+// The health rules (stream C8): `health_rule` of a rank is a position in this list; the writer's constants for them are proved against these names.
+inline constexpr std::size_t RL_ENEMIES_HEALTH_RULE_COUNT = 5;
+inline constexpr const char* RL_ENEMIES_HEALTH_RULE_NAMES[RL_ENEMIES_HEALTH_RULE_COUNT] = {
+  "stock",
+  "respawn",
+  "expiry",
+  "clock",
+  "scripted",
+};
 struct rl_enemies_member
 {
   const char* name;
@@ -2207,7 +2216,7 @@ struct rl_enemies_member
   std::size_t count;
   std::size_t offset;
 };
-inline constexpr std::size_t RL_ENEMIES_FIGHT_MEMBER_COUNT = 14;
+inline constexpr std::size_t RL_ENEMIES_FIGHT_MEMBER_COUNT = 16;
 inline constexpr rl_enemies_member RL_ENEMIES_FIGHT_MEMBERS[RL_ENEMIES_FIGHT_MEMBER_COUNT] = {
   { "kind", 'I', 1, 0 },
   { "iteration", 'I', 1, 4 },
@@ -2223,8 +2232,10 @@ inline constexpr rl_enemies_member RL_ENEMIES_FIGHT_MEMBERS[RL_ENEMIES_FIGHT_MEM
   { "capability", 'B', 139, 216 },
   { "raid_name", 'B', 576, 355 },
   { "raid_type", 'B', 576, 931 },
+  { "expected_iteration_time", 'd', 1, 1512 },
+  { "fixed_time", 'B', 1, 1520 },
 };
-inline constexpr std::size_t RL_ENEMIES_DECISION_MEMBER_COUNT = 40;
+inline constexpr std::size_t RL_ENEMIES_DECISION_MEMBER_COUNT = 49;
 inline constexpr rl_enemies_member RL_ENEMIES_DECISION_MEMBERS[RL_ENEMIES_DECISION_MEMBER_COUNT] = {
   { "kind", 'I', 1, 0 },
   { "seq", 'I', 1, 4 },
@@ -2240,32 +2251,41 @@ inline constexpr rl_enemies_member RL_ENEMIES_DECISION_MEMBERS[RL_ENEMIES_DECISI
   { "combat_reach", 'd', 20, 520 },
   { "health_pct", 'd', 20, 680 },
   { "time_to_die", 'd', 20, 840 },
-  { "immunity_remaining", 'd', 20, 1000 },
-  { "damage_real", 'f', 20, 1160 },
-  { "damage_expected", 'f', 20, 1240 },
-  { "damage_unranked", 'f', 2, 1320 },
-  { "player_x", 'd', 1, 1328 },
-  { "player_y", 'd', 1, 1336 },
-  { "player_facing_x", 'd', 1, 1344 },
-  { "player_facing_y", 'd', 1, 1352 },
-  { "player_target_actor", 'H', 1, 1360 },
-  { "player_move_distance", 'd', 1, 1368 },
-  { "player_move_remains", 'd', 1, 1376 },
-  { "raid_next_start", 'd', 24, 1384 },
-  { "raid_next_end", 'd', 24, 1576 },
-  { "raid_duration", 'f', 24, 1768 },
-  { "raid_cooldown", 'f', 24, 1864 },
-  { "raid_up", 'B', 24, 1960 },
-  { "raid_duration_mean", 'f', 24, 1984 },
-  { "raid_cooldown_mean", 'f', 24, 2080 },
-  { "rend_remaining", 'd', 20, 2176 },
-  { "deep_wounds_remaining", 'd', 20, 2336 },
-  { "colossus_smash_remaining", 'd', 20, 2496 },
-  { "fatal_mark_stacks", 'd', 20, 2656 },
-  { "overwhelmed_stacks", 'd', 20, 2816 },
-  { "ravaged_remaining", 'd', 20, 2976 },
-  { "venomfang_debuff_stacks", 'd', 20, 3136 },
-  { "wrecked_stacks", 'd', 20, 3296 },
+  { "health_rule", 'B', 20, 1000 },
+  { "current_health", 'd', 20, 1024 },
+  { "max_health", 'd', 20, 1184 },
+  { "base_health", 'd', 20, 1344 },
+  { "damage_taken", 'd', 20, 1504 },
+  { "death_pct", 'd', 20, 1664 },
+  { "life_start_time", 'd', 20, 1824 },
+  { "life_damage_base", 'd', 20, 1984 },
+  { "life_span", 'd', 20, 2144 },
+  { "immunity_remaining", 'd', 20, 2304 },
+  { "damage_real", 'f', 20, 2464 },
+  { "damage_expected", 'f', 20, 2544 },
+  { "damage_unranked", 'f', 2, 2624 },
+  { "player_x", 'd', 1, 2632 },
+  { "player_y", 'd', 1, 2640 },
+  { "player_facing_x", 'd', 1, 2648 },
+  { "player_facing_y", 'd', 1, 2656 },
+  { "player_target_actor", 'H', 1, 2664 },
+  { "player_move_distance", 'd', 1, 2672 },
+  { "player_move_remains", 'd', 1, 2680 },
+  { "raid_next_start", 'd', 24, 2688 },
+  { "raid_next_end", 'd', 24, 2880 },
+  { "raid_duration", 'f', 24, 3072 },
+  { "raid_cooldown", 'f', 24, 3168 },
+  { "raid_up", 'B', 24, 3264 },
+  { "raid_duration_mean", 'f', 24, 3288 },
+  { "raid_cooldown_mean", 'f', 24, 3384 },
+  { "rend_remaining", 'd', 20, 3480 },
+  { "deep_wounds_remaining", 'd', 20, 3640 },
+  { "colossus_smash_remaining", 'd', 20, 3800 },
+  { "fatal_mark_stacks", 'd', 20, 3960 },
+  { "overwhelmed_stacks", 'd', 20, 4120 },
+  { "ravaged_remaining", 'd', 20, 4280 },
+  { "venomfang_debuff_stacks", 'd', 20, 4440 },
+  { "wrecked_stacks", 'd', 20, 4600 },
 };
 inline constexpr std::size_t RL_ENEMIES_FOOTER_MEMBER_COUNT = 4;
 inline constexpr rl_enemies_member RL_ENEMIES_FOOTER_MEMBERS[RL_ENEMIES_FOOTER_MEMBER_COUNT] = {
