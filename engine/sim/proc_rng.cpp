@@ -147,9 +147,19 @@ int real_ppm_t::trigger( action_state_t* )
   // 2020-10-11: Instead of using the aboslute time to the last successful proc, it appears
   // that the amount of time that is added on each trigger attempt is capped at max_interval
   accumulated_blp += std::min( player->sim->current_time() - last_trigger_attempt, max_interval );
+  // 290-C1 (roll recorder FORMAT 2): the two values proc_chance() just consumed, in whole milliseconds, read here before the
+  // roll's own update of last_trigger_attempt and accumulated_blp below. Bad luck is 0 for a source with the protection off
+  // (the chance formula reads none). Pure reads of this source's own members: no rng call, no event, no state change.
+  const auto rl_bad_luck_ms =
+      blp_state == BLP_ENABLED ? static_cast<std::int32_t>( std::min( accumulated_blp, max_bad_luck_prot ).total_millis() ) : 0;
+  const auto rl_gap_ms = static_cast<std::int32_t>(
+      std::min( player->sim->current_time() - last_trigger_attempt, max_interval ).total_millis() );
   double chance = proc_chance();
   last_roll_chance = chance;
-  bool success = rng().roll( chance );
+  rng::rng_t& rl_stream = rng();
+  const std::uint64_t rl_draw_before = rl_stream.rl_draw_counter();
+  bool success = rl_stream.roll( chance );
+  rl_rng_record::per_minute_roll( player->sim, rl_stream, rl_draw_before, rl_bad_luck_ms, rl_gap_ms );
 
   last_trigger_attempt = player->sim->current_time();
 

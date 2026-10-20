@@ -679,6 +679,7 @@ public:
   void open_refill( proc_rng_t* deck );
   void annotate_draw( rng::rng_t& stream, std::uint64_t before, double chance, bool outcome, std::uint8_t label );
   void label_last_roll( std::uint8_t label, double chance, bool success );
+  void per_minute_roll( rng::rng_t& stream, std::uint64_t before, std::int32_t bad_luck_accumulated_ms, std::int32_t previous_attempt_gap_ms );
   void restore_from_state( const action_state_t* state );
   void restore_frames( const press_frame_t& outer, const press_frame_t& inner, const action_t* inner_owner );
   void stamp_state( action_state_t* state );
@@ -1019,7 +1020,8 @@ double recorder_t::on_draw( std::uint32_t& roller_slot, const std::uint64_t& dra
     rec.inner_trigger_kind = current_inner_.kind;
     rec.outcome = OUTCOME_NOT_A_ROLL;
     rec.label = LABEL_NONE;
-    rec.flags = after_resalt_ ? FLAG_AFTER_RESALT : 0;
+    // 290-C1: every roll is written as "not a per-minute roll"; per_minute_roll() clears the flag on the ones that are.
+    rec.flags = static_cast<std::uint8_t>( ( after_resalt_ ? FLAG_AFTER_RESALT : 0 ) | FLAG_NO_PER_MINUTE );
 
     last_roll_stream_ = stream_id;
     last_roll_ordinal_ = draw_counter;
@@ -1085,6 +1087,36 @@ void recorder_t::annotate_draw( rng::rng_t& stream, std::uint64_t before, double
   rec.outcome = outcome ? OUTCOME_SUCCESS : OUTCOME_FAIL;
   rec.label = label;
   rec.flags = static_cast<std::uint8_t>( rec.flags | FLAG_ANNOTATED );
+  std::memcpy( buffer_.data() + buffer_.size() - RECORD_SIZE, &rec, RECORD_SIZE );
+}
+
+void recorder_t::per_minute_roll( rng::rng_t& stream, std::uint64_t before, std::int32_t bad_luck_accumulated_ms,
+                                   std::int32_t previous_attempt_gap_ms )
+{
+  // Writing-only (253-02): patches a ROLL entry the buffer holds.
+  if ( !writing_ )
+    return;
+
+  // Same placement contract as annotate_draw(): exactly one draw on `stream` since `before`, and the entry the patch
+  // finds is the one that draw just wrote. A roll the chance decided without a draw (chance <= 0 or >= 1) wrote no
+  // entry, so nothing here is patched and the previous roll's entry is never touched.
+  const std::uint64_t after = stream.rl_draw_counter();
+  if ( after != before + 1 )
+    return;
+
+  const std::uint32_t roller = stream.rl_roller_id();
+  if ( roller != last_roll_stream_ || after != last_roll_ordinal_ || buffer_.size() < RECORD_SIZE )
+    return;
+
+  record rec;
+  std::memcpy( &rec, buffer_.data() + buffer_.size() - RECORD_SIZE, RECORD_SIZE );
+  if ( rec.kind != KIND_ROLL || rec.stream != roller || rec.draw_ordinal != after )
+    return;
+
+  // FORMAT 2 (see the top of rl_rng_record.hpp): int32 milliseconds in the roll's reserved bytes, little-endian host order.
+  std::memcpy( rec.reserved, &bad_luck_accumulated_ms, sizeof( bad_luck_accumulated_ms ) );
+  std::memcpy( rec.reserved + 4, &previous_attempt_gap_ms, sizeof( previous_attempt_gap_ms ) );
+  rec.flags = static_cast<std::uint8_t>( rec.flags & ~FLAG_NO_PER_MINUTE );
   std::memcpy( buffer_.data() + buffer_.size() - RECORD_SIZE, &rec, RECORD_SIZE );
 }
 
@@ -3207,6 +3239,15 @@ void annotate_draw( sim_t* sim, rng::rng_t& stream, std::uint64_t before, double
   if ( !root->rl_rng_recorder )
     return;
   root->rl_rng_recorder->annotate_draw( stream, before, chance, outcome, label );
+}
+
+void per_minute_roll( sim_t* sim, rng::rng_t& stream, std::uint64_t before, std::int32_t bad_luck_accumulated_ms,
+                      std::int32_t previous_attempt_gap_ms )
+{
+  sim_t* root = root_of( sim );
+  if ( !root->rl_rng_recorder )
+    return;
+  root->rl_rng_recorder->per_minute_roll( stream, before, bad_luck_accumulated_ms, previous_attempt_gap_ms );
 }
 
 void label_last_roll( sim_t* sim, std::uint8_t label, double chance, bool success )
