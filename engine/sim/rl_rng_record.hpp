@@ -714,6 +714,15 @@ void fight_end( sim_t* sim );
 // recorder object (owned by sim_t::rl_rng_recorder).
 void write_footer( sim_t* sim );
 
+// Phase 290 stream C, stage C2. Called ONLY in a forked copy (solver_branch.cpp become_child(), before the copy re-salts and plays on). The
+// recorder object, its file stream and its unflushed buffer were copied by fork() together with the rest of the process; the file belongs to the PARENT's
+// fight. The copy therefore stops writing for good: the file stream is released and leaked on purpose (never flushed, never closed -- the copy leaves through
+// _exit(), as rl_translog::branch_child_disable() does), the buffered rows are dropped, the writer flag and the event flag are cleared, so a copy writes no
+// record, no event, no counter, no footer and no sidecar, whatever it plays. A copy shares the parent's open file description, so one write from it would land
+// in the parent's file at the parent's offset: that is the fault this call removes. The recorder keeps tracking press frames and rollers, as it does for a
+// replay-only run. No-op when the recorder is off.
+void branch_child_disown( sim_t* sim );
+
 // Called from sim_t::resalt_source_rngs(), right after its `if ( !per_source_rng ) return;`
 // guard, before any stream is reseeded. Writes a RESALT entry and sets the after-re-salt flag
 // every later ROLL entry this fight carries (FLAG_AFTER_RESALT). Changes nothing the re-salt
