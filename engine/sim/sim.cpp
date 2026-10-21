@@ -4472,6 +4472,8 @@ void sim_t::create_options()
   add_option( opt_timespan( "max_time", max_time, timespan_t::zero(), timespan_t::max() ) );
   add_option( opt_bool( "fixed_time", fixed_time ) );
   add_option( opt_float( "solver_respawn_health", solver_respawn_health, 0.0, 1.0e12 ) );
+  // 261021-fmix (D22 point 3): see sim.hpp's solver_pack_respawn_gaps_str doc comment. Parsed and refused in setup().
+  add_option( opt_string( "solver_pack_respawn_gaps", solver_pack_respawn_gaps_str ) );
   add_option( opt_float( "vary_combat_length", vary_combat_length, 0.0, 1.0 ) );
   add_option( opt_func( "ptr", parse_ptr ) );
   add_option( opt_int( "threads", threads ) );
@@ -4864,6 +4866,8 @@ void sim_t::create_options()
   add_option( opt_bool( "target_select_enabled", target_select_enabled ) );  // CR-06 (260902/cr4)
   add_option( opt_bool( "target_scorer_force_rules", target_scorer_force_rules ) );  // 230-02 (SCOR-01)
   add_option( opt_bool( "solver_funnel_mode", solver_funnel_mode ) );  // 266-09 (R11)
+  // 261021-fmix (D25 point 1): see sim.hpp's solver_funnel_windows_str doc comment. Parsed and refused in setup().
+  add_option( opt_string( "solver_funnel_windows", solver_funnel_windows_str ) );
   add_option( opt_bool( "solver_random_chosen_enemy", solver_random_chosen_enemy ) );  // 266-09 (R7, R11)
   add_option( opt_bool( "ignore_invulnerable_targets", ignore_invulnerable_targets ) );
   add_option( opt_bool( "enable_dps_healing", enable_dps_healing ) );
@@ -5476,6 +5480,119 @@ void sim_t::setup( sim_control_t* c )
       throw sc_runtime_error( fmt::format(
           "solver_hold_windows='{}' declared no valid actionIndex:startSeconds:endSeconds "
           "entries.", solver_hold_windows_str ) );
+    }
+  }
+
+  // 261021-fmix (batch 261020-wvh item 13, D22 point 3 and D25 point 1): the two new fight-text lists, each its own fail-closed
+  // block that names the refusal token and the FULL declared string. Nothing here draws a random number: the gaps and the windows
+  // are the fight text's own (NO DICE).
+  {
+    // Parses a comma list into entries; a leading, doubled or trailing comma is an empty entry, which the callers refuse.
+    const auto split_list = []( const std::string& text ) {
+      std::vector<std::string> entries;
+      std::size_t from = 0;
+      for ( ;; )
+      {
+        const auto comma = text.find( ',', from );
+        entries.push_back( text.substr( from, comma == std::string::npos ? std::string::npos : comma - from ) );
+        if ( comma == std::string::npos )
+          break;
+        from = comma + 1;
+      }
+      return entries;
+    };
+    // The whole of `text` must be one finite number.
+    const auto parse_seconds = []( const std::string& text, double& out ) {
+      if ( text.empty() )
+        return false;
+      try
+      {
+        std::size_t used = 0;
+        out = std::stod( text, &used );
+        return used == text.size() && std::isfinite( out );
+      }
+      catch ( const std::exception& )
+      {
+        return false;
+      }
+    };
+
+    solver_pack_respawn_gaps.clear();
+    const bool trash_pack_fight = fight_style == FIGHT_STYLE_TRASH_PACK;
+    if ( !solver_pack_respawn_gaps_str.empty() )
+    {
+      if ( !trash_pack_fight )
+      {
+        throw sc_runtime_error( fmt::format(
+            "PACK_RESPAWN_GAPS_STYLE: solver_pack_respawn_gaps='{}' is only meaningful with fight_style=TrashPack (it sets "
+            "when a dead pack returns).", solver_pack_respawn_gaps_str ) );
+      }
+      if ( !( solver_respawn_health > 0.0 ) )
+      {
+        throw sc_runtime_error( fmt::format(
+            "PACK_RESPAWN_GAPS_NEEDS: solver_pack_respawn_gaps='{}' also needs solver_respawn_health > 0 (the pack only "
+            "returns under the respawn model).", solver_pack_respawn_gaps_str ) );
+      }
+      for ( const auto& entry : split_list( solver_pack_respawn_gaps_str ) )
+      {
+        double gap_s = 0.0;
+        if ( !parse_seconds( entry, gap_s ) || !( gap_s > 0.0 ) )
+        {
+          throw sc_runtime_error( fmt::format(
+              "PACK_RESPAWN_GAPS_MALFORMED: entry '{}' of solver_pack_respawn_gaps='{}' is not a finite number of seconds "
+              "greater than zero.", entry, solver_pack_respawn_gaps_str ) );
+        }
+        solver_pack_respawn_gaps.push_back( timespan_t::from_seconds( gap_s ) );
+      }
+    }
+    else if ( trash_pack_fight && solver_respawn_health > 0.0 )
+    {
+      throw sc_runtime_error(
+          "PACK_RESPAWN_GAPS_NEEDS: fight_style=TrashPack with solver_respawn_health > 0 also needs solver_pack_respawn_gaps=<seconds>"
+          "[,<seconds>...] (one gap per return of the pack; the per-mob immediate respawn no longer exists)." );
+    }
+
+    solver_funnel_windows.clear();
+    if ( !solver_funnel_windows_str.empty() )
+    {
+      if ( !solver_funnel_mode )
+      {
+        throw sc_runtime_error( fmt::format(
+            "FUNNEL_WINDOWS_NEEDS_MODE: solver_funnel_windows='{}' needs solver_funnel_mode=1 (the windows restrict the funnel; "
+            "they do not turn it on).", solver_funnel_windows_str ) );
+      }
+      const double max_time_s = max_time.total_seconds();
+      double previous_end_s = 0.0;
+      for ( const auto& entry : split_list( solver_funnel_windows_str ) )
+      {
+        const auto colon = entry.find( ':' );
+        double start_s = 0.0, end_s = 0.0;
+        if ( colon == std::string::npos || entry.find( ':', colon + 1 ) != std::string::npos ||
+             !parse_seconds( entry.substr( 0, colon ), start_s ) || !parse_seconds( entry.substr( colon + 1 ), end_s ) )
+        {
+          throw sc_runtime_error( fmt::format(
+              "FUNNEL_WINDOWS_MALFORMED: entry '{}' of solver_funnel_windows='{}' is not 'startSeconds:endSeconds'.",
+              entry, solver_funnel_windows_str ) );
+        }
+        const char* problem = nullptr;
+        if ( start_s < 0.0 )
+          problem = "starts before the fight";
+        else if ( !( end_s > start_s ) )
+          problem = "ends at or before its start";
+        else if ( start_s < previous_end_s )
+          problem = "overlaps or precedes the window before it (windows must be sorted and disjoint)";
+        else if ( end_s > max_time_s )
+          problem = "ends past max_time";
+        if ( problem != nullptr )
+        {
+          throw sc_runtime_error( fmt::format(
+              "FUNNEL_WINDOWS_MALFORMED: window '{}' of solver_funnel_windows='{}' {} (max_time={}).", entry,
+              solver_funnel_windows_str, problem, max_time_s ) );
+        }
+        previous_end_s = end_s;
+        solver_funnel_windows.push_back(
+            { timespan_t::from_seconds( start_s ), timespan_t::from_seconds( end_s ) } );
+      }
     }
   }
 

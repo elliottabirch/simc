@@ -1205,6 +1205,12 @@ void to_json( const ::report::json::report_configuration_t& report_configuration
   // guarantee) -- also protects against an OLD binary silently ignoring the option (D1).
   if ( sim.solver_respawn_health > 0 )
     options_root[ "solver_respawn_health" ] = sim.solver_respawn_health;
+  // 261021-fmix (D22 point 3, D25 point 1): echo the two fight-text lists only when set (default-off guarantee; an OLD binary that
+  // silently ignored the option would leave the echo out).
+  if ( !sim.solver_pack_respawn_gaps_str.empty() )
+    options_root[ "solver_pack_respawn_gaps" ] = sim.solver_pack_respawn_gaps_str;
+  if ( !sim.solver_funnel_windows_str.empty() )
+    options_root[ "solver_funnel_windows" ] = sim.solver_funnel_windows_str;
   options_root[ "optimize_expressions" ] = sim.optimize_expressions;
   options_root[ "optimal_raid" ] = sim.optimal_raid;
   options_root[ "log" ] = sim.log;

@@ -800,7 +800,7 @@ bool rl_can_be_hit( const player_t* p, const player_t* t )
 // With the flag off this does nothing at all (R8).
 static void pin_to_tag( player_t* p )
 {
-  if ( !p->sim->solver_funnel_mode )
+  if ( !p->sim->funnel_active() )  // 261021-fmix D25: inside a funnel window, or the whole fight with no windows
     return;
   player_t* tag = p->rl_chosen_enemy;
   if ( tag == nullptr )
@@ -2337,7 +2337,7 @@ void retarget( action_t* a, player_t* p, player_t* pick )
   // (the action's own target above) but does NOT move the player's own target or either weapon swing: they stay
   // on the chosen enemy (the tag), the way the live game keeps them. Flag off: today's writes, unchanged (R8).
   // The mid-cast fallback in action.cpp calls this with the player's own target, so it needs no gate of its own.
-  if ( !p->sim->solver_funnel_mode )
+  if ( !p->sim->funnel_active() )  // 261021-fmix D25: outside a funnel window these are the flag-off writes
   {
     p->target = pick;
     if ( p->main_hand_attack )

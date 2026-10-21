@@ -116,6 +116,11 @@ struct enemy_t : public player_t
   }
   double life_dmg_taken() const { return iteration_dmg_taken - life_dmg_taken_base; }
   void respawn();
+  // 261021-fmix (D22 point 3): whole-pack respawn. True for an enemy of a TrashPack fight under the respawn model: its death is
+  // handled by pack_member_demise(), never by the per-mob respawn() (removed for TrashPack; boss and other styles keep respawn()).
+  bool pack_respawns() const { return respawns() && sim->fight_style == FIGHT_STYLE_TRASH_PACK; }
+  void pack_member_demise();
+  void pack_member_arise();
   std::unique_ptr<expr_t> create_expression( util::string_view expression_str ) override;
 
   bool has_absorb() const override
@@ -2172,6 +2177,9 @@ void enemy_t::combat_begin()
     life_start_time     = sim->current_time();
     life_dmg_taken_base = iteration_dmg_taken;
     respawn_count       = 0;
+    // 261021-fmix (D22 point 3): the pack's gap list starts again every iteration (all combat_begin calls precede the first event).
+    if ( pack_respawns() && this == sim->target )
+      sim->solver_pack_respawn_next = 0;
   }
 }
 
@@ -2192,7 +2200,13 @@ void enemy_t::demise()
   // path below. See D4.
   if ( respawns() && !current.sleeping && !sim->event_mgr.canceled )
   {
-    respawn();
+    // 261021-fmix (D22 point 3): a TrashPack member stays dead until the whole pack is dead; it returns with its pack mates
+    // after the next listed gap. Boss and every other style keep the immediate per-mob respawn. Both return before the
+    // cancel_iteration() path below, as respawn() always did.
+    if ( pack_respawns() )
+      pack_member_demise();
+    else
+      respawn();
     return;
   }
 
@@ -2235,6 +2249,67 @@ void enemy_t::respawn()
     respawn_proc->occur();
 
   arise();  // full health (init_resources), new actor_spawn_index, ACTOR_ARISE retarget -- same event, no gap
+
+  life_start_time     = sim->current_time();
+  life_dmg_taken_base = iteration_dmg_taken;
+
+  sim->print_log( "{} respawns: life {} begins, health={}", *this, respawn_count + 1, resources.max[ RESOURCE_HEALTH ] );
+}
+
+// enemy_t::pack_member_demise ==============================================
+
+// 261021-fmix (batch 261020-wvh item 13, D22 point 3): the death of one TrashPack member under the respawn model. The stock demise
+// minus the pets (the body of respawn() without arise()), then: if a pack mate still lives, nothing else happens -- this member
+// stays dead. If it was the LAST living member, ONE event solver_pack_respawn_gaps[k] seconds later raises every member at full
+// health (the per-arise health factor of init_resources applies) and k advances. A list that has run out raises
+// PACK_RESPAWN_GAPS_EXHAUSTED. No random number: every gap is from the fight text (NO DICE, owner 10-09).
+void enemy_t::pack_member_demise()
+{
+  std::vector<pet_t*> kept_pets;
+  kept_pets.swap( pet_list );
+  player_t::demise();  // sleeping, list removal, ACTOR_DEMISE retarget, on-kill/on-demise, buffs+dots+actions cancelled
+  pet_list.swap( kept_pets );
+
+  ++respawn_count;
+  if ( respawn_proc )
+    respawn_proc->occur();
+
+  // The pack is every enemy_t of the fight (raid_events are cleared under TrashPack, so no add pets exist).
+  std::vector<enemy_t*> pack;
+  for ( player_t* member : sim->target_list )
+  {
+    if ( auto* enemy = dynamic_cast<enemy_t*>( member ) )
+    {
+      if ( !enemy->current.sleeping )
+        return;  // a pack mate lives: this member stays dead until the whole pack is dead
+      pack.push_back( enemy );
+    }
+  }
+
+  const std::size_t k = sim->solver_pack_respawn_next;
+  if ( k >= sim->solver_pack_respawn_gaps.size() )
+  {
+    throw sc_runtime_error( fmt::format(
+        "PACK_RESPAWN_GAPS_EXHAUSTED: the pack died for the {}th time at {} s but solver_pack_respawn_gaps='{}' lists only {} gap(s).",
+        k + 1, sim->current_time().total_seconds(), sim->solver_pack_respawn_gaps_str, sim->solver_pack_respawn_gaps.size() ) );
+  }
+  const timespan_t gap = sim->solver_pack_respawn_gaps[ k ];
+  sim->solver_pack_respawn_next = k + 1;
+
+  sim->print_log( "pack of {} is dead; it returns in {} s (gap {} of {})", pack.size(), gap.total_seconds(), k + 1,
+                  sim->solver_pack_respawn_gaps.size() );
+  make_event( *sim, gap, [ pack ]() {
+    for ( enemy_t* member : pack )
+      member->pack_member_arise();
+  } );
+}
+
+// enemy_t::pack_member_arise ===============================================
+
+// The tail of respawn(): arise() at full health, then the per-life clock and damage snapshot restart.
+void enemy_t::pack_member_arise()
+{
+  arise();  // full health (init_resources), new actor_spawn_index, ACTOR_ARISE retarget
 
   life_start_time     = sim->current_time();
   life_dmg_taken_base = iteration_dmg_taken;

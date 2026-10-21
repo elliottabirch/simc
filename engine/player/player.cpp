@@ -15066,7 +15066,7 @@ void player_t::acquire_target( retarget_source event, player_t* context )
   // tag (player_t::rl_chosen_enemy is written by the chooser alone), so every other player, pets included,
   // skips this. The tag not being hittable falls through to the stock choice above; the chooser re-picks at the
   // next decision boundary and the target follows. Flag off: not one line of this runs (R8).
-  if ( sim->solver_funnel_mode && rl_chosen_enemy != nullptr && rl_target_select::rl_can_be_hit( this, rl_chosen_enemy ) )
+  if ( sim->funnel_active() && rl_chosen_enemy != nullptr && rl_target_select::rl_can_be_hit( this, rl_chosen_enemy ) )
     candidate_target = rl_chosen_enemy;
 
   // Invulnerable targets are currently not in the target_non_sleeping_list, so fall back to

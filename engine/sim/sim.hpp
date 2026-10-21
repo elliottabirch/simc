@@ -137,6 +137,16 @@ struct sim_t : private sc_thread_t
   // time_to_percent() despite fixed_time=1, and respawns as a fresh mob on death instead of ending the
   // iteration. See sc_enemy.cpp enemy_t::respawn().
   double solver_respawn_health;
+  // 261021-fmix (batch 261020-wvh item 13, D22 point 3): whole-pack TrashPack respawn. Under fight_style=TrashPack with
+  // solver_respawn_health > 0 a pack member that dies STAYS dead until the last living member of the pack dies; then ONE event,
+  // gaps[k] seconds later, raises every member at full health (k = solver_pack_respawn_next, one step per return, reset at the
+  // start of every iteration). The list comes from the fight text only (solver_pack_respawn_gaps=<seconds>,<seconds>,...): no
+  // random number in the fork (NO DICE). Refused by name (setup): PACK_RESPAWN_GAPS_NEEDS, PACK_RESPAWN_GAPS_STYLE,
+  // PACK_RESPAWN_GAPS_MALFORMED; at run time PACK_RESPAWN_GAPS_EXHAUSTED when the list runs out. The old per-mob immediate
+  // respawn of TrashPack enemies is removed (boss and other fight styles keep it). See sc_enemy.cpp enemy_t::pack_member_demise().
+  std::string solver_pack_respawn_gaps_str;
+  std::vector<timespan_t> solver_pack_respawn_gaps;
+  std::size_t solver_pack_respawn_next = 0;
   bool save_profiles;
   bool save_profile_with_actions;  // When saving full profiles, include actions or not
   bool save_full_profile;  // save the full profile instead of only active save_e flags
@@ -1512,6 +1522,34 @@ struct sim_t : private sc_thread_t
   // of play (R8). There is NO funnel aiming rule: select(), preference_for, the legality filter and
   // target_scorer_force_rules are the same code with the flag on and off (R6).
   bool solver_funnel_mode;
+  // 261021-fmix (batch 261020-wvh item 13, D25 point 1): funnel windows. solver_funnel_windows=<start>:<end>,<start>:<end>,...
+  // (seconds, three decimals, from the fight start) restricts solver_funnel_mode to those windows; an EMPTY list restricts
+  // nothing (the whole-fight funnel of 266-09). Play asks funnel_active(), never the bool: player_t::acquire_target,
+  // rl_target_select pin_to_tag and rl_target_select retarget. No event is scheduled at a window edge: the pin takes effect at the
+  // first decision boundary inside a window and releases at the first one outside it (the edge is fuzzy by at most one decision
+  // interval). A window is half open, [start, end). The observation column capability.mode_funnel and the translog header / fight
+  // tag bits still read solver_funnel_mode ("this fight funnels at some time"), frozen at the pull. Refused by name (setup):
+  // FUNNEL_WINDOWS_NEEDS_MODE (windows with solver_funnel_mode=0), FUNNEL_WINDOWS_MALFORMED (end <= start, unsorted or
+  // overlapping, an end past max_time, an unparseable entry). No random number: the windows come from the fight text (NO DICE).
+  std::string solver_funnel_windows_str;
+  struct funnel_window_t
+  {
+    timespan_t start;
+    timespan_t end;
+  };
+  std::vector<funnel_window_t> solver_funnel_windows;
+  bool funnel_active() const
+  {
+    if ( !solver_funnel_mode )
+      return false;
+    if ( solver_funnel_windows.empty() )
+      return true;
+    const timespan_t now = current_time();
+    for ( const auto& window : solver_funnel_windows )
+      if ( now >= window.start && now < window.end )
+        return true;
+    return false;
+  }
   // Phase 266 (plan 266-09, research R7/R11): the random chosen enemy. With it on, the chooser picks the tag
   // uniformly at random among the eligible enemies instead of the first in the list, drawing from its OWN
   // per-fight stream (solver_target_rng below) and only when two or more enemies are eligible. It acts on the
