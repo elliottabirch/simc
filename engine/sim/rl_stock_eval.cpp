@@ -211,6 +211,20 @@ bool enabled( const sim_t* sim )
 
 void on_init_finished( sim_t* sim )
 {
+  // 261020-wvn: the play option is checked BEFORE the early return for the observer being off, so it can never be silently inert.
+  if ( sim->solver_policy_play_stock )
+  {
+    std::string missing;
+    if ( sim->solver_policy_str.empty() )
+      missing += " solver_policy=";
+    if ( g_list_name.empty() )
+      missing += " solver_apl_stock_list=";
+    if ( !sim->solver_record_apl_choice )
+      missing += " solver_record_apl_choice=1";
+    if ( !missing.empty() )
+      throw sc_runtime_error( fmt::format( "PLAY_STOCK_NEEDS: solver_policy_play_stock=1 also needs{}", missing ) );
+  }
+
   if ( !enabled( sim ) )
     return;
 

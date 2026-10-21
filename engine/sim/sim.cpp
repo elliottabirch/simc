@@ -4657,6 +4657,8 @@ void sim_t::create_options()
   // Phase 271.4 (271.4-03): names the preserved stock list the recorder walks dry at each net decision; turns the `.apl`
   // sidecar to format 2. The name lives in rl_stock_eval (a sim_t member would rebuild every file). Default empty: off.
   add_option( opt_string( "solver_apl_stock_list", rl_stock_eval::list_name_storage() ) );
+  // 261020-wvn: see sim.hpp's solver_policy_play_stock doc comment. Default off.
+  add_option( opt_bool( "solver_policy_play_stock", solver_policy_play_stock ) );
   // 261009-spd: see sim.hpp's rl_capability_selftest doc comment.
   add_option( opt_bool( "rl_capability_selftest", rl_capability_selftest ) );
   // 261009-spd (T3): see sim.hpp's rl_huge_pages doc comment.

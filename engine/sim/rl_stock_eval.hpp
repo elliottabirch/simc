@@ -61,6 +61,7 @@ inline constexpr std::uint8_t F_LIST_SWITCH     = 4;   // the walk went through 
 inline constexpr std::uint8_t F_VARIABLE_OP     = 8;   // a variable line whose operation is not a plain set ran
 inline constexpr std::uint8_t F_DEPTH           = 16;  // the recursion depth limit was hit
 inline constexpr std::uint8_t F_NAME_TRUNCATED  = 32;  // the strict leaf's name is 48 bytes or longer
+inline constexpr std::uint8_t F_PLAYED          = 64;  // solver_policy_play_stock=1 pressed this record's mapped pick
 
 // Sim option storage (`solver_apl_stock_list=<name>`). A global because a sim_t member would rebuild every file;
 // the RL rigs run one sim per process. Default empty: the module is off.

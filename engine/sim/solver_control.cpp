@@ -807,7 +807,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // Phase 271.4 (271.4-03, G271.4-8): the dry stock-rotation pick, evaluated BEFORE bind_slots, read_state, the aim pick
     // and every exploration draw, so the list sees the state the net sees and the net's aim (p->target) never leaks into
     // the list's target selection. Nothing runs and no random number is drawn (rl_stock_eval.hpp). Off: one bool test.
-    const rl_stock_eval::pick_t stock_pick =
+    rl_stock_eval::pick_t stock_pick =
         rl_stock_eval::enabled( sim ) ? rl_stock_eval::evaluate( p, et ) : rl_stock_eval::pick_t{};
 
     // tstl-sylvanas phase 220, plan 220-01 (OBS-07), REORDERED by
@@ -1152,6 +1152,19 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
         forced_here = true;
         break;
       }
+    }
+
+    // 261020-wvn (batch 261020-wvh item 6, owner answer 1): solver_policy_play_stock=1 presses the stock list's mapped pick when
+    // that button is selectable now (select_mask: holds applied) and no forced press already claimed this decision; otherwise the
+    // net's own choice above stands (fall-through). After the action dial, so the dial's draws are exactly what they were; the
+    // press is what the translog row's action carries, and the `.apl` record of this decision is marked F_PLAYED (the row's own
+    // flags byte is full). Off: one bool test.
+    if ( sim->solver_policy_play_stock && !forced_here && stock_pick.mapped_index >= 0 &&
+         select_mask[ stock_pick.mapped_index ] )
+    {
+      idx = stock_pick.mapped_index;
+      exploratory = false;
+      stock_pick.flags = static_cast<std::uint8_t>( stock_pick.flags | rl_stock_eval::F_PLAYED );
     }
 
     // 221-03 (ACT-05/ACT-06, Task 2 point 4): cleared for EVERY decision

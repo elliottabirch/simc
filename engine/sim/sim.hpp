@@ -1162,6 +1162,12 @@ struct sim_t : private sc_thread_t
   // base path of its own). Read-only after setup(); solver_control.cpp checks this once per
   // decision to decide whether to pass apl_choice's name through to record_decision().
   bool solver_record_apl_choice = false;
+  // 261020-wvn (batch 261020-wvh item 6, owner answer 1): solver_policy_play_stock=1 makes the in-process arm PRESS the
+  // stock list's mapped pick (rl_stock_eval, see its header) whenever that button is selectable this decision, and fall
+  // through to the net's own choice otherwise. The press is the translog row's action; the `.apl` record of that
+  // decision carries rl_stock_eval::F_PLAYED. Needs solver_policy=, solver_apl_stock_list= and solver_record_apl_choice=1
+  // (refused by name, token PLAY_STOCK_NEEDS, in rl_stock_eval::on_init_finished). Default off: one bool test per decision.
+  bool solver_policy_play_stock = false;
   // rl_forward_probe sim option (tstl-sylvanas Phase 222, plan 222-04,
   // NET-02's cross-path receipt). Loads a solver_policy= blob (weights are
   // already loaded+validated in setup() above, same as solver_policy=
