@@ -12,6 +12,7 @@
 #include "player/player.hpp"
 #include "sim/rl_policy_constants_select.h"
 #include "sim/sim.hpp"
+#include "sim/solver_branch.hpp"
 
 #include <cstring>
 #include <string>
@@ -86,19 +87,6 @@ struct walk_t
   bool         strict_no_gcd = false;
   bool         refused       = false;
 };
-
-// The button index of a leaf: the registry's cast button whose token equals the leaf's engine name, else -1.
-int button_index( const action_t* a )
-{
-  const char* name = a->name();
-  for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
-  {
-    if ( RL_ACTIONS[ i ].kind == rl_action_kind::cast && RL_ACTIONS[ i ].token != nullptr &&
-         std::strcmp( name, RL_ACTIONS[ i ].token ) == 0 )
-      return static_cast<int>( i );
-  }
-  return -1;
-}
 
 // One list at depth `depth`. Mirrors player_t::select_action's loop (player.cpp), minus its side effects. Returns the
 // first ready MAPPED leaf below this list, or nullptr; the first ready leaf of any kind is recorded in `w` once.
@@ -199,6 +187,19 @@ const action_t* walk( const action_priority_list_t& list, execute_type et, walk_
 
 }  // namespace
 
+// The button index of a leaf: the registry's cast button whose token equals the leaf's engine name, else -1.
+int button_index( const action_t* a )
+{
+  const char* name = a->name();
+  for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+  {
+    if ( RL_ACTIONS[ i ].kind == rl_action_kind::cast && RL_ACTIONS[ i ].token != nullptr &&
+         std::strcmp( name, RL_ACTIONS[ i ].token ) == 0 )
+      return static_cast<int>( i );
+  }
+  return -1;
+}
+
 std::string& list_name_storage()
 {
   return g_list_name;
@@ -209,22 +210,48 @@ bool enabled( const sim_t* sim )
   return sim != nullptr && sim->solver_record_apl_choice && !g_list_name.empty();
 }
 
+void validate_observer_options( sim_t* sim )
+{
+  if ( !sim->solver_policy_observe_stock )
+    return;
+
+  std::string missing;
+  if ( sim->solver_policy_str.empty() )
+    missing += " solver_policy=";
+  if ( g_list_name.empty() )
+    missing += " solver_apl_stock_list=";
+  if ( !sim->solver_record_apl_choice )
+    missing += " solver_record_apl_choice=1";
+  if ( sim->rl_translog_file_str.empty() )
+    missing += " rl_translog=";
+  if ( !missing.empty() )
+    throw sc_runtime_error( fmt::format( "OBSERVE_STOCK_NEEDS: solver_policy_observe_stock=1 also needs{}", missing ) );
+
+  std::string conflicts;
+  if ( !sim->solver_control_str.empty() )
+    conflicts += " solver_control=";
+  if ( !sim->solver_hold_windows_str.empty() )
+    conflicts += " solver_hold_windows=";
+  if ( !sim->solver_force_decision_str.empty() )
+    conflicts += " solver_force_decision=";
+  if ( sim->solver_min_maelstrom_spend > 0 )
+    conflicts += " solver_min_maelstrom_spend>0";
+  if ( sim->solver_mask_no_enemy )
+    conflicts += " solver_mask_no_enemy=1";
+  const solver_branch::config_t& branch = solver_branch::cfg();
+  if ( branch.branch_at >= 0 )
+    conflicts += " solver_branch_at=";
+  if ( branch.teacher )
+    conflicts += " solver_teacher=1";
+  if ( branch.resalt_at_decision >= 0 )
+    conflicts += " per_source_rng_resalt_at_decision=";
+  if ( !conflicts.empty() )
+    throw sc_runtime_error(
+        fmt::format( "OBSERVE_STOCK_CONFLICT: solver_policy_observe_stock=1 cannot be combined with{}", conflicts ) );
+}
+
 void on_init_finished( sim_t* sim )
 {
-  // 261020-wvn: the play option is checked BEFORE the early return for the observer being off, so it can never be silently inert.
-  if ( sim->solver_policy_play_stock )
-  {
-    std::string missing;
-    if ( sim->solver_policy_str.empty() )
-      missing += " solver_policy=";
-    if ( g_list_name.empty() )
-      missing += " solver_apl_stock_list=";
-    if ( !sim->solver_record_apl_choice )
-      missing += " solver_record_apl_choice=1";
-    if ( !missing.empty() )
-      throw sc_runtime_error( fmt::format( "PLAY_STOCK_NEEDS: solver_policy_play_stock=1 also needs{}", missing ) );
-  }
-
   if ( !enabled( sim ) )
     return;
 
@@ -250,6 +277,17 @@ void on_init_finished( sim_t* sim )
   if ( actor->base.skill != 1 )
     throw sc_runtime_error( refusal_text( fmt::format(
         "the actor '{}' has skill {} (not 1): the list walk would draw the random stream", actor->name(), actor->base.skill ) ) );
+
+  // Observer mode: SimC's own select_action must walk the named list, so the actor's active list IS that list.
+  if ( sim->solver_policy_observe_stock )
+  {
+    const std::string active = actor->default_action_list != nullptr ? actor->default_action_list->name_str : std::string();
+    if ( active != g_list_name )
+      throw sc_runtime_error( fmt::format(
+          "OBSERVE_STOCK_NEEDS: solver_policy_observe_stock=1 needs the actor's active list to be the list solver_apl_stock_list= "
+          "names ('{}'): put action_list={} in the profile (the active list is '{}')",
+          g_list_name, g_list_name, active ) );
+  }
 }
 
 pick_t evaluate( player_t* p, execute_type et )

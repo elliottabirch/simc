@@ -1374,7 +1374,8 @@ static_assert( offsetof( decision_record, name ) == 8 );
 // registry has a button for, -1 none. `strict_index`: the first ready stock leaf, its button index, -1 none ready, -2 it has
 // no button. `boundary`: 0 foreground, 1 off-global-cooldown poll, 2 cast-while-casting poll. `flags`: rl_stock_eval::F_*
 // (1 refused, 2 strict leaf triggers no global cooldown, 4 went through a run/swap list, 8 non-set variable ran, 16 depth
-// limit, 32 name truncated, 64 played (solver_policy_play_stock)). `strict_name`: the strict leaf's engine name, NUL-terminated, empty when none ready.
+// limit, 32 name truncated, 64 RETIRED (the retired play-stock mode used it; never written), 128 idle (observer mode,
+// solver_policy_observe_stock: the one row of an idle stretch)). `strict_name`: the strict leaf's engine name, NUL-terminated, empty when none ready.
 struct alignas( 8 ) decision_record_v2
 {
   std::uint32_t kind;                       // @0  -- KIND_DECISION

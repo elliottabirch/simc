@@ -48,6 +48,7 @@
 
 #include "sc_enums.hpp"
 
+struct action_t;
 struct player_t;
 struct sim_t;
 
@@ -61,7 +62,8 @@ inline constexpr std::uint8_t F_LIST_SWITCH     = 4;   // the walk went through 
 inline constexpr std::uint8_t F_VARIABLE_OP     = 8;   // a variable line whose operation is not a plain set ran
 inline constexpr std::uint8_t F_DEPTH           = 16;  // the recursion depth limit was hit
 inline constexpr std::uint8_t F_NAME_TRUNCATED  = 32;  // the strict leaf's name is 48 bytes or longer
-inline constexpr std::uint8_t F_PLAYED          = 64;  // solver_policy_play_stock=1 pressed this record's mapped pick
+// Bit 64 is RETIRED: the retired play-stock mode (commit 0080c3dd1f) used it, nothing writes it any more, and the readers refuse it.
+inline constexpr std::uint8_t F_IDLE            = 128; // observer mode (solver_policy_observe_stock=1): this row is the one row of an idle stretch
 
 // Sim option storage (`solver_apl_stock_list=<name>`). A global because a sim_t member would rebuild every file;
 // the RL rigs run one sim per process. Default empty: the module is off.
@@ -70,10 +72,22 @@ std::string& list_name_storage();
 // True when the option names a list AND solver_record_apl_choice is on.
 bool enabled( const sim_t* sim );
 
+// Observer mode (261021-ezq), the option checks that need only option values. Called from sim_t::setup() before the stock-list
+// refusals, so a missing option is reported under its own name. Does nothing unless solver_policy_observe_stock=1. Throws
+// sc_runtime_error starting `OBSERVE_STOCK_NEEDS:` when solver_policy=, solver_apl_stock_list=, solver_record_apl_choice=1 or
+// rl_translog= is missing, and starting `OBSERVE_STOCK_CONFLICT:` when solver_control=, solver_hold_windows=,
+// solver_force_decision=, solver_min_maelstrom_spend > 0, solver_mask_no_enemy=1 or a branch, teacher or re-salt mode is set.
+void validate_observer_options( sim_t* sim );
+
+// The button index of an action: the registry's cast button whose token equals the action's engine name, else -1. The name match the
+// dry walk uses for its leaves; observer mode uses it on the leaf SimC's own select_action returned.
+int button_index( const action_t* a );
+
 // Called once from sim_t::init, after every actor's init_finished(). When enabled, throws sc_runtime_error (text
 // starting `rl_stock_eval: registry '<id>' list '<name>': `) when there is no RL actor, when the name is `default`
-// or `precombat`, when the actor declares no such list, or when the actor's base skill is not 1. Stores no pointer:
-// every decision resolves the list by name, so nothing outlives a sim.
+// or `precombat`, when the actor declares no such list, or when the actor's base skill is not 1. In observer mode it also
+// throws `OBSERVE_STOCK_NEEDS:` unless the RL actor's active list is the list named by solver_apl_stock_list= (the profile must
+// carry action_list=<L>). Stores no pointer: every decision resolves the list by name, so nothing outlives a sim.
 void on_init_finished( sim_t* sim );
 
 // One decision's answer.

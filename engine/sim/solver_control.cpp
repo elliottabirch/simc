@@ -303,6 +303,24 @@ void accept_wait( sim_t* sim, execute_type et, double sec, const std::string& co
   sim->solver_control_has_pending_wait = true;
 }
 
+// 261021-ezq: the registry index of the fixed next-event wait (label "wait_next_event"), resolved by label once. Observer mode
+// records an idle stretch as this button.
+int observer_wait_index()
+{
+  static const int index = []() {
+    for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+    {
+      if ( RL_ACTIONS[ i ].kind == rl_action_kind::wait && RL_ACTIONS[ i ].label != nullptr &&
+           std::strcmp( RL_ACTIONS[ i ].label, "wait_next_event" ) == 0 )
+        return static_cast<int>( i );
+    }
+    return -1;
+  }();
+  if ( index < 0 )
+    protocol_abort( "OBSERVE_STOCK_IDLE_WAIT_ILLEGAL: the registry has no wait action labelled wait_next_event" );
+  return index;
+}
+
 // The removed turn reply arm's own function (R6-27) was here; deleted along with
 // every layer of the turn action (233.1-01 Task 3).
 } // anonymous namespace
@@ -582,6 +600,34 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
   // matches every one of its pet records.
   if ( sim->solver_control_str.empty() && std::strcmp( p->name(), RL_ACTOR_NAME ) != 0 )
     return apl_choice;
+
+  // 261021-ezq OBSERVER MODE (solver_policy_observe_stock=1; sim.hpp has the contract). SimC's own select_action already decided
+  // for this boundary (`apl_choice`); the arm below only records it. Two things happen here, ABOVE the seq increment:
+  //   - a non-foreground boundary aborts (the stock list's leaves are foreground leaves; a profile with off-GCD or
+  //     cast-while-casting lines would differ from pure SimC here, and the run must not pretend otherwise);
+  //   - a re-poll inside an open idle stretch (nothing ready, the stretch's one row already written) writes nothing and
+  //     consumes no decision number: the same precedent as the no-op decrement of the all-illegal background boundary below,
+  //     so seq stays contiguous and the .apl record count equals the decision row count. It does what the scripted path does
+  //     after choose() at a boundary of its own (player.cpp, execute_action: refresh_chosen, because there the boundary call of
+  //     read_state is not reached): keeps the chosen-enemy tag current. Returning nullptr with no pending wait leaves SimC's own
+  //     idle poll (available(), gauss 100 ms +- 10 ms) to schedule the next try, so its random draw is untouched.
+  // The first-decision auto-attack yield above stays first (the first boundary of a fight is never recorded).
+  if ( sim->solver_policy_observe_stock )
+  {
+    if ( et != execute_type::FOREGROUND )
+      protocol_abort( fmt::format( "OBSERVE_STOCK_BOUNDARY: observer mode records foreground boundaries only, got boundary={} at t={:.3f}",
+                                   decision_dump::boundary_name( et ), sim->current_time().total_seconds() ) );
+    if ( apl_choice == nullptr && sim->solver_observe_idle_open )
+    {
+      rl_target_select::refresh_chosen( p );
+      sim->solver_control_last_reply_type = "wait";
+      sim->solver_control_has_requested_wait_sec = false;
+      sim->solver_control_last_requested_wait_sec = 0.0;
+      sim->solver_control_last_wait_anchor_label.clear();
+      sim->solver_control_last_wait_source.clear();
+      return nullptr;
+    }
+  }
 
   // 261005-tch2 (solver_mask_no_enemy): at a background (off-GCD / cast-while-casting) boundary no wait
   // is legal (build_mask's R1), so with every cast masked there is nothing to press: this boundary is
@@ -997,6 +1043,72 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       sim->rl_obs_ns.push_back( obs_timing_ns.count() );
     }
 
+    // 261021-ezq OBSERVER EPILOGUE. Nothing past this block runs in observer mode: no forward pass (the loaded net is never
+    // consulted, q fields are NaN), no action dial, no hold windows, no forced press, no branch hook, no accept_cast (no retarget).
+    // The press is SimC's own: `apl_choice` itself is returned, with its own target and its own line_cd (player.cpp starts it).
+    if ( sim->solver_policy_observe_stock )
+    {
+      constexpr float nan = std::numeric_limits<float>::quiet_NaN();
+      const bool      idle_row = ( apl_choice == nullptr );
+      int             observe_idx = -1;
+      std::uint16_t   observe_target = rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK;
+      if ( idle_row )
+      {
+        // The first poll of an idle stretch: the wait_next_event button, resolved by its registry label (never a literal index).
+        observe_idx = observer_wait_index();
+        if ( !mask[ observe_idx ] )
+          protocol_abort( fmt::format( "OBSERVE_STOCK_IDLE_WAIT_ILLEGAL: seq={} t={:.3f} nothing is ready on the list but the "
+                                       "wait_next_event button (index {}) is masked", seq, sim->current_time().total_seconds(),
+                                       observe_idx ) );
+        stock_pick.flags = static_cast<std::uint8_t>( stock_pick.flags | rl_stock_eval::F_IDLE );
+        sim->solver_observe_idle_open = true;
+        sim->solver_control_last_reply_type = "wait";
+      }
+      else
+      {
+        observe_idx = rl_stock_eval::button_index( apl_choice );
+        if ( observe_idx < 0 )
+          protocol_abort( fmt::format( "OBSERVE_STOCK_UNMAPPED_LEAF: seq={} t={:.3f} SimC's own pick '{}' is a ready leaf with no "
+                                       "registry button", seq, sim->current_time().total_seconds(), apl_choice->name() ) );
+        if ( !mask[ observe_idx ] )
+          protocol_abort( fmt::format( "OBSERVE_STOCK_MASK_DISAGREES: seq={} t={:.3f} SimC's own pick '{}' (button {}) is masked "
+                                       "illegal by the catalog", seq, sim->current_time().total_seconds(), apl_choice->name(),
+                                       observe_idx ) );
+        sim->solver_observe_idle_open = false;
+        sim->solver_control_last_reply_type = "cast";
+        // A targeted button records its target as the net path does (the actor index of the enemy SimC's pick aims at); an
+        // untargeted one records no pick.
+        if ( apl_choice->target != nullptr && rl_target_select::is_targeted_action( apl_choice ) )
+          observe_target = static_cast<std::uint16_t>( apl_choice->target->actor_index );
+      }
+      // The dry walk of this same boundary must agree with SimC's own select_action: idle = strict and mapped both -1 (and not
+      // refused), played = strict == mapped == the executed leaf's button.
+      const int want = idle_row ? -1 : observe_idx;
+      if ( ( stock_pick.flags & rl_stock_eval::F_REFUSED ) != 0 || stock_pick.strict_index != want || stock_pick.mapped_index != want )
+        protocol_abort( fmt::format( "OBSERVE_STOCK_WALK_DISAGREES: seq={} t={:.3f} SimC's own pick '{}' (button {}) but the dry walk "
+                                     "says strict={} ('{}') mapped={} flags={}", seq, sim->current_time().total_seconds(),
+                                     idle_row ? "<idle>" : apl_choice->name(), want, stock_pick.strict_index,
+                                     stock_pick.strict_name, stock_pick.mapped_index, static_cast<int>( stock_pick.flags ) ) );
+      sim->solver_control_has_requested_wait_sec = false;
+      sim->solver_control_last_requested_wait_sec = 0.0;
+      sim->solver_control_last_wait_anchor_label.clear();
+      sim->solver_control_last_wait_source.clear();
+      try
+      {
+        rl_translog::record_decision( sim, p, seq, obs, mask, observe_idx, nan, nan, observe_target, false, false, false, nullptr,
+                                       0, 0, rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
+                                       apl_choice != nullptr ? apl_choice->name() : nullptr, false,
+                                       rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
+                                       rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK, chosen_enemy_index_of( p ), &stock_pick );
+      }
+      catch ( ... )
+      {
+        rl_translog::flush_pending( sim );
+        throw;
+      }
+      return apl_choice;
+    }
+
     float q[ RL_ACTION_DIM ];
     rl_policy::forward( *sim->solver_policy_weights, obs, mask, q );
 
@@ -1152,19 +1264,6 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
         forced_here = true;
         break;
       }
-    }
-
-    // 261020-wvn (batch 261020-wvh item 6, owner answer 1): solver_policy_play_stock=1 presses the stock list's mapped pick when
-    // that button is selectable now (select_mask: holds applied) and no forced press already claimed this decision; otherwise the
-    // net's own choice above stands (fall-through). After the action dial, so the dial's draws are exactly what they were; the
-    // press is what the translog row's action carries, and the `.apl` record of this decision is marked F_PLAYED (the row's own
-    // flags byte is full). Off: one bool test.
-    if ( sim->solver_policy_play_stock && !forced_here && stock_pick.mapped_index >= 0 &&
-         select_mask[ stock_pick.mapped_index ] )
-    {
-      idx = stock_pick.mapped_index;
-      exploratory = false;
-      stock_pick.flags = static_cast<std::uint8_t>( stock_pick.flags | rl_stock_eval::F_PLAYED );
     }
 
     // 221-03 (ACT-05/ACT-06, Task 2 point 4): cleared for EVERY decision
@@ -1533,6 +1632,7 @@ void reset_iteration( sim_t* sim )
   if ( sim->solver_control_str.empty() && sim->solver_policy_str.empty() )
     return;
 
+  sim->solver_observe_idle_open = false;  // 261021-ezq: an idle stretch never carries over into the next fight
   sim->solver_control_auto_attack_started = false;
   sim->solver_control_has_pending_wait = false;
   sim->solver_control_pending_wait_s = 0.0;

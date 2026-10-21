@@ -4659,8 +4659,8 @@ void sim_t::create_options()
   // Phase 271.4 (271.4-03): names the preserved stock list the recorder walks dry at each net decision; turns the `.apl`
   // sidecar to format 2. The name lives in rl_stock_eval (a sim_t member would rebuild every file). Default empty: off.
   add_option( opt_string( "solver_apl_stock_list", rl_stock_eval::list_name_storage() ) );
-  // 261020-wvn: see sim.hpp's solver_policy_play_stock doc comment. Default off.
-  add_option( opt_bool( "solver_policy_play_stock", solver_policy_play_stock ) );
+  // 261021-ezq: see sim.hpp's solver_policy_observe_stock doc comment. Default off.
+  add_option( opt_bool( "solver_policy_observe_stock", solver_policy_observe_stock ) );
   // 261009-spd: see sim.hpp's rl_capability_selftest doc comment.
   add_option( opt_bool( "rl_capability_selftest", rl_capability_selftest ) );
   // 261009-spd (T3): see sim.hpp's rl_huge_pages doc comment.
@@ -5855,6 +5855,11 @@ void sim_t::setup( sim_control_t* c )
         "solver_record_apl_choice=1 requires rl_translog= (the .apl sidecar has no base path of "
         "its own)." );
   }
+
+  // 261021-ezq: the observer mode's option checks, before the stock-list refusals below so a missing option is named
+  // OBSERVE_STOCK_NEEDS rather than reported as the stock-list option's own refusal. The active-list check needs the actors and
+  // runs in rl_stock_eval::on_init_finished.
+  rl_stock_eval::validate_observer_options( this );
 
   // Phase 271.4 (271.4-03): solver_apl_stock_list=<name> asks the in-process arm to walk the preserved stock list at
   // each decision and write both picks into the `.apl` sidecar (format 2). It therefore needs the sidecar

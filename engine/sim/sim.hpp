@@ -1172,12 +1172,21 @@ struct sim_t : private sc_thread_t
   // base path of its own). Read-only after setup(); solver_control.cpp checks this once per
   // decision to decide whether to pass apl_choice's name through to record_decision().
   bool solver_record_apl_choice = false;
-  // 261020-wvn (batch 261020-wvh item 6, owner answer 1): solver_policy_play_stock=1 makes the in-process arm PRESS the
-  // stock list's mapped pick (rl_stock_eval, see its header) whenever that button is selectable this decision, and fall
-  // through to the net's own choice otherwise. The press is the translog row's action; the `.apl` record of that
-  // decision carries rl_stock_eval::F_PLAYED. Needs solver_policy=, solver_apl_stock_list= and solver_record_apl_choice=1
-  // (refused by name, token PLAY_STOCK_NEEDS, in rl_stock_eval::on_init_finished). Default off: one bool test per decision.
-  bool solver_policy_play_stock = false;
+  // 261021-ezq (replaces the retired play-stock mode of 0080c3dd1f, which pressed the stock list's pick through the net's
+  // action path): solver_policy_observe_stock=1 is the OBSERVER mode. The RL actor's active list is the named stock list
+  // (action_list=<L> with solver_apl_stock_list=<L>), so SimC's own select_action decides: its object, its target, its line,
+  // its idle poll. The in-process arm only RECORDS: one translog row per press (the executed leaf's button, `.apl` strict ==
+  // mapped == that button) and ONE row per idle stretch (the wait_next_event button, `.apl` flag rl_stock_eval::F_IDLE) where
+  // the stretch starts; the later re-polls of the same stretch write nothing and consume no decision number. The net named by
+  // solver_policy= stays loaded (the arm needs it) but is never consulted: q fields are NaN. A ready leaf with no registry
+  // button aborts the fight by name (OBSERVE_STOCK_UNMAPPED_LEAF). Needs solver_policy=, solver_apl_stock_list=,
+  // solver_record_apl_choice=1 and rl_translog=, refused by name OBSERVE_STOCK_NEEDS (also when the active list is not the
+  // named list); conflicts with solver_control=, solver_hold_windows=, solver_force_decision=, solver_min_maelstrom_spend,
+  // solver_mask_no_enemy and every branch, teacher and re-salt mode (OBSERVE_STOCK_CONFLICT). Default off: one bool test.
+  bool solver_policy_observe_stock = false;
+  // Observer mode, per fight: true while an idle stretch is open (its one row is written, its re-polls are not). Cleared at the
+  // start of every fight by solver_control::reset_iteration.
+  bool solver_observe_idle_open = false;
   // rl_forward_probe sim option (tstl-sylvanas Phase 222, plan 222-04,
   // NET-02's cross-path receipt). Loads a solver_policy= blob (weights are
   // already loaded+validated in setup() above, same as solver_policy=
