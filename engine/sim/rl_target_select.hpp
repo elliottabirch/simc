@@ -81,8 +81,11 @@ void refresh_chosen( player_t* p );
 // The gate: the observer flag is on and `p` is the RL actor (the fork's one RL-actor test: exact name, never a pet).
 bool observer_targeting( const player_t* p );
 
-// The first enemy of sim->target_non_sleeping_list, in list order, that rl_can_be_hit( p, t ) accepts; nullptr when none.
-// Reads only. The tag chooser's own "can be hit" predicate, so "hittable" has one definition in the fork.
+// Nearest-first (261021-ezq R2FIX D-23, owner): among the enemies of sim->target_non_sleeping_list that rl_can_be_hit( p, t )
+// accepts, the nearest one within melee reach (the T-3 melee definition refresh_chosen uses: the registry's RL_TAG_MELEE_ACTION,
+// else the shortest-range aimed action), else the nearest one that can be hit at all; nullptr when none. Ties keep the list order.
+// Reads only, draws no random number (refresh_chosen's do-not-hit split and random option are not part of it). "Hittable" keeps
+// its one definition in the fork, the tag chooser's own predicate.
 player_t* observer_front_candidate( const player_t* p );
 
 // The pre-walk alignment, called by player_t::execute_action immediately before the foreground select_action (the list walk is

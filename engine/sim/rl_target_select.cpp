@@ -922,12 +922,35 @@ bool observer_targeting( const player_t* p )
   return p->sim->solver_policy_observe_stock && std::strcmp( p->name(), RL_ACTOR_NAME ) == 0 && !p->is_pet();
 }
 
+// 261021-ezq R2FIX D-23 (owner: nearest-first): among the enemies the actor can hit, the nearest one within melee reach (the tag
+// chooser's own T-3 melee definition: the registry's RL_TAG_MELEE_ACTION, else the shortest-range aimed action, through
+// generic_filter), else the nearest one that can be hit at all, else nullptr. Ties keep the engine's list order (strict "<"
+// comparison on the first match). It is refresh_chosen's pick without its do-not-hit split (sheet fights only) and without its
+// random draw. Reads only.
 player_t* observer_front_candidate( const player_t* p )
 {
+  const action_t* const melee         = actor_binding_for( p ).melee;
+  player_t*             nearest_melee = nullptr;
+  player_t*             nearest_any   = nullptr;
+  double                melee_dist    = 0.0;
+  double                any_dist      = 0.0;
   for ( player_t* t : p->sim->target_non_sleeping_list )
-    if ( t->is_enemy() && rl_can_be_hit( p, t ) )
-      return t;
-  return nullptr;
+  {
+    if ( !t->is_enemy() || !rl_can_be_hit( p, t ) )
+      continue;
+    const double dist = p->get_player_distance( *t );
+    if ( nearest_any == nullptr || dist < any_dist )
+    {
+      nearest_any = t;
+      any_dist    = dist;
+    }
+    if ( melee != nullptr && generic_filter( melee, t, /*harmful=*/true ) && ( nearest_melee == nullptr || dist < melee_dist ) )
+    {
+      nearest_melee = t;
+      melee_dist    = dist;
+    }
+  }
+  return nearest_melee != nullptr ? nearest_melee : nearest_any;
 }
 
 void observer_align_targets( player_t* p )

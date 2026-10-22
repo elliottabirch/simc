@@ -15074,10 +15074,16 @@ void player_t::acquire_target( retarget_source event, player_t* context )
   // is the first enemy the actor can hit (rl_can_be_hit: alive, in front, in some aimed action's range plus reach) when there is
   // one, instead of the first enemy of the list that happens to be behind the player; with none hittable the stock choice stands.
   // The funnel rule below then applies as before. Observer off: the gate is false and nothing here runs (R8).
+  // The preference can move the target off a LIVING enemy (stock acquisition never does), and stock action_t::acquire_target keeps a
+  // living target for every event but SELF_ARISE/SELF_RETARGET, so the actions must be told to follow with SELF_RETARGET (rule A's form).
+  retarget_source action_event = event;
   if ( sim->facing_enabled && rl_target_select::observer_targeting( this ) )
   {
     if ( player_t* front = rl_target_select::observer_front_candidate( this ) )
+    {
       candidate_target = front;
+      action_event     = retarget_source::SELF_RETARGET;
+    }
   }
 
   // 2026-10-02, 266-09 (research R5, owner F9): in a funnel-mode fight the RL actor keeps the tag as its target
@@ -15113,8 +15119,8 @@ void player_t::acquire_target( retarget_source event, player_t* context )
     // re-aims it. 233.1-RESEARCH.md contradiction C1: this site (and T5 below) were missed
     // by the brief's own `grep -rn '[>.]face( '` pattern, which cannot match an unqualified
     // member call.
-    range::for_each( action_list, [event, context, candidate_target]( action_t* action ) {
-      action->acquire_target( event, context, candidate_target );
+    range::for_each( action_list, [action_event, context, candidate_target]( action_t* action ) {
+      action->acquire_target( action_event, context, candidate_target );
     } );
 
     trigger_ready();
