@@ -1241,7 +1241,11 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
                              stamp->second.actor_spawn_index == t->actor_spawn_index;
       out << "{\"actor_index\":" << t->actor_index << ",\"actor_spawn_index\":" << t->actor_spawn_index
           << ",\"x\":" << t->x_position << ",\"y\":" << t->y_position
-          << ",\"combat_reach\":" << t->combat_reach << ",\"time_to_die\":" << ttd
+          << ",\"combat_reach\":" << t->combat_reach
+          // 261022-fuz F1d: the same three geometry inputs as the shortest round-trip text, so a reader recomputes the membership exactly
+          // (the keys above stay at the stream's 6 significant digits).
+          << ",\"x_exact\":" << fmt::format( "{}", t->x_position ) << ",\"y_exact\":" << fmt::format( "{}", t->y_position )
+          << ",\"combat_reach_exact\":" << fmt::format( "{}", t->combat_reach ) << ",\"time_to_die\":" << ttd
           << ",\"is_boss\":" << ( rl_target_select::obs_is_boss( t ) ? "true" : "false" )
           << ",\"time_to_die_raw\":" << fmt::format( "{}", raw_ttd );
       if ( stamped )
