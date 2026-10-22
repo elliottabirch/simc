@@ -2,7 +2,7 @@
 // GENERATED FILE -- DO NOT EDIT (XPORT-04, D-09).
 //
 // Produced by:      scripts/rl/gen_rl_constants.py
-// Registry source:  scripts/rl/specs/enhancement.json
+// Registry source:  data/specs/enhancement.json
 // Spec id:          'enhancement'
 //
 // D-09's regenerate-and-diff freshness check treats any difference between a
@@ -133,7 +133,7 @@ inline constexpr std::size_t RL_ACTION_DIM = 22;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
-inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:d46a26800a7f44587ca90621ea222a59f2fddf651491137ac91456c6af5b1969";
+inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v6:d19478fd87a174197ca15a42cfd294bd457b2c4c4ea0f431ce294dd3c8b522b3";
 inline constexpr const char* RL_MASK_RULES_SHA = "3f930294d36b217dca01fc51600c0da9d0568e20152fb53c588b6e8ddccf7662";
 inline constexpr const char* RL_ACTION_SPACE_SHA = "5e5f43d009948f4adbe65e86b1238e725596c593452d89a40e31c1b8e8e21684";
 
@@ -898,7 +898,7 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_COOLDOWNS_MEMBERS[] = {
 
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_0[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "time_to_die", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "time_to_die", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, false },
     { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
     { "in_reach", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "health_pct", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
@@ -915,7 +915,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_0[] = {
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_1[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "time_to_die", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "time_to_die", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, false },
     { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
     { "in_reach", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "health_pct", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
@@ -932,7 +932,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_1[] = {
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_2[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "time_to_die", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "time_to_die", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, false },
     { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
     { "in_reach", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "health_pct", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
@@ -949,7 +949,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_2[] = {
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_3[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "time_to_die", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "time_to_die", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, false },
     { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
     { "in_reach", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "health_pct", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
@@ -966,7 +966,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_3[] = {
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_4[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "time_to_die", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "time_to_die", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, false },
     { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
     { "in_reach", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "health_pct", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
@@ -983,7 +983,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_4[] = {
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_5[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "time_to_die", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "time_to_die", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, false },
     { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
     { "in_reach", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "health_pct", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
@@ -1000,7 +1000,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_5[] = {
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_6[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "time_to_die", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "time_to_die", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, false },
     { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
     { "in_reach", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "health_pct", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
@@ -1027,12 +1027,12 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_TARGET_FACTS_MEMBERS[] = {
 
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_SHAPES_LEAVES_0[] = {
     { "enemies_hit", rl_kind::k_seconds, 0.0, false, 1.0, true, 8.0, nullptr, 0, false },
-    { "summed_remaining_life", rl_kind::k_seconds, 0.0, false, 1.0, true, 360.0, nullptr, 0, false },
+    { "summed_remaining_life", rl_kind::k_seconds, 0.0, true, 3600.0, false, 1.0, nullptr, 0, false },
     { "long_lived_count", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_SHAPES_LEAVES_1[] = {
     { "enemies_hit", rl_kind::k_seconds, 0.0, false, 1.0, true, 8.0, nullptr, 0, false },
-    { "summed_remaining_life", rl_kind::k_seconds, 0.0, false, 1.0, true, 360.0, nullptr, 0, false },
+    { "summed_remaining_life", rl_kind::k_seconds, 0.0, true, 3600.0, false, 1.0, nullptr, 0, false },
     { "long_lived_count", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
 };
 inline constexpr rl_obs_member RL_OBS_FAMILY_SHAPES_MEMBERS[] = {
@@ -1387,7 +1387,7 @@ inline constexpr double RL_BUCKETS_SLOT363[] = { 0.0, 3.0 };
 inline constexpr double RL_BUCKETS_SLOT364[] = { 0.0, 4.0 };
 inline constexpr double RL_BUCKETS_SLOT365[] = { 0.0, 5.0 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
-    { "fight_remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, true },
+    { "fight_remains", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, true },
     { "active_enemies", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
     { "raid_event_next_in", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
     { "dying_within_5s", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
@@ -1402,9 +1402,9 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "immunity_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 600.0, nullptr, 0, false },
     { "lashing_flames_carrier_count", rl_kind::k_seconds, 0.0, false, 1.0, true, 12.0, nullptr, 0, false },
     { "lightning_rod_carrier_count", rl_kind::k_seconds, 0.0, false, 1.0, true, 12.0, nullptr, 0, false },
-    { "longest_time_to_die", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "longest_time_to_die", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, false },
     { "nearest_enemy_distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
-    { "soonest_time_to_die", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "soonest_time_to_die", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, false },
     { "hits.chain_lightning", rl_kind::k_int, 0.0, true, 5.0, false, 1.0, nullptr, 0, false },
     { "hits.tempest", rl_kind::k_seconds, 0.0, false, 1.0, true, 12.0, nullptr, 0, false },
     { "hits.lava_lash.flame_shock_spread", rl_kind::k_int, 0.0, true, 5.0, false, 1.0, nullptr, 0, false },
