@@ -231,6 +231,34 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
 bool next_raid_event_in( const sim_t* sim, double& out_seconds );
 
 // ---------------------------------------------------------------------------------------------
+// 261022-fuz F1 (decision 7): FUZZY TIME ESTIMATES in the OBSERVATION. The observation shows the net the time inputs the addon will
+// have -- an estimate, not the exact end -- so every time-derived observation value passes through these helpers. All the numbers
+// are drawn by fight_draw.py and handed over as the four solver_time_estimate_* options (sim.hpp); nothing here draws a random
+// number and nothing here is read by the simulation itself (targeting scores, SimC's APL expressions, the wait clamp and legality
+// keep the true values). With the options absent every function returns its raw input unchanged (no multiplication).
+//
+//   d(t)   piecewise-linear drift over the knots, flat outside them
+//   m(b,t) = max(0, 1 + b + d(t))
+//   observed_fight_remains( sim, F_raw )        = F_raw * m(fight bias, t)
+//   observed_time_to_die( sim, e, raw )         add stamp:   raw * m(bias of that add, t)
+//                                               enemy stamp: min( raw * m(bias of that life, t), F_cap * m(fight bias, t) )
+// `raw` is time_to_percent( 0 ) in seconds with NO clip. F_cap = max( 0, expected_iteration_time - current_time ) in seconds, the
+// cap SimC applies to an enemy_t's own estimate under the respawn model.
+// ---------------------------------------------------------------------------------------------
+double time_estimate_drift_at( const sim_t* sim, double t_seconds );
+double time_estimate_factor( const sim_t* sim, double bias, double t_seconds );
+double time_estimate_fight_cap( const sim_t* sim );
+double observed_fight_remains( const sim_t* sim, double raw_fight_remains );
+double observed_time_to_die( const sim_t* sim, const player_t* enemy, double raw_time_to_die );
+
+// The side table. `key` is the draw's own address of the bias: "add:{line}:{index}" or "enemy:{group}:{life}".
+void stamp_time_estimate( sim_t* sim, const player_t* actor, bool is_add, const std::string& key, double bias );
+// Look a drawn bias up (refusing by name when the list does not reach: TIME_ESTIMATE_ADDS_UNLISTED / _ADDS_EXHAUSTED /
+// _LIVES_EXHAUSTED), and stamp. The raid event / enemy call sites use these two and nothing else.
+void stamp_time_estimate_add( sim_t* sim, const player_t* add, const std::string& line, std::size_t index );
+void stamp_time_estimate_enemy_life( sim_t* sim, const player_t* enemy, std::size_t group, std::size_t life );
+
+// ---------------------------------------------------------------------------------------------
 // 228-10 Task 1 Step 3/4 (D-16/D-17/TGT-05/TGT-06). Two new engine-wide computations, each ONE
 // function shared by every consumer (decision_dump.cpp's own aggregate keys AND, for the
 // immunity window, read_state()'s own new rl_state_t::immunity_remaining field -- D-12's "read

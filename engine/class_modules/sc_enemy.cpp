@@ -6,6 +6,7 @@
 #include "util/generic.hpp"
 
 #include "simulationcraft.hpp"
+#include "sim/rl_policy.hpp"  // 261022-fuz F1: stamp_time_estimate_enemy_life
 #include "sim/sheet_fight.hpp"  // tstl-sylvanas 261-02
 
 // ==========================================================================
@@ -107,6 +108,9 @@ struct enemy_t : public player_t
   double armor_coefficient( int level, tank_dummy_e diff );
   // 260923-hp: respawn-on-death health model.
   bool respawns() const { return sim->solver_respawn_health > 0.0; }
+  // 261022-fuz F1 (R2, R3): stamp this life with its drawn bias (key enemy:{position among the non-pet enemies}:{lives completed}).
+  // No-op with the time-estimate options absent.
+  void stamp_time_estimate_life();
   // tstl-sylvanas 260928-tb8: under fight_style=TrashPack enemy k of N gets 0.5 + k/(N-1) times the respawn
   // pool (Fluffy_Pillow 0.5x .. last Dummy_Enemy 1.5x, mean exactly 1.0), so lives spread instead of all
   // ending together. No random draw, so paired seeds stay aligned. 1.0 for every other fight style.
@@ -2188,6 +2192,7 @@ void enemy_t::combat_begin()
       sim->solver_pack_respawn_next = 0;
     start_max_life();  // 261021-ezq R2FIX D-22: the first life's cap timer (no-op with the option off)
   }
+  stamp_time_estimate_life();  // 261022-fuz F1: the first life (precombat_init already ran arise(), so the spawn index is set)
 }
 
 // enemy_t::combat_end ======================================================
@@ -2259,6 +2264,7 @@ void enemy_t::respawn()
 
   life_start_time     = sim->current_time();
   life_dmg_taken_base = iteration_dmg_taken;
+  stamp_time_estimate_life();  // 261022-fuz F1: respawn_count lives are complete, so this is life index respawn_count
 
   sim->print_log( "{} respawns: life {} begins, health={}", *this, respawn_count + 1, resources.max[ RESOURCE_HEALTH ] );
 }
@@ -2317,12 +2323,33 @@ void enemy_t::pack_member_demise()
 void enemy_t::pack_member_arise()
 {
   arise();  // full health (init_resources), new actor_spawn_index, ACTOR_ARISE retarget
+  stamp_time_estimate_life();  // 261022-fuz F1: this life's bias (index = lives completed = respawn_count)
 
   life_start_time     = sim->current_time();
   life_dmg_taken_base = iteration_dmg_taken;
   start_max_life();  // 261021-ezq R2FIX D-22: this life's cap timer (no-op with the option off)
 
   sim->print_log( "{} respawns: life {} begins, health={}", *this, respawn_count + 1, resources.max[ RESOURCE_HEALTH ] );
+}
+
+// enemy_t::stamp_time_estimate_life ========================================
+
+// 261022-fuz F1 (P-1): one group of per-life biases per non-pet enemy in sim->target_list order (the boss, Patchwerk's extra targets,
+// TrashPack members); the life index is the number of lives completed so far. A list that does not reach is the named refusal
+// TIME_ESTIMATE_LIVES_EXHAUSTED. Options absent: returns at once, nothing is stamped.
+void enemy_t::stamp_time_estimate_life()
+{
+  if ( !sim->time_estimate_on )
+    return;
+  std::size_t group = 0;
+  for ( player_t* t : sim->target_list )
+  {
+    if ( t == this )
+      break;
+    if ( t->is_enemy() && !t->is_pet() )
+      ++group;
+  }
+  rl_policy::stamp_time_estimate_enemy_life( sim, this, group, respawn_count );
 }
 
 // enemy_t::start_max_life ==================================================

@@ -22,6 +22,8 @@
 #include "util/concurrency.hpp"
 #include "util/io.hpp"
 
+#include "fmt/format.h"
+
 #include <cstring>
 #include <algorithm>
 #include <map>
@@ -376,6 +378,19 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
     const double fight_remaining =
         clamp_nonneg( ( sim->expected_iteration_time - sim->current_time() ).total_seconds() );
     out << ",\"fight_remains\":" << fight_remaining;
+    // 261022-fuz F1 (decision 7): the time-estimate keys, ALL additive (fmt `{}` = shortest round-trip). `fight_remains` above stays the
+    // true value. `fight_remains_raw` is the value slot 310 multiplies; `fight_remains_cap` is the cap SimC applies to an enemy_t's own
+    // estimate (the same number, F1 records whether they are the same double); with the options absent every observed value is its raw.
+    {
+      const double t_exact = sim->current_time().total_seconds();
+      const double raw_fight = clamp_nonneg( sim->max_time.total_seconds() - t_exact );
+      out << ",\"t_exact\":" << fmt::format( "{}", t_exact )
+          << ",\"time_estimate_on\":" << ( sim->time_estimate_on ? "true" : "false" )
+          << ",\"fight_remains_raw\":" << fmt::format( "{}", raw_fight )
+          << ",\"fight_remains_cap\":" << fmt::format( "{}", rl_policy::time_estimate_fight_cap( sim ) )
+          << ",\"time_estimate_drift\":" << fmt::format( "{}", sim->time_estimate_on ? rl_policy::time_estimate_drift_at( sim, t_exact ) : 0.0 )
+          << ",\"observed_fight_remains\":" << fmt::format( "{}", rl_policy::observed_fight_remains( sim, raw_fight ) );
+    }
     double raid_event_bound = 0.0;
     if ( rl_policy::next_raid_event_in( sim, raid_event_bound ) )
       out << ",\"raid_event_next_in\":" << raid_event_bound;
@@ -1204,10 +1219,22 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
         out << ",";
       first_enemy = false;
       const double ttd = std::min( t->time_to_percent( 0 ).total_seconds(), 600.0 );  // WR-10 clip
+      // 261022-fuz F1: the additive per-enemy time-estimate keys (see the top-level keys above); `time_to_die` stays the clipped truth.
+      const double raw_ttd = t->time_to_percent( 0 ).total_seconds();
+      const auto   stamp   = p->sim->time_estimate_stamps.find( t );
+      const bool   stamped = p->sim->time_estimate_on && stamp != p->sim->time_estimate_stamps.end() &&
+                             stamp->second.actor_spawn_index == t->actor_spawn_index;
       out << "{\"actor_index\":" << t->actor_index << ",\"actor_spawn_index\":" << t->actor_spawn_index
           << ",\"x\":" << t->x_position << ",\"y\":" << t->y_position
           << ",\"combat_reach\":" << t->combat_reach << ",\"time_to_die\":" << ttd
-          << ",\"is_boss\":" << ( rl_target_select::obs_is_boss( t ) ? "true" : "false" ) << "}";
+          << ",\"is_boss\":" << ( rl_target_select::obs_is_boss( t ) ? "true" : "false" )
+          << ",\"time_to_die_raw\":" << fmt::format( "{}", raw_ttd );
+      if ( stamped )
+        out << ",\"time_estimate_kind\":\"" << ( stamp->second.is_add ? "add" : "enemy" ) << "\",\"time_estimate_key\":\""
+            << stamp->second.key << "\",\"time_estimate_bias\":" << fmt::format( "{}", stamp->second.bias );
+      else
+        out << ",\"time_estimate_kind\":null,\"time_estimate_key\":null,\"time_estimate_bias\":null";
+      out << ",\"observed_time_to_die\":" << fmt::format( "{}", rl_policy::observed_time_to_die( p->sim, t, raw_ttd ) ) << "}";
     }
     out << "]";
     // The removed turn-action legality-predicate JSON key (R6-27, 233.1-01) was here -- deleted

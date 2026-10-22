@@ -2196,6 +2196,35 @@ void sim_t::combat_begin()
   for ( auto& t : target_list )
     t->precombat_init();
 
+  // 261022-fuz F1: the stamp table starts empty every iteration (enemy_t::combat_begin below writes each enemy's first life, the
+  // raid events and respawns write the rest). With the options absent nothing here does anything.
+  time_estimate_stamps.clear();
+  if ( time_estimate_on )
+  {
+    // Refused by name at the first combat_begin, when the raid events and the enemies exist: a listed adds line that no raid event
+    // carries, and a group count that is not the number of non-pet enemies (the lists are positional, in target_list order).
+    for ( const auto& entry : time_estimate_adds )
+    {
+      const bool known = std::any_of( raid_events.begin(), raid_events.end(), [ &entry ]( const auto& re ) {
+        return re && re->type == "adds" && re->name == entry.first;
+      } );
+      if ( !known )
+      {
+        throw sc_runtime_error( fmt::format(
+            "TIME_ESTIMATE_ADDS_UNKNOWN_LINE: solver_time_estimate_adds='{}' lists '{}', which no 'adds' raid event is named.",
+            solver_time_estimate_adds_str, entry.first ) );
+      }
+    }
+    const std::size_t enemy_count = static_cast<std::size_t>( std::count_if(
+        target_list.begin(), target_list.end(), []( const player_t* t ) { return t->is_enemy() && !t->is_pet(); } ) );
+    if ( enemy_count != time_estimate_enemies.size() )
+    {
+      throw sc_runtime_error( fmt::format(
+          "TIME_ESTIMATE_ENEMIES_COUNT: solver_time_estimate_enemies='{}' has {} group(s) but the fight has {} non-pet enemies.",
+          solver_time_estimate_enemies_str, time_estimate_enemies.size(), enemy_count ) );
+    }
+  }
+
   for ( auto& t : target_list )
     t->combat_begin();
 
@@ -4476,6 +4505,11 @@ void sim_t::create_options()
   add_option( opt_string( "solver_pack_respawn_gaps", solver_pack_respawn_gaps_str ) );
   // 261021-ezq R2FIX D-22: see sim.hpp's solver_pack_max_life_str doc comment. Parsed and refused in setup().
   add_option( opt_string( "solver_pack_max_life", solver_pack_max_life_str ) );
+  // 261022-fuz F1: see sim.hpp's solver_time_estimate_bias_str doc comment. Parsed and refused in setup().
+  add_option( opt_string( "solver_time_estimate_bias", solver_time_estimate_bias_str ) );
+  add_option( opt_string( "solver_time_estimate_drift", solver_time_estimate_drift_str ) );
+  add_option( opt_string( "solver_time_estimate_adds", solver_time_estimate_adds_str ) );
+  add_option( opt_string( "solver_time_estimate_enemies", solver_time_estimate_enemies_str ) );
   add_option( opt_float( "vary_combat_length", vary_combat_length, 0.0, 1.0 ) );
   add_option( opt_func( "ptr", parse_ptr ) );
   add_option( opt_int( "threads", threads ) );
@@ -5578,6 +5612,146 @@ void sim_t::setup( sim_control_t* c )
             solver_pack_max_life_str ) );
       }
       solver_pack_max_life = timespan_t::from_seconds( max_life_s );
+    }
+
+    // 261022-fuz F1: the four time-estimate options (decision 7; see sim.hpp). Each is its own fail-closed block that names the
+    // refusal token, the option and the FULL declared string. Nothing here draws a random number (NO DICE). All four empty: nothing
+    // below runs, time_estimate_on stays false and every helper in rl_policy returns its raw input.
+    time_estimate_on   = false;
+    time_estimate_bias = 0.0;
+    time_estimate_drift.clear();
+    time_estimate_adds.clear();
+    time_estimate_enemies.clear();
+    time_estimate_stamps.clear();
+    const bool has_te_bias    = !solver_time_estimate_bias_str.empty();
+    const bool has_te_drift   = !solver_time_estimate_drift_str.empty();
+    const bool has_te_adds    = !solver_time_estimate_adds_str.empty();
+    const bool has_te_enemies = !solver_time_estimate_enemies_str.empty();
+    if ( has_te_bias || has_te_drift || has_te_adds || has_te_enemies )
+    {
+      // A relative error lives strictly inside (-1, 1): 1 + b + d then stays positive for any single term.
+      const auto parse_relative = [ &parse_seconds ]( const std::string& text, double& out ) {
+        return parse_seconds( text, out ) && out > -1.0 && out < 1.0;
+      };
+      const auto split_colons = []( const std::string& text ) {
+        std::vector<std::string> parts;
+        std::size_t from = 0;
+        for ( ;; )
+        {
+          const auto colon = text.find( ':', from );
+          parts.push_back( text.substr( from, colon == std::string::npos ? std::string::npos : colon - from ) );
+          if ( colon == std::string::npos )
+            break;
+          from = colon + 1;
+        }
+        return parts;
+      };
+
+      if ( has_te_bias )
+      {
+        double b = 0.0;
+        if ( !parse_relative( solver_time_estimate_bias_str, b ) )
+        {
+          throw sc_runtime_error( fmt::format(
+              "TIME_ESTIMATE_BIAS_MALFORMED: solver_time_estimate_bias='{}' is not one finite number strictly between -1 and 1.",
+              solver_time_estimate_bias_str ) );
+        }
+        time_estimate_bias = b;
+      }
+
+      if ( has_te_drift )
+      {
+        const double max_time_s = max_time.total_seconds();
+        for ( const auto& entry : split_list( solver_time_estimate_drift_str ) )
+        {
+          const auto parts = split_colons( entry );
+          double knot_s = 0.0, d = 0.0;
+          if ( parts.size() != 2 || !parse_seconds( parts[ 0 ], knot_s ) || !parse_relative( parts[ 1 ], d ) || knot_s < 0.0 )
+          {
+            throw sc_runtime_error( fmt::format(
+                "TIME_ESTIMATE_DRIFT_MALFORMED: entry '{}' of solver_time_estimate_drift='{}' is not 'seconds:drift' with seconds "
+                ">= 0 and drift strictly between -1 and 1.", entry, solver_time_estimate_drift_str ) );
+          }
+          if ( time_estimate_drift.empty() ? knot_s != 0.0 : !( knot_s > time_estimate_drift.back().first ) )
+          {
+            throw sc_runtime_error( fmt::format(
+                "TIME_ESTIMATE_DRIFT_MALFORMED: knot '{}' of solver_time_estimate_drift='{}' {}.", entry,
+                solver_time_estimate_drift_str,
+                time_estimate_drift.empty() ? "is the first knot and must be at 0" : "does not come strictly after the knot before it" ) );
+          }
+          time_estimate_drift.emplace_back( knot_s, d );
+        }
+        if ( time_estimate_drift.back().first < max_time_s )
+        {
+          throw sc_runtime_error( fmt::format(
+              "TIME_ESTIMATE_DRIFT_MALFORMED: the last knot of solver_time_estimate_drift='{}' is at {} s, below max_time={} s.",
+              solver_time_estimate_drift_str, time_estimate_drift.back().first, max_time_s ) );
+        }
+      }
+
+      if ( has_te_adds )
+      {
+        for ( const auto& entry : split_list( solver_time_estimate_adds_str ) )
+        {
+          const auto parts = split_colons( entry );
+          if ( parts.size() < 2 || parts[ 0 ].empty() || time_estimate_adds.count( parts[ 0 ] ) != 0 )
+          {
+            throw sc_runtime_error( fmt::format(
+                "TIME_ESTIMATE_ADDS_MALFORMED: entry '{}' of solver_time_estimate_adds='{}' is not 'name:bias[:bias...]' with a "
+                "non-empty name that no other entry uses.", entry, solver_time_estimate_adds_str ) );
+          }
+          std::vector<double> biases;
+          for ( std::size_t i = 1; i < parts.size(); ++i )
+          {
+            double b = 0.0;
+            if ( !parse_relative( parts[ i ], b ) )
+            {
+              throw sc_runtime_error( fmt::format(
+                  "TIME_ESTIMATE_ADDS_MALFORMED: value '{}' of entry '{}' of solver_time_estimate_adds='{}' is not a finite number "
+                  "strictly between -1 and 1.", parts[ i ], entry, solver_time_estimate_adds_str ) );
+            }
+            biases.push_back( b );
+          }
+          time_estimate_adds.emplace( parts[ 0 ], std::move( biases ) );
+        }
+      }
+
+      if ( has_te_enemies )
+      {
+        for ( const auto& group : split_list( solver_time_estimate_enemies_str ) )
+        {
+          std::vector<double> biases;
+          for ( const auto& value : split_colons( group ) )
+          {
+            double b = 0.0;
+            if ( !parse_relative( value, b ) )
+            {
+              throw sc_runtime_error( fmt::format(
+                  "TIME_ESTIMATE_ENEMIES_MALFORMED: value '{}' of group '{}' of solver_time_estimate_enemies='{}' is not a finite "
+                  "number strictly between -1 and 1 (an empty group is refused too).", value, group,
+                  solver_time_estimate_enemies_str ) );
+            }
+            biases.push_back( b );
+          }
+          time_estimate_enemies.push_back( std::move( biases ) );
+        }
+      }
+
+      if ( !has_te_bias || !has_te_drift || !has_te_enemies )
+      {
+        throw sc_runtime_error( fmt::format(
+            "TIME_ESTIMATE_NEEDS: the time-estimate options come together: solver_time_estimate_bias, _drift and _enemies are "
+            "required whenever any of the four is set (_adds is optional: a fight without raid-event adds has none). Set: "
+            "bias={} drift={} adds={} enemies={}.", has_te_bias, has_te_drift, has_te_adds, has_te_enemies ) );
+      }
+      if ( fight_style == FIGHT_STYLE_SHEET_FIGHT || !fixed_time || vary_combat_length != 0.0 )
+      {
+        throw sc_runtime_error( fmt::format(
+            "TIME_ESTIMATE_STYLE: the time-estimate options need a fixed-length fight (fixed_time=1, vary_combat_length=0, not "
+            "fight_style=SheetFight): the end is max_time - t only then. Got fixed_time={} vary_combat_length={} fight_style={}.",
+            fixed_time ? 1 : 0, vary_combat_length, util::fight_style_string( fight_style ) ) );
+      }
+      time_estimate_on = true;
     }
 
     solver_funnel_windows.clear();

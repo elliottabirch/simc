@@ -17,6 +17,7 @@
 #include "raid_event.hpp"
 #include "sim/event.hpp"
 #include "sim/expressions.hpp"
+#include "sim/rl_policy.hpp"
 #include "sim/rl_rng_record.hpp"
 #include "sim/sheet_fight.hpp"
 #include "sim/sim.hpp"
@@ -363,6 +364,10 @@ struct adds_event_t final : public raid_event_t
       }
 
       adds[ i ]->summon( add_duration );
+      // 261022-fuz F1 (R2, R3): stamp this life of the add with its drawn bias, key add:{line}:{(starts so far) * count + i}. summon()
+      // has just given it a fresh actor_spawn_index. Option absent: nothing here runs.
+      if ( sim->time_estimate_on )
+        rl_policy::stamp_time_estimate_add( sim, adds[ i ], name, static_cast<std::size_t>( num_starts - 1 ) * adds_to_remove + i );
       adds[ i ]->x_position = x_offset + spawn_x_coord;
       adds[ i ]->y_position = y_offset + spawn_y_coord;
 

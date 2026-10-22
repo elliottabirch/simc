@@ -356,6 +356,113 @@ const cooldown_reading* rl_state_t::find_cooldown( const char* name ) const
 // alone excludes it.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 261022-fuz F1 (decision 7): the fuzzy time estimate. See the block comment in rl_policy.hpp. Every function returns its raw input
+// when the options are absent (sim->time_estimate_on false): no multiplication, no stamp lookup.
+// ---------------------------------------------------------------------------
+
+double time_estimate_drift_at( const sim_t* sim, double t_seconds )
+{
+  const auto& knots = sim->time_estimate_drift;
+  if ( knots.empty() )
+    return 0.0;
+  if ( t_seconds <= knots.front().first )
+    return knots.front().second;
+  if ( t_seconds >= knots.back().first )
+    return knots.back().second;
+  // The first knot strictly after t; the one before it is t_k <= t < t_k+1.
+  const auto hi = std::upper_bound( knots.begin(), knots.end(), t_seconds,
+                                    []( double t, const std::pair<double, double>& knot ) { return t < knot.first; } );
+  const auto lo = hi - 1;
+  return lo->second + ( hi->second - lo->second ) * ( t_seconds - lo->first ) / ( hi->first - lo->first );
+}
+
+double time_estimate_factor( const sim_t* sim, double bias, double t_seconds )
+{
+  return std::max( 0.0, 1.0 + bias + time_estimate_drift_at( sim, t_seconds ) );
+}
+
+double time_estimate_fight_cap( const sim_t* sim )
+{
+  // The cap SimC itself applies to an enemy_t's estimate under the respawn model (sc_enemy.cpp enemy_t::time_to_percent).
+  return std::max( 0.0, ( sim->expected_iteration_time - sim->current_time() ).total_seconds() );
+}
+
+double observed_fight_remains( const sim_t* sim, double raw_fight_remains )
+{
+  if ( !sim->time_estimate_on )
+    return raw_fight_remains;
+  return raw_fight_remains * time_estimate_factor( sim, sim->time_estimate_bias, sim->current_time().total_seconds() );
+}
+
+double observed_time_to_die( const sim_t* sim, const player_t* enemy, double raw_time_to_die )
+{
+  if ( !sim->time_estimate_on )
+    return raw_time_to_die;
+  const auto found = sim->time_estimate_stamps.find( enemy );
+  if ( found == sim->time_estimate_stamps.end() || found->second.actor_spawn_index != enemy->actor_spawn_index )
+  {
+    if ( enemy->is_sleeping() )
+      return raw_time_to_die;  // not alive: no estimate is shown for it anywhere
+    throw sc_runtime_error( fmt::format(
+        "TIME_ESTIMATE_UNMAPPED_ENEMY: living enemy '{}' (actor_index {}, spawn index {}) has no stamped time-estimate bias.",
+        enemy->name(), enemy->actor_index, enemy->actor_spawn_index ) );
+  }
+  const double t = sim->current_time().total_seconds();
+  const double own = raw_time_to_die * time_estimate_factor( sim, found->second.bias, t );
+  if ( found->second.is_add )
+    return own;
+  // An enemy_t's estimate never shows more than the fight's own end estimate (P-4, the continuous form).
+  return std::min( own, time_estimate_fight_cap( sim ) * time_estimate_factor( sim, sim->time_estimate_bias, t ) );
+}
+
+void stamp_time_estimate( sim_t* sim, const player_t* actor, bool is_add, const std::string& key, double bias )
+{
+  sim_t::time_estimate_stamp_t& stamp = sim->time_estimate_stamps[ actor ];
+  stamp.actor_spawn_index             = actor->actor_spawn_index;
+  stamp.is_add                        = is_add;
+  stamp.key                           = key;
+  stamp.bias                          = bias;
+}
+
+void stamp_time_estimate_add( sim_t* sim, const player_t* add, const std::string& line, std::size_t index )
+{
+  const auto found = sim->time_estimate_adds.find( line );
+  if ( found == sim->time_estimate_adds.end() )
+  {
+    throw sc_runtime_error( fmt::format(
+        "TIME_ESTIMATE_ADDS_UNLISTED: the adds line '{}' summons an add at {} s but solver_time_estimate_adds='{}' has no entry for it.",
+        line, sim->current_time().total_seconds(), sim->solver_time_estimate_adds_str ) );
+  }
+  if ( index >= found->second.size() )
+  {
+    throw sc_runtime_error( fmt::format(
+        "TIME_ESTIMATE_ADDS_EXHAUSTED: the adds line '{}' summons add number {} at {} s but its entry in "
+        "solver_time_estimate_adds lists only {} bias(es).",
+        line, index + 1, sim->current_time().total_seconds(), found->second.size() ) );
+  }
+  stamp_time_estimate( sim, add, true, fmt::format( "add:{}:{}", line, index ), found->second[ index ] );
+}
+
+void stamp_time_estimate_enemy_life( sim_t* sim, const player_t* enemy, std::size_t group, std::size_t life )
+{
+  if ( group >= sim->time_estimate_enemies.size() )
+  {
+    throw sc_runtime_error( fmt::format(
+        "TIME_ESTIMATE_ENEMIES_COUNT: enemy position {} has no group in solver_time_estimate_enemies='{}' ({} group(s)).", group,
+        sim->solver_time_estimate_enemies_str, sim->time_estimate_enemies.size() ) );
+  }
+  const std::vector<double>& lives = sim->time_estimate_enemies[ group ];
+  if ( life >= lives.size() )
+  {
+    throw sc_runtime_error( fmt::format(
+        "TIME_ESTIMATE_LIVES_EXHAUSTED: enemy {} begins life number {} at {} s but its group in solver_time_estimate_enemies lists "
+        "only {} bias(es).",
+        group, life + 1, sim->current_time().total_seconds(), lives.size() ) );
+  }
+  stamp_time_estimate( sim, enemy, false, fmt::format( "enemy:{}:{}", group, life ), lives[ life ] );
+}
+
 bool next_raid_event_in( const sim_t* sim, double& out_seconds )
 {
   const double fight_remaining =
@@ -436,7 +543,9 @@ fight_wide_aggregates_t compute_fight_wide_aggregates( player_t* p )
     if ( lf && lf->check() > 0 )
       ++agg.lashing_flames_carrier_count;
 
-    const double ttd = std::min( t->time_to_percent( 0 ).total_seconds(), 600.0 );
+    // 261022-fuz F1: the observed (fuzzed) estimate, no 600 s clip after it; options absent: the raw seconds. The counts below and the
+    // soonest/longest are taken on the observed values (OD-3).
+    const double ttd = observed_time_to_die( p->sim, t, t->time_to_percent( 0 ).total_seconds() );
     if ( !agg.has_soonest_time_to_die || ttd < agg.soonest_time_to_die )
     {
       agg.has_soonest_time_to_die = true;
@@ -530,12 +639,10 @@ shape_hit_result_t compute_crash_lightning_shape( player_t* p )
                                                             t->combat_reach ) )
       continue;
     ++r.enemies_hit;
-    const double ttd = std::min( t->time_to_percent( 0 ).total_seconds(), 600.0 );  // WR-10 clip
-    // 260923-lrc OWNER RULING A (2026-09-23, via session tstl-sylvanas-ac): each per-enemy
-    // remaining-life term is capped at 60s INSIDE the sum, so the sum saturates at six
-    // enemies x 60s = 360 (census clipDiv 3600 -> 360) instead of scaling like an uncapped
-    // 600s-per-enemy clock.
-    r.summed_remaining_life += std::min( ttd, 60.0 );
+    // 261022-fuz F1 (R4): the observed unclipped life, and the sum of the observed lives with NO per-term cap (the 260923-lrc owner
+    // ruling A cap of 60 s per term is dropped by decision 7; the encoder divisor takes the range).
+    const double ttd = observed_time_to_die( p->sim, t, t->time_to_percent( 0 ).total_seconds() );
+    r.summed_remaining_life += ttd;
     if ( ttd > rl_target_select::DYING_WITHIN_LATER_SECONDS )
       ++r.long_lived_count;
   }
@@ -554,8 +661,8 @@ shape_hit_result_t compute_sundering_shape( player_t* p )
                                                        t->combat_reach ) )
       continue;
     ++r.enemies_hit;
-    const double ttd = std::min( t->time_to_percent( 0 ).total_seconds(), 600.0 );  // WR-10 clip
-    r.summed_remaining_life += std::min( ttd, 60.0 );  // 260923-lrc OWNER RULING A
+    const double ttd = observed_time_to_die( p->sim, t, t->time_to_percent( 0 ).total_seconds() );  // 261022-fuz F1 (R4): see above
+    r.summed_remaining_life += ttd;
     if ( ttd > rl_target_select::DYING_WITHIN_LATER_SECONDS )
       ++r.long_lived_count;
   }
@@ -3835,7 +3942,7 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
                                     : RL_EPISODE_MAX_TIME;
       // tstl-sylvanas 262-04 (R-8): in a sheet fight the clock-like reading is the saturating value (raw >= 60 encodes 1.0),
       // never `max_time - t`: that is a time-since-the-pull in disguise and only drops under 60 s in slow fights.
-      raw = ( p->sim->fight_style == FIGHT_STYLE_SHEET_FIGHT ) ? RL_SATURATED_SECONDS : std::max( fight_len - s.t, 0.0 );
+      raw = ( p->sim->fight_style == FIGHT_STYLE_SHEET_FIGHT ) ? RL_SATURATED_SECONDS : observed_fight_remains( p->sim, std::max( fight_len - s.t, 0.0 ) );  // 261022-fuz F1: the observed estimate
       status = lookup_status::present;
     }
     else
@@ -4118,7 +4225,8 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
                                               ? p->sim->max_time.total_seconds()
                                               : RL_EPISODE_MAX_TIME;
                 // tstl-sylvanas 262-04 (R-8): the saturating value in a sheet fight, as for fight_remains above.
-                v = ( p->sim->fight_style == FIGHT_STYLE_SHEET_FIGHT ) ? RL_SATURATED_SECONDS : std::max( fight_len - s.t, 0.0 );
+                // 261022-fuz F1 (OD-3): the nothing-pending substitute is the OBSERVED fight_remains, never the exact one.
+                v = ( p->sim->fight_style == FIGHT_STYLE_SHEET_FIGHT ) ? RL_SATURATED_SECONDS : observed_fight_remains( p->sim, std::max( fight_len - s.t, 0.0 ) );
               }
               raw = v;
               status = lookup_status::present;

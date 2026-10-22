@@ -23,7 +23,11 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string>
+#include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 struct actor_target_data_t;
 struct buff_t;
@@ -155,6 +159,35 @@ struct sim_t : private sc_thread_t
   // line of this runs, every fight is byte-identical. See sc_enemy.cpp enemy_t::start_max_life().
   std::string solver_pack_max_life_str;
   timespan_t solver_pack_max_life = timespan_t::zero();
+  // 261022-fuz F1: fuzzy time estimates in the OBSERVATION (decision 7). Four options, all empty by default (= option absent: every
+  // helper in rl_policy returns its raw input, nothing is stamped, every fight is byte-identical). No random number lives in the
+  // fork: every bias is drawn by fight_draw.py and passed as option text (NO DICE, D22).
+  //   solver_time_estimate_bias=<b>                    one number, six decimals: the fight's relative error of the end estimate
+  //   solver_time_estimate_drift=<t0>:<d0>,<t1>:<d1>   drift knots (seconds, relative), linear between knots, flat outside
+  //   solver_time_estimate_adds=<line>:<b0>:<b1>..,..  one bias per spawned add of a raid-event adds line, index k * count + i
+  //   solver_time_estimate_enemies=<b0>:<b1>..,..      one group of per-LIFE biases per enemy_t in target_list order
+  // Refused by name (setup): TIME_ESTIMATE_BIAS_MALFORMED, _DRIFT_MALFORMED, _ADDS_MALFORMED, _ENEMIES_MALFORMED, _NEEDS, _STYLE;
+  // first combat_begin: _ADDS_UNKNOWN_LINE, _ENEMIES_COUNT; run time: _ADDS_UNLISTED, _ADDS_EXHAUSTED, _LIVES_EXHAUSTED,
+  // and in the observation _UNMAPPED_ENEMY. See rl_policy::observed_fight_remains / observed_time_to_die (rl_policy_obs.cpp).
+  std::string solver_time_estimate_bias_str;
+  std::string solver_time_estimate_drift_str;
+  std::string solver_time_estimate_adds_str;
+  std::string solver_time_estimate_enemies_str;
+  bool time_estimate_on = false;
+  double time_estimate_bias = 0.0;
+  std::vector<std::pair<double, double>> time_estimate_drift;  // (knot seconds, drift)
+  std::unordered_map<std::string, std::vector<double>> time_estimate_adds;  // adds line name -> biases (index k * count + i)
+  std::vector<std::vector<double>> time_estimate_enemies;  // enemy position -> biases by life index
+  // The per-iteration stamp table: a living add or enemy life -> the drawn bias it carries. Written only through
+  // rl_policy::stamp_time_estimate, cleared in sim_t::combat_begin before the target_list combat_begin loop.
+  struct time_estimate_stamp_t
+  {
+    int actor_spawn_index = -1;
+    bool is_add = false;
+    std::string key;
+    double bias = 0.0;
+  };
+  std::unordered_map<const player_t*, time_estimate_stamp_t> time_estimate_stamps;
   bool save_profiles;
   bool save_profile_with_actions;  // When saving full profiles, include actions or not
   bool save_full_profile;  // save the full profile instead of only active save_e flags

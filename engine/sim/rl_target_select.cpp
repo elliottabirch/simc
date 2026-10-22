@@ -1105,12 +1105,10 @@ enemy_fact build_enemy_fact( const action_t* a, player_t* candidate )
   // separately (D-16: the observation writer needs ground truth, not the gated legality bit).
   f.in_front = a->player->is_in_front( *candidate, 0.0 );
 
-  // WR-10 (260902/cr4): clipped at 600.0s AT THE SOURCE -- ties preference_shortest_time_to_die's
-  // 1.0e9 and preference_lava_lash's 2.0e9 dominance offsets to a provable bound rather than one
-  // conditional on fixed_time=1 (under fixed_time=1 no candidate's raw time_to_percent(0) exceeds
-  // max_time anyway, but an unclipped value is a theoretical hazard the offsets should not have to
-  // assume away). Byte identity on a 600s shape confirms this changes nothing today.
-  f.time_to_die = std::min( candidate->time_to_percent( 0 ).total_seconds(), 600.0 );
+  // 261022-fuz F1 (decision 7): this is the OBSERVATION builder (the targeting scores read build_enemy_fact_for_scoring below, which
+  // keeps the truth and the WR-10 600 s clip, so no pick moves): the value is the OBSERVED (fuzzed) estimate with NO 600 s clip
+  // after it. With the time-estimate options absent observed_time_to_die returns the raw seconds unchanged.
+  f.time_to_die = rl_policy::observed_time_to_die( candidate->sim, candidate, candidate->time_to_percent( 0 ).total_seconds() );
   f.health_pct  = candidate->health_percentage();
   f.is_boss     = obs_is_boss( candidate );  // tstl-sylvanas 260928-tb8
   f.hazard      = candidate->sheet_hazard;  // tstl-sylvanas 262-04 (IN-02, R-6): the actor's own flag, beside is_boss
@@ -1448,7 +1446,7 @@ float scaled_fact( float raw, std::size_t i, const aim_fact_gate& gate )
 // from its generic enemy_fact field, its declared value or its class geometry provider, then SCALED into the registry's
 // range and capability-gated (see scaled_fact above). The generated fact-list macro in the constants header is generated
 // content and no code expands it any more. The rules never read this scaled block (they rank on `enemy_fact`'s raw values --
-// build_enemy_fact's 600 s time-to-die cap stays, the 60 s cap lives only in the scaling's clipDiv).
+// build_enemy_fact_for_scoring keeps the truth and its 600 s time-to-die cap; build_enemy_fact (this block) shows the fuzzed estimate, 261022-fuz).
 void fill_candidate_features( const action_t*, const enemy_fact& fact, float* out,
                               const aim_fact_gate& gate )
 {
