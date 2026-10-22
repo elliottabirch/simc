@@ -1246,7 +1246,7 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
           << ",\"time_to_die_raw\":" << fmt::format( "{}", raw_ttd );
       if ( stamped )
         out << ",\"time_estimate_kind\":\"" << ( stamp->second.is_add ? "add" : "enemy" ) << "\",\"time_estimate_key\":\""
-            << stamp->second.key << "\",\"time_estimate_bias\":" << fmt::format( "{}", stamp->second.bias );
+            << json_escape( stamp->second.key ) << "\",\"time_estimate_bias\":" << fmt::format( "{}", stamp->second.bias );
       else
         out << ",\"time_estimate_kind\":null,\"time_estimate_key\":null,\"time_estimate_bias\":null";
       out << ",\"observed_time_to_die\":" << fmt::format( "{}", rl_policy::observed_time_to_die( p->sim, t, raw_ttd ) );
@@ -1483,7 +1483,7 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
                                          rl_policy::observed_time_to_die( p->sim, picked, raw_ttd ) );
           if ( stamped )
             obs_picks_text += fmt::format( ",\"time_estimate_kind\":\"{}\",\"time_estimate_key\":\"{}\",\"time_estimate_bias\":{}}}",
-                                           stamp->second.is_add ? "add" : "enemy", stamp->second.key, stamp->second.bias );
+                                           stamp->second.is_add ? "add" : "enemy", json_escape( stamp->second.key ), stamp->second.bias );
           else
             obs_picks_text += ",\"time_estimate_kind\":null,\"time_estimate_key\":null,\"time_estimate_bias\":null}";
         }

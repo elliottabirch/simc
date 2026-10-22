@@ -70,6 +70,9 @@ struct adds_event_t final : public raid_event_t
   bool same_duration;
   double vulnerable;
 
+  double time_estimate_count_range() const override
+  { return count_range; }
+
   adds_event_t( sim_t* s, util::string_view options_str )
     : raid_event_t( s, "adds" ),
       count( 1 ),

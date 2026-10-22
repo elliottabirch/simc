@@ -95,6 +95,9 @@ public:
   void deactivate( util::string_view reason );
   virtual void reset();
   virtual void combat_begin();
+  // 261022-fuz F1c: the adds event's count_range (0 for every other event), read by the time-estimate refusal in sim_t::combat_begin.
+  virtual double time_estimate_count_range() const
+  { return 0.0; }
   void parse_options( util::string_view options_str );
   bool parse_timestamps( std::string_view );
 

@@ -45,6 +45,7 @@
 #include "sim/solver_branch.hpp"
 
 #include <filesystem>
+#include <unordered_set>
 #include "sim/scale_factor_control.hpp"
 #include "sim/sim_control.hpp"
 #include "sim/solver_control.hpp"
@@ -2213,6 +2214,34 @@ void sim_t::combat_begin()
         throw sc_runtime_error( fmt::format(
             "TIME_ESTIMATE_ADDS_UNKNOWN_LINE: solver_time_estimate_adds='{}' lists '{}', which no 'adds' raid event is named.",
             solver_time_estimate_adds_str, entry.first ) );
+      }
+    }
+    // An add's key is add:{line}:{(num_starts - 1) * adds_to_remove + i}. That index is unique per mob only when every start summons
+    // the same number of adds (count_range = 0) and one adds line carries each name; refused by name, never reused silently.
+    for ( const auto& entry : time_estimate_adds )
+    {
+      for ( const auto& re : raid_events )
+      {
+        if ( re && re->type == "adds" && re->name == entry.first && re->time_estimate_count_range() != 0.0 )
+        {
+          throw sc_runtime_error( fmt::format(
+              "TIME_ESTIMATE_ADDS_COUNT_RANGE: the adds line '{}' listed in solver_time_estimate_adds='{}' has count_range={}; its "
+              "count is re-drawn at every start, so the per-add index would repeat. Use count_range=0 on a listed line.",
+              entry.first, solver_time_estimate_adds_str, re->time_estimate_count_range() ) );
+        }
+      }
+    }
+    {
+      std::unordered_set<std::string> seen_adds_names;
+      for ( const auto& re : raid_events )
+      {
+        if ( re && re->type == "adds" && !seen_adds_names.insert( re->name ).second )
+        {
+          throw sc_runtime_error( fmt::format(
+              "TIME_ESTIMATE_ADDS_DUPLICATE_LINE: two 'adds' raid events are named '{}'; solver_time_estimate_adds='{}' keys one "
+              "list per name, so the per-add index would repeat. Give each adds line its own name.",
+              re->name, solver_time_estimate_adds_str ) );
+        }
       }
     }
     const std::size_t enemy_count = static_cast<std::size_t>( std::count_if(
@@ -5742,14 +5771,20 @@ void sim_t::setup( sim_control_t* c )
         throw sc_runtime_error( fmt::format(
             "TIME_ESTIMATE_NEEDS: the time-estimate options come together: solver_time_estimate_bias, _drift and _enemies are "
             "required whenever any of the four is set (_adds is optional: a fight without raid-event adds has none). Set: "
-            "bias={} drift={} adds={} enemies={}.", has_te_bias, has_te_drift, has_te_adds, has_te_enemies ) );
+            "bias={} drift={} adds={} enemies={}. Values: solver_time_estimate_bias='{}' solver_time_estimate_drift='{}' "
+            "solver_time_estimate_adds='{}' solver_time_estimate_enemies='{}'.", has_te_bias, has_te_drift, has_te_adds,
+            has_te_enemies, solver_time_estimate_bias_str, solver_time_estimate_drift_str, solver_time_estimate_adds_str,
+            solver_time_estimate_enemies_str ) );
       }
       if ( fight_style == FIGHT_STYLE_SHEET_FIGHT || !fixed_time || vary_combat_length != 0.0 )
       {
         throw sc_runtime_error( fmt::format(
             "TIME_ESTIMATE_STYLE: the time-estimate options need a fixed-length fight (fixed_time=1, vary_combat_length=0, not "
-            "fight_style=SheetFight): the end is max_time - t only then. Got fixed_time={} vary_combat_length={} fight_style={}.",
-            fixed_time ? 1 : 0, vary_combat_length, util::fight_style_string( fight_style ) ) );
+            "fight_style=SheetFight): the end is max_time - t only then. Got fixed_time={} vary_combat_length={} fight_style={}. "
+            "Options: solver_time_estimate_bias='{}' solver_time_estimate_drift='{}' solver_time_estimate_adds='{}' "
+            "solver_time_estimate_enemies='{}'.",
+            fixed_time ? 1 : 0, vary_combat_length, util::fight_style_string( fight_style ), solver_time_estimate_bias_str,
+            solver_time_estimate_drift_str, solver_time_estimate_adds_str, solver_time_estimate_enemies_str ) );
       }
       time_estimate_on = true;
     }

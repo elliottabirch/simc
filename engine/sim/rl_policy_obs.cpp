@@ -402,11 +402,15 @@ double observed_time_to_die( const sim_t* sim, const player_t* enemy, double raw
   const auto found = sim->time_estimate_stamps.find( enemy );
   if ( found == sim->time_estimate_stamps.end() || found->second.actor_spawn_index != enemy->actor_spawn_index )
   {
-    if ( enemy->is_sleeping() )
-      return raw_time_to_die;  // not alive: no estimate is shown for it anywhere
+    // A sleeping enemy with a raw time to die of exactly 0 shows 0 (nothing to estimate). Anything else without a current stamp would
+    // hand the model the true value of an enemy the options never covered: refused by name (sleeping or living alike).
+    if ( enemy->is_sleeping() && raw_time_to_die == 0.0 )
+      return 0.0;
     throw sc_runtime_error( fmt::format(
-        "TIME_ESTIMATE_UNMAPPED_ENEMY: living enemy '{}' (actor_index {}, spawn index {}) has no stamped time-estimate bias.",
-        enemy->name(), enemy->actor_index, enemy->actor_spawn_index ) );
+        "TIME_ESTIMATE_UNMAPPED_ENEMY: {} enemy '{}' (actor_index {}, spawn index {}) has raw time_to_die {} and no current stamped "
+        "time-estimate bias; solver_time_estimate_adds='{}' solver_time_estimate_enemies='{}'.",
+        enemy->is_sleeping() ? "sleeping" : "living", enemy->name(), enemy->actor_index, enemy->actor_spawn_index,
+        raw_time_to_die, sim->solver_time_estimate_adds_str, sim->solver_time_estimate_enemies_str ) );
   }
   const double t = sim->current_time().total_seconds();
   const double own = raw_time_to_die * time_estimate_factor( sim, found->second.bias, t );
@@ -438,8 +442,9 @@ void stamp_time_estimate_add( sim_t* sim, const player_t* add, const std::string
   {
     throw sc_runtime_error( fmt::format(
         "TIME_ESTIMATE_ADDS_EXHAUSTED: the adds line '{}' summons add number {} at {} s but its entry in "
-        "solver_time_estimate_adds lists only {} bias(es).",
-        line, index + 1, sim->current_time().total_seconds(), found->second.size() ) );
+        "solver_time_estimate_adds='{}' lists only {} bias(es) for it (key add:{}:{}).",
+        line, index + 1, sim->current_time().total_seconds(), sim->solver_time_estimate_adds_str, found->second.size(), line,
+        index ) );
   }
   stamp_time_estimate( sim, add, true, fmt::format( "add:{}:{}", line, index ), found->second[ index ] );
 }
@@ -457,8 +462,9 @@ void stamp_time_estimate_enemy_life( sim_t* sim, const player_t* enemy, std::siz
   {
     throw sc_runtime_error( fmt::format(
         "TIME_ESTIMATE_LIVES_EXHAUSTED: enemy {} begins life number {} at {} s but its group in solver_time_estimate_enemies lists "
-        "only {} bias(es).",
-        group, life + 1, sim->current_time().total_seconds(), lives.size() ) );
+        "only {} bias(es) (key enemy:{}:{}; solver_time_estimate_enemies='{}').",
+        group, life + 1, sim->current_time().total_seconds(), lives.size(), group, life,
+        sim->solver_time_estimate_enemies_str ) );
   }
   stamp_time_estimate( sim, enemy, false, fmt::format( "enemy:{}:{}", group, life ), lives[ life ] );
 }
