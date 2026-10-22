@@ -4474,6 +4474,8 @@ void sim_t::create_options()
   add_option( opt_float( "solver_respawn_health", solver_respawn_health, 0.0, 1.0e12 ) );
   // 261021-fmix (D22 point 3): see sim.hpp's solver_pack_respawn_gaps_str doc comment. Parsed and refused in setup().
   add_option( opt_string( "solver_pack_respawn_gaps", solver_pack_respawn_gaps_str ) );
+  // 261021-ezq R2FIX D-22: see sim.hpp's solver_pack_max_life_str doc comment. Parsed and refused in setup().
+  add_option( opt_string( "solver_pack_max_life", solver_pack_max_life_str ) );
   add_option( opt_float( "vary_combat_length", vary_combat_length, 0.0, 1.0 ) );
   add_option( opt_func( "ptr", parse_ptr ) );
   add_option( opt_int( "threads", threads ) );
@@ -5550,6 +5552,32 @@ void sim_t::setup( sim_control_t* c )
       throw sc_runtime_error(
           "PACK_RESPAWN_GAPS_NEEDS: fight_style=TrashPack with solver_respawn_health > 0 also needs solver_pack_respawn_gaps=<seconds>"
           "[,<seconds>...] (one gap per return of the pack; the per-mob immediate respawn no longer exists)." );
+    }
+
+    // 261021-ezq R2FIX D-22: TrashPack maximum life (see sim.hpp). Option empty: nothing below runs and the cap stays zero (off).
+    solver_pack_max_life = timespan_t::zero();
+    if ( !solver_pack_max_life_str.empty() )
+    {
+      if ( !trash_pack_fight )
+      {
+        throw sc_runtime_error( fmt::format(
+            "PACK_MAX_LIFE_STYLE: solver_pack_max_life='{}' is only meaningful with fight_style=TrashPack (it caps how long a pack "
+            "member lives).", solver_pack_max_life_str ) );
+      }
+      if ( !( solver_respawn_health > 0.0 ) )
+      {
+        throw sc_runtime_error( fmt::format(
+            "PACK_MAX_LIFE_NEEDS: solver_pack_max_life='{}' also needs solver_respawn_health > 0 (a despawned member counts for the "
+            "whole-pack respawn, which only exists under the respawn model).", solver_pack_max_life_str ) );
+      }
+      double max_life_s = 0.0;
+      if ( !parse_seconds( solver_pack_max_life_str, max_life_s ) || !( max_life_s > 0.0 ) )
+      {
+        throw sc_runtime_error( fmt::format(
+            "PACK_MAX_LIFE_MALFORMED: solver_pack_max_life='{}' is not a finite number of seconds greater than zero.",
+            solver_pack_max_life_str ) );
+      }
+      solver_pack_max_life = timespan_t::from_seconds( max_life_s );
     }
 
     solver_funnel_windows.clear();

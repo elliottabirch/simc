@@ -46,6 +46,7 @@ struct enemy_t : public player_t
   double life_dmg_taken_base;    // iteration_dmg_taken when the current life began
   unsigned respawn_count;        // lives completed this iteration
   proc_t* respawn_proc;
+  unsigned max_life_despawns;    // 261021-ezq R2FIX D-22: lives ended by the solver_pack_max_life cap this iteration
 
   enemy_t( sim_t* s, util::string_view n, race_e r = RACE_HUMANOID, player_e type = ENEMY )
     : player_t( s, type, n, r ),
@@ -63,7 +64,8 @@ struct enemy_t : public player_t
       life_start_time( timespan_t::zero() ),
       life_dmg_taken_base( 0.0 ),
       respawn_count( 0 ),
-      respawn_proc( nullptr )
+      respawn_proc( nullptr ),
+      max_life_despawns( 0 )
   {
     s->target_list.push_back( this );
     position_str = "front";
@@ -121,6 +123,9 @@ struct enemy_t : public player_t
   bool pack_respawns() const { return respawns() && sim->fight_style == FIGHT_STYLE_TRASH_PACK; }
   void pack_member_demise();
   void pack_member_arise();
+  // 261021-ezq R2FIX D-22: the per-life cap timer of a pack member (see sim.hpp solver_pack_max_life_str). Does nothing, and
+  // schedules nothing, unless pack_respawns() and the option is set.
+  void start_max_life();
   std::unique_ptr<expr_t> create_expression( util::string_view expression_str ) override;
 
   bool has_absorb() const override
@@ -2177,9 +2182,11 @@ void enemy_t::combat_begin()
     life_start_time     = sim->current_time();
     life_dmg_taken_base = iteration_dmg_taken;
     respawn_count       = 0;
+    max_life_despawns   = 0;
     // 261021-fmix (D22 point 3): the pack's gap list starts again every iteration (all combat_begin calls precede the first event).
     if ( pack_respawns() && this == sim->target )
       sim->solver_pack_respawn_next = 0;
+    start_max_life();  // 261021-ezq R2FIX D-22: the first life's cap timer (no-op with the option off)
   }
 }
 
@@ -2313,8 +2320,32 @@ void enemy_t::pack_member_arise()
 
   life_start_time     = sim->current_time();
   life_dmg_taken_base = iteration_dmg_taken;
+  start_max_life();  // 261021-ezq R2FIX D-22: this life's cap timer (no-op with the option off)
 
   sim->print_log( "{} respawns: life {} begins, health={}", *this, respawn_count + 1, resources.max[ RESOURCE_HEALTH ] );
+}
+
+// enemy_t::start_max_life ==================================================
+
+// 261021-ezq R2FIX D-22: TrashPack maximum life. One event solver_pack_max_life after a pack member's life began: if that same life
+// is still running (the member is awake and its actor_spawn_index is the one the timer started with -- a death and a return in
+// between gave it a new index), the member despawns through demise(), whose pack_respawns() branch is pack_member_demise(): the
+// despawn counts for the whole-pack rule exactly as a death does (on-demise effects run as for a death). Option unset: returns
+// before scheduling anything, so not one line of the cap runs and every fight is byte-identical. No random number.
+void enemy_t::start_max_life()
+{
+  if ( !pack_respawns() || !( sim->solver_pack_max_life > timespan_t::zero() ) )
+    return;
+
+  const int life_spawn_index = actor_spawn_index;
+  make_event( *sim, sim->solver_pack_max_life, [ this, life_spawn_index ]() {
+    if ( current.sleeping || actor_spawn_index != life_spawn_index )
+      return;
+    ++max_life_despawns;
+    sim->print_log( "{} reaches its maximum life of {} s and despawns (max-life despawn {} this iteration)", *this,
+                    sim->solver_pack_max_life.total_seconds(), max_life_despawns );
+    demise();
+  } );
 }
 
 double enemy_t::armor_coefficient( int level, tank_dummy_e dungeon_content )

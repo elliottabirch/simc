@@ -147,6 +147,14 @@ struct sim_t : private sc_thread_t
   std::string solver_pack_respawn_gaps_str;
   std::vector<timespan_t> solver_pack_respawn_gaps;
   std::size_t solver_pack_respawn_next = 0;
+  // 261021-ezq R2FIX D-22: TrashPack maximum life. solver_pack_max_life=<seconds> (empty = off; the parsed value is zero when off). A
+  // pack member still alive that many seconds after its life began (the iteration's first life at combat_begin, every return of the
+  // pack at pack_member_arise) despawns through demise(), the same path as a death, so the whole-pack respawn rule above fires
+  // (on-demise effects run as for a death). Only under fight_style=TrashPack with solver_respawn_health > 0. Refused by name
+  // (setup): PACK_MAX_LIFE_STYLE, PACK_MAX_LIFE_NEEDS, PACK_MAX_LIFE_MALFORMED. Option empty: no event is scheduled anywhere, not one
+  // line of this runs, every fight is byte-identical. See sc_enemy.cpp enemy_t::start_max_life().
+  std::string solver_pack_max_life_str;
+  timespan_t solver_pack_max_life = timespan_t::zero();
   bool save_profiles;
   bool save_profile_with_actions;  // When saving full profiles, include actions or not
   bool save_full_profile;  // save the full profile instead of only active save_e flags
