@@ -498,7 +498,7 @@ bool next_raid_event_in( const sim_t* sim, double& out_seconds )
 // block.
 // ---------------------------------------------------------------------------
 
-fight_wide_aggregates_t compute_fight_wide_aggregates( player_t* p )
+fight_wide_aggregates_t compute_fight_wide_aggregates( player_t* p, std::vector<const player_t*>* members )
 {
   using rl_target_select::DYING_WITHIN_LATER_SECONDS;
   using rl_target_select::DYING_WITHIN_SOON_SECONDS;
@@ -511,6 +511,8 @@ fight_wide_aggregates_t compute_fight_wide_aggregates( player_t* p )
   {
     if ( !t->is_enemy() || !rl_target_select::rl_counts_as_enemy( t ) )  // 262-04 (IN-02)
       continue;
+    if ( members != nullptr )
+      members->push_back( t );  // 261022-fuz F1b: the dump's membership flag; the observation passes null
     ++agg.enemies_total;
 
     const double dist = p->get_player_distance( *t );
@@ -627,7 +629,7 @@ invulnerability_window_t compute_invulnerability_window( const sim_t* sim )
 // never wrapped a second time in the selector module.
 // ---------------------------------------------------------------------------
 
-shape_hit_result_t compute_crash_lightning_shape( player_t* p )
+shape_hit_result_t compute_crash_lightning_shape( player_t* p, std::vector<const player_t*>* members )
 {
   shape_hit_result_t r;
   for ( player_t* t : p->sim->target_non_sleeping_list )
@@ -638,6 +640,8 @@ shape_hit_result_t compute_crash_lightning_shape( player_t* p )
                                                             p->facing_y, t->x_position, t->y_position,
                                                             t->combat_reach ) )
       continue;
+    if ( members != nullptr )
+      members->push_back( t );  // 261022-fuz F1b: the dump's membership flag; the observation passes null
     ++r.enemies_hit;
     // 261022-fuz F1 (R4): the observed unclipped life, and the sum of the observed lives with NO per-term cap (the 260923-lrc owner
     // ruling A cap of 60 s per term is dropped by decision 7; the encoder divisor takes the range).
@@ -649,7 +653,7 @@ shape_hit_result_t compute_crash_lightning_shape( player_t* p )
   return r;
 }
 
-shape_hit_result_t compute_sundering_shape( player_t* p )
+shape_hit_result_t compute_sundering_shape( player_t* p, std::vector<const player_t*>* members )
 {
   shape_hit_result_t r;
   for ( player_t* t : p->sim->target_non_sleeping_list )
@@ -660,6 +664,8 @@ shape_hit_result_t compute_sundering_shape( player_t* p )
                                                        p->facing_y, t->x_position, t->y_position,
                                                        t->combat_reach ) )
       continue;
+    if ( members != nullptr )
+      members->push_back( t );  // 261022-fuz F1b: the dump's membership flag; the observation passes null
     ++r.enemies_hit;
     const double ttd = observed_time_to_die( p->sim, t, t->time_to_percent( 0 ).total_seconds() );  // 261022-fuz F1 (R4): see above
     r.summed_remaining_life += ttd;

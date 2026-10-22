@@ -307,7 +307,9 @@ struct fight_wide_aggregates_t
   double nearest_enemy_distance     = 0.0;
 };
 
-fight_wide_aggregates_t compute_fight_wide_aggregates( player_t* p );
+// 261022-fuz F1b: `members`, when not null, receives every enemy the function counted (the decision dump's membership flags read it;
+// the observation passes null and is unchanged).
+fight_wide_aggregates_t compute_fight_wide_aggregates( player_t* p, std::vector<const player_t*>* members = nullptr );
 
 // TGT-06/D-17/Q18: the fight-wide invulnerability schedule, filtered from `sim->raid_events` by
 // `type == "invulnerable"` -- COPIES `next_raid_event_in`'s own loop/discard-the-sentinel
@@ -345,8 +347,9 @@ struct shape_hit_result_t
   int    long_lived_count      = 0;
 };
 
-shape_hit_result_t compute_crash_lightning_shape( player_t* p );
-shape_hit_result_t compute_sundering_shape( player_t* p );
+// 261022-fuz F1b: `members`, when not null, receives every enemy inside the shape (the dump's membership flags); null in the observation.
+shape_hit_result_t compute_crash_lightning_shape( player_t* p, std::vector<const player_t*>* members = nullptr );
+shape_hit_result_t compute_sundering_shape( player_t* p, std::vector<const player_t*>* members = nullptr );
 
 // WR-05 fix (210-CR-FIX): `source` is a `std::string`, not a `const char*`
 // into shared storage. `wait_result` is part of the pinned POD interface --

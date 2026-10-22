@@ -1206,9 +1206,24 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   // every enemy on target_non_sleeping_list with no immunity/range/harmful filter at all, D-16 --
   // reusing candidate_facts above would silently drop an immune or out-of-range enemy the shape
   // math still counts).
+  // 261022-fuz F1b: the fight-wide aggregates and the two shape results are computed ONCE here, before the per-enemy list, so the list can
+  // carry each enemy's membership as the fork's own functions decided it (the functions are stateless reads; the target_aggregates and
+  // shape_facts blocks below print these same results, so their values are unchanged).
+  std::vector<const player_t*> members_fight_wide, members_crash_lightning, members_sundering;
+  const rl_policy::fight_wide_aggregates_t agg = rl_policy::compute_fight_wide_aggregates( p, &members_fight_wide );
+  const rl_policy::shape_hit_result_t      cl  = rl_policy::compute_crash_lightning_shape( p, &members_crash_lightning );
+  const rl_policy::shape_hit_result_t      su  = rl_policy::compute_sundering_shape( p, &members_sundering );
+  const auto is_member = []( const std::vector<const player_t*>& list, const player_t* t ) {
+    return std::find( list.begin(), list.end(), t ) != list.end();
+  };
+
   {
     out << ",\"player_position\":{\"x\":" << p->x_position << ",\"y\":" << p->y_position
         << ",\"facing_x\":" << p->facing_x << ",\"facing_y\":" << p->facing_y << "}";
+    // 261022-fuz F1b: the inputs of the membership rules (crash_lightning_cone_contains / sundering_rect_contains) as shortest round-trip text;
+    // with each enemy's x, y and combat_reach below they let a reader recompute the membership independently.
+    out << ",\"player_geometry\":{\"x\":" << fmt::format( "{}", p->x_position ) << ",\"y\":" << fmt::format( "{}", p->y_position )
+        << ",\"facing_x\":" << fmt::format( "{}", p->facing_x ) << ",\"facing_y\":" << fmt::format( "{}", p->facing_y ) << "}";
     out << ",\"all_enemies\":[";
     bool first_enemy = true;
     for ( player_t* t : p->sim->target_non_sleeping_list )
@@ -1234,7 +1249,25 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
             << stamp->second.key << "\",\"time_estimate_bias\":" << fmt::format( "{}", stamp->second.bias );
       else
         out << ",\"time_estimate_kind\":null,\"time_estimate_key\":null,\"time_estimate_bias\":null";
-      out << ",\"observed_time_to_die\":" << fmt::format( "{}", rl_policy::observed_time_to_die( p->sim, t, raw_ttd ) ) << "}";
+      out << ",\"observed_time_to_die\":" << fmt::format( "{}", rl_policy::observed_time_to_die( p->sim, t, raw_ttd ) );
+      // 261022-fuz F1b: the membership of this enemy as the fork's own functions decided it (a cross-check; a reader derives its own).
+      out << ",\"counts_as_enemy\":" << ( t->is_enemy() && rl_target_select::rl_counts_as_enemy( t ) ? "true" : "false" )
+          << ",\"in_fight_aggregates\":" << ( is_member( members_fight_wide, t ) ? "true" : "false" ) << ",\"in_shapes\":[";
+      {
+        bool first_shape = true;
+        if ( is_member( members_crash_lightning, t ) )
+        {
+          out << "\"crash_lightning\"";
+          first_shape = false;
+        }
+        if ( is_member( members_sundering, t ) )
+        {
+          if ( !first_shape )
+            out << ",";
+          out << "\"sundering\"";
+        }
+      }
+      out << "]}";
     }
     out << "]";
     // The removed turn-action legality-predicate JSON key (R6-27, 233.1-01) was here -- deleted
@@ -1249,7 +1282,6 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   // stateless read of live engine state (target_non_sleeping_list, sim->raid_events,
   // player_t::facing_x/y), safe under any threading configuration.
   {
-    const rl_policy::fight_wide_aggregates_t agg = rl_policy::compute_fight_wide_aggregates( p );
     out << ",\"target_aggregates\":{";
     out << "\"enemies_total\":" << agg.enemies_total;
     out << ",\"enemies_in_melee\":" << agg.enemies_in_melee;
@@ -1285,7 +1317,6 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   // here" -- computed from the CURRENT facing only, through the ONE shared geometry copy
   // (rl_target_select::crash_lightning_cone_contains / sundering_rect_contains).
   {
-    const rl_policy::shape_hit_result_t cl = rl_policy::compute_crash_lightning_shape( p );
     out << ",\"shape_facts\":{";
     out << "\"crash_lightning\":{";
     out << "\"enemies_hit\":" << cl.enemies_hit;
@@ -1293,13 +1324,26 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
     out << ",\"long_lived_count\":" << cl.long_lived_count;
     out << "}";
 
-    const rl_policy::shape_hit_result_t su = rl_policy::compute_sundering_shape( p );
     out << ",\"sundering\":{";
     out << "\"enemies_hit\":" << su.enemies_hit;
     out << ",\"summed_remaining_life\":" << su.summed_remaining_life;
     out << ",\"long_lived_count\":" << su.long_lived_count;
     out << "}";
     out << "}";
+  }
+
+  // 261022-fuz F1b: the raw time aggregates the observation's 17 time slots encode (the fight-wide soonest/longest/dying counts and the two
+  // shapes' summed lives and long-lived counts), from the same results printed in target_aggregates and shape_facts, at fmt `{}` precision so
+  // a reader recomputes every aggregate slot from the dumped per-enemy observed values.
+  {
+    out << ",\"time_aggregates\":{\"longest\":";
+    if ( agg.has_longest_time_to_die ) out << fmt::format( "{}", agg.longest_time_to_die ); else out << "null";
+    out << ",\"soonest\":";
+    if ( agg.has_soonest_time_to_die ) out << fmt::format( "{}", agg.soonest_time_to_die ); else out << "null";
+    out << ",\"dying_within_5s\":" << agg.dying_within_5s << ",\"dying_within_15s\":" << agg.dying_within_15s;
+    out << ",\"shapes\":{\"crash_lightning\":{\"summed_remaining_life\":" << fmt::format( "{}", cl.summed_remaining_life )
+        << ",\"long_lived_count\":" << cl.long_lived_count << "},\"sundering\":{\"summed_remaining_life\":"
+        << fmt::format( "{}", su.summed_remaining_life ) << ",\"long_lived_count\":" << su.long_lived_count << "}}}";
   }
 
   // 260901-od1 (kill-the-dual-encoder-seam) -- the engine-encoded
@@ -1370,6 +1414,7 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   // Phase 268 plan 06 (FORK-06): the resource conjunct names the SPEC's own resource (RL_RESOURCE_NAME through
   // rl_policy::rl_spec_resource(): maelstrom for enhancement, rage for arms) instead of the Maelstrom literal, so an arms actor's
   // observation is built and dumped. For enhancement the predicate is the same resource, so its dump is unchanged.
+  std::string obs_picks_text;  // 261022-fuz F1b: filled by the obs block below, written after it (null when no obs was built)
   if ( p->sim->threads == 1 && p->sim->profileset_map.empty() && !p->is_enemy() &&
        p->resources.is_active( rl_policy::rl_spec_resource() ) )
   {
@@ -1387,6 +1432,66 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
     rl_policy::build_mask( state, obs_mask );
     float obs[ RL_OBS_DIM ];
     rl_policy::build_obs( p, state, table, obs_mask, obs );
+
+    // 261022-fuz F1b: the enemy each target_facts.{token} block of THIS obs encoded. read_state() above re-selected every targeted action's
+    // pick and build_obs read it back through lookup_pick(); the same pure read, right after build_obs and before anything else can move the
+    // decision stamp, names that pick (the targeted_picks block earlier in this row is read BEFORE the re-selection and can differ).
+    obs_picks_text = ",\"obs_picks\":{";
+    {
+      const std::size_t n_picks = rl_target_select::targeted_action_token_count();
+      const char* const* pick_tokens = rl_target_select::targeted_action_tokens();
+      for ( std::size_t i = 0; i < n_picks; ++i )
+      {
+        if ( i > 0 )
+          obs_picks_text += ",";
+        obs_picks_text += std::string( "\"" ) + pick_tokens[ i ] + "\":";
+        action_t* pick_action = rl_button_bind::bound_action_for_token( p, pick_tokens[ i ] );
+        bool      pick_found  = false;
+        player_t* picked      = pick_action != nullptr ? rl_target_select::lookup_pick( pick_action, &pick_found ) : nullptr;
+        if ( pick_found && picked != nullptr )
+          obs_picks_text += "[" + std::to_string( picked->actor_index ) + "," + std::to_string( picked->actor_spawn_index ) + "]";
+        else
+          obs_picks_text += "null";
+      }
+    }
+    obs_picks_text += "}";
+    // The picked enemy can be one that is no longer in all_enemies (a dead target a token still names), so its observed life cannot be
+    // read back from the list: record, per token, the value build_enemy_fact handed the observation (`fact_time_to_die`, the one the
+    // encoder scaled) beside the raw life and the stamp, so the slot is recomputable either way.
+    obs_picks_text += ",\"obs_pick_enemies\":{";
+    {
+      const std::size_t n_picks = rl_target_select::targeted_action_token_count();
+      const char* const* pick_tokens = rl_target_select::targeted_action_tokens();
+      for ( std::size_t i = 0; i < n_picks; ++i )
+      {
+        if ( i > 0 )
+          obs_picks_text += ",";
+        obs_picks_text += std::string( "\"" ) + pick_tokens[ i ] + "\":";
+        action_t* pick_action = rl_button_bind::bound_action_for_token( p, pick_tokens[ i ] );
+        bool      pick_found  = false;
+        player_t* picked      = pick_action != nullptr ? rl_target_select::lookup_pick( pick_action, &pick_found ) : nullptr;
+        if ( pick_found && picked != nullptr )
+        {
+          const double raw_ttd = picked->time_to_percent( 0 ).total_seconds();
+          const auto   stamp   = p->sim->time_estimate_stamps.find( picked );
+          const bool   stamped = p->sim->time_estimate_on && stamp != p->sim->time_estimate_stamps.end() &&
+                                 stamp->second.actor_spawn_index == picked->actor_spawn_index;
+          obs_picks_text += fmt::format( "{{\"in_target_list\":{},\"fact_time_to_die\":{},\"time_to_die_raw\":{},\"observed_time_to_die\":{}",
+                                         std::find( p->sim->target_non_sleeping_list.begin(), p->sim->target_non_sleeping_list.end(), picked ) !=
+                                             p->sim->target_non_sleeping_list.end(),
+                                         rl_target_select::build_enemy_fact( pick_action, picked ).time_to_die, raw_ttd,
+                                         rl_policy::observed_time_to_die( p->sim, picked, raw_ttd ) );
+          if ( stamped )
+            obs_picks_text += fmt::format( ",\"time_estimate_kind\":\"{}\",\"time_estimate_key\":\"{}\",\"time_estimate_bias\":{}}}",
+                                           stamp->second.is_add ? "add" : "enemy", stamp->second.key, stamp->second.bias );
+          else
+            obs_picks_text += ",\"time_estimate_kind\":null,\"time_estimate_key\":null,\"time_estimate_bias\":null}";
+        }
+        else
+          obs_picks_text += "null";
+      }
+    }
+    obs_picks_text += "}";
 
     out << ",\"obs\":[";
     for ( std::size_t i = 0; i < RL_OBS_DIM; ++i )
@@ -1421,6 +1526,7 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
     out << ",\"obs\":null";
     out << ",\"obs_mask\":null";
   }
+  out << ( obs_picks_text.empty() ? std::string( ",\"obs_picks\":null,\"obs_pick_enemies\":null" ) : obs_picks_text );
 }
 
 void record( player_t* p, action_t* chosen, execute_type et )
