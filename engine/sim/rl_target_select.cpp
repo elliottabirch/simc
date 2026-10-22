@@ -913,6 +913,100 @@ void refresh_chosen( player_t* p )
   }
 }
 
+// ---- 261021-ezq R2FIX (D-15, D-16): observer targeting. See the declarations in the header for the rule. ----------------------
+// Every debug line is printed only under sim->debug, in the exact key=value form a checker parses: the tag, then
+// `it=<iteration> t=<seconds, 3 decimals>`, then the fields. Nothing here turns the player, writes facing or draws a random number.
+
+bool observer_targeting( const player_t* p )
+{
+  return p->sim->solver_policy_observe_stock && std::strcmp( p->name(), RL_ACTOR_NAME ) == 0 && !p->is_pet();
+}
+
+player_t* observer_front_candidate( const player_t* p )
+{
+  for ( player_t* t : p->sim->target_non_sleeping_list )
+    if ( t->is_enemy() && rl_can_be_hit( p, t ) )
+      return t;
+  return nullptr;
+}
+
+void observer_align_targets( player_t* p )
+{
+  if ( !observer_targeting( p ) )
+  {
+    throw sc_runtime_error( fmt::format(
+        "rl_target_select::observer_align_targets: player '{}' is not the observer RL actor (observer flag {}, RL actor '{}') -- the "
+        "observer targeting rule runs for the RL actor in observer mode only, and every call site must carry that gate itself",
+        p->name(), p->sim->solver_policy_observe_stock ? 1 : 0, RL_ACTOR_NAME ) );
+  }
+
+  sim_t* const sim = p->sim;
+  player_t* const tag = p->rl_chosen_enemy;
+  const bool tag_ok = sim->funnel_active() && tag != nullptr && rl_can_be_hit( p, tag );
+
+  // Rule A: a living target behind the player is dropped for the tag (in a window, when it can be hit) or the first hittable
+  // enemy in front. The player's own part of the stock retarget action; never the pets.
+  if ( sim->facing_enabled && p->target != nullptr && p->target->is_enemy() && !p->target->is_sleeping() &&
+       !p->is_in_front( *p->target, 0.0 ) )
+  {
+    player_t* const c = tag_ok ? tag : observer_front_candidate( p );
+    if ( c != nullptr && c != p->target )
+    {
+      sim->print_debug( "observer-front it={} t={:.3f} old={} old_in_front=0 new={} new_hittable=1 tag={}", sim->current_iteration,
+                        sim->current_time().total_seconds(), p->target->name(), c->name(), tag_ok ? 1 : 0 );
+      p->target = c;
+      for ( action_t* a : p->action_list )
+        a->acquire_target( retarget_source::SELF_RETARGET, p, c );
+      for ( action_t* a : p->dynamic_target_action_list )
+        a->acquire_target( retarget_source::SELF_RETARGET, p, c );
+    }
+    else if ( c == nullptr && sim->debug )
+    {
+      const double widest = actor_binding_for( p ).widest_range;
+      for ( player_t* t : sim->target_non_sleeping_list )
+      {
+        if ( !t->is_enemy() || !p->is_in_front( *t, 0.0 ) )
+          continue;
+        sim->print_debug(
+            "observer-front-skip it={} t={:.3f} old={} enemy={} in_front=1 sleeping={} hazard={} invulnerable={} untargetable={} "
+            "dist={:.2f} reach={} widest={}",
+            sim->current_iteration, sim->current_time().total_seconds(), p->target->name(), t->name(), t->is_sleeping() ? 1 : 0,
+            t->sheet_hazard ? 1 : 0, ( t->debuffs.invulnerable && t->debuffs.invulnerable->check() ) ? 1 : 0,
+            sim->is_untargetable_enemy( t ) ? 1 : 0, p->get_player_distance( *t ), t->combat_reach, widest );
+      }
+    }
+  }
+
+  // Rule B (P-8, pin at walk time): inside a funnel window with the tag hittable, the player's target and swings sit on the tag and
+  // the walk's actions follow it, so the first walk of a window already plays on the tag. Otherwise an action aimed at a dead
+  // enemy is pointed at the player's living target.
+  if ( tag_ok )
+  {
+    pin_to_tag( p );
+    for ( action_t* a : p->action_list )
+    {
+      if ( a->background || a->target == nullptr || !a->target->is_enemy() || a->target == tag )
+        continue;
+      sim->print_debug( "observer-follow it={} t={:.3f} action={} old={} old_sleeping={} new={} reason=tag", sim->current_iteration,
+                        sim->current_time().total_seconds(), a->name(), a->target->name(), a->target->is_sleeping() ? 1 : 0,
+                        tag->name() );
+      a->acquire_target( retarget_source::SELF_RETARGET, p, tag );
+    }
+  }
+  else if ( p->target != nullptr && p->target->is_enemy() && !p->target->is_sleeping() )
+  {
+    for ( action_t* a : p->action_list )
+    {
+      if ( a->background || a->target == nullptr || !a->target->is_enemy() || !a->target->is_sleeping() )
+        continue;
+      sim->print_debug( "observer-follow it={} t={:.3f} action={} old={} old_sleeping=1 new={} reason=dead-target",
+                        sim->current_iteration, sim->current_time().total_seconds(), a->name(), a->target->name(),
+                        p->target->name() );
+      a->acquire_target( retarget_source::SELF_RETARGET, p, p->target );
+    }
+  }
+}
+
 // tstl-sylvanas 260928-tb8: observation-only non-boss mask for trash pulls. Engine mechanics keep
 // player_t::is_boss() untouched (the shaman APL never reads it; the only mechanical use is dungeon-style
 // priority damage), so only what the net and the decision dump see changes.

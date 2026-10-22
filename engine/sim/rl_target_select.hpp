@@ -69,6 +69,31 @@ bool rl_can_be_hit( const player_t* p, const player_t* t );
 // the RL actor: every call site must carry the RL-actor gate itself.
 void refresh_chosen( player_t* p );
 
+// ---- 261021-ezq R2FIX (D-15, D-16): observer targeting ----
+//
+// In observer mode (sim->solver_policy_observe_stock) SimC's own select_action decides what the RL actor presses, and the
+// observer only records it. The player's TARGET used to be whatever stock acquire_target left it on, which let it sit on an enemy
+// behind the player while another stood in front (bug A: idle polls with nothing hittable) and let the funnel pin to the tag
+// move only the player's target, not the walk's actions (bug B). The three functions below are the whole of the fix. The player
+// never turns (233.1-01), nothing here writes facing, nothing draws a random number, and with the observer flag off not one line
+// of any of them runs (R8): every call site is under observer_targeting.
+
+// The gate: the observer flag is on and `p` is the RL actor (the fork's one RL-actor test: exact name, never a pet).
+bool observer_targeting( const player_t* p );
+
+// The first enemy of sim->target_non_sleeping_list, in list order, that rl_can_be_hit( p, t ) accepts; nullptr when none.
+// Reads only. The tag chooser's own "can be hit" predicate, so "hittable" has one definition in the fork.
+player_t* observer_front_candidate( const player_t* p );
+
+// The pre-walk alignment, called by player_t::execute_action immediately before the foreground select_action (the list walk is
+// the one moment that needs a hittable target; no engine event fires when a target ends up behind the player). Rule A (only
+// with sim->facing_enabled): a living target behind the player is replaced by the tag (inside a funnel window, when the tag can
+// be hit) or else by observer_front_candidate, with the player's own part of the stock retarget action. Rule B: inside a funnel
+// window with the tag hittable the player's target and swings are pinned to the tag (the writes refresh_chosen makes after the
+// walk) and the walk's non-background actions are pointed at the tag; otherwise an action aimed at a dead enemy is pointed at
+// the player's living target. REFUSES (throws) any player for which observer_targeting is false.
+void observer_align_targets( player_t* p );
+
 // A plain per-enemy fact record -- no engine pointer beyond the candidate itself (D-03: the same
 // shape the repo-side rig and the addon's parity harness will mirror, TGT-07). NOT sent over the
 // wire by this plan; plan 228-04's observation writer builds its own leaves from the same

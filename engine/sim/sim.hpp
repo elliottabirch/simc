@@ -1182,8 +1182,11 @@ struct sim_t : private sc_thread_t
   bool solver_record_apl_choice = false;
   // 261021-ezq (replaces the retired play-stock mode of 0080c3dd1f, which pressed the stock list's pick through the net's
   // action path): solver_policy_observe_stock=1 is the OBSERVER mode. The RL actor's active list is the named stock list
-  // (action_list=<L> with solver_apl_stock_list=<L>), so SimC's own select_action decides: its object, its target, its line,
-  // its idle poll. The in-process arm only RECORDS: one translog row per press (the executed leaf's button, `.apl` strict ==
+  // (action_list=<L> with solver_apl_stock_list=<L>), so SimC's own select_action decides: its object, its line,
+  // its idle poll; its target follows the observer targeting rule (rl_target_select::observer_align_targets: a hittable in-front
+  // enemy is preferred, a living target behind the player is dropped before each list walk, inside a funnel window the pin to the
+  // tag is written at the walk and the walk's actions follow it, a dead action target is replaced; the player never turns; 261021-ezq
+  // R2FIX). Observer off: not one line of that rule runs. The in-process arm only RECORDS: one translog row per press (the executed leaf's button, `.apl` strict ==
   // mapped == that button) and ONE row per idle stretch (the wait_next_event button, `.apl` flag rl_stock_eval::F_IDLE) where
   // the stretch starts; the later re-polls of the same stretch write nothing and consume no decision number. The net named by
   // solver_policy= stays loaded (the arm needs it) but is never consulted: q fields are NaN. A ready leaf with no registry
@@ -1543,7 +1546,7 @@ struct sim_t : private sc_thread_t
   // (seconds, three decimals, from the fight start) restricts solver_funnel_mode to those windows; an EMPTY list restricts
   // nothing (the whole-fight funnel of 266-09). Play asks funnel_active(), never the bool: player_t::acquire_target,
   // rl_target_select pin_to_tag and rl_target_select retarget. No event is scheduled at a window edge: the pin takes effect at the
-  // first decision boundary inside a window and releases at the first one outside it (the edge is fuzzy by at most one decision
+  // first decision boundary inside a window (in observer mode, at that boundary's list walk) and releases at the first one outside it (the edge is fuzzy by at most one decision
   // interval). A window is half open, [start, end). The observation column capability.mode_funnel and the translog header / fight
   // tag bits still read solver_funnel_mode ("this fight funnels at some time"), frozen at the pull. Refused by name (setup):
   // FUNNEL_WINDOWS_NEEDS_MODE (windows with solver_funnel_mode=0), FUNNEL_WINDOWS_MALFORMED (end <= start, unsorted or

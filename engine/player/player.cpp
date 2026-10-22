@@ -7622,6 +7622,15 @@ action_t* player_t::execute_action()
   else
   {
     visited_apls_ = 0;  // Reset visited apl list
+    // 261021-ezq R2FIX (D-15, D-16): observer targeting. The list walk is the one moment that needs a hittable target (no engine
+    // event fires when a living target ends up behind the player), so the observer RL actor's targets are aligned HERE, before
+    // the walk: rule A drops a target behind the player for a hittable enemy in front (the player never turns), rule B pins the
+    // player and the walk's actions to the funnel tag inside a window (the tag is refreshed only after the walk, in choose(), so
+    // pinning at the walk removes a one-decision lag at each window entry) and replaces a dead action target. The dry walk and
+    // decision_dump::record run after this in the same call and see the same targets as SimC's walk. Observer off (every net-driven
+    // and scripted fight, every other player, every pet): the one gate test is false and not one line of the rule runs (R8).
+    if ( rl_target_select::observer_targeting( this ) )
+      rl_target_select::observer_align_targets( this );
     action = select_action( *active_action_list, execute_type::FOREGROUND );
   }
 
@@ -15059,6 +15068,16 @@ void player_t::acquire_target( retarget_source event, player_t* context )
 
     candidate_target = enemy;
     break;
+  }
+
+  // 261021-ezq R2FIX (D-15): observer targeting, the acquisition half. In observer mode (RL actor only, facing on) the candidate
+  // is the first enemy the actor can hit (rl_can_be_hit: alive, in front, in some aimed action's range plus reach) when there is
+  // one, instead of the first enemy of the list that happens to be behind the player; with none hittable the stock choice stands.
+  // The funnel rule below then applies as before. Observer off: the gate is false and nothing here runs (R8).
+  if ( sim->facing_enabled && rl_target_select::observer_targeting( this ) )
+  {
+    if ( player_t* front = rl_target_select::observer_front_candidate( this ) )
+      candidate_target = front;
   }
 
   // 2026-10-02, 266-09 (research R5, owner F9): in a funnel-mode fight the RL actor keeps the tag as its target
