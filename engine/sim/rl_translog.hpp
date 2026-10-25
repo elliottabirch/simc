@@ -1342,7 +1342,7 @@ struct table_info_t
   std::uint32_t decision_index = 0;           // this fight's recorded-row index (0-based), the RNG key
   double probability = std::numeric_limits<double>::quiet_NaN();   // the strategy's probability of the chosen button, NaN when it has none
   float q_chosen = std::numeric_limits<float>::quiet_NaN();        // Q of the chosen cell before this decision's own update would apply
-  std::int32_t n_chosen = 0;                                       // N of the chosen cell, same moment
+  std::int32_t n_chosen = -1;                                      // N of the chosen cell, same moment; -1 when no strategy decided (sim/apl.py N_NONE)
 };
 
 // Longest name observed across the enhancement Stormbringer profile's own action list is
