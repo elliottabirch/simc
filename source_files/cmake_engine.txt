@@ -164,6 +164,7 @@ sim/rl_action_census.hpp
 sim/rl_buff_census.hpp
 sim/rl_button_bind.hpp
 sim/rl_stock_eval.hpp
+sim/rl_table_policy.hpp
 sim/rl_target_select.hpp
 sim/rl_translog.hpp
 sim/rl_rng_record.hpp
@@ -374,6 +375,7 @@ sim/rl_action_census.cpp
 sim/rl_buff_census.cpp
 sim/rl_button_bind.cpp
 sim/rl_stock_eval.cpp
+sim/rl_table_policy.cpp
 sim/rl_target_select.cpp
 sim/rl_translog.cpp
 sim/rl_rng_record.cpp

@@ -312,6 +312,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -321,7 +322,7 @@ struct sim_t;
 struct player_t;
 struct ZSTD_CCtx_s;
 
-// 271.4-03: the dry stock-rotation pick the `.apl` sidecar (format 2) is written from.
+// 271.4-03: the dry stock-rotation pick the `.apl` sidecar (format 3 since 261025-bk4) is written from.
 namespace rl_stock_eval
 {
 struct pick_t;
@@ -1312,14 +1313,37 @@ inline constexpr std::uint32_t HEADER_SIZE = 32u;
 inline constexpr std::uint32_t KIND_DECISION = 1u;
 inline constexpr std::uint32_t KIND_FOOTER = 2u;
 
-// Phase 271.4 (271.4-03, AGREE-01): FORMAT 2. Written ONLY when `solver_apl_stock_list=` names a list (with
-// solver_record_apl_choice=1): the decision record then carries the dry stock-rotation pick (rl_stock_eval.hpp) instead of
-// the engine's catalog `apl_choice` name. Format 1 (the option absent) is unchanged byte for byte: same header, same
-// 64-byte record, same footer; FORMAT_VERSION stays 1u. The header, the footer and the record size are shared; only the
-// decision record's body differs (decision_record_v2 below). A format-1 reader refuses a format-2 file by its version
-// field (fail closed). The offsets below are contract AG-1 of plan 271.4-01 and are pinned by static_asserts.
-inline constexpr std::uint32_t FORMAT_VERSION_STOCK = 2u;
-inline constexpr std::size_t STOCK_NAME_BUF_SIZE = 48u;
+// 261025-bk4 (wave B, lane b2): FORMAT 3 REPLACES the former format 2 (hard swap, owner decision 2: a writer and every live reader move
+// together; files written by an older checkout are read by that checkout). It is written ONLY when `solver_apl_stock_list=` names a list
+// (with solver_record_apl_choice=1): the decision record then carries the dry stock-rotation pick (rl_stock_eval.hpp) AND the table
+// player's choice (rl_table_policy.hpp) instead of the engine's catalog `apl_choice` name. Format 1 (the option absent) is unchanged byte
+// for byte: same header, same 64-byte record, same footer; FORMAT_VERSION stays 1u. The header, the footer and the record size are shared;
+// only the decision record's body differs (decision_record_v3 below). A format-1 reader refuses a format-3 file by its version field (fail
+// closed). The offsets below are pinned by static_asserts. Observer rows (solver_policy_observe_stock) and the net arm's rows carry
+// chooser 0 (NONE), strategy 0, state id 0xFFFFFFFF, decision_index 0, probability NaN, q NaN, n 0.
+inline constexpr std::uint32_t FORMAT_VERSION_TABLE = 3u;
+inline constexpr std::size_t TABLE_NAME_BUF_SIZE = 24u;   // 23 characters plus the NUL; a longer strict leaf name sets F_NAME_TRUNCATED (32)
+
+// `chooser` of a format-3 record: who decided this boundary.
+inline constexpr std::uint8_t CHOOSER_NONE = 0;            // observer mode, or the net arm: no table was consulted
+inline constexpr std::uint8_t CHOOSER_STRATEGY = 1;        // a chapter 4 strategy picked a button of the decided set
+inline constexpr std::uint8_t CHOOSER_STOCK = 2;           // deferred: the stock list's first ready leaf is a button the table does not decide
+inline constexpr std::uint8_t CHOOSER_FORCED_IDLE = 3;     // nothing of the decided set was legal: the idle button
+inline constexpr std::uint8_t CHOOSER_STRATEGY_IDLE = 4;   // the strategy chose the idle button (solver_table_wait=1)
+inline constexpr std::uint8_t CHOOSER_NOSTATE = 5;         // the observation was outside the state set's domain: the stock pick (or idle)
+inline constexpr std::uint32_t STATE_ID_NONE = 0xFFFFFFFFu;
+
+// What the table player tells the sidecar about one decision (filled by rl_table_policy::decide; nullptr/defaults = chooser NONE).
+struct table_info_t
+{
+  std::uint8_t chooser = CHOOSER_NONE;
+  std::uint8_t strategy = 0;                  // 1-based index into the nine strategy ids (rl_table_policy.hpp), 0 none
+  std::uint32_t state_id = STATE_ID_NONE;     // the bucketed state, or STATE_ID_NONE
+  std::uint32_t decision_index = 0;           // this fight's recorded-row index (0-based), the RNG key
+  double probability = std::numeric_limits<double>::quiet_NaN();   // the strategy's probability of the chosen button, NaN when it has none
+  float q_chosen = std::numeric_limits<float>::quiet_NaN();        // Q of the chosen cell before this decision's own update would apply
+  std::int32_t n_chosen = 0;                                       // N of the chosen cell, same moment
+};
 
 // Longest name observed across the enhancement Stormbringer profile's own action list is
 // "use_item_voracious_heart_of_ulatek" (35 chars) -- 47 bytes leaves headroom for any
@@ -1370,33 +1394,52 @@ static_assert( offsetof( decision_record, kind ) == 0 );
 static_assert( offsetof( decision_record, seq ) == 4 );
 static_assert( offsetof( decision_record, name ) == 8 );
 
-// Format 2 decision record (64 bytes, same size as format 1). `mapped_index`: button index of the first ready stock leaf the
-// registry has a button for, -1 none. `strict_index`: the first ready stock leaf, its button index, -1 none ready, -2 it has
-// no button. `boundary`: 0 foreground, 1 off-global-cooldown poll, 2 cast-while-casting poll. `flags`: rl_stock_eval::F_*
-// (1 refused, 2 strict leaf triggers no global cooldown, 4 went through a run/swap list, 8 non-set variable ran, 16 depth
-// limit, 32 name truncated, 64 RETIRED (the retired play-stock mode used it; never written), 128 idle (observer mode,
-// solver_policy_observe_stock: the one row of an idle stretch)). `strict_name`: the strict leaf's engine name, NUL-terminated, empty when none ready.
-struct alignas( 8 ) decision_record_v2
+// Format 3 decision record (64 bytes, same size as format 1), little-endian.
+//   @0  u32 kind (KIND_DECISION)                @4  u32 seq (the decision row's own seq)
+//   @8  i16 mapped_index: button index of the first ready stock leaf the registry has a button for, -1 none
+//   @10 i16 strict_index: the first ready stock leaf, its button index, -1 none ready, -2 it has no button
+//   @12 u8 boundary: 0 foreground, 1 off-global-cooldown poll, 2 cast-while-casting poll
+//   @13 u8 flags: rl_stock_eval::F_* (1 refused, 2 strict leaf triggers no global cooldown, 4 went through a run/swap list, 8 non-set
+//       variable ran, 16 depth limit, 32 strict name truncated (longer than 23 bytes), 64 RETIRED (never written), 128 idle (observer mode:
+//       the one row of an idle stretch))
+//   @14 u8 chooser (CHOOSER_*)                  @15 u8 strategy id (1..9, 0 none)
+//   @16 u32 state id (STATE_ID_NONE when none)  @20 u32 decision_index (per fight)
+//   @24 f64 probability of the chosen button (NaN: none / Thompson)
+//   @32 f32 Q of the chosen cell before this decision's update   @36 i32 N of the chosen cell
+//   @40 char[24] strict leaf name, NUL-terminated, empty when none ready
+struct alignas( 8 ) decision_record_v3
 {
-  std::uint32_t kind;                       // @0  -- KIND_DECISION
-  std::uint32_t seq;                        // @4  -- the decision row's own seq
+  std::uint32_t kind;                       // @0
+  std::uint32_t seq;                        // @4
   std::int16_t mapped_index;                // @8
   std::int16_t strict_index;                // @10
   std::uint8_t boundary;                    // @12
   std::uint8_t flags;                       // @13
-  std::uint16_t zero;                       // @14
-  char strict_name[ STOCK_NAME_BUF_SIZE ];  // @16
+  std::uint8_t chooser;                     // @14
+  std::uint8_t strategy;                    // @15
+  std::uint32_t state_id;                   // @16
+  std::uint32_t decision_index;             // @20
+  double probability;                       // @24
+  float q_chosen;                           // @32
+  std::int32_t n_chosen;                    // @36
+  char strict_name[ TABLE_NAME_BUF_SIZE ];  // @40
 };
-static_assert( sizeof( decision_record_v2 ) == RECORD_SIZE, "rl_apl_choice::decision_record_v2 must be exactly RECORD_SIZE bytes" );
-static_assert( alignof( decision_record_v2 ) == 8, "rl_apl_choice::decision_record_v2 must be 8-aligned" );
-static_assert( offsetof( decision_record_v2, kind ) == 0 );
-static_assert( offsetof( decision_record_v2, seq ) == 4 );
-static_assert( offsetof( decision_record_v2, mapped_index ) == 8 );
-static_assert( offsetof( decision_record_v2, strict_index ) == 10 );
-static_assert( offsetof( decision_record_v2, boundary ) == 12 );
-static_assert( offsetof( decision_record_v2, flags ) == 13 );
-static_assert( offsetof( decision_record_v2, zero ) == 14 );
-static_assert( offsetof( decision_record_v2, strict_name ) == 16 );
+static_assert( sizeof( decision_record_v3 ) == RECORD_SIZE, "rl_apl_choice::decision_record_v3 must be exactly RECORD_SIZE bytes" );
+static_assert( alignof( decision_record_v3 ) == 8, "rl_apl_choice::decision_record_v3 must be 8-aligned" );
+static_assert( offsetof( decision_record_v3, kind ) == 0 );
+static_assert( offsetof( decision_record_v3, seq ) == 4 );
+static_assert( offsetof( decision_record_v3, mapped_index ) == 8 );
+static_assert( offsetof( decision_record_v3, strict_index ) == 10 );
+static_assert( offsetof( decision_record_v3, boundary ) == 12 );
+static_assert( offsetof( decision_record_v3, flags ) == 13 );
+static_assert( offsetof( decision_record_v3, chooser ) == 14 );
+static_assert( offsetof( decision_record_v3, strategy ) == 15 );
+static_assert( offsetof( decision_record_v3, state_id ) == 16 );
+static_assert( offsetof( decision_record_v3, decision_index ) == 20 );
+static_assert( offsetof( decision_record_v3, probability ) == 24 );
+static_assert( offsetof( decision_record_v3, q_chosen ) == 32 );
+static_assert( offsetof( decision_record_v3, n_chosen ) == 36 );
+static_assert( offsetof( decision_record_v3, strict_name ) == 40 );
 
 // Once, at translog close (write_footer()). Mirrors rl_attr::footer_record's own zero-fill
 // convention for every field besides the count.
@@ -1508,7 +1551,9 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq,
                        // 271.4-03 (AGREE-01): the dry stock-rotation pick at this decision, caller-resolved; non-null
                        // exactly when solver_apl_stock_list= is set (the `.apl` sidecar is then format 2 and a null pick
                        // is an inconsistency that throws), nullptr otherwise (format 1, unchanged).
-                       const rl_stock_eval::pick_t* stock_pick = nullptr );
+                       const rl_stock_eval::pick_t* stock_pick = nullptr,
+                       // 261025-bk4 (b2): the table player's choice for the format-3 `.apl` record; nullptr = chooser NONE (observer mode, net arm).
+                       const rl_apl_choice::table_info_t* table_info = nullptr );
 
 // Called from sim_t::combat_end(), after datacollection_end(). Builds and
 // appends the close row, then flushes the buffered rows for this fight to

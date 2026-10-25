@@ -60,6 +60,10 @@ if(SC_EVENT_QUEUE_DEBUG)
     target_compile_definitions(engine PUBLIC EVENT_QUEUE_DEBUG)
 endif()
 
+# 261025-bk4 (b2): the table player's arithmetic must round exactly as the repository's Python does (learn/tabular/rng.py, state.py,
+# book/ch04_strategies.py). A fused multiply-add would change a rounding Python does not fuse, so this one file is compiled without contraction.
+set_source_files_properties(sim/rl_table_policy.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+
 target_compile_definitions(engine PRIVATE "SC_GIT_REV=\"${GIT_COMMIT_HASH}\"" "SC_GIT_BRANCH=\"${GIT_BRANCH}\"")
 
 # Phase 268 (G268-2): which registry spec's RL constants header this build compiles. The default keeps the

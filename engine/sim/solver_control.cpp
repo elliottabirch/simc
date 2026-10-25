@@ -14,6 +14,7 @@
 #include "sim/rl_button_bind.hpp"
 #include "sim/rl_stock_eval.hpp"
 #include "sim/rl_policy.hpp"
+#include "sim/rl_table_policy.hpp"
 #include "sim/rl_target_select.hpp"
 #include "sim/rl_translog.hpp"
 #include "sim/solver_branch.hpp"
@@ -1110,7 +1111,33 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     }
 
     float q[ RL_ACTION_DIM ];
-    rl_policy::forward( *sim->solver_policy_weights, obs, mask, q );
+    // 261025-bk4 (wave B, lane b2): THE TABLE PLAYER (solver_table_policy=; rl_table_policy.hpp has the contract and the order). With a table
+    // loaded the pick comes from the table's strategy instead of the net's forward pass and masked_argmax; the net is loaded (its allowed_actions
+    // already ANDed the mask above) and never consulted. validate_table_options refused every option that would reach past this point on the net
+    // path (hold windows, forced decisions, the spend override, the no-enemy mask, a branch or teacher mode, the exploration dials), so what follows
+    // -- the row, accept_cast with the rules path's aim and retarget -- is the net arm's own code. Off: one string test.
+    const bool table_play = rl_table_policy::active();
+    rl_table_policy::decision_t table_decision;
+    if ( table_play )
+    {
+      table_decision = rl_table_policy::decide( sim, p, foreground, seq, obs, mask, stock_pick );
+      if ( table_decision.noop )
+      {
+        // A background boundary with nothing to press (no decided button, no deferred stock press, no legal wait): not a decision, exactly
+        // the all-illegal background case above -- the decision number goes back and no row is written.
+        assert( sim->solver_control_seq == seq );
+        --sim->solver_control_seq;
+        sim->solver_control_last_reply_type = "noop";
+        sim->solver_control_has_requested_wait_sec = false;
+        sim->solver_control_last_requested_wait_sec = 0.0;
+        sim->solver_control_last_wait_anchor_label.clear();
+        sim->solver_control_last_wait_source.clear();
+        return nullptr;
+      }
+      std::fill( std::begin( q ), std::end( q ), 0.0f );
+    }
+    else
+      rl_policy::forward( *sim->solver_policy_weights, obs, mask, q );
 
     // 260922-mfh (D3): hold windows restrict SELECTION ONLY -- they must never touch the
     // `mask` that build_obs/forward above, the q_margin/top_q diagnostics below, and BOTH
@@ -1165,7 +1192,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       }
     }
 
-    const int greedy_idx = rl_policy::masked_argmax( q, select_mask );
+    const int greedy_idx = table_play ? table_decision.idx : rl_policy::masked_argmax( q, select_mask );
     int idx = greedy_idx;
     bool exploratory = false;
 
@@ -1302,8 +1329,8 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
         second_best = q[ i ];
       }
     }
-    const float q_margin =
-        legal_count >= 2 ? ( best - second_best ) : std::numeric_limits<float>::quiet_NaN();
+    const float q_margin = table_play ? table_decision.q_margin
+                                      : ( legal_count >= 2 ? ( best - second_best ) : std::numeric_limits<float>::quiet_NaN() );
     // top_q (translog version 3, this session's Task 2): the best LEGAL Q
     // value -- the net's own estimate of how much more discounted damage is
     // still coming from this decision onward, before the engine picks an
@@ -1311,7 +1338,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // (never a re-derived value), so the two logged fields can never
     // silently disagree about what "best" meant at this boundary. NaN when
     // no action was legal, matching q_margin's own convention.
-    const float top_q = legal_count >= 1 ? best : std::numeric_limits<float>::quiet_NaN();
+    const float top_q = table_play ? table_decision.top_q : ( legal_count >= 1 ? best : std::numeric_limits<float>::quiet_NaN() );
 
     // 261005-branch-teacher (sim/solver_branch.hpp): decision-anchored re-salt, fork() branching at
     // a decision, and the branching teacher. One bool test and a return when no mode is on. Runs
@@ -1322,6 +1349,21 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     solver_branch::on_decision( sim, p, seq, q, mask, select_mask, legal_count, q_margin, top_q, exploratory,
                                 forced_here, idx );
     const rl_action_desc& action = RL_ACTIONS[ idx ];
+
+    // 261025-bk4 (b2): the table player's "no press". The idle button is expressed as SimC's own idle: nothing is returned and no wait is set, so
+    // player_ready_event_t::execute takes its READY_POLL branch and available() (gauss 100 ms) schedules the next try. The row is written first, as
+    // for every decision. The requested-wait fields were cleared above.
+    if ( table_play && table_decision.idle )
+    {
+      sim->solver_control_last_reply_type = "wait";
+      sim->solver_control_has_pending_wait = false;
+      rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, top_q, rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK, false,
+                                     exploratory, row_held, nullptr, 0, 0, rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
+                                     sim->solver_record_apl_choice && apl_choice ? apl_choice->name() : nullptr, false,
+                                     rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK, rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
+                                     chosen_enemy_index_of( p ), &stock_pick, &table_decision.info );
+      return nullptr;
+    }
 
     if ( action.kind == rl_action_kind::cast )
     {
@@ -1508,7 +1550,9 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
                                      // recomputed here.
                                      chosen_enemy_index_of( p ),
                                      // 271.4-03: the dry stock-rotation pick (null when the option is off).
-                                     rl_stock_eval::enabled( sim ) ? &stock_pick : nullptr );
+                                     rl_stock_eval::enabled( sim ) ? &stock_pick : nullptr,
+                                     // 261025-bk4: the table player's choice (null: chooser NONE).
+                                     table_play ? &table_decision.info : nullptr );
       // 212-CR-FIX WR-06: accept_cast() can refuse a not-ready action via
       // protocol_abort() (a throw), which unwinds past combat_end()'s
       // record_close() hook entirely for this fight -- without this catch,
@@ -1668,5 +1712,8 @@ void reset_iteration( sim_t* sim )
       + static_cast<std::uint64_t>( sim->rng_iteration_index() ) * EXPLORE_SEED_FIGHT_SPREAD
       + static_cast<std::uint64_t>( sim->thread_index );
   sim->solver_explore_rng.seed( explore_seed );
+
+  // 261025-bk4 (b2): the table player's per-fight state (the row counter, the pending reward; scope=fight also re-copies Q, N, M2 from the file).
+  rl_table_policy::on_fight_start( sim );
 }
 } // namespace solver_control

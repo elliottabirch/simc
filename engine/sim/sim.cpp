@@ -36,6 +36,7 @@
 #include "sim/rl_buff_census.hpp"
 #include "sim/rl_button_bind.hpp"
 #include "sim/rl_stock_eval.hpp"
+#include "sim/rl_table_policy.hpp"
 #include "sim/rl_target_select.hpp"
 #include "sim/rl_translog.hpp"
 #include "sim/rl_rng_record.hpp"
@@ -2489,6 +2490,8 @@ void sim_t::combat_end()
   // -- outside both solver_control::choose() transport arms -- so the
   // close row is written on BOTH transports and with neither (D-08).
   // No-op when rl_translog= is unset.
+  // 261025-bk4 (b2): the table player closes the fight's last strategy decision with the final damage, before the close row records it.
+  rl_table_policy::on_fight_end( this );
   rl_translog::record_close( this );
   // Phase 268 (268-05, G268-8): opt-in credit census, one JSON line per non-enemy player (observer only).
   if ( rl_credit_census )
@@ -4726,6 +4729,13 @@ void sim_t::create_options()
   add_option( opt_string( "solver_apl_stock_list", rl_stock_eval::list_name_storage() ) );
   // 261021-ezq: see sim.hpp's solver_policy_observe_stock doc comment. Default off.
   add_option( opt_bool( "solver_policy_observe_stock", solver_policy_observe_stock ) );
+  // 261025-bk4 (b2): the table player, see rl_table_policy.hpp. The values live in that module (a sim_t member would rebuild every file).
+  add_option( opt_string( "solver_table_policy", rl_table_policy::path_storage() ) );
+  add_option( opt_string( "solver_table_scope", rl_table_policy::scope_storage() ) );
+  add_option( opt_string( "solver_table_fallback", rl_table_policy::fallback_storage() ) );
+  add_option( opt_string( "solver_table_defer", rl_table_policy::defer_storage() ) );
+  add_option( opt_bool( "solver_table_wait", rl_table_policy::wait_storage() ) );
+  add_option( opt_bool( "solver_table_trace", rl_table_policy::trace_storage() ) );
   // 261009-spd: see sim.hpp's rl_capability_selftest doc comment.
   add_option( opt_bool( "rl_capability_selftest", rl_capability_selftest ) );
   // 261009-spd (T3): see sim.hpp's rl_huge_pages doc comment.
@@ -6097,6 +6107,10 @@ void sim_t::setup( sim_control_t* c )
   // OBSERVE_STOCK_NEEDS rather than reported as the stock-list option's own refusal. The active-list check needs the actors and
   // runs in rl_stock_eval::on_init_finished.
   rl_stock_eval::validate_observer_options( this );
+
+  // 261025-bk4 (b2): the table player's option checks and the TBP1 load (rl_table_policy.hpp). The stock-list refusals below name their own
+  // options first only when the table player is off; with it on, TABLE_NEEDS names what is missing.
+  rl_stock_eval::validate_table_options( this );
 
   // Phase 271.4 (271.4-03): solver_apl_stock_list=<name> asks the in-process arm to walk the preserved stock list at
   // each decision and write both picks into the `.apl` sidecar (format 2). It therefore needs the sidecar

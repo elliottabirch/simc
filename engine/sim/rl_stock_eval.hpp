@@ -16,7 +16,7 @@
 //   - the strict pick: the first ready leaf, mapped or not (its button index, or -2 when it has no button, and
 //     its engine name);
 //   - the mapped pick: the first ready leaf the registry has a button for (its button index, or -1 when none).
-// Both go into the `.apl` sidecar (format 2, see rl_translog.hpp) beside the net's own press, so a reader can
+// Both go into the `.apl` sidecar (format 3, see rl_translog.hpp; format 2 until 261025-bk4) beside the net's own press, so a reader can
 // lay the net's choice next to the list's choice in the SAME state.
 //
 // Same state, nothing runs. The walk is a line-for-line mirror of player_t::select_action WITHOUT calling it:
@@ -55,13 +55,13 @@ struct sim_t;
 namespace rl_stock_eval
 {
 
-// Flag bits of the `.apl` format-2 record (contract AG-1).
+// Flag bits of the `.apl` format-3 record (contract AG-1, format 2 until 261025-bk4).
 inline constexpr std::uint8_t F_REFUSED         = 1;   // a random roll would have been needed: no pick
 inline constexpr std::uint8_t F_STRICT_NO_GCD   = 2;   // the strict leaf triggers no global cooldown
 inline constexpr std::uint8_t F_LIST_SWITCH     = 4;   // the walk went through a run_action_list / swap_action_list
 inline constexpr std::uint8_t F_VARIABLE_OP     = 8;   // a variable line whose operation is not a plain set ran
 inline constexpr std::uint8_t F_DEPTH           = 16;  // the recursion depth limit was hit
-inline constexpr std::uint8_t F_NAME_TRUNCATED  = 32;  // the strict leaf's name is 48 bytes or longer
+inline constexpr std::uint8_t F_NAME_TRUNCATED  = 32;  // the strict leaf's name is 24 bytes or longer (format 3; 48 in format 2)
 // Bit 64 is RETIRED: the retired play-stock mode (commit 0080c3dd1f) used it, nothing writes it any more, and the readers refuse it.
 inline constexpr std::uint8_t F_IDLE            = 128; // observer mode (solver_policy_observe_stock=1): this row is the one row of an idle stretch
 
@@ -78,6 +78,14 @@ bool enabled( const sim_t* sim );
 // rl_translog= is missing, and starting `OBSERVE_STOCK_CONFLICT:` when solver_control=, solver_hold_windows=,
 // solver_force_decision=, solver_min_maelstrom_spend > 0, solver_mask_no_enemy=1 or a branch, teacher or re-salt mode is set.
 void validate_observer_options( sim_t* sim );
+
+// Table player (261025-bk4, solver_table_policy=; rl_table_policy.hpp). Called from sim_t::setup() after validate_observer_options, once the
+// solver_policy= blob is loaded. Does nothing unless solver_table_policy= is set (and refuses a stray solver_table_* option without it). Throws
+// sc_runtime_error starting `TABLE_NEEDS:` when solver_policy=, solver_apl_stock_list=, solver_record_apl_choice=1 or rl_translog= is missing or
+// the blob carries an aim head, and starting `TABLE_CONFLICT:` when solver_control=, solver_policy_observe_stock=1, solver_hold_windows=,
+// solver_force_decision=, solver_min_maelstrom_spend > 0, solver_mask_no_enemy=1, or a branch, teacher or re-salt mode is set; then loads
+// the file (`TABLE_FILE:` refusals).
+void validate_table_options( sim_t* sim );
 
 // The button index of an action: the registry's cast button whose token equals the action's engine name, else -1. The name match the
 // dry walk uses for its leaves; observer mode uses it on the leaf SimC's own select_action returned.

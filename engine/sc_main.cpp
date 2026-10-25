@@ -25,6 +25,7 @@
 // 261005-fight-list (quick 261005-mix, plan 02): the `rl_fight_list=` driver below hands the translog writer
 // from entry to entry (rl_translog::carry_t) and empties the RL modules' process-wide caches between entries.
 #include "sim/rl_target_select.hpp"
+#include "sim/rl_table_policy.hpp"
 #include "sim/rl_translog.hpp"
 #include "sim/sim.hpp"
 #include "sim/scale_factor_control.hpp"
@@ -356,7 +357,9 @@ const char* const FIGHT_LIST_REFUSED_PREFIXES[] = {
 // rl_obs_names_out: one path, rewritten by each entry's init, would keep only the last fight's bind.
 // solver_apl_stock_list (Phase 271.4) is a per-process option (one list name would apply to every entry of the fight
 // list, and the .apl format is chosen once per process), so an entry may not set it.
-const char* const FIGHT_LIST_REFUSED_NAMES[] = { "solver_control", "decision_dump", "rl_bind_report", "solver_apl_stock_list" };
+const char* const FIGHT_LIST_REFUSED_NAMES[] = { "solver_control", "decision_dump", "rl_bind_report", "solver_apl_stock_list",
+                                                   // 261025-bk4: the table player is per process too (one table, one trace, one runtime).
+                                                   "solver_table_policy" };
 
 // The LAST value an entry's options give `name` (later options win in sim_t, as here), or nullptr when absent.
 const std::string* fight_list_option( const sim_control_t& control, const std::string& name )
@@ -1356,6 +1359,14 @@ int main( int argc, char** argv )
 
   // 261009-spd (T3): static data onto 2 MB pages, before any sim_t exists. See huge_pages_start().
   huge_pages_start( args );
+
+  // 261025-bk4 (b2): `rl_table_probe=<mode> key=value ...` is the table player's sim-less probe (rl_table_policy.cpp has the modes and file
+  // formats). It needs no sim_t, no profile and no fight: it reads binary files, writes one, and exits.
+  for ( const std::string& arg : args )
+  {
+    if ( arg.compare( 0, std::strlen( "rl_table_probe=" ), "rl_table_probe=" ) == 0 )
+      return rl_table_policy::run_probe( args );
+  }
 
   // 261005-fight-list (quick 261005-mix, plan 02): `rl_fight_list=<list>` runs one fight per entry file in one
   // process (see run_fight_list). Any other invocation falls through to the unchanged single-sim path.

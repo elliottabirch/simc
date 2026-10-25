@@ -656,9 +656,9 @@ void open_and_write_header( sim_t* sim )
 
     rl_apl_choice::file_header ph{};
     std::memcpy( ph.magic, rl_apl_choice::MAGIC, sizeof( rl_apl_choice::MAGIC ) );
-    // 271.4-03: format 2 when solver_apl_stock_list= names a list (the decision record carries the dry stock-rotation
-    // pick); format 1, unchanged, otherwise.
-    ph.format_version = rl_stock_eval::enabled( root ) ? rl_apl_choice::FORMAT_VERSION_STOCK : rl_apl_choice::FORMAT_VERSION;
+    // 261025-bk4 (b2): format 3 (REPLACES the former format 2) when solver_apl_stock_list= names a list (the decision record
+    // carries the dry stock-rotation pick and the table player's choice); format 1, unchanged, otherwise.
+    ph.format_version = rl_stock_eval::enabled( root ) ? rl_apl_choice::FORMAT_VERSION_TABLE : rl_apl_choice::FORMAT_VERSION;
     ph.record_size = rl_apl_choice::RECORD_SIZE;
     ph.header_size = rl_apl_choice::HEADER_SIZE;
     std::memset( ph.zero16, 0, sizeof( ph.zero16 ) );
@@ -681,7 +681,8 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float ob
                        std::uint8_t candidate_count, std::uint8_t chosen_candidate_slot,
                        const char* apl_choice_name, bool aim_explored,
                        std::uint8_t rules_candidate_slot, std::uint8_t observed_candidate_slot,
-                       std::uint16_t chosen_enemy_actor_index, const rl_stock_eval::pick_t* stock_pick )
+                       std::uint16_t chosen_enemy_actor_index, const rl_stock_eval::pick_t* stock_pick,
+                       const rl_apl_choice::table_info_t* table_info )
 {
   sim_t* root = root_of( sim );
   if ( root->rl_translog_file_str.empty() )
@@ -813,29 +814,37 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float ob
   if ( root->rl_translog_apl_stream )
   {
     rl_apl_choice::decision_record    ar{};
-    rl_apl_choice::decision_record_v2 ar2{};
+    rl_apl_choice::decision_record_v3 ar3{};
     const void*                       rec_ptr  = &ar;
     std::size_t                       rec_size = sizeof( ar );
     if ( rl_stock_eval::enabled( root ) )
     {
-      // Format 2 (271.4-03): a format-2 file never receives a format-1 record.
+      // Format 3 (261025-bk4, replaces format 2): a format-3 file never receives a format-1 record.
       if ( stock_pick == nullptr )
       {
         throw sc_runtime_error( fmt::format(
-            "rl_translog=: the '{}.apl' sidecar is format 2 (solver_apl_stock_list=) but decision seq={} carries no "
+            "rl_translog=: the '{}.apl' sidecar is format 3 (solver_apl_stock_list=) but decision seq={} carries no "
             "stock pick.", root->rl_translog_file_str, seq ) );
       }
-      ar2.kind = rl_apl_choice::KIND_DECISION;
-      ar2.seq = static_cast<std::uint32_t>( seq );
-      ar2.mapped_index = stock_pick->mapped_index;
-      ar2.strict_index = stock_pick->strict_index;
-      ar2.boundary = stock_pick->boundary;
-      ar2.flags = stock_pick->flags;
-      ar2.zero = 0;
-      std::memset( ar2.strict_name, 0, sizeof( ar2.strict_name ) );
-      std::strncpy( ar2.strict_name, stock_pick->strict_name.c_str(), rl_apl_choice::STOCK_NAME_BUF_SIZE - 1 );
-      rec_ptr  = &ar2;
-      rec_size = sizeof( ar2 );
+      const rl_apl_choice::table_info_t none{};
+      const rl_apl_choice::table_info_t& ti = table_info != nullptr ? *table_info : none;
+      ar3.kind = rl_apl_choice::KIND_DECISION;
+      ar3.seq = static_cast<std::uint32_t>( seq );
+      ar3.mapped_index = stock_pick->mapped_index;
+      ar3.strict_index = stock_pick->strict_index;
+      ar3.boundary = stock_pick->boundary;
+      ar3.flags = stock_pick->flags;
+      ar3.chooser = ti.chooser;
+      ar3.strategy = ti.strategy;
+      ar3.state_id = ti.state_id;
+      ar3.decision_index = ti.decision_index;
+      ar3.probability = ti.probability;
+      ar3.q_chosen = ti.q_chosen;
+      ar3.n_chosen = ti.n_chosen;
+      std::memset( ar3.strict_name, 0, sizeof( ar3.strict_name ) );
+      std::strncpy( ar3.strict_name, stock_pick->strict_name.c_str(), rl_apl_choice::TABLE_NAME_BUF_SIZE - 1 );
+      rec_ptr  = &ar3;
+      rec_size = sizeof( ar3 );
     }
     else
     {

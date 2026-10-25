@@ -10,7 +10,9 @@
 #include "player/action_priority_list.hpp"
 #include "player/action_variable.hpp"
 #include "player/player.hpp"
+#include "sim/rl_policy.hpp"
 #include "sim/rl_policy_constants_select.h"
+#include "sim/rl_table_policy.hpp"
 #include "sim/sim.hpp"
 #include "sim/solver_branch.hpp"
 
@@ -32,8 +34,8 @@ std::string g_list_name;
 // reports it (F_DEPTH) so a recorder can never abort a fight.
 constexpr int MAX_DEPTH = 16;
 
-// The strict leaf's name buffer in the `.apl` record is 48 bytes (47 characters plus the NUL).
-constexpr std::size_t NAME_BYTES = 48;
+// The strict leaf's name buffer in the format-3 `.apl` record is 24 bytes (23 characters plus the NUL); 48 in the former format 2.
+constexpr std::size_t NAME_BYTES = 24;
 
 bool is_rl_actor( const player_t* p )
 {
@@ -248,6 +250,54 @@ void validate_observer_options( sim_t* sim )
   if ( !conflicts.empty() )
     throw sc_runtime_error(
         fmt::format( "OBSERVE_STOCK_CONFLICT: solver_policy_observe_stock=1 cannot be combined with{}", conflicts ) );
+}
+
+void validate_table_options( sim_t* sim )
+{
+  if ( !rl_table_policy::active() )
+  {
+    rl_table_policy::load_and_validate( sim );  // refuses a stray solver_table_* option; nothing else
+    return;
+  }
+
+  std::string missing;
+  if ( sim->solver_policy_str.empty() )
+    missing += " solver_policy=";
+  if ( g_list_name.empty() )
+    missing += " solver_apl_stock_list=";
+  if ( !sim->solver_record_apl_choice )
+    missing += " solver_record_apl_choice=1";
+  if ( sim->rl_translog_file_str.empty() )
+    missing += " rl_translog=";
+  if ( !missing.empty() )
+    throw sc_runtime_error( fmt::format( "TABLE_NEEDS: solver_table_policy= also needs{}", missing ) );
+  if ( sim->solver_policy_weights != nullptr && ( sim->solver_policy_weights->has_aim_head || sim->solver_policy_weights->exploration != 0.0f ) )
+    throw sc_runtime_error( "TABLE_NEEDS: the solver_policy= blob must carry no aim head and a zero exploration dial (it is loaded, never consulted)" );
+
+  std::string conflicts;
+  if ( !sim->solver_control_str.empty() )
+    conflicts += " solver_control=";
+  if ( sim->solver_policy_observe_stock )
+    conflicts += " solver_policy_observe_stock=1";
+  if ( !sim->solver_hold_windows_str.empty() )
+    conflicts += " solver_hold_windows=";
+  if ( !sim->solver_force_decision_str.empty() )
+    conflicts += " solver_force_decision=";
+  if ( sim->solver_min_maelstrom_spend > 0 )
+    conflicts += " solver_min_maelstrom_spend>0";
+  if ( sim->solver_mask_no_enemy )
+    conflicts += " solver_mask_no_enemy=1";
+  const solver_branch::config_t& branch = solver_branch::cfg();
+  if ( branch.branch_at >= 0 )
+    conflicts += " solver_branch_at=";
+  if ( branch.teacher )
+    conflicts += " solver_teacher=1";
+  if ( branch.resalt_at_decision >= 0 )
+    conflicts += " per_source_rng_resalt_at_decision=";
+  if ( !conflicts.empty() )
+    throw sc_runtime_error( fmt::format( "TABLE_CONFLICT: solver_table_policy= cannot be combined with{}", conflicts ) );
+
+  rl_table_policy::load_and_validate( sim );
 }
 
 void on_init_finished( sim_t* sim )
