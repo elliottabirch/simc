@@ -1,5 +1,8 @@
 // ==========================================================================
-// 261025-bk4 (wave B, lane b2): THE TABLE PLAYER. See rl_table_policy.hpp for the contract and the order of operations.
+// 261025-bk4 (wave B, lane b2; wave B3 reconciliation): THE TABLE PLAYER. See rl_table_policy.hpp for the contract and the order of operations.
+// Wave B3 (the Python side is the specification, the fork follows): the loader reads exactly the TBP1 version 2 that tools/tbp_compile.py writes, the
+// update waits for the next STRATEGY decision (rows pressed by a deferral, a forced idle or NOSTATE neither update nor move the pending decision),
+// solver_table_defer=all is arm A1, and the .tbt writer is sim/tbt.py's layout byte for byte.
 //
 // Contents, in order: (1) the TBP1 file the fork reads, (2) the decision random number generator, (3) the six feature evaluators, (4) the nine strategies,
 // (5) the runtime (one decision, the update, the trace), (6) the sim-less probe.
@@ -51,13 +54,15 @@ bool        g_wait = false;
 bool        g_trace = false;
 
 // ---- constants shared with the repository's Python -------------------------------------------------------------------------------------
-// The TBP1 version this reader reads (learn/tabular/tbp.py FORMAT_VERSION). Version 2 added: decided_tokens, update_rule, reward_rule, scope, the
-// optional M2 array. An older file is read by an older checkout (hard swap), never by a shim.
+// The TBP1 version this reader reads (learn/tabular/tbp.py FORMAT_VERSION): version 2, exactly what tools/tbp_compile.py writes. Version 2 added the M2
+// array, the `decided` block, the update_rule / reward_rule / scope ids and the 2^20 state cap. An older file is read by an older checkout (hard swap),
+// never by a shim; the ids below are tbp.py's UPDATE_RULE / REWARD_RULE / SCOPE (the Python side is the specification, the fork follows: quick 261025-bk4 wave B3).
 constexpr std::uint32_t TBP_VERSION = 2u;
 constexpr std::size_t   TBP_PREAMBLE = 16;
 constexpr std::uint64_t TBP_MAX_STATES = 1ull << 20;
-constexpr const char*   UPDATE_RULE_ID = "incremental-mean-v1";
-constexpr const char*   REWARD_RULE_ID = "step-damage-v1";
+constexpr const char*   UPDATE_RULE_ID = "sample-average-n-first-f64-v1";
+constexpr const char*   REWARD_RULE_ID = "damage-since-last-strategy-decision-v1";
+constexpr const char*   SCOPE_ID = "fight";
 // learn/tabular/rng.py RNG_RULE, verbatim.
 constexpr const char* RNG_RULE_TEXT =
     "splitmix64-v1: state = mix(mix(fight_seed) ^ decision_index); draw = mix(state) then state += GOLDEN; uniform = (draw >> 11) * 2^-53; normal = "
@@ -199,6 +204,91 @@ double np_sum( const double* a, std::size_t n )
   return res;
 }
 
+// sha256 (FIPS 180-4) for the .tbt header: a copy of rl_buff_credit.cpp's (that one lives in its anonymous namespace).
+struct table_sha256_t
+{
+  std::uint32_t h[ 8 ] = { 0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au, 0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u };
+  std::uint8_t buf[ 64 ];
+  std::size_t fill        = 0;
+  std::uint64_t total_len = 0;
+
+  static std::uint32_t rotr( std::uint32_t x, unsigned n ) { return ( x >> n ) | ( x << ( 32u - n ) ); }
+
+  void block( const std::uint8_t* p )
+  {
+    static const std::uint32_t K[ 64 ] = {
+        0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u, 0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u, 0xd807aa98u, 0x12835b01u,
+        0x243185beu, 0x550c7dc3u, 0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u, 0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
+        0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau, 0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u, 0xc6e00bf3u, 0xd5a79147u,
+        0x06ca6351u, 0x14292967u, 0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u, 0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
+        0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u, 0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u, 0x19a4c116u, 0x1e376c08u,
+        0x2748774cu, 0x34b0bcb5u, 0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u, 0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
+        0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u };
+    std::uint32_t w[ 64 ];
+    for ( int i = 0; i < 16; ++i )
+      w[ i ] = ( std::uint32_t( p[ 4 * i ] ) << 24 ) | ( std::uint32_t( p[ 4 * i + 1 ] ) << 16 ) | ( std::uint32_t( p[ 4 * i + 2 ] ) << 8 ) |
+               std::uint32_t( p[ 4 * i + 3 ] );
+    for ( int i = 16; i < 64; ++i )
+    {
+      const std::uint32_t s0 = rotr( w[ i - 15 ], 7 ) ^ rotr( w[ i - 15 ], 18 ) ^ ( w[ i - 15 ] >> 3 );
+      const std::uint32_t s1 = rotr( w[ i - 2 ], 17 ) ^ rotr( w[ i - 2 ], 19 ) ^ ( w[ i - 2 ] >> 10 );
+      w[ i ]                 = w[ i - 16 ] + s0 + w[ i - 7 ] + s1;
+    }
+    std::uint32_t a = h[ 0 ], b = h[ 1 ], c = h[ 2 ], d = h[ 3 ], e = h[ 4 ], f = h[ 5 ], g = h[ 6 ], hh = h[ 7 ];
+    for ( int i = 0; i < 64; ++i )
+    {
+      const std::uint32_t S1  = rotr( e, 6 ) ^ rotr( e, 11 ) ^ rotr( e, 25 );
+      const std::uint32_t ch  = ( e & f ) ^ ( ~e & g );
+      const std::uint32_t t1  = hh + S1 + ch + K[ i ] + w[ i ];
+      const std::uint32_t S0  = rotr( a, 2 ) ^ rotr( a, 13 ) ^ rotr( a, 22 );
+      const std::uint32_t maj = ( a & b ) ^ ( a & c ) ^ ( b & c );
+      const std::uint32_t t2  = S0 + maj;
+      hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+    }
+    h[ 0 ] += a; h[ 1 ] += b; h[ 2 ] += c; h[ 3 ] += d; h[ 4 ] += e; h[ 5 ] += f; h[ 6 ] += g; h[ 7 ] += hh;
+  }
+
+  void update( const void* data, std::size_t n )
+  {
+    const auto* p = static_cast<const std::uint8_t*>( data );
+    total_len += n;
+    while ( n > 0 )
+    {
+      const std::size_t take = std::min<std::size_t>( 64 - fill, n );
+      std::memcpy( buf + fill, p, take );
+      fill += take;
+      p += take;
+      n -= take;
+      if ( fill == 64 )
+      {
+        block( buf );
+        fill = 0;
+      }
+    }
+  }
+
+  void finish( std::uint8_t out[ 32 ] )
+  {
+    const std::uint64_t bits = total_len * 8u;
+    const std::uint8_t one   = 0x80;
+    update( &one, 1 );
+    const std::uint8_t zero = 0;
+    while ( fill != 56 )
+      update( &zero, 1 );
+    std::uint8_t len[ 8 ];
+    for ( int i = 0; i < 8; ++i )
+      len[ i ] = static_cast<std::uint8_t>( bits >> ( 56 - 8 * i ) );
+    update( len, 8 );
+    for ( int i = 0; i < 8; ++i )
+    {
+      out[ 4 * i ]     = static_cast<std::uint8_t>( h[ i ] >> 24 );
+      out[ 4 * i + 1 ] = static_cast<std::uint8_t>( h[ i ] >> 16 );
+      out[ 4 * i + 2 ] = static_cast<std::uint8_t>( h[ i ] >> 8 );
+      out[ 4 * i + 3 ] = static_cast<std::uint8_t>( h[ i ] );
+    }
+  }
+};
+
 // ---- (1) the TBP1 file the fork reads ---------------------------------------------------------------------------------------------------
 enum class rule_t
 {
@@ -246,6 +336,7 @@ struct table_t
 {
   std::string            path;
   std::uint32_t          crc = 0;
+  std::uint8_t           sha256[ 32 ] = {};  // of the whole file: the .tbt header carries its first 16 bytes
   std::uint64_t          bytes = 0;
   std::string            state_set;
   std::uint64_t          n_states = 0;
@@ -254,7 +345,6 @@ struct table_t
   params_t               params;
   bool                   decided[ BUTTONS ] = {};
   std::string            scope = "fight";
-  bool                   has_m2 = false;
   std::vector<float>     Q;
   std::vector<std::int32_t> N;
   std::vector<double>    M2;
@@ -537,7 +627,7 @@ feature_t feature_of( const value_t& f, std::size_t index )
 }
 
 // Reads and validates one TBP1 file against this build. Refusal tokens are tbp.py's (TBP_MAGIC, TBP_VERSION, TBP_TRUNCATED, TBP_HEADER, TBP_CRC, TBP_SHAPE)
-// plus TBP_FINGERPRINT (the three contract hashes), TBP_STATES_CAP and TBP_OPEN.
+// plus TBP_FINGERPRINT (the three contract hashes), TBP_STATES and TBP_OPEN.
 table_t load_table( const std::string& path )
 {
   const std::vector<unsigned char> data = read_file( path );
@@ -607,7 +697,7 @@ table_t load_table( const std::string& path )
   if ( n_states < 1 )
     header_refusal( "n_states must be positive" );
   if ( static_cast<std::uint64_t>( n_states ) > TBP_MAX_STATES )
-    file_refusal( "TBP_STATES_CAP", fmt::format( "{}: {} states exceed the dense-table cap of {}", path, n_states, TBP_MAX_STATES ) );
+    file_refusal( "TBP_STATES", fmt::format( "{}: {} states exceed the dense-table cap of {}", path, n_states, TBP_MAX_STATES ) );
   t.n_states = static_cast<std::uint64_t>( n_states );
 
   const value_t& features = array_of( doc, "features", "header" );
@@ -630,21 +720,28 @@ table_t load_table( const std::string& path )
   if ( product != t.n_states )
     header_refusal( fmt::format( "the features' radix product is {}, the state set says {} states", product, t.n_states ) );
 
-  // The decided buttons: tokens resolved against this build's cast buttons, never by position alone.
-  const value_t& decided = array_of( doc, "decided_tokens", "header" );
+  // The decided buttons: tbp.py's `decided` block {tokens, buttons}. Tokens are resolved against this build's cast buttons, and `buttons[i]` must be the
+  // index of `tokens[i]` in the header's own `buttons` list (the check is by token text, `strcmp( RL_ACTIONS[b].token, tok ) == 0`), never by position alone.
+  const value_t& decided_block = member( doc, "decided", "header" );
+  const value_t& decided = array_of( decided_block, "tokens", "header decided" );
+  const value_t& decided_buttons = array_of( decided_block, "buttons", "header decided" );
   if ( decided.Size() == 0 )
-    header_refusal( "decided_tokens is empty: the player would decide nothing" );
+    header_refusal( "decided.tokens is empty: the player would decide nothing" );
+  if ( decided_buttons.Size() != decided.Size() )
+    header_refusal( fmt::format( "decided.buttons holds {} entries, decided.tokens {}", decided_buttons.Size(), decided.Size() ) );
   for ( rapidjson::SizeType i = 0; i < decided.Size(); ++i )
   {
     if ( !decided[ i ].IsString() )
-      header_refusal( "'decided_tokens' must hold strings" );
+      header_refusal( "'decided.tokens' must hold strings" );
     const std::string token( decided[ i ].GetString(), decided[ i ].GetStringLength() );
     int               found = -1;
     for ( int b = 0; b < BUTTONS; ++b )
-      if ( RL_ACTIONS[ b ].kind == rl_action_kind::cast && RL_ACTIONS[ b ].token != nullptr && token == RL_ACTIONS[ b ].token )
+      if ( RL_ACTIONS[ b ].kind == rl_action_kind::cast && RL_ACTIONS[ b ].token != nullptr && std::strcmp( RL_ACTIONS[ b ].token, token.c_str() ) == 0 )
         found = b;
     if ( found < 0 )
       header_refusal( fmt::format( "decided token '{}' is not a cast button of this build", token ) );
+    if ( !decided_buttons[ i ].IsInt64() || decided_buttons[ i ].GetInt64() != found )
+      header_refusal( fmt::format( "decided.buttons[{}] is not {}, the index of token '{}' in this build", i, found, token ) );
     if ( t.decided[ found ] )
       header_refusal( fmt::format( "decided token '{}' appears twice", token ) );
     t.decided[ found ] = true;
@@ -668,45 +765,43 @@ table_t load_table( const std::string& path )
     header_refusal( fmt::format( "update_rule '{}' is not '{}'", str_of( doc, "update_rule", "header" ), UPDATE_RULE_ID ) );
   if ( str_of( doc, "reward_rule", "header" ) != REWARD_RULE_ID )
     header_refusal( fmt::format( "reward_rule '{}' is not '{}'", str_of( doc, "reward_rule", "header" ), REWARD_RULE_ID ) );
-  if ( has_member( doc, "scope" ) )
-  {
-    t.scope = str_of( doc, "scope", "header" );
-    if ( t.scope != "fight" && t.scope != "process" )
-      header_refusal( fmt::format( "scope '{}' is neither fight nor process", t.scope ) );
-  }
+  t.scope = str_of( doc, "scope", "header" );
+  if ( t.scope != SCOPE_ID )
+    header_refusal( fmt::format( "scope '{}' is not '{}' (this build plays the fight scope only: Q, N and M2 are copied from the file at every fight start)", t.scope, SCOPE_ID ) );
+  // The K rule is recorded and read by nobody (the player does not apply it: table_certify.py); it must be there and well formed (tbp.py _check_header).
+  const value_t& krule = member( doc, "k", "header" );
+  if ( int_of( krule, "value", "header k" ) < 0 )
+    header_refusal( "k.value must not be negative" );
 
   // The arrays: Q float32, N int32, optionally M2 float64, then the CRC-32 of every byte before it.
   const std::uint64_t cells = t.n_states * static_cast<std::uint64_t>( BUTTONS );
-  const std::uint64_t base = TBP_PREAMBLE + header_bytes + cells * 8ull + 4ull;
-  const std::uint64_t with_m2 = base + cells * 8ull;
-  if ( data.size() == base )
-    t.has_m2 = false;
-  else if ( data.size() == with_m2 )
-    t.has_m2 = true;
-  else
-    file_refusal( "TBP_TRUNCATED", fmt::format( "{}: {} states x {} buttons need {} bytes (or {} with M2), the file holds {}", path, t.n_states, BUTTONS, base, with_m2, data.size() ) );
+  const std::uint64_t need = TBP_PREAMBLE + header_bytes + cells * 16ull + 4ull;  // Q float32, N int32, M2 float64, CRC-32
+  if ( data.size() != need )
+    file_refusal( "TBP_TRUNCATED", fmt::format( "{}: {} states x {} buttons need {} bytes, the file holds {}", path, t.n_states, BUTTONS, need, data.size() ) );
   const std::uint32_t crc = rl_translog::crc32( data.data(), data.size() - 4 );
   if ( crc != read_le<std::uint32_t>( data.data() + data.size() - 4 ) )
     file_refusal( "TBP_CRC", fmt::format( "{}: the CRC-32 of the file does not match its trailer", path ) );
   t.crc = crc;
+  {
+    table_sha256_t h;
+    h.update( data.data(), data.size() );
+    h.finish( t.sha256 );
+  }
 
   const unsigned char* arrays = data.data() + TBP_PREAMBLE + header_bytes;
   t.Q.resize( cells );
   t.N.resize( cells );
   std::memcpy( t.Q.data(), arrays, cells * 4 );
   std::memcpy( t.N.data(), arrays + cells * 4, cells * 4 );
-  if ( t.has_m2 )
-  {
-    t.M2.resize( cells );
-    std::memcpy( t.M2.data(), arrays + cells * 8, cells * 8 );
-  }
+  t.M2.resize( cells );
+  std::memcpy( t.M2.data(), arrays + cells * 8, cells * 8 );
   for ( std::uint64_t i = 0; i < cells; ++i )
   {
     if ( !std::isfinite( t.Q[ i ] ) )
       file_refusal( "TBP_SHAPE", fmt::format( "{}: Q holds a NaN or an infinity (cell {})", path, i ) );
     if ( t.N[ i ] < 0 )
       file_refusal( "TBP_SHAPE", fmt::format( "{}: N holds a negative count (cell {})", path, i ) );
-    if ( t.has_m2 && !( std::isfinite( t.M2[ i ] ) && t.M2[ i ] >= 0.0 ) )
+    if ( !( std::isfinite( t.M2[ i ] ) && t.M2[ i ] >= 0.0 ) )
       file_refusal( "TBP_SHAPE", fmt::format( "{}: M2 holds a negative or non-finite value (cell {})", path, i ) );
   }
 
@@ -1048,17 +1143,19 @@ choice_t run_strategy( const table_t& t, const double* Q, const std::int64_t* N,
 }
 
 // ---- (5) the runtime ---------------------------------------------------------------------------------------------------------------------
-// The `.tbt` trace (solver_table_trace=1): `<rl_translog>.tbt`, little-endian, written once per decision at the same point as the translog row
-// (before accept_cast) and once per fight for the closing update. Header 32 bytes, then fixed 792-byte records:
-//   header   @0 "TBT1"  @4 u32 version 1  @8 u32 record_size 792  @12 u32 header_size 32  @16 u32 TBP1 file CRC-32  @20 u32 n_states  @24 u64 TBP1 file bytes
-//   record   @0 u32 kind (1 decision, 2 closing update: only the update block and the fight words are set)  @4 u32 seq  @8 u32 iteration (fight index)
-//            @12 u32 decision_index  @16 u64 fight seed (sim->seed)  @24 u32 state id (0xFFFFFFFF none)  @28 u32 packed FINAL mask (bit i = button i)
-//            @32 u8 chooser  @33 u8 strategy  @34 u8 chosen button (255 none)  @35 u8 has_update  @36 u32 raw 64-bit draws consumed
-//            @40 f64[24] the values the strategy consumed in order (a uniform, an index's uniform, or a normal; Thompson: 22 normals)
-//            @232 f32[22] Q row used for the pick (after the previous update)  @320 i32[22] N row  @408 f64[22] probability vector (0.0 on buttons not
-//            available, NaN everywhere for a strategy with none, 0.0 on a row without a strategy decision)  @584 f64[22] M2 row (0.0 without M2)
-//            @760 u32 update: previous state  @764 u8 previous button  @768 f64 reward  @776 f32 Q_old  @780 i32 N_old  @784 f32 Q_new  @788 i32 N_new
-// The update block is the fold applied at THIS decision for the previous strategy decision (has_update = 1).
+// The `.tbt` trace (solver_table_trace=1): `<rl_translog>.tbt`, little-endian, in the layout of the repository's sim/tbt.py (the Python side is the specification, the
+// fork follows: quick 261025-bk4 wave B3). Written once per decision at the same point as the translog row (before accept_cast), once per fight for the closing update
+// (kind 3), and a footer (kind 2) when the translog's footer is written.
+//   header   32 bytes  "TBT1", u32 version 1, u32 record size 800, u32 header size 32, the first 16 bytes of the sha256 of the TBP1 file played
+//   record   800 bytes, `<IIIIQIIBBBBI24d22f22i22d22dIB3xdfifid`
+//            @0 u32 kind (1 decision, 2 footer, 3 fight end)  @4 u32 seq (footer: decision records; fight end: 0)  @8 u32 iteration (fight index; footer: fight-end records)
+//            @12 u32 decision_index (fight end: the decisions the fight made)  @16 u64 fight seed (sim->seed)  @24 u32 state id (0xFFFFFFFF none)  @28 u32 packed FINAL mask
+//            @32 u8 chooser  @33 u8 strategy  @34 u8 button (255 none)  @35 u8 has_update  @36 u32 raw 64-bit draws consumed
+//            @40 f64[24] the values the strategy consumed in order (a uniform, an index's uniform, or ONE normal for the two uniforms inside it; Thompson: 22 normals)
+//            @232 f32[22] Q row  @320 i32[22] N row  @408 f64[22] M2 row (the row as the pick saw it: after the previous update, zeros when no state)
+//            @584 f64[22] the probabilities the strategy sampled from (0.0 on an illegal button; all zero for Thompson and for every row without a strategy)
+//            @760 u32 update: state  @764 u8 update: button  @765 3 pad  @768 f64 reward  @776 f32 Q_old  @780 i32 N_old  @784 f32 Q_new  @788 i32 N_new  @792 f64 M2_new
+// The update block is the fold applied at THIS record (has_update = 1) for the pending strategy decision.
 struct alignas( 8 ) trace_record_t
 {
   std::uint32_t kind;
@@ -1076,8 +1173,8 @@ struct alignas( 8 ) trace_record_t
   double        values[ MAX_VALUES ];
   float         q[ BUTTONS ];
   std::int32_t  n[ BUTTONS ];
-  double        prob[ BUTTONS ];
   double        m2[ BUTTONS ];
+  double        prob[ BUTTONS ];
   std::uint32_t upd_state;
   std::uint8_t  upd_button;
   std::uint8_t  pad[ 3 ];
@@ -1086,12 +1183,14 @@ struct alignas( 8 ) trace_record_t
   std::int32_t  upd_n_old;
   float         upd_q_new;
   std::int32_t  upd_n_new;
+  double        upd_m2_new;
 };
-static_assert( sizeof( trace_record_t ) == 792, "trace record layout" );
+static_assert( sizeof( trace_record_t ) == 800, "trace record layout" );
 static_assert( offsetof( trace_record_t, fight_seed ) == 16 && offsetof( trace_record_t, state_id ) == 24 && offsetof( trace_record_t, chooser ) == 32 &&
                    offsetof( trace_record_t, n_draws ) == 36 && offsetof( trace_record_t, values ) == 40 && offsetof( trace_record_t, q ) == 232 &&
-                   offsetof( trace_record_t, n ) == 320 && offsetof( trace_record_t, prob ) == 408 && offsetof( trace_record_t, m2 ) == 584 &&
-                   offsetof( trace_record_t, upd_state ) == 760 && offsetof( trace_record_t, upd_reward ) == 768 && offsetof( trace_record_t, upd_n_new ) == 788,
+                   offsetof( trace_record_t, n ) == 320 && offsetof( trace_record_t, m2 ) == 408 && offsetof( trace_record_t, prob ) == 584 &&
+                   offsetof( trace_record_t, upd_state ) == 760 && offsetof( trace_record_t, upd_reward ) == 768 && offsetof( trace_record_t, upd_n_new ) == 788 &&
+                   offsetof( trace_record_t, upd_m2_new ) == 792,
                "trace record offsets" );
 
 struct pending_t
@@ -1112,10 +1211,13 @@ struct runtime_t
   player_t*                 actor = nullptr;
   std::unique_ptr<io::ofstream> trace;
   std::string               trace_path;
+  std::uint32_t             trace_decisions = 0;  // the footer's counts
+  std::uint32_t             trace_fight_ends = 0;
 };
 
 runtime_t g_rt;
-bool      g_defer_stock = true;
+bool      g_defer_stock = true;  // defer=stock (default)
+bool      g_defer_all = false;   // defer=all (arm A1)
 bool      g_refuse_fallback = false;
 bool      g_loaded = false;
 
@@ -1127,9 +1229,11 @@ struct update_info_t
   double        reward = 0.0;
   float         q_old = 0.0f, q_new = 0.0f;
   std::int32_t  n_old = 0, n_new = 0;
+  double        m2_new = 0.0;
 };
 
-// incremental-mean-v1.
+// update_rule 'sample-average-n-first-f64-v1' (tbp.py UPDATE_RULES): N[s,a] += 1 (refused at 2^31-1); Q_old = double(Q[s,a]); Q[s,a] = float32(Q_old + (r - Q_old) / double(N[s,a]));
+// M2[s,a] += (r - Q_old) * (r - double(Q_new float32)), the product rounded before the sum (rl_table_policy.cpp is compiled with -ffp-contract=off).
 update_info_t apply_update( const pending_t& pend, double damage_now )
 {
   update_info_t u;
@@ -1151,10 +1255,11 @@ update_info_t apply_update( const pending_t& pend, double damage_now )
   if ( !std::isfinite( q_new ) )
     refuse( "TABLE_STRATEGY", fmt::format( "the updated Q of cell ({}, {}) is not finite", pend.state, pend.button ) );
   g_rt.Q[ cell ] = q_new;
-  if ( g_table.has_m2 )
-    g_rt.M2[ cell ] += ( reward - q_old ) * ( reward - static_cast<double>( q_new ) );
+  const double product = ( reward - q_old ) * ( reward - static_cast<double>( q_new ) );
+  g_rt.M2[ cell ] = g_rt.M2[ cell ] + product;
   u.q_new = q_new;
   u.n_new = g_rt.N[ cell ];
+  u.m2_new = g_rt.M2[ cell ];
   return u;
 }
 
@@ -1166,6 +1271,10 @@ void write_trace( const trace_record_t& r )
   g_rt.trace->flush();
   if ( !*g_rt.trace )
     refuse( "TABLE_FILE", fmt::format( "write to '{}' failed", g_rt.trace_path ) );
+  if ( r.kind == 1 )
+    ++g_rt.trace_decisions;
+  else if ( r.kind == 3 )
+    ++g_rt.trace_fight_ends;
 }
 
 void fill_update( trace_record_t& r, const update_info_t& u )
@@ -1180,6 +1289,7 @@ void fill_update( trace_record_t& r, const update_info_t& u )
   r.upd_n_old = u.n_old;
   r.upd_q_new = u.q_new;
   r.upd_n_new = u.n_new;
+  r.upd_m2_new = u.m2_new;
 }
 
 void open_trace( sim_t* sim )
@@ -1191,13 +1301,11 @@ void open_trace( sim_t* sim )
     refuse( "TABLE_NEEDS", fmt::format( "unable to open '{}' for writing", g_rt.trace_path ) );
   unsigned char header[ 32 ] = {};
   std::memcpy( header, "TBT1", 4 );
-  const std::uint32_t version = 1, record = sizeof( trace_record_t ), hsize = 32, n_states = static_cast<std::uint32_t>( g_table.n_states );
+  const std::uint32_t version = 1, record = sizeof( trace_record_t ), hsize = 32;
   std::memcpy( header + 4, &version, 4 );
   std::memcpy( header + 8, &record, 4 );
   std::memcpy( header + 12, &hsize, 4 );
-  std::memcpy( header + 16, &g_table.crc, 4 );
-  std::memcpy( header + 20, &n_states, 4 );
-  std::memcpy( header + 24, &g_table.bytes, 8 );
+  std::memcpy( header + 16, g_table.sha256, 16 );
   g_rt.trace->write( reinterpret_cast<const char*>( header ), sizeof( header ) );
   g_rt.trace->flush();
 }
@@ -1225,24 +1333,20 @@ void load_and_validate( sim_t* sim )
       refuse( "TABLE_NEEDS", "a solver_table_* option is set without solver_table_policy=" );
     return;
   }
-  const std::string scope = g_scope.empty() ? std::string() : g_scope;
-  if ( !scope.empty() && scope != "fight" && scope != "process" )
-    refuse( "TABLE_NEEDS", fmt::format( "solver_table_scope='{}' must be fight or process", scope ) );
+  if ( !g_scope.empty() && g_scope != SCOPE_ID )
+    refuse( "TABLE_NEEDS", fmt::format( "solver_table_scope='{}' must be '{}' (the only scope this build plays)", g_scope, SCOPE_ID ) );
   if ( !g_fallback.empty() && g_fallback != "stock" && g_fallback != "refuse" )
     refuse( "TABLE_NEEDS", fmt::format( "solver_table_fallback='{}' must be stock or refuse", g_fallback ) );
-  if ( !g_defer.empty() && g_defer != "stock" && g_defer != "none" )
-    refuse( "TABLE_NEEDS", fmt::format( "solver_table_defer='{}' must be stock or none", g_defer ) );
+  if ( !g_defer.empty() && g_defer != "stock" && g_defer != "none" && g_defer != "all" )
+    refuse( "TABLE_NEEDS", fmt::format( "solver_table_defer='{}' must be stock, none or all", g_defer ) );
   g_refuse_fallback = g_fallback == "refuse";
-  g_defer_stock = g_defer != "none";
+  g_defer_stock = g_defer != "none" && g_defer != "all";
+  g_defer_all = g_defer == "all";
 
   if ( g_loaded )
     return;  // setup() ran again in this process (a child sim): the file is read once, the runtime is not reset
   g_table = load_table( g_path );
-  // The option decides the scope (default fight); a file that names a scope must agree (the header's scope defaults to fight).
-  const std::string effective = scope.empty() ? std::string( "fight" ) : scope;
-  if ( g_table.scope != effective )
-    refuse( "TABLE_NEEDS", fmt::format( "the file's scope is '{}', solver_table_scope is '{}'", g_table.scope, effective ) );
-  g_table.scope = effective;
+  g_table.scope = SCOPE_ID;
 
   if ( g_wait )
     g_table.decided[ g_table.idle_index ] = true;
@@ -1266,12 +1370,10 @@ void on_fight_start( sim_t* )
     return;
   g_rt.rows = 0;
   g_rt.pending = pending_t();
-  if ( g_table.scope == "fight" )
-  {
-    g_rt.Q = g_table.Q;
-    g_rt.N = g_table.N;
-    g_rt.M2 = g_table.M2;
-  }
+  // scope fight: Q, N and M2 start from the immutable file at every fight start (the warm-up fight and the kept fight alike).
+  g_rt.Q = g_table.Q;
+  g_rt.N = g_table.N;
+  g_rt.M2 = g_table.M2;
 }
 
 void on_fight_end( sim_t* sim )
@@ -1283,8 +1385,8 @@ void on_fight_end( sim_t* sim )
   if ( g_rt.trace )
   {
     trace_record_t r{};
-    r.kind = 2;
-    r.seq = static_cast<std::uint32_t>( sim->solver_control_seq );
+    r.kind = 3;
+    r.seq = 0;
     r.iteration = static_cast<std::uint32_t>( rl_translog::fight_index( sim ) );
     r.decision_index = static_cast<std::uint32_t>( g_rt.rows );
     r.fight_seed = static_cast<std::uint64_t>( sim->seed );
@@ -1293,6 +1395,21 @@ void on_fight_end( sim_t* sim )
     fill_update( r, u );
     write_trace( r );
   }
+}
+
+void close_trace( sim_t* )
+{
+  if ( !g_rt.trace )
+    return;
+  trace_record_t r{};
+  r.kind = 2;
+  r.seq = g_rt.trace_decisions;
+  r.iteration = g_rt.trace_fight_ends;
+  r.state_id = rl_apl_choice::STATE_ID_NONE;
+  r.button = 255;
+  write_trace( r );
+  g_rt.trace->close();
+  g_rt.trace.reset();
 }
 
 decision_t decide( sim_t* sim, player_t* p, bool foreground, std::uint64_t seq, const float* obs, const std::uint8_t* mask, const rl_stock_eval::pick_t& stock )
@@ -1314,25 +1431,36 @@ decision_t decide( sim_t* sim, player_t* p, bool foreground, std::uint64_t seq, 
     n_legal += legal[ b ];
   }
   const int  mapped = stock.mapped_index;
-  const bool defer = g_defer_stock && mapped >= 0 && mapped < BUTTONS && !t.decided[ mapped ] && mask[ mapped ] != 0;
+  const bool stock_legal = mapped >= 0 && mapped < BUTTONS && mask[ mapped ] != 0;
 
-  // The plan: read-only, so a no-op leaves the table and the counters untouched.
-  enum class plan_t { stock, nostate_press, nostate_idle, forced_idle, strategy };
+  // The plan: read-only, so a no-op leaves the table and the counters untouched. The order is table_certify.py's reference: the observation is bucketed BEFORE the
+  // deferral test (an observation outside the state set is NOSTATE whatever the deferral would say), then defer=all, then defer=stock, then the legal set.
+  enum class plan_t { stock, stock_idle, nostate_press, nostate_idle, forced_idle, strategy };
   plan_t plan = plan_t::strategy;
-  if ( defer )
-    plan = plan_t::stock;
-  else if ( !in_domain )
+  if ( !in_domain )
   {
     if ( g_refuse_fallback )
       refuse( "TABLE_FALLBACK_REFUSED",
               fmt::format( "seq={} t={:.3f}: the observation is outside the state set '{}' (solver_table_fallback=refuse)", seq, sim->current_time().total_seconds(),
                            t.state_set ) );
-    plan = ( mapped >= 0 && mapped < BUTTONS && mask[ mapped ] != 0 ) ? plan_t::nostate_press : plan_t::nostate_idle;
+    plan = stock_legal ? plan_t::nostate_press : plan_t::nostate_idle;
   }
+  else if ( g_defer_all )
+  {
+    // arm A1: every legal stock pick is pressed; no ready mapped leaf is the stock pick "wait"; an illegal stock pick is a forced idle. No draw, no update.
+    if ( stock_legal )
+      plan = plan_t::stock;
+    else if ( mapped < 0 )
+      plan = plan_t::stock_idle;
+    else
+      plan = plan_t::forced_idle;
+  }
+  else if ( g_defer_stock && stock_legal && !t.decided[ mapped ] )
+    plan = plan_t::stock;
   else if ( n_legal == 0 )
     plan = plan_t::forced_idle;
 
-  const bool wants_idle = plan == plan_t::nostate_idle || plan == plan_t::forced_idle;
+  const bool wants_idle = plan == plan_t::nostate_idle || plan == plan_t::forced_idle || plan == plan_t::stock_idle;
   if ( wants_idle && mask[ t.idle_index ] == 0 )
   {
     if ( !foreground )
@@ -1343,15 +1471,6 @@ decision_t decide( sim_t* sim, player_t* p, bool foreground, std::uint64_t seq, 
     refuse( "TABLE_NO_LEGAL", fmt::format( "seq={} t={:.3f}: no decided button, no deferred stock press and no legal idle button", seq, sim->current_time().total_seconds() ) );
   }
 
-  // The previous strategy decision's one-step reward, then the pick (update-then-pick is the order to certify).
-  const double  now_damage = p->solver_damage_so_far;
-  update_info_t upd;
-  if ( g_rt.pending.valid )
-  {
-    upd = apply_update( g_rt.pending, now_damage );
-    g_rt.pending = pending_t();
-  }
-
   const std::uint32_t decision_index = static_cast<std::uint32_t>( g_rt.rows );
   ++g_rt.rows;
   rl_apl_choice::table_info_t& info = d.info;
@@ -1360,12 +1479,19 @@ decision_t decide( sim_t* sim, player_t* p, bool foreground, std::uint64_t seq, 
   d.q_margin = std::numeric_limits<float>::quiet_NaN();
   d.top_q = std::numeric_limits<float>::quiet_NaN();
 
-  choice_t choice;
-  bool     have_choice = false;
+  const double  now_damage = p->solver_damage_so_far;
+  update_info_t upd;
+  choice_t      choice;
+  bool          have_choice = false;
   switch ( plan )
   {
     case plan_t::stock:
       d.idx = mapped;
+      info.chooser = rl_apl_choice::CHOOSER_STOCK;
+      break;
+    case plan_t::stock_idle:
+      d.idx = t.idle_index;
+      d.idle = true;
       info.chooser = rl_apl_choice::CHOOSER_STOCK;
       break;
     case plan_t::nostate_press:
@@ -1384,6 +1510,13 @@ decision_t decide( sim_t* sim, player_t* p, bool foreground, std::uint64_t seq, 
       break;
     case plan_t::strategy:
     {
+      // The pending strategy decision's reward (the damage since IT: a deferred press, a forced idle or a NOSTATE row in between neither updated nor moved it)
+      // is folded in BEFORE the pick, then the strategy chooses on the updated row.
+      if ( g_rt.pending.valid )
+      {
+        upd = apply_update( g_rt.pending, now_damage );
+        g_rt.pending = pending_t();
+      }
       const std::size_t row = static_cast<std::size_t>( sid ) * BUTTONS;
       double            Qd[ BUTTONS ];
       std::int64_t      Nd[ BUTTONS ];
@@ -1392,16 +1525,10 @@ decision_t decide( sim_t* sim, player_t* p, bool foreground, std::uint64_t seq, 
       {
         Qd[ b ] = static_cast<double>( g_rt.Q[ row + static_cast<std::size_t>( b ) ] );
         Nd[ b ] = static_cast<std::int64_t>( g_rt.N[ row + static_cast<std::size_t>( b ) ] );
-        if ( t.has_m2 )
-        {
-          // reward_sd of a cell with N >= 2: the population standard deviation sqrt(M2 / N); M2 is non-negative by construction, clamped against rounding.
-          const double var = Nd[ b ] > 0 ? g_rt.M2[ row + static_cast<std::size_t>( b ) ] / static_cast<double>( Nd[ b ] ) : 0.0;
-          sd[ b ] = std::sqrt( std::max( var, 0.0 ) );
-        }
-        else
-          sd[ b ] = 0.0;
+        // tbp.table_reward_sd: sqrt(M2 / N) where N >= 2, 0.0 elsewhere.
+        sd[ b ] = Nd[ b ] >= 2 ? std::sqrt( g_rt.M2[ row + static_cast<std::size_t>( b ) ] / static_cast<double>( Nd[ b ] ) ) : 0.0;
       }
-      choice = run_strategy( t, Qd, Nd, t.has_m2 ? sd : nullptr, legal, static_cast<std::uint64_t>( sim->seed ), decision_index );
+      choice = run_strategy( t, Qd, Nd, sd, legal, static_cast<std::uint64_t>( sim->seed ), decision_index );
       have_choice = true;
       d.idx = choice.action;
       d.idle = d.idx == t.idle_index;
@@ -1462,11 +1589,11 @@ decision_t decide( sim_t* sim, player_t* p, bool foreground, std::uint64_t seq, 
       {
         r.q[ b ] = g_rt.Q[ row + static_cast<std::size_t>( b ) ];
         r.n[ b ] = g_rt.N[ row + static_cast<std::size_t>( b ) ];
-        r.m2[ b ] = t.has_m2 ? g_rt.M2[ row + static_cast<std::size_t>( b ) ] : 0.0;
+        r.m2[ b ] = g_rt.M2[ row + static_cast<std::size_t>( b ) ];
       }
     }
     for ( int b = 0; b < BUTTONS; ++b )
-      r.prob[ b ] = have_choice ? ( choice.has_probs ? choice.probs[ b ] : std::numeric_limits<double>::quiet_NaN() ) : 0.0;
+      r.prob[ b ] = have_choice && choice.has_probs ? choice.probs[ b ] : 0.0;
     fill_update( r, upd );
     write_trace( r );
   }
@@ -1654,9 +1781,9 @@ int run_probe( const std::vector<std::string>& args )
           const std::size_t c = static_cast<std::size_t>( sid ) * BUTTONS + static_cast<std::size_t>( b );
           Qd[ b ] = static_cast<double>( t.Q[ c ] );
           Nd[ b ] = t.N[ c ];
-          sd[ b ] = t.has_m2 && Nd[ b ] > 0 ? std::sqrt( std::max( t.M2[ c ] / static_cast<double>( Nd[ b ] ), 0.0 ) ) : 0.0;
+          sd[ b ] = Nd[ b ] >= 2 ? std::sqrt( t.M2[ c ] / static_cast<double>( Nd[ b ] ) ) : 0.0;
         }
-        const choice_t c = run_strategy( t, Qd, Nd, t.has_m2 ? sd : nullptr, legal, keys[ i * 2 ], keys[ i * 2 + 1 ] );
+        const choice_t c = run_strategy( t, Qd, Nd, sd, legal, keys[ i * 2 ], keys[ i * 2 + 1 ] );
         o.button = c.action;
         o.draws = static_cast<std::uint32_t>( c.draws );
         o.probability = c.has_probs ? c.probs[ c.action ] : std::numeric_limits<double>::quiet_NaN();
@@ -1688,7 +1815,7 @@ int run_probe( const std::vector<std::string>& args )
           Qd[ b ] = static_cast<double>( read_le<float>( r + 4 * b ) );
           Nd[ b ] = read_le<std::int32_t>( r + 88 + 4 * b );
           const double m2 = read_le<double>( r + 176 + 8 * b );
-          sd[ b ] = Nd[ b ] > 0 ? std::sqrt( std::max( m2 / static_cast<double>( Nd[ b ] ), 0.0 ) ) : 0.0;
+          sd[ b ] = Nd[ b ] >= 2 ? std::sqrt( m2 / static_cast<double>( Nd[ b ] ) ) : 0.0;
           legal[ b ] = r[ 352 + b ];
         }
         pick_out_t& o = picks[ i ];

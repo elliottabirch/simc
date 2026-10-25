@@ -1,5 +1,5 @@
 // ==========================================================================
-// 261025-bk4 (wave B, lane b2): THE TABLE PLAYER. The in-process arm of solver_control::choose plays a TBP1 table.
+// 261025-bk4 (wave B, lane b2; reconciled with the Python side in wave B3): THE TABLE PLAYER. The in-process arm of solver_control::choose plays a TBP1 table.
 //
 // Words used here. A "TBP1" file is the table player's file (written by the repository's learn/tabular/tbp.py): a compiled state set (the
 // bucketing rules on the 444 observation slots), `Q[s, a]` (float32), `N[s, a]` (int32) and optionally `M2[s, a]` (float64) over the 22
@@ -16,19 +16,22 @@
 //     2. the state id is bucketed from the observation and the mask         (`bucket`, the float32 pipeline of state.py)
 //     3. the plan: STOCK (defer) | NOSTATE (fallback) | FORCED_IDLE | STRATEGY, read-only; a background boundary with nothing to press is
 //        a no-op that consumes no decision number
-//     4. the previous strategy decision's one-step reward is folded in:  r = damage now - damage at that decision;
+//     4. (STRATEGY plans only) the pending strategy decision's reward is folded in:  r = damage now - damage at THAT decision;
 //        N += 1; Q = float32( Q + (r - Q) / N ) (float64 arithmetic on the widened float32 Q); M2 += (r - Q_old) * (r - Q_new)
 //     5. the pick: the strategy on the (updated) row, the legal set = mask AND decided set, RNG key (fight seed, decision index)
 //     6. the row is recorded (translog + `.apl` format 3 + optional `.tbt` trace), then accept_cast (or the idle fall-through)
 //   and the last strategy decision of a fight is closed at combat_end (on_fight_end), immediately before the translog's close row.
 //
-// Reward. `reward_rule` "step-damage-v1": r = p->solver_damage_so_far (double) at the NEXT recorded decision (of any chooser) minus its value at
-// the strategy decision; for the fight's last strategy decision, the fight's final damage (the close row's final_damage_total). This is exactly the
-// repository's one-step reward `learn/returns.py:step_rewards`, so Q is the mean one-step reward. `update_rule` "incremental-mean-v1" is the update above.
+// Reward. `reward_rule` "damage-since-last-strategy-decision-v1": r = p->solver_damage_so_far (double) at the NEXT strategy decision (chooser STRATEGY or
+// STRATEGY_IDLE) minus its value at the pending strategy decision; the rows pressed in between (STOCK, FORCED_IDLE, NOSTATE) neither update nor move the pending
+// decision. The fight's last pending decision is closed at combat_end with the fight's final damage (the close row's final_damage_total). `update_rule`
+// "sample-average-n-first-f64-v1" is the update above. Both ids are learn/tabular/tbp.py's; the reference is rungs/r000_plumbing/table_certify.py.
 //
 // The cooldown hybrid (H1-pre, `solver_table_defer=stock`, the default). When the dry stock walk's first ready MAPPED leaf is a cast button the
 // table does not decide and that button is legal in the row's mask, it is pressed (chooser STOCK): no RNG draw, no table change. Else the strategy
-// decides among the legal decided buttons. With `solver_table_defer=none` the stock list is never consulted for a press.
+// decides among the legal decided buttons. With `solver_table_defer=none` the stock list is never consulted for a press. With `solver_table_defer=all`
+// (arm A1, the transport anchor) every legal stock pick is pressed (STOCK), no ready mapped leaf is the stock pick "wait" (STOCK on the idle button), an
+// illegal stock pick is a FORCED_IDLE; no draw, no update. In every mode an observation outside the state set is NOSTATE (bucketing precedes the deferral test).
 //
 // "No press" is a fall-through: nothing is returned and no wait is set, so SimC's own idle poll (player_t::available(), gauss 100 ms) schedules
 // the next try. The idle button is the registry's `wait_next_event`. It is pressed when nothing decided is legal (FORCED_IDLE) or, with
@@ -36,21 +39,21 @@
 //
 // Options (all default off; global storage here, because a sim_t member would rebuild every file; the RL rigs run one sim per process):
 //     solver_table_policy=<path>       the TBP1 file; empty = the table player is off (one string test)
-//     solver_table_scope=fight|process fight (default): Q, N, M2 are copied from the loaded file at every fight start; process: they carry across fights
+//     solver_table_scope=fight         fight (the only scope, the default): Q, N, M2 are copied from the loaded file at every fight start
 //     solver_table_fallback=stock|refuse   an observation outside the state set's domain: the stock pick (chooser NOSTATE), or abort by name
-//     solver_table_defer=stock|none        the hybrid above
+//     solver_table_defer=stock|none|all    the hybrid above
 //     solver_table_wait=0|1                voluntary idle (default 0)
 //     solver_table_trace=0|1               write `<rl_translog>.tbt` (layout in rl_table_policy.cpp)
 // Needs (refused by name TABLE_NEEDS): solver_policy=, solver_apl_stock_list=, solver_record_apl_choice=1, rl_translog=, a blob without an aim head.
 // Conflicts (TABLE_CONFLICT): solver_control=, solver_policy_observe_stock, hold windows, forced decisions, solver_min_maelstrom_spend > 0,
 // solver_mask_no_enemy, a branch / teacher / re-salt mode. Loader refusals start TABLE_FILE:, a refused fallback TABLE_FALLBACK_REFUSED:.
 //
-// The file, TBP1 version 2 (the repository's writer is learn/tabular/tbp.py; interim: src/sylvanas_rl/tools/tbp_fork_v2.py, which also documents the byte layout):
-// magic `TBP1`, u32 version 2, u64 header bytes, a JSON header, Q float32 (S x 22), N int32 (S x 22), optionally M2 float64 (S x 22; present exactly when the file is
-// that much longer), a CRC-32 trailer. The header carries `fingerprints` (the three registry hashes, refused TBP_FINGERPRINT against this build's baked ones), `buttons`,
-// `state_set.n_states` (at most 2^20, TBP_STATES_CAP), `features` (the six rule kinds, doubles for float64 edges and float32 values), `strategy` {id, params}, the
-// `rng` rule text of learn/tabular/rng.py, `decided_tokens`, `update_rule` "incremental-mean-v1", `reward_rule` "step-damage-v1" and `scope`. The header's `k` (the K rule) is
-// read by nobody here: neither the Python reference strategies nor the order above use it. For optimistic_initialization the prior is folded in at load.
+// The file, TBP1 version 2 (the repository's writer is learn/tabular/tbp.py, driven by tools/tbp_compile.py; its docstring documents the byte layout):
+// magic `TBP1`, u32 version 2, u64 header bytes, a JSON header, Q float32 (S x 22), N int32 (S x 22), M2 float64 (S x 22), a CRC-32 trailer. The header carries
+// `fingerprints` (the three registry hashes, refused TBP_FINGERPRINT against this build's baked ones), `buttons`, `state_set.n_states` (at most 2^20, TBP_STATES),
+// `features` (the six rule kinds, doubles for float64 edges and float32 values), `strategy` {id, params}, the `rng` rule text of learn/tabular/rng.py, the `decided`
+// block {tokens, buttons}, `update_rule` "sample-average-n-first-f64-v1", `reward_rule` "damage-since-last-strategy-decision-v1", `scope` "fight" and `k`. The header's `k` (the K
+// rule) is read by nobody here: the player does not apply it (table_certify.py). For optimistic_initialization the prior is folded in at load.
 //
 // The sim-less probe (`simc rl_table_probe=<mode> key=value ...`, run from main() before any sim_t exists): modes buckets, picks, rows, rng, libm,
 // epsilons. The formats are in the comment above run_probe in rl_table_policy.cpp.
@@ -97,6 +100,9 @@ void on_fight_start( sim_t* sim );
 
 // Called from sim_t::combat_end() immediately before rl_translog::record_close: closes the last strategy decision with the fight's final damage.
 void on_fight_end( sim_t* sim );
+
+// Called from rl_translog::write_footer after the `.apl` footer: writes the `.tbt` footer record (kind 2: decision and fight-end counts) and closes the trace. Does nothing without a trace.
+void close_trace( sim_t* sim );
 
 // One decision's answer.
 struct decision_t

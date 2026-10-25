@@ -18,6 +18,7 @@
 #include "sim/rl_policy.hpp"
 #include "sim/rl_rng_record.hpp"
 #include "sim/rl_stock_eval.hpp"
+#include "sim/rl_table_policy.hpp"
 #include "sim/rl_target_select.hpp"
 #include "sim/sim.hpp"
 #include "util/io.hpp"
@@ -1364,6 +1365,9 @@ void write_footer( sim_t* sim )
     }
     root->rl_translog_apl_stream->close();
   }
+
+  // 261025-bk4 (wave B3): the table player's `.tbt` trace gets its footer record (kind 2) and is closed here, beside the `.apl` footer. No trace: nothing happens.
+  rl_table_policy::close_trace( root );
 }
 
 // ---- Fight-list support (quick 261005-mix, plan 01) ----
