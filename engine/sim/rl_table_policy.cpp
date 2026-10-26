@@ -66,6 +66,9 @@ constexpr std::size_t   TBP_PREAMBLE = 16;
 constexpr std::uint64_t TBP_MAX_STATES = 1ull << 20;
 constexpr const char*   UPDATE_RULE_ID = "constant-alpha-floor-f64-v1";
 constexpr const char*   REWARD_RULE_ID = "damage-since-last-strategy-decision-v1";
+// tbp.py REWARD_RULE_RETURN: Q is the mean Monte Carlo return (damage from the press to the fight end). The return of a press is unknown until the fight ends, so under this
+// rule the player applies NO in-fight update: Q, N and M2 stay as the file loaded them, and the trace records "no update" (has_update = 0) at every record (261026-rbt).
+constexpr const char*   REWARD_RULE_RETURN_ID = "damage-to-fight-end-v1";
 constexpr const char*   SCOPE_ID = "fight";
 // learn/tabular/rng.py RNG_RULE, verbatim.
 constexpr const char* RNG_RULE_TEXT =
@@ -351,6 +354,7 @@ struct table_t
   std::string            scope = "fight";
   double                 update_alpha = 0.0;  // the header's `update_alpha`, in (0, 1]
   std::string            header_text;         // the header bytes of the file exactly as read (JSON padded with spaces): a saved table repeats them verbatim
+  bool                   return_reward = false;  // reward_rule is REWARD_RULE_RETURN_ID: no in-fight update
   std::vector<float>     Q;
   std::vector<std::int32_t> N;
   std::vector<double>    M2;
@@ -773,8 +777,12 @@ table_t load_table( const std::string& path )
   t.update_alpha = num_of( doc, "update_alpha", "header" );
   if ( !( std::isfinite( t.update_alpha ) && t.update_alpha > 0.0 && t.update_alpha <= 1.0 ) )
     header_refusal( fmt::format( "update_alpha {} is outside (0, 1]", t.update_alpha ) );
-  if ( str_of( doc, "reward_rule", "header" ) != REWARD_RULE_ID )
-    header_refusal( fmt::format( "reward_rule '{}' is not '{}'", str_of( doc, "reward_rule", "header" ), REWARD_RULE_ID ) );
+  {
+    const std::string reward_rule = str_of( doc, "reward_rule", "header" );
+    if ( reward_rule != REWARD_RULE_ID && reward_rule != REWARD_RULE_RETURN_ID )
+      header_refusal( fmt::format( "reward_rule '{}' is neither '{}' nor '{}'", reward_rule, REWARD_RULE_ID, REWARD_RULE_RETURN_ID ) );
+    t.return_reward = reward_rule == REWARD_RULE_RETURN_ID;
+  }
   t.scope = str_of( doc, "scope", "header" );
   if ( t.scope != SCOPE_ID )
     header_refusal( fmt::format( "scope '{}' is not '{}' (this build plays the fight scope only: Q, N and M2 are copied from the file at every fight start)", t.scope, SCOPE_ID ) );
@@ -1236,6 +1244,8 @@ struct update_info_t
 update_info_t apply_update( const pending_t& pend, double damage_now )
 {
   update_info_t u;
+  if ( g_table.return_reward )
+    return u;  // reward_rule damage-to-fight-end-v1: the return of this press is unknown until the fight ends, so Q, N and M2 stay as loaded; applied = false, the trace says so
   const std::size_t cell = static_cast<std::size_t>( pend.state ) * BUTTONS + static_cast<std::size_t>( pend.button );
   const double      reward = damage_now - pend.damage;
   if ( !std::isfinite( reward ) )
