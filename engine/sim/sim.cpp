@@ -4736,6 +4736,9 @@ void sim_t::create_options()
   add_option( opt_string( "solver_table_defer", rl_table_policy::defer_storage() ) );
   add_option( opt_bool( "solver_table_wait", rl_table_policy::wait_storage() ) );
   add_option( opt_bool( "solver_table_trace", rl_table_policy::trace_storage() ) );
+  // 261026-lrn: the table is saved at the end of the kept fight, and the decaying strategies read the fight's place in its chain as their clock.
+  add_option( opt_string( "solver_table_save", rl_table_policy::save_storage() ) );
+  add_option( opt_int( "solver_table_clock", rl_table_policy::clock_storage() ) );
   // 261009-spd: see sim.hpp's rl_capability_selftest doc comment.
   add_option( opt_bool( "rl_capability_selftest", rl_capability_selftest ) );
   // 261009-spd (T3): see sim.hpp's rl_huge_pages doc comment.

@@ -17,7 +17,8 @@
 //     3. the plan: STOCK (defer) | NOSTATE (fallback) | FORCED_IDLE | STRATEGY, read-only; a background boundary with nothing to press is
 //        a no-op that consumes no decision number
 //     4. (STRATEGY plans only) the pending strategy decision's reward is folded in:  r = damage now - damage at THAT decision;
-//        N += 1; Q = float32( Q + (r - Q) / N ) (float64 arithmetic on the widened float32 Q); M2 += (r - Q_old) * (r - Q_new)
+//        N += 1; alpha_n = max(update_alpha, 1/N); Q = float32( Q_old + alpha_n * (r - Q_old) ) (float64 arithmetic on the widened float32 Q);
+//        M2 = N * (1 - alpha_n) * (M2_old / N_old + alpha_n * (r - Q_old)^2) (the exponentially weighted variance times N; N_old = 0 reads as variance 0)
 //     5. the pick: the strategy on the (updated) row, the legal set = mask AND decided set, RNG key (fight seed, decision index)
 //     6. the row is recorded (translog + `.apl` format 3 + optional `.tbt` trace), then accept_cast (or the idle fall-through)
 //   and the last strategy decision of a fight is closed at combat_end (on_fight_end), immediately before the translog's close row.
@@ -25,7 +26,7 @@
 // Reward. `reward_rule` "damage-since-last-strategy-decision-v1": r = p->solver_damage_so_far (double) at the NEXT strategy decision (chooser STRATEGY or
 // STRATEGY_IDLE) minus its value at the pending strategy decision; the rows pressed in between (STOCK, FORCED_IDLE, NOSTATE) neither update nor move the pending
 // decision. The fight's last pending decision is closed at combat_end with the fight's final damage (the close row's final_damage_total). `update_rule`
-// "sample-average-n-first-f64-v1" is the update above. Both ids are learn/tabular/tbp.py's; the reference is rungs/r000_plumbing/table_certify.py.
+// "constant-alpha-floor-f64-v1" is the update above (the header's `update_alpha`, 0.05 in the lane-lrn files). Both ids are learn/tabular/tbp.py's; the reference is rungs/r000_plumbing/table_certify.py.
 //
 // The cooldown hybrid (H1-pre, `solver_table_defer=stock`, the default). When the dry stock walk's first ready MAPPED leaf is a cast button the
 // table does not decide and that button is legal in the row's mask, it is pressed (chooser STOCK): no RNG draw, no table change. Else the strategy
@@ -44,16 +45,23 @@
 //     solver_table_defer=stock|none|all    the hybrid above
 //     solver_table_wait=0|1                voluntary idle (default 0)
 //     solver_table_trace=0|1               write `<rl_translog>.tbt` (layout in rl_table_policy.cpp)
+//     solver_table_save=<path>             at the end of the KEPT fight (the last iteration) write the table as it stands to <path> (tbp.py's byte layout, the loaded file's header
+//                                          verbatim, the CRC-32 recomputed; <path>.tmp then rename); refused TABLE_NEEDS when it names the input file. A chain of launches
+//                                          carries a table across fights by starting each launch from the previous launch's saved file (quick 261026-lrn). Empty = off.
+//     solver_table_clock=<k>               integer >= 0, default 0: the `e` of the three decaying strategies (lin_dec_epsilon_greedy, exp_dec_epsilon_greedy, softmax) for every
+//                                          decision of this launch. It is the fight's place in its chain, so a schedule decays over fights, not over the decisions of one fight
+//                                          (before version 3 `e` was the decision index). The `.tbt` trace header records it.
 // Needs (refused by name TABLE_NEEDS): solver_policy=, solver_apl_stock_list=, solver_record_apl_choice=1, rl_translog=, a blob without an aim head.
 // Conflicts (TABLE_CONFLICT): solver_control=, solver_policy_observe_stock, hold windows, forced decisions, solver_min_maelstrom_spend > 0,
 // solver_mask_no_enemy, a branch / teacher / re-salt mode. Loader refusals start TABLE_FILE:, a refused fallback TABLE_FALLBACK_REFUSED:.
 //
-// The file, TBP1 version 2 (the repository's writer is learn/tabular/tbp.py, driven by tools/tbp_compile.py; its docstring documents the byte layout):
-// magic `TBP1`, u32 version 2, u64 header bytes, a JSON header, Q float32 (S x 22), N int32 (S x 22), M2 float64 (S x 22), a CRC-32 trailer. The header carries
+// The file, TBP1 version 3 (the repository's writer is learn/tabular/tbp.py, driven by tools/tbp_compile.py; its docstring documents the byte layout):
+// magic `TBP1`, u32 version 3, u64 header bytes, a JSON header, Q float32 (S x 22), N int32 (S x 22), M2 float64 (S x 22), a CRC-32 trailer. The header carries
 // `fingerprints` (the three registry hashes, refused TBP_FINGERPRINT against this build's baked ones), `buttons`, `state_set.n_states` (at most 2^20, TBP_STATES),
 // `features` (the six rule kinds, doubles for float64 edges and float32 values), `strategy` {id, params}, the `rng` rule text of learn/tabular/rng.py, the `decided`
-// block {tokens, buttons}, `update_rule` "sample-average-n-first-f64-v1", `reward_rule` "damage-since-last-strategy-decision-v1", `scope` "fight" and `k`. The header's `k` (the K
-// rule) is read by nobody here: the player does not apply it (table_certify.py). For optimistic_initialization the prior is folded in at load.
+// block {tokens, buttons}, `update_rule` "constant-alpha-floor-f64-v1", `update_alpha` (a number in (0, 1]), `reward_rule` "damage-since-last-strategy-decision-v1", `scope` "fight" and `k`. The header's `k` (the K
+// rule) is read by nobody here: the player does not apply it (table_certify.py). For optimistic_initialization the prior is already in the file's arrays (the compiler folds it; this reader folds nothing, so a saved table loads again unchanged).
+// A version 2 file is refused by name (TBP_VERSION).
 //
 // The sim-less probe (`simc rl_table_probe=<mode> key=value ...`, run from main() before any sim_t exists): modes buckets, picks, rows, rng, libm,
 // epsilons. The formats are in the comment above run_probe in rl_table_policy.cpp.
@@ -87,6 +95,8 @@ std::string& fallback_storage();
 std::string& defer_storage();
 bool& wait_storage();
 bool& trace_storage();
+std::string& save_storage();
+int& clock_storage();
 
 // True when solver_table_policy names a file. One string test.
 bool active();

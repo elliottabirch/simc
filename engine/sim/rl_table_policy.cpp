@@ -52,15 +52,19 @@ std::string g_fallback;
 std::string g_defer;
 bool        g_wait = false;
 bool        g_trace = false;
+std::string g_save;           // solver_table_save=<path>: the kept fight's table is written here at its end (empty = off)
+int         g_clock = 0;      // solver_table_clock=<k>: the `e` of the decaying strategies (the fight's place in its chain)
 
 // ---- constants shared with the repository's Python -------------------------------------------------------------------------------------
-// The TBP1 version this reader reads (learn/tabular/tbp.py FORMAT_VERSION): version 2, exactly what tools/tbp_compile.py writes. Version 2 added the M2
-// array, the `decided` block, the update_rule / reward_rule / scope ids and the 2^20 state cap. An older file is read by an older checkout (hard swap),
-// never by a shim; the ids below are tbp.py's UPDATE_RULE / REWARD_RULE / SCOPE (the Python side is the specification, the fork follows: quick 261025-bk4 wave B3).
-constexpr std::uint32_t TBP_VERSION = 2u;
+// The TBP1 version this reader reads (learn/tabular/tbp.py FORMAT_VERSION): version 3, exactly what tools/tbp_compile.py writes. Version 2 added the M2
+// array, the `decided` block, the update_rule / reward_rule / scope ids and the 2^20 state cap; version 3 (quick 261026-lrn) adds the header field `update_alpha`
+// and the update rule `constant-alpha-floor-f64-v1`, and the optimistic prior is folded into the file's arrays by the compiler (this reader no longer folds it:
+// a file the player saves must load again unchanged). A version 2 file is refused by name (TBP_VERSION, hard swap: it is read by an older checkout), never by a shim;
+// the ids below are tbp.py's UPDATE_RULE / REWARD_RULE / SCOPE (the Python side is the specification, the fork follows: quick 261025-bk4 wave B3).
+constexpr std::uint32_t TBP_VERSION = 3u;
 constexpr std::size_t   TBP_PREAMBLE = 16;
 constexpr std::uint64_t TBP_MAX_STATES = 1ull << 20;
-constexpr const char*   UPDATE_RULE_ID = "sample-average-n-first-f64-v1";
+constexpr const char*   UPDATE_RULE_ID = "constant-alpha-floor-f64-v1";
 constexpr const char*   REWARD_RULE_ID = "damage-since-last-strategy-decision-v1";
 constexpr const char*   SCOPE_ID = "fight";
 // learn/tabular/rng.py RNG_RULE, verbatim.
@@ -345,6 +349,8 @@ struct table_t
   params_t               params;
   bool                   decided[ BUTTONS ] = {};
   std::string            scope = "fight";
+  double                 update_alpha = 0.0;  // the header's `update_alpha`, in (0, 1]
+  std::string            header_text;         // the header bytes of the file exactly as read (JSON padded with spaces): a saved table repeats them verbatim
   std::vector<float>     Q;
   std::vector<std::int32_t> N;
   std::vector<double>    M2;
@@ -643,6 +649,7 @@ table_t load_table( const std::string& path )
   table_t t;
   t.path = path;
   t.bytes = data.size();
+  t.header_text.assign( reinterpret_cast<const char*>( data.data() ) + TBP_PREAMBLE, static_cast<std::size_t>( header_bytes ) );
 
   rapidjson::Document doc;
   {
@@ -763,6 +770,9 @@ table_t load_table( const std::string& path )
     header_refusal( "the rng rule is not splitmix64-v1 as this reader implements it" );
   if ( str_of( doc, "update_rule", "header" ) != UPDATE_RULE_ID )
     header_refusal( fmt::format( "update_rule '{}' is not '{}'", str_of( doc, "update_rule", "header" ), UPDATE_RULE_ID ) );
+  t.update_alpha = num_of( doc, "update_alpha", "header" );
+  if ( !( std::isfinite( t.update_alpha ) && t.update_alpha > 0.0 && t.update_alpha <= 1.0 ) )
+    header_refusal( fmt::format( "update_alpha {} is outside (0, 1]", t.update_alpha ) );
   if ( str_of( doc, "reward_rule", "header" ) != REWARD_RULE_ID )
     header_refusal( fmt::format( "reward_rule '{}' is not '{}'", str_of( doc, "reward_rule", "header" ), REWARD_RULE_ID ) );
   t.scope = str_of( doc, "scope", "header" );
@@ -805,21 +815,8 @@ table_t load_table( const std::string& path )
       file_refusal( "TBP_SHAPE", fmt::format( "{}: M2 holds a negative or non-finite value (cell {})", path, i ) );
   }
 
-  // optimistic_initialization: the player folds the prior in at load (tbp.py header doc; ch04_strategies.optimistic_prior):
-  // Q' = (optimistic_estimate * initial_count + N * Q) / (initial_count + N), N' = initial_count + N, in float64, Q' stored as float32.
-  if ( t.strategy == S_OPTIMISTIC_INITIALIZATION )
-  {
-    for ( std::uint64_t i = 0; i < cells; ++i )
-    {
-      const std::int64_t new_n = static_cast<std::int64_t>( t.N[ i ] ) + t.params.initial_count;
-      if ( new_n > std::numeric_limits<std::int32_t>::max() )
-        file_refusal( "TBP_SHAPE", fmt::format( "{}: initial_count + N overflows int32 at cell {}", path, i ) );
-      const double q = ( t.params.optimistic_estimate * static_cast<double>( t.params.initial_count ) + static_cast<double>( t.N[ i ] ) * static_cast<double>( t.Q[ i ] ) ) /
-                       static_cast<double>( new_n );
-      t.Q[ i ] = static_cast<float>( q );
-      t.N[ i ] = static_cast<std::int32_t>( new_n );
-    }
-  }
+  // optimistic_initialization (version 3): the prior is already in the file's arrays (tbp.optimistic_file_arrays folds it at compile time), so the table the player
+  // starts from, the table it saves and the table the next launch loads are the same thing; nothing is folded here.
 
   t.idle_index = idle_button_index();
   if ( t.idle_index < 0 )
@@ -962,12 +959,11 @@ double exp_dec_epsilon_at( std::int64_t e, std::int64_t n_episodes, double init_
 
 // `Q` is the row widened to float64, `N` the counts, `sd` the per-cell reward standard deviation or null, `legal` the available buttons (mask AND decided).
 choice_t run_strategy( const table_t& t, const double* Q, const std::int64_t* N, const double* sd, const std::uint8_t* legal, std::uint64_t fight_seed,
-                       std::uint64_t decision_index )
+                       std::uint64_t decision_index, std::int64_t e )
 {
   const params_t& p = t.params;
   choice_t        out;
   stream_t        stream( fight_seed, decision_index );
-  const std::int64_t e = static_cast<std::int64_t>( decision_index );
 
   int avail[ BUTTONS ];
   int n_avail = 0;
@@ -1146,7 +1142,8 @@ choice_t run_strategy( const table_t& t, const double* Q, const std::int64_t* N,
 // The `.tbt` trace (solver_table_trace=1): `<rl_translog>.tbt`, little-endian, in the layout of the repository's sim/tbt.py (the Python side is the specification, the
 // fork follows: quick 261025-bk4 wave B3). Written once per decision at the same point as the translog row (before accept_cast), once per fight for the closing update
 // (kind 3), and a footer (kind 2) when the translog's footer is written.
-//   header   32 bytes  "TBT1", u32 version 1, u32 record size 800, u32 header size 32, the first 16 bytes of the sha256 of the TBP1 file played
+//   header   40 bytes  "TBT1", u32 version 2, u32 record size 800, u32 header size 40, the first 16 bytes of the sha256 of the TBP1 file played, u64 clock (solver_table_clock: the `e`
+//                      of the decaying strategies for every decision of this launch; version 2 added it, quick 261026-lrn)
 //   record   800 bytes, `<IIIIQIIBBBBI24d22f22i22d22dIB3xdfifid`
 //            @0 u32 kind (1 decision, 2 footer, 3 fight end)  @4 u32 seq (footer: decision records; fight end: 0)  @8 u32 iteration (fight index; footer: fight-end records)
 //            @12 u32 decision_index (fight end: the decisions the fight made)  @16 u64 fight seed (sim->seed)  @24 u32 state id (0xFFFFFFFF none)  @28 u32 packed FINAL mask
@@ -1232,8 +1229,10 @@ struct update_info_t
   double        m2_new = 0.0;
 };
 
-// update_rule 'sample-average-n-first-f64-v1' (tbp.py UPDATE_RULES): N[s,a] += 1 (refused at 2^31-1); Q_old = double(Q[s,a]); Q[s,a] = float32(Q_old + (r - Q_old) / double(N[s,a]));
-// M2[s,a] += (r - Q_old) * (r - double(Q_new float32)), the product rounded before the sum (rl_table_policy.cpp is compiled with -ffp-contract=off).
+// update_rule 'constant-alpha-floor-f64-v1' (tbp.py UPDATE_RULES; book/ch04_strategies.update is the reference): N[s,a] += 1 (refused at 2^31-1); alpha_n = max(alpha, 1.0 / double(N[s,a]));
+// Q_old = double(Q[s,a]); Q[s,a] = float32(Q_old + alpha_n * (r - Q_old)). M2 is the exponentially weighted variance times N: v_old = M2 / double(N_old) (0.0 when N_old = 0);
+// delta = r - Q_old; v_new = (1.0 - alpha_n) * (v_old + alpha_n * (delta * delta)); M2 = double(N_new) * v_new. Every product and sum is rounded to double on its own
+// (rl_table_policy.cpp is compiled with -ffp-contract=off).
 update_info_t apply_update( const pending_t& pend, double damage_now )
 {
   update_info_t u;
@@ -1250,17 +1249,59 @@ update_info_t apply_update( const pending_t& pend, double damage_now )
   u.reward = reward;
   u.q_old = g_rt.Q[ cell ];
   u.n_old = g_rt.N[ cell ];
+  const std::int32_t n_old = g_rt.N[ cell ];
   g_rt.N[ cell ] += 1;
-  const float q_new = static_cast<float>( q_old + ( reward - q_old ) / static_cast<double>( g_rt.N[ cell ] ) );
+  const double alpha_n = std::max( g_table.update_alpha, 1.0 / static_cast<double>( g_rt.N[ cell ] ) );
+  const double delta = reward - q_old;
+  const float  q_new = static_cast<float>( q_old + alpha_n * delta );
   if ( !std::isfinite( q_new ) )
     refuse( "TABLE_STRATEGY", fmt::format( "the updated Q of cell ({}, {}) is not finite", pend.state, pend.button ) );
   g_rt.Q[ cell ] = q_new;
-  const double product = ( reward - q_old ) * ( reward - static_cast<double>( q_new ) );
-  g_rt.M2[ cell ] = g_rt.M2[ cell ] + product;
+  const double v_old = n_old > 0 ? g_rt.M2[ cell ] / static_cast<double>( n_old ) : 0.0;
+  const double v_new = ( 1.0 - alpha_n ) * ( v_old + alpha_n * ( delta * delta ) );
+  g_rt.M2[ cell ] = static_cast<double>( g_rt.N[ cell ] ) * v_new;
   u.q_new = q_new;
   u.n_new = g_rt.N[ cell ];
   u.m2_new = g_rt.M2[ cell ];
   return u;
+}
+
+// solver_table_save: the table at the end of the kept fight, in the file layout of tbp.py (_encode): the preamble (magic, version, header length), the loaded file's header bytes
+// verbatim, Q float32, N int32, M2 float64 (little-endian, the host's own byte order on x86-64), and the CRC-32/IEEE of every byte before the trailer. It goes to <path>.tmp first and
+// is renamed, so a reader never sees half a file. The loader reads it back with no change (the header is the loaded file's).
+void save_table( const std::string& path )
+{
+  const table_t&      t = g_table;
+  const std::uint64_t cells = t.n_states * static_cast<std::uint64_t>( BUTTONS );
+  std::vector<unsigned char> out;
+  out.reserve( static_cast<std::size_t>( TBP_PREAMBLE + t.header_text.size() + cells * 16ull + 4ull ) );
+  auto put = [ & ]( const void* p, std::size_t n ) {
+    const unsigned char* b = static_cast<const unsigned char*>( p );
+    out.insert( out.end(), b, b + n );
+  };
+  const std::uint32_t version = TBP_VERSION;
+  const std::uint64_t header_bytes = t.header_text.size();
+  put( "TBP1", 4 );
+  put( &version, 4 );
+  put( &header_bytes, 8 );
+  put( t.header_text.data(), t.header_text.size() );
+  put( g_rt.Q.data(), static_cast<std::size_t>( cells ) * 4 );
+  put( g_rt.N.data(), static_cast<std::size_t>( cells ) * 4 );
+  put( g_rt.M2.data(), static_cast<std::size_t>( cells ) * 8 );
+  const std::uint32_t crc = rl_translog::crc32( out.data(), out.size() );
+  put( &crc, 4 );
+  const std::string tmp = path + ".tmp";
+  {
+    std::ofstream file( tmp, std::ios::binary | std::ios::trunc );
+    if ( !file.is_open() )
+      refuse( "TABLE_FILE", fmt::format( "unable to open '{}' for writing (solver_table_save)", tmp ) );
+    file.write( reinterpret_cast<const char*>( out.data() ), static_cast<std::streamsize>( out.size() ) );
+    file.flush();
+    if ( !file )
+      refuse( "TABLE_FILE", fmt::format( "write to '{}' failed (solver_table_save)", tmp ) );
+  }
+  if ( std::rename( tmp.c_str(), path.c_str() ) != 0 )
+    refuse( "TABLE_FILE", fmt::format( "rename '{}' to '{}' failed (solver_table_save)", tmp, path ) );
 }
 
 void write_trace( const trace_record_t& r )
@@ -1299,13 +1340,15 @@ void open_trace( sim_t* sim )
   g_rt.trace->open( g_rt.trace_path, std::ios::out | std::ios::trunc | std::ios::binary );
   if ( !g_rt.trace->is_open() )
     refuse( "TABLE_NEEDS", fmt::format( "unable to open '{}' for writing", g_rt.trace_path ) );
-  unsigned char header[ 32 ] = {};
+  unsigned char header[ 40 ] = {};
   std::memcpy( header, "TBT1", 4 );
-  const std::uint32_t version = 1, record = sizeof( trace_record_t ), hsize = 32;
+  const std::uint32_t version = 2, record = sizeof( trace_record_t ), hsize = 40;
+  const std::uint64_t clock_value = static_cast<std::uint64_t>( g_clock );
   std::memcpy( header + 4, &version, 4 );
   std::memcpy( header + 8, &record, 4 );
   std::memcpy( header + 12, &hsize, 4 );
   std::memcpy( header + 16, g_table.sha256, 16 );
+  std::memcpy( header + 32, &clock_value, 8 );
   g_rt.trace->write( reinterpret_cast<const char*>( header ), sizeof( header ) );
   g_rt.trace->flush();
 }
@@ -1319,6 +1362,8 @@ std::string& fallback_storage() { return g_fallback; }
 std::string& defer_storage() { return g_defer; }
 bool&        wait_storage() { return g_wait; }
 bool&        trace_storage() { return g_trace; }
+std::string& save_storage() { return g_save; }
+int&         clock_storage() { return g_clock; }
 
 bool active()
 {
@@ -1329,7 +1374,7 @@ void load_and_validate( sim_t* sim )
 {
   if ( g_path.empty() )
   {
-    if ( !g_scope.empty() || !g_fallback.empty() || !g_defer.empty() || g_wait || g_trace )
+    if ( !g_scope.empty() || !g_fallback.empty() || !g_defer.empty() || g_wait || g_trace || !g_save.empty() || g_clock != 0 )
       refuse( "TABLE_NEEDS", "a solver_table_* option is set without solver_table_policy=" );
     return;
   }
@@ -1339,6 +1384,10 @@ void load_and_validate( sim_t* sim )
     refuse( "TABLE_NEEDS", fmt::format( "solver_table_fallback='{}' must be stock or refuse", g_fallback ) );
   if ( !g_defer.empty() && g_defer != "stock" && g_defer != "none" && g_defer != "all" )
     refuse( "TABLE_NEEDS", fmt::format( "solver_table_defer='{}' must be stock, none or all", g_defer ) );
+  if ( g_clock < 0 )
+    refuse( "TABLE_NEEDS", fmt::format( "solver_table_clock={} must be an integer >= 0", g_clock ) );
+  if ( !g_save.empty() && g_save == g_path )
+    refuse( "TABLE_NEEDS", "solver_table_save= names the file solver_table_policy= reads: the input table is never overwritten" );
   g_refuse_fallback = g_fallback == "refuse";
   g_defer_stock = g_defer != "none" && g_defer != "all";
   g_defer_all = g_defer == "all";
@@ -1378,23 +1427,30 @@ void on_fight_start( sim_t* )
 
 void on_fight_end( sim_t* sim )
 {
-  if ( !g_loaded || !g_rt.pending.valid || g_rt.actor == nullptr )
+  if ( !g_loaded )
     return;
-  const update_info_t u = apply_update( g_rt.pending, g_rt.actor->solver_damage_so_far );
-  g_rt.pending = pending_t();
-  if ( g_rt.trace )
+  if ( g_rt.pending.valid && g_rt.actor != nullptr )
   {
-    trace_record_t r{};
-    r.kind = 3;
-    r.seq = 0;
-    r.iteration = static_cast<std::uint32_t>( rl_translog::fight_index( sim ) );
-    r.decision_index = static_cast<std::uint32_t>( g_rt.rows );
-    r.fight_seed = static_cast<std::uint64_t>( sim->seed );
-    r.state_id = rl_apl_choice::STATE_ID_NONE;
-    r.button = 255;
-    fill_update( r, u );
-    write_trace( r );
+    const update_info_t u = apply_update( g_rt.pending, g_rt.actor->solver_damage_so_far );
+    g_rt.pending = pending_t();
+    if ( g_rt.trace )
+    {
+      trace_record_t r{};
+      r.kind = 3;
+      r.seq = 0;
+      r.iteration = static_cast<std::uint32_t>( rl_translog::fight_index( sim ) );
+      r.decision_index = static_cast<std::uint32_t>( g_rt.rows );
+      r.fight_seed = static_cast<std::uint64_t>( sim->seed );
+      r.state_id = rl_apl_choice::STATE_ID_NONE;
+      r.button = 255;
+      fill_update( r, u );
+      write_trace( r );
+    }
   }
+  // solver_table_save: the kept fight is the last iteration (the warm-up fight, iteration 0, is discarded by on_fight_start's copy from the file, so the saved table is
+  // the incoming file plus this fight's updates and nothing else).
+  if ( !g_save.empty() && sim->current_iteration == sim->iterations - 1 )
+    save_table( g_save );
 }
 
 void close_trace( sim_t* )
@@ -1528,7 +1584,7 @@ decision_t decide( sim_t* sim, player_t* p, bool foreground, std::uint64_t seq, 
         // tbp.table_reward_sd: sqrt(M2 / N) where N >= 2, 0.0 elsewhere.
         sd[ b ] = Nd[ b ] >= 2 ? std::sqrt( g_rt.M2[ row + static_cast<std::size_t>( b ) ] / static_cast<double>( Nd[ b ] ) ) : 0.0;
       }
-      choice = run_strategy( t, Qd, Nd, sd, legal, static_cast<std::uint64_t>( sim->seed ), decision_index );
+      choice = run_strategy( t, Qd, Nd, sd, legal, static_cast<std::uint64_t>( sim->seed ), decision_index, g_clock );
       have_choice = true;
       d.idx = choice.action;
       d.idle = d.idx == t.idle_index;
@@ -1783,7 +1839,7 @@ int run_probe( const std::vector<std::string>& args )
           Nd[ b ] = t.N[ c ];
           sd[ b ] = Nd[ b ] >= 2 ? std::sqrt( t.M2[ c ] / static_cast<double>( Nd[ b ] ) ) : 0.0;
         }
-        const choice_t c = run_strategy( t, Qd, Nd, sd, legal, keys[ i * 2 ], keys[ i * 2 + 1 ] );
+        const choice_t c = run_strategy( t, Qd, Nd, sd, legal, keys[ i * 2 ], keys[ i * 2 + 1 ], static_cast<std::int64_t>( keys[ i * 2 + 1 ] ) );
         o.button = c.action;
         o.draws = static_cast<std::uint32_t>( c.draws );
         o.probability = c.has_probs ? c.probs[ c.action ] : std::numeric_limits<double>::quiet_NaN();
@@ -1820,7 +1876,8 @@ int run_probe( const std::vector<std::string>& args )
         }
         pick_out_t& o = picks[ i ];
         o = pick_out_t{ 0, -1, 0, std::numeric_limits<double>::quiet_NaN() };
-        const choice_t c = run_strategy( t, Qd, Nd, use_sd ? sd : nullptr, legal, read_le<std::uint64_t>( r + 376 ), read_le<std::uint64_t>( r + 384 ) );
+        const choice_t c = run_strategy( t, Qd, Nd, use_sd ? sd : nullptr, legal, read_le<std::uint64_t>( r + 376 ), read_le<std::uint64_t>( r + 384 ),
+                                         static_cast<std::int64_t>( read_le<std::uint64_t>( r + 384 ) ) );
         o.button = c.action;
         o.draws = static_cast<std::uint32_t>( c.draws );
         o.probability = c.has_probs ? c.probs[ c.action ] : std::numeric_limits<double>::quiet_NaN();
