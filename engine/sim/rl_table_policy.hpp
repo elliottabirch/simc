@@ -25,7 +25,8 @@
 // Reward. `reward_rule` "damage-since-last-strategy-decision-v1": r = p->solver_damage_so_far (double) at the NEXT strategy decision (chooser STRATEGY or
 // STRATEGY_IDLE) minus its value at the pending strategy decision; the rows pressed in between (STOCK, FORCED_IDLE, NOSTATE) neither update nor move the pending
 // decision. The fight's last pending decision is closed at combat_end with the fight's final damage (the close row's final_damage_total). `update_rule`
-// "sample-average-n-first-f64-v1" is the update above. Both ids are learn/tabular/tbp.py's; the reference is rungs/r000_plumbing/table_certify.py.
+// "sample-average-n-first-f64-v1" is the update above. A second `reward_rule`, "damage-to-fight-end-v1" (the table's Q is the mean Monte Carlo return, quick 261026-rbt), applies NO update:
+// the return of a press is unknown until the fight ends, so Q, N and M2 stay as loaded and every trace record carries has_update = 0. Both ids are learn/tabular/tbp.py's; the reference is rungs/r000_plumbing/table_certify.py.
 //
 // The cooldown hybrid (H1-pre, `solver_table_defer=stock`, the default). When the dry stock walk's first ready MAPPED leaf is a cast button the
 // table does not decide and that button is legal in the row's mask, it is pressed (chooser STOCK): no RNG draw, no table change. Else the strategy
