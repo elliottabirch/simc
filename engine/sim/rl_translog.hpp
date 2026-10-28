@@ -740,6 +740,9 @@ struct decision_record
   float t_decided;            // @52+4W+4SF -- version 16 (261027-fts; was padding): the instant the policy decided this press,
                                //         sim->current_time().total_seconds(). `t` above is the COMMIT instant (the press became irrevocable)
                                //         and `t_decided <= t`; the two are equal for every wait and for every cast that needs no queue.
+                               //         With the decision window (stage D, solver_window_ms > 0, net and table arms) it is the poll that SELECTED the executed
+                               //         pick: the window open (a stable pick: t - t_decided = 0.250 s, 0.245 s + the queue lag after a hard cast), or a later
+                               //         poll when the pick changed; `obs`, `mask`, the picks and the flags are that poll's.
                                //         `obs`, `mask`, `action` and the picks describe t_decided; every cumulative counter describes t.
   // Version 9 (260917-pcn): the per-fight CUMULATIVE proc-roll observer block, struct-of-arrays,
   // alignas(8) so it starts exactly at PROC_BLOCK_OFFSET (= the version-7 row size) at any width W.
@@ -774,17 +777,20 @@ struct decision_record
 //   7     cooldown_reset      (cooldown_t::set_max_charges cancelled the queue)
 //   8     ready_cancelled     (schedule_ready() or action_t::cancel() with the press queued)
 //   9     ready_preempts_queue (Player-Ready fired with the press queued)
-//   10    replaced            (an off-GCD / cast-while-casting re-decision cancelled the queued press and queued another)
+//   10    replaced            (the pending press was replaced by another: an off-GCD / cast-while-casting re-decision cancelled the queued press, or -- stage D -- a
+//                              window poll replaced the hold, a re-poll replaced the queued press, the fire instant dropped the hold for another pick, or the hold
+//                              was illegal at the fire)
 //   11    fight_end           (the fight ended with the press still queued)
 //   12    branch_cut          (solver_branch window cut; the combination with a queued press is refused, so this stays 0)
 //   13    staged_not_queued   (the policy chose, the engine did not queue it: an off-GCD pick for the action already queued, or not usable)
 //   14    delayed             (committed press whose fire moved later than its queue event was scheduled for at the decision, by more than 2 ms)
-//   15    repolls             (stage D: re-polls that kept the pending press)
-//   16    replaced_by_wait    (stage D: a wait pick inside the window left the queued press open)
-//   17    flipflop_bound      (stage D: the replace bound was reached and the pending press held)
+//   15    repolls             (stage D: window polls and queue re-polls that picked the pending press again and kept it with the payload of the poll that selected it)
+//   16    replaced_by_wait    (stage D: a wait pick -- in a window, in the queue window, or at the fire instant -- left the pending press open)
+//   17    flipflop_bound      (stage D: the 4-replacement bound of a window or a queue was reached and the pending press held)
 //   18    cast_interrupted    (a committed hard cast was interrupted while the cast bar ran: the row exists, the damage is zero)
 //   19    cast_failed_at_end  (a committed cast reached its execute event and could not execute)
-//   20    staged              (decisions that reached the pending machinery: rows + the discards 0-13 below equal this)
+//   20    staged              (decisions that reached the pending machinery: rows + the discards 0-13 below equal this. Stage D: a window HOLD counts once when it is
+//                              made, and a hold that reaches the fire is the row's staging, not a second one; a re-poll that replaces a queued press counts the new pick)
 //   21    queued              (staged decisions that needed a queue, i.e. queue_delay > 0)
 //   22    committed_queued    (queued decisions that became a row)
 // Invariant (checked by a reader): decision_count == staged - sum(slots 0-13).

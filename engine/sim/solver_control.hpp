@@ -20,6 +20,7 @@
 
 #include "config.hpp"
 #include "sc_enums.hpp"
+#include "util/timespan.hpp"
 
 #include <cstdint>
 #include <string>
@@ -189,6 +190,50 @@ void note_cast_interrupted( player_t* p );
 void note_cast_failed_at_end( player_t* p, action_t* a );
 // sim_t::combat_end(), immediately before rl_table_policy::on_fight_end and the close row: whatever is still staged or queued is discarded (fight_end).
 void on_fight_end( sim_t* sim );
+// ==========================================================================
+// 261027-fts stage D: THE DECISION WINDOW (D10) AND THE RE-POLL (D3, D4). Net and table arms only; the observer arm, the FIFO transport and a branch /
+// teacher mode never open one. Every option is global storage (a sim_t member would rebuild every file):
+//   solver_window_ms=<n>   default 250. The window: for every foreground GCD (and cast end) the policy is first asked n ms before the instant the actor
+//                          is ready again (the Player-Ready event; for a hard cast the cast end), then every solver_repoll_ms after that, then once
+//                          more at the instant itself (the ordinary Player-Ready decision). 0 = off: the stage-B behaviour, byte for byte.
+//   solver_repoll_ms=<n>   default 25 (the live addon's cadence).
+//   solver_window_log=<f>  off by default: one JSON line per policy call that is NOT an ordinary decision boundary (diagnostic and the D3 count).
+//   solver_window_probe=1  off by default, a purity probe: every poll runs (the window opens, the chain polls, the queue is re-polled) but nothing is ever
+//                          held or replaced, so the launch must be byte-identical to solver_window_ms=0 -- proof that a poll leaves the simulation untouched.
+// A window poll is a REAL decision boundary for the policy (read_state(..., true), the mask, the forward pass or the table's pick, the pick's target) and
+// NOTHING ELSE: no row, no decision number kept, no retarget, no wait set, no APL walk. Its outcome is one HOLD (the pick that would be pressed):
+//   - a cast pick becomes the hold; a later poll that picks the same button and target keeps it AND its payload (the observation, mask, picks and flags of the
+//     poll that selected it: the row's `t_decided` is that poll); a different cast replaces it (the new poll's payload); a wait pick leaves it open
+//     (live: a queued press cannot be recalled); at most 4 replacements per window (flipflop_bound), then the hold stays.
+//   - the exploration draw (button dial) is made ONCE per window, at its first poll; an explored pick (a cast or a wait) is held to the fire and no later
+//     poll replaces it; the aim dial is drawn at the fire instant only (a poll never draws it).
+//   - the fire instant is the actor's ordinary Player-Ready decision: it re-decides on the real state, then resolves against the hold (same button and target:
+//     the hold's row payload is committed; a wait pick leaves the hold pressed; a different cast replaces it; an illegal hold is dropped, census `replaced`).
+// The press itself is the engine's own: Player-Ready -> execute_action -> queue_execute, so a press whose cooldown ends after the fire is queued exactly as
+// before (stage B), and from that moment the same chain re-polls it every solver_repoll_ms strictly before its fire, plus once at the fire instant (inside the
+// queue event): the same button and target keeps the queue, a wait leaves it open, a different cast cancels it (census `replaced`) and presses the new pick.
+// Census: staged counts a HOLD once when it is made (a hold that reaches the fire is the row's staging); replaced / replaced_by_wait / flipflop_bound /
+// repolls as in the table of rl_translog.hpp.
+// ==========================================================================
+int&         window_ms_storage();
+int&         repoll_ms_storage();
+std::string& window_log_storage();
+int&         window_probe_storage();
+
+// player_t::schedule_ready() made a Player-Ready event for a non-waiting boundary at `ready_at`; action_t::schedule_execute() started a hard cast whose bar and
+// GCD end at `ends_at`. Both open the window if it is on, for the RL actor only. No-ops otherwise.
+void window_arm( player_t* p, timespan_t ready_at );
+void window_arm_cast( player_t* p, timespan_t ends_at );
+// player_ready_event_t::execute(), before it decides: cancels the poll chain. The hold (if any) stays for the decision that follows.
+void window_on_ready( player_t* p );
+// action_t::queue_execute() just made a queue event for `a` (FOREGROUND, delay > 0): arms the re-poll chain of the queued press.
+void queue_window_open( player_t* p, action_t* a );
+// action_t::reschedule_queue_event() moved the fire of a queued press: re-arms the chain if it had run out.
+void queue_rescheduled( player_t* p, action_t* a );
+// queued_action_execute_event_t::execute(), first thing, for a FOREGROUND press: the poll at the fire instant. Returns true when it replaced the press (the queue
+// event must do nothing more); false: the press stands, the event goes on to fire it.
+bool queue_fire_poll( player_t* p, action_t* a );
+
 // decision_dump::record(), right after it wrote the decision line of the RL actor: writes the resolve line of a decision that is already resolved (a wait, an
 // idle row, a boundary that produced no decision); a staged decision's line follows at its commit or discard. No-op without a translog.
 void dump_decision_written( sim_t* sim );

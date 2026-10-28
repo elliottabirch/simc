@@ -11,6 +11,7 @@
 #include "decision_dump.hpp"
 #include "player/action_priority_list.hpp"
 #include "player/player.hpp"
+#include "sim/cooldown.hpp"
 #include "sim/event.hpp"
 #include "sim/rl_button_bind.hpp"
 #include "sim/rl_stock_eval.hpp"
@@ -31,6 +32,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -62,6 +64,45 @@ constexpr double WAIT_END_OF_FIGHT_EPSILON_SECONDS = 0.001;
   fmt::print( stderr, "solver_control: FATAL: {}\n", msg );
   throw std::runtime_error( "solver_control protocol violation: " + msg );
 }
+
+// ==========================================================================
+// 261027-fts stage D: POLL MODE (the contract is in solver_control.hpp, "THE DECISION WINDOW"). A window poll or a queue re-poll runs choose() with g_poll set:
+// the policy decides (read_state at a real decision boundary, mask, forward pass or the table's pick, the pick's target) and NOTHING ELSE happens: no row
+// written or staged, no decision number kept, no retarget, no wait set, no auto-attack re-arm, no forced decision, no aim dial. What the decision was is
+// left in g_poll_out for the caller.
+// ==========================================================================
+struct poll_out_t
+{
+  enum class kind_t : std::uint8_t { none, cast, wait };
+  kind_t                        kind = kind_t::none;
+  action_t*                     action = nullptr;  // the resolved cast (kind cast)
+  int                           idx = -1;          // RL_ACTIONS index
+  std::uint16_t                 target = rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK;
+  bool                          explored = false;  // the button dial fired
+  bool                          has_rec = false;
+  rl_translog::decision_record  rec{};
+  bool                          has_stock = false;
+  rl_stock_eval::pick_t         stock{};
+  bool                          has_table = false;
+  rl_table_policy::decision_t   table{};
+};
+// The window / poll state is thread_local: a worker thread runs its own sim_t (threads > 1 without a translog is legal for a net arm), so one thread's
+// window must never be seen or overwritten by another's. (The stage-B pending rows stay process-global: a translog forces threads=1.)
+thread_local bool       g_poll = false;               // this choose() call is a poll
+thread_local bool       g_skip_button_dial = false;   // the poll must not draw the exploration (button) dial
+thread_local poll_out_t g_poll_out;
+constexpr int WINDOW_MAX_REPLACES = 4;   // flip-flop bound (DECISIONS.md): a window or a queue may replace its pick at most this many times
+
+// The last cast choose() handed to the engine (not a poll): queue_window_open() reads its target and exploration flag.
+struct last_pick_t
+{
+  bool          valid = false;
+  action_t*     action = nullptr;
+  int           idx = -1;
+  std::uint16_t target = rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK;
+  bool          explored = false;
+};
+thread_local last_pick_t g_last_pick;
 
 // The shared action resolver is solver_control::resolve_action(), DEFINED below inside `namespace solver_control`
 // (221-01, Pattern 2) so `rl_policy_obs.cpp`'s engine-truth handle table (read_action_gate_bits) and this file's
@@ -132,7 +173,8 @@ action_t* accept_cast( player_t* p, const std::string& action_name, std::uint64_
     // CR-04 (260902/cr4): the turn (D-05's second call site) is now folded INTO retarget() itself
     // -- see that function's own doc comment (rl_target_select.cpp) -- so it is no longer a
     // separate call at this site.
-    rl_target_select::retarget( resolved, p, pick );
+    if ( !g_poll )  // 261027-fts stage D: a window poll decides; the player turns to the pick only when the press is made
+      rl_target_select::retarget( resolved, p, pick );
   }
 
   return resolved;
@@ -417,10 +459,59 @@ struct pending_row_t
   rl_table_policy::decision_t           table;
   timespan_t                            decided_at = timespan_t::zero();
   timespan_t                            expected_fire = timespan_t::zero();
+  bool                                  explored = false;  // 261027-fts stage D: the button dial fired (a queue re-poll never replaces an explored press)
+  bool                                  dump_line = true;  // false: a press a re-poll made (no decision line in the dump), so its commit / discard writes no resolve line
 };
 
 pending_row_t g_staged;
 pending_row_t g_queued;
+
+// ==========================================================================
+// 261027-fts stage D: the HOLD of a decision window (solver_control.hpp). One at a time, the RL actor's.
+// ==========================================================================
+struct hold_t
+{
+  bool                          valid = false;
+  sim_t*                        sim = nullptr;
+  player_t*                     p = nullptr;
+  poll_out_t::kind_t            kind = poll_out_t::kind_t::none;
+  int                           idx = -1;
+  std::uint16_t                 target = rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK;
+  bool                          explored = false;
+  bool                          has_rec = false;
+  rl_translog::decision_record  rec{};
+  bool                          has_stock = false;
+  rl_stock_eval::pick_t         stock{};
+  bool                          has_table = false;
+  rl_table_policy::decision_t   table{};
+  timespan_t                    decided_at = timespan_t::zero();
+  int                           replaces = 0;
+};
+struct window_t
+{
+  bool       active = false;   // a window is running for `p`: the poll chain is armed or ran, and the fire has not happened
+  sim_t*     sim = nullptr;
+  player_t*  p = nullptr;
+  event_t*   ev = nullptr;     // the next poll event (nullptr once it fired, was cancelled or the chain ran out)
+  bool       drawn = false;    // the first poll of the window drew the exploration (button) dial
+  hold_t     hold;
+};
+thread_local window_t g_win;
+
+// The re-poll chain of a QUEUED press (a cast whose cooldown ends after the instant it was pressed).
+struct queue_poll_t
+{
+  bool       valid = false;
+  sim_t*     sim = nullptr;
+  player_t*  p = nullptr;
+  action_t*  action = nullptr;
+  std::uint16_t target = rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK;
+  bool       explored = false;
+  int        replaces = 0;
+  event_t*   ev = nullptr;
+};
+thread_local queue_poll_t g_q;
+thread_local int          g_q_replaces_next = 0;  // carried into the chain of the press that replaced a queued one
 
 // The resolve line of the decision-dump (D12). g_line_written: the decision line of the current boundary is already in the file.
 struct dump_outcome_t
@@ -506,7 +597,8 @@ void commit_pending( pending_row_t& pd, bool via_queue_event )
     if ( now - pd.expected_fire > timespan_t::from_millis( 2 ) )
       count( rl_translog::census_slot::delayed );
   }
-  dump_resolve( sim, "commit", nullptr, now.total_seconds(), pd.decided_at.total_seconds(), static_cast<long long>( pd.seq ) );
+  if ( pd.dump_line )
+    dump_resolve( sim, "commit", nullptr, now.total_seconds(), pd.decided_at.total_seconds(), static_cast<long long>( pd.seq ) );
   pd.valid = false;
 }
 
@@ -521,7 +613,8 @@ void discard_pending( pending_row_t& pd, std::uint32_t slot, const char* name )
     --sim->solver_control_seq;
   }
   count( slot );
-  dump_resolve( sim, "discard", name, sim->current_time().total_seconds(), pd.decided_at.total_seconds(), -1 );
+  if ( pd.dump_line )
+    dump_resolve( sim, "discard", name, sim->current_time().total_seconds(), pd.decided_at.total_seconds(), -1 );
   pd.valid = false;
 }
 
@@ -546,6 +639,9 @@ void begin_boundary( player_t* p, execute_type et )
 
 // The row of one decision. deferred = a cast that goes through queue_execute(): staged, committed or discarded later. Not deferred (wait, idle, a decision with
 // no press): committed at once, byte for byte what record_decision() wrote.
+// 261027-fts stage D: in POLL mode the filled row is only kept (g_poll_out). At the fire instant (an ordinary decision) the HOLD of the window is resolved here:
+// a decision for the same button and target commits the hold's payload (the observation, mask, picks, flags and stock/table record of the poll that selected
+// it, `t_decided` = that poll) -- the hold was counted as staged when it was made, so nothing is counted again; anything else drops the hold (census `replaced`).
 void submit_decision( bool deferred, action_t* act, const rl_table_policy::decision_t* table, sim_t* sim, player_t* p, std::uint64_t seq,
                       const float obs[ RL_OBS_DIM ], const std::uint8_t mask[ RL_ACTION_DIM ], int action_index, float q_margin, float top_q,
                       std::uint16_t chosen_target_actor_index, bool wait_floored, bool exploratory, bool held, const float* candidate_features,
@@ -558,14 +654,50 @@ void submit_decision( bool deferred, action_t* act, const rl_table_policy::decis
   rl_translog::decision_record r = rl_translog::fill_decision( sim, p, seq, obs, mask, action_index, q_margin, top_q, chosen_target_actor_index, wait_floored,
                                                                exploratory, held, candidate_features, candidate_mask, candidate_count, chosen_candidate_slot,
                                                                aim_explored, rules_candidate_slot, observed_candidate_slot, chosen_enemy_actor_index );
-  count( rl_translog::census_slot::staged );
+  if ( g_poll )
+  {
+    g_poll_out.has_rec = true;
+    g_poll_out.rec = r;
+    g_poll_out.has_stock = stock_pick != nullptr;
+    if ( stock_pick != nullptr )
+      g_poll_out.stock = *stock_pick;
+    g_poll_out.has_table = table != nullptr;
+    if ( table != nullptr )
+      g_poll_out.table = *table;
+    return;
+  }
+  timespan_t                         decided_at = sim->current_time();
+  bool                               merged = false;
+  const rl_stock_eval::pick_t*       stock_use = stock_pick;
+  const rl_table_policy::decision_t* table_use = table;
+  if ( g_win.hold.valid && g_win.hold.sim == sim && g_win.hold.p == p )
+  {
+    hold_t& h = g_win.hold;
+    if ( h.has_rec && ( h.kind == poll_out_t::kind_t::cast ) == deferred && h.idx == action_index && h.target == chosen_target_actor_index )
+    {
+      r = h.rec;
+      r.seq = static_cast<std::uint32_t>( seq );
+      decided_at = h.decided_at;
+      stock_use = h.has_stock ? &h.stock : nullptr;
+      table_use = h.has_table ? &h.table : nullptr;
+      merged = true;
+      if ( !deferred )
+        rl_translog::stamp_commit( sim, p, r );  // a wait commits at once: its counters are the fire instant's
+    }
+    else
+      count( rl_translog::census_slot::replaced );
+    // The hold is consumed. Its storage (stock_use / table_use point into it) is not touched again until the next hold is made.
+    h.valid = false;
+  }
+  if ( !merged )
+    count( rl_translog::census_slot::staged );
   if ( !deferred )
   {
-    rl_translog::write_row( sim, p, r, apl_choice_name, stock_pick, table != nullptr ? &table->info : nullptr );
-    if ( table != nullptr )
-      rl_table_policy::commit( sim, p, seq, *table );
+    rl_translog::write_row( sim, p, r, apl_choice_name, stock_use, table_use != nullptr ? &table_use->info : nullptr );
+    if ( table_use != nullptr )
+      rl_table_policy::commit( sim, p, seq, *table_use );
     const double now = sim->current_time().total_seconds();
-    dump_resolve( sim, "commit", nullptr, now, now, static_cast<long long>( seq ) );
+    dump_resolve( sim, "commit", nullptr, now, decided_at.total_seconds(), static_cast<long long>( seq ) );
     return;
   }
   if ( g_staged.valid )
@@ -581,14 +713,16 @@ void submit_decision( bool deferred, action_t* act, const rl_table_policy::decis
   pd.seq = seq;
   pd.has_apl_name = apl_choice_name != nullptr;
   pd.apl_name = apl_choice_name != nullptr ? apl_choice_name : "";
-  pd.has_stock = stock_pick != nullptr;
-  if ( stock_pick != nullptr )
-    pd.stock = *stock_pick;
-  pd.has_table = table != nullptr;
-  if ( table != nullptr )
-    pd.table = *table;
-  pd.decided_at = sim->current_time();
-  pd.expected_fire = pd.decided_at;
+  pd.has_stock = stock_use != nullptr;
+  if ( stock_use != nullptr )
+    pd.stock = *stock_use;
+  pd.has_table = table_use != nullptr;
+  if ( table_use != nullptr )
+    pd.table = *table_use;
+  pd.decided_at = decided_at;
+  pd.expected_fire = sim->current_time();
+  pd.explored = ( r.flags & rl_translog::FLAG_EXPLORATORY ) != 0;
+  pd.dump_line = true;
 }
 
 // A throw out of accept_cast()/accept_wait() must not lose the row of the decision that was refused: it is exactly the row a later investigation wants.
@@ -597,6 +731,444 @@ void flush_staged_on_abort( sim_t* sim )
   if ( g_staged.valid && g_staged.sim == sim )
     commit_pending( g_staged, false );
 }
+
+// ==========================================================================
+// 261027-fts stage D: the decision window and the re-poll (the contract is in solver_control.hpp).
+// ==========================================================================
+void window_log( sim_t* sim, const char* kind, const char* outcome, int idx )
+{
+  const std::string& path = window_log_storage();
+  if ( path.empty() )
+    return;
+  static std::mutex    m;
+  std::lock_guard<std::mutex> lock( m );
+  static std::ofstream f;
+  static bool          opened = false;
+  if ( !opened )
+  {
+    f.open( path, std::ios::out | std::ios::trunc );
+    opened = true;
+  }
+  if ( f.is_open() )
+  {
+    f << fmt::format( "{{\"kind\":\"{}\",\"outcome\":\"{}\",\"t\":{:.6f},\"iteration\":{},\"idx\":{}}}\n", kind, outcome,
+                     sim->current_time().total_seconds(), sim->current_iteration, idx );
+    f.flush();
+  }
+}
+
+// True when a window / re-poll may run for `p`: the in-process policy (net or table) drives the RL actor at a foreground boundary. The observer arm, the
+// FIFO transport and a branch / teacher mode never do (the branch modes are refused by name: a window cut and a branch child do not compose).
+bool window_enabled( player_t* p )
+{
+  if ( window_ms_storage() <= 0 )
+    return false;
+  sim_t* sim = p->sim;
+  if ( !sim->solver_control_str.empty() || sim->solver_policy_str.empty() || sim->solver_policy_observe_stock || sim->rl_bl_shadow || !is_rl_actor( p ) )
+    return false;
+  const solver_branch::config_t& bc = solver_branch::cfg();
+  if ( bc.branch_at >= 0 || bc.teacher || solver_branch::is_child() )
+    protocol_abort( "WINDOW_BRANCH: solver_window_ms > 0 under a solver_branch mode (branch / teacher / child): the decision window and a branch child do not compose "
+                    "(261027-fts, decision 11); set solver_window_ms=0" );
+  return !p->is_sleeping();
+}
+
+// The instant the window closes: the actor's Player-Ready event, or for a running cast the later of its end and the GCD's. Zero when neither exists.
+timespan_t window_end( player_t* p )
+{
+  if ( p->readying != nullptr )
+    return p->readying->occurs();
+  if ( p->executing != nullptr && p->executing->execute_event != nullptr )
+    return std::max( p->executing->execute_event->occurs(), p->gcd_ready );
+  return timespan_t::zero();
+}
+
+poll_out_t run_poll( player_t* p, bool skip_button )
+{
+  sim_t*              sim = p->sim;
+  const std::uint64_t seq0 = sim->solver_control_seq;
+  g_poll = true;
+  g_skip_button_dial = skip_button;
+  g_poll_out = poll_out_t{};
+  action_t* a = nullptr;
+  try
+  {
+    a = solver_control::choose( p, nullptr, execute_type::FOREGROUND );
+  }
+  catch ( ... )
+  {
+    g_poll = false;
+    g_skip_button_dial = false;
+    sim->solver_control_seq = seq0;
+    throw;
+  }
+  g_poll = false;
+  g_skip_button_dial = false;
+  sim->solver_control_seq = seq0;  // a poll consumes no decision number
+  poll_out_t out = g_poll_out;
+  out.action = a;
+  if ( out.kind == poll_out_t::kind_t::cast && a == nullptr )
+    out.kind = poll_out_t::kind_t::none;
+  return out;
+}
+
+void make_hold( sim_t* sim, player_t* p, const poll_out_t& out )
+{
+  if ( window_probe_storage() != 0 )
+    return;  // solver_window_probe: the poll ran, nothing is held
+  hold_t& h = g_win.hold;
+  const int replaces = h.valid ? h.replaces + 1 : 0;
+  h = hold_t{};
+  h.valid = true;
+  h.sim = sim;
+  h.p = p;
+  h.kind = out.kind;
+  h.idx = out.idx;
+  h.target = out.target;
+  h.explored = out.explored;
+  h.has_rec = out.has_rec;
+  if ( out.has_rec )
+    h.rec = out.rec;
+  h.has_stock = out.has_stock;
+  if ( out.has_stock )
+    h.stock = out.stock;
+  h.has_table = out.has_table;
+  if ( out.has_table )
+    h.table = out.table;
+  h.decided_at = sim->current_time();
+  h.replaces = replaces;
+  count( rl_translog::census_slot::staged );  // a hold is a staged decision; the fire either commits it (no second count) or drops it (replaced / fight_end)
+}
+
+// One pre-fire poll of the window.
+void window_poll_run( player_t* p )
+{
+  sim_t*  sim = p->sim;
+  hold_t& h = g_win.hold;
+  if ( h.valid && h.explored )
+    return;  // an explored decision is held to the fire: nothing replaces it
+  const bool first = !g_win.drawn;
+  const char* kind = first ? "open" : "repoll";
+  poll_out_t out = run_poll( p, /*skip_button=*/!first );
+  if ( first )
+    g_win.drawn = true;
+  if ( out.kind == poll_out_t::kind_t::none )
+  {
+    window_log( sim, kind, "none", -1 );
+    return;
+  }
+  if ( out.kind == poll_out_t::kind_t::wait )
+  {
+    if ( h.valid )
+    {
+      count( rl_translog::census_slot::replaced_by_wait );
+      window_log( sim, kind, "wait_kept_hold", out.idx );
+    }
+    else if ( out.explored )
+    {
+      make_hold( sim, p, out );
+      window_log( sim, kind, "hold_wait_explored", out.idx );
+    }
+    else
+      window_log( sim, kind, "wait", out.idx );
+    return;
+  }
+  if ( h.valid )
+  {
+    if ( out.idx == h.idx && out.target == h.target )
+    {
+      count( rl_translog::census_slot::repolls );
+      window_log( sim, kind, "kept", out.idx );
+      return;
+    }
+    if ( h.replaces >= WINDOW_MAX_REPLACES )
+    {
+      count( rl_translog::census_slot::flipflop_bound );
+      window_log( sim, kind, "flipflop_bound", out.idx );
+      return;
+    }
+    count( rl_translog::census_slot::replaced );
+    make_hold( sim, p, out );
+    window_log( sim, kind, "replaced", out.idx );
+    return;
+  }
+  make_hold( sim, p, out );
+  window_log( sim, kind, out.explored ? "hold_explored" : "hold", out.idx );
+}
+
+// The execute_action() tail for a press the engine did not get from player_ready_event_t (a queued press replaced by a re-poll): the same assignments in the
+// same order as player_t::execute_action(), after choose().
+void press_chosen( player_t* p, action_t* action )
+{
+  p->last_foreground_action = action;
+  action->line_cooldown->start();
+  action->queue_execute( execute_type::FOREGROUND );
+  if ( !action->quiet )
+  {
+    p->iteration_executed_foreground_actions++;
+    action->total_executions++;
+    if ( action->trigger_gcd > timespan_t::zero() )
+      p->prev_gcd_actions.push_back( action );
+    else
+      p->off_gcdactions.push_back( action );
+    if ( !p->is_add() && ( !p->is_pet() || p->collect_pet_sequence_data ) )
+      p->sequence_add( action, action->target );
+  }
+}
+
+// accept_cast()'s retarget for a press made after a poll (the poll itself does not retarget): casting on a unit IS targeting it.
+void retarget_to_pick( player_t* p, action_t* a )
+{
+  if ( p->sim->target_select_enabled && is_rl_actor( p ) && rl_target_select::is_targeted_action( a ) )
+  {
+    bool      found = false;
+    player_t* pick = rl_target_select::lookup_pick( a, &found );
+    if ( found && pick != nullptr )
+      rl_target_select::retarget( a, p, pick );
+  }
+}
+
+struct window_poll_event_t : public event_t
+{
+  player_t* actor;
+  bool      queue_chain;
+  window_poll_event_t( sim_t& s, player_t* pl, timespan_t d, bool q ) : event_t( s, d ), actor( pl ), queue_chain( q ) {}
+  const char* name() const override
+  {
+    return queue_chain ? "RL-Queue-Poll" : "RL-Window-Poll";
+  }
+  void execute() override;
+};
+
+void arm_queue_chain( player_t* p, action_t* a )
+{
+  if ( g_q.ev != nullptr || a->queue_event == nullptr )
+    return;
+  const timespan_t step = timespan_t::from_millis( repoll_ms_storage() );
+  if ( p->sim->current_time() + step >= a->queue_event->occurs() )
+    return;  // strictly before the fire only; the fire instant has its own poll
+  g_q.ev = make_event<window_poll_event_t>( *p->sim, *p->sim, p, step, true );
+}
+
+// A re-poll of the queued press `a` (inside the chain, or at its fire instant). Returns true when it replaced the press.
+bool queue_poll_run( player_t* p, action_t* a, bool at_fire )
+{
+  sim_t* sim = p->sim;
+  if ( g_q.explored )
+    return false;  // an explored press is held to its fire
+  poll_out_t out = run_poll( p, /*skip_button=*/true );
+  const char* kind = at_fire ? "queue_fire" : "queue_repoll";
+  if ( window_probe_storage() != 0 )
+  {
+    window_log( sim, kind, "probe", out.idx );
+    return false;  // solver_window_probe: the poll ran, the press stands
+  }
+  if ( out.kind == poll_out_t::kind_t::none )
+  {
+    window_log( sim, kind, "none", -1 );
+    return false;
+  }
+  if ( out.kind == poll_out_t::kind_t::wait )
+  {
+    count( rl_translog::census_slot::replaced_by_wait );
+    window_log( sim, kind, "wait_kept_press", out.idx );
+    return false;
+  }
+  if ( out.action == a && out.target == g_q.target )
+  {
+    count( rl_translog::census_slot::repolls );
+    window_log( sim, kind, "kept", out.idx );
+    return false;
+  }
+  if ( g_q.replaces >= WINDOW_MAX_REPLACES )
+  {
+    count( rl_translog::census_slot::flipflop_bound );
+    window_log( sim, kind, "flipflop_bound", out.idx );
+    return false;
+  }
+  // A different cast: the queued press is cancelled (its row is discarded, census `replaced`) and the new pick is pressed through the engine's own path.
+  window_log( sim, kind, "replaced", out.idx );
+  const int replaces = g_q.replaces + 1;
+  if ( g_queued.valid && g_queued.p == p && g_queued.action == a )
+    discard_pending( g_queued, rl_translog::census_slot::replaced, DISCARD_NAMES[ static_cast<int>( discard_reason::replaced ) ] );
+  else if ( !translog_on( sim ) )
+    count( rl_translog::census_slot::replaced );
+  if ( g_q.ev != nullptr )
+    event_t::cancel( g_q.ev );
+  g_q.valid = false;
+  event_t::cancel( a->queue_event );
+  p->queueing = nullptr;
+  // The old press never executed: undo the counts execute_action() made for it (queued_action_execute_event_t does the same when its queue fails).
+  p->iteration_executed_foreground_actions--;
+  a->total_executions--;
+  if ( !p->prev_gcd_actions.empty() && p->prev_gcd_actions.back() == a )
+    p->prev_gcd_actions.pop_back();
+  retarget_to_pick( p, out.action );
+  if ( translog_on( sim ) && out.has_rec )
+  {
+    const std::uint64_t seq = ++sim->solver_control_seq;
+    if ( g_staged.valid )
+      pending_invariant( fmt::format( "a re-poll replaced a queued press while seq={} is staged", g_staged.seq ) );
+    pending_row_t& pd = g_staged;
+    pd = pending_row_t{};
+    pd.valid = true;
+    pd.sim = sim;
+    pd.p = p;
+    pd.action = out.action;
+    pd.rec = out.rec;
+    pd.rec.seq = static_cast<std::uint32_t>( seq );
+    pd.seq = seq;
+    pd.has_stock = out.has_stock;
+    if ( out.has_stock )
+      pd.stock = out.stock;
+    pd.has_table = out.has_table;
+    if ( out.has_table )
+      pd.table = out.table;
+    pd.decided_at = sim->current_time();
+    pd.expected_fire = pd.decided_at;
+    pd.explored = out.explored;
+    pd.dump_line = false;
+    count( rl_translog::census_slot::staged );
+  }
+  g_last_pick = last_pick_t{ true, out.action, out.idx, out.target, out.explored };
+  g_q_replaces_next = replaces;
+  press_chosen( p, out.action );
+  g_q_replaces_next = 0;  // taken by queue_window_open() if the new press queued; a press that fired at once has no chain to carry it into
+  return true;
+}
+
+void window_poll_event_t::execute()
+{
+  player_t* p = actor;
+  sim_t*    sim = &this->sim();
+  if ( queue_chain )
+  {
+    if ( g_q.ev == this )
+      g_q.ev = nullptr;
+    if ( !g_q.valid || g_q.p != p || g_q.sim != sim )
+      return;
+    action_t* a = g_q.action;
+    if ( p->queueing != a || a->queue_event == nullptr )
+    {
+      g_q.valid = false;  // the queue was resolved by an engine path (fired, interrupted, cancelled)
+      return;
+    }
+    if ( sim->current_time() >= a->queue_event->occurs() )
+      return;
+    if ( !queue_poll_run( p, a, false ) && g_q.valid && p->queueing == g_q.action )
+      arm_queue_chain( p, g_q.action );
+    return;
+  }
+  if ( g_win.ev == this )
+    g_win.ev = nullptr;
+  if ( !g_win.active || g_win.p != p || g_win.sim != sim || p->is_sleeping() )
+    return;
+  const timespan_t end = window_end( p );
+  const timespan_t now = sim->current_time();
+  if ( end <= now )
+    return;  // the fire instant is the ordinary Player-Ready decision
+  if ( p->queueing != nullptr || g_staged.valid || g_queued.valid )
+    return;  // cannot happen while the window is armed from a Player-Ready; a queued press has its own chain
+  window_poll_run( p );
+  const timespan_t step = timespan_t::from_millis( repoll_ms_storage() );
+  if ( now + step < end && g_win.active )
+    g_win.ev = make_event<window_poll_event_t>( *sim, *sim, p, step, false );
+}
+
+void window_open( player_t* p, timespan_t end )
+{
+  sim_t*           sim = p->sim;
+  const timespan_t now = sim->current_time();
+  const timespan_t step = timespan_t::from_millis( repoll_ms_storage() );
+  if ( g_win.active && g_win.p == p && g_win.sim == sim )
+    return;  // a window is already running for this boundary (a hard cast opened it at the cast start)
+  if ( g_win.hold.valid )
+  {
+    // A hold older than its boundary (its fire never resolved it): dropped.
+    count( rl_translog::census_slot::replaced );
+    g_win.hold.valid = false;
+  }
+  g_win = window_t{};
+  if ( end - now < step )
+    return;  // too close to the boundary for a poll to precede it
+  const timespan_t open_at = std::max( now, end - timespan_t::from_millis( window_ms_storage() ) );
+  g_win.active = true;
+  g_win.sim = sim;
+  g_win.p = p;
+  g_win.ev = make_event<window_poll_event_t>( *sim, *sim, p, open_at - now, false );
+}
+
+// The fire instant: the ordinary decision resolved against the hold. Moves `idx` to the hold's button when the hold stands; returns true when the hold is an
+// explored one (held to the fire: the aim dial is not drawn on top of it).
+bool window_resolve_final( sim_t* sim, player_t* p, const std::uint8_t mask[ RL_ACTION_DIM ], int& idx, bool& exploratory, bool table_play, bool forced )
+{
+  if ( g_poll || !g_win.hold.valid || g_win.hold.sim != sim || g_win.hold.p != p )
+    return false;
+  hold_t& h = g_win.hold;
+  if ( forced )
+    return false;  // a forced decision (solver_force_decision) is not overridden by a hold: the hold is dropped when the row is submitted
+  if ( h.idx < 0 || mask[ h.idx ] == 0 )
+  {
+    window_log( sim, "fire", "hold_illegal", h.idx );
+    return false;  // dropped when the row is submitted (census `replaced`)
+  }
+  if ( h.explored )
+  {
+    idx = h.idx;
+    exploratory = true;
+    window_log( sim, "fire", "hold_explored", idx );
+    return true;
+  }
+  if ( h.kind == poll_out_t::kind_t::cast )
+  {
+    if ( RL_ACTIONS[ idx ].kind == rl_action_kind::wait && !table_play )
+    {
+      // a wait pick leaves the press open: it fires (the table player's idle is its own plan, not a pick against the hold: the hold is dropped)
+      count( rl_translog::census_slot::replaced_by_wait );
+      idx = h.idx;
+      window_log( sim, "fire", "wait_kept_hold", idx );
+    }
+    else if ( idx != h.idx && h.replaces >= WINDOW_MAX_REPLACES )
+    {
+      count( rl_translog::census_slot::flipflop_bound );
+      idx = h.idx;
+      window_log( sim, "fire", "flipflop_bound", idx );
+    }
+    else
+      window_log( sim, "fire", idx == h.idx ? "kept" : "replaced", idx );
+  }
+  return false;
+}
+
+// RAII at the top of an ordinary foreground decision of the RL actor: whatever the window left (the hold, the draw flag, a running chain) is resolved or dropped
+// when the decision ends, however it ends.
+struct fire_guard_t
+{
+  sim_t*    sim;
+  player_t* p;
+  bool      on;
+  fire_guard_t( sim_t* s, player_t* pl, bool enable ) : sim( s ), p( pl ), on( enable ) {}
+  fire_guard_t( const fire_guard_t& ) = delete;
+  fire_guard_t& operator=( const fire_guard_t& ) = delete;
+  ~fire_guard_t()
+  {
+    if ( !on )
+      return;
+    if ( g_win.hold.valid && g_win.hold.p == p )
+    {
+      count( rl_translog::census_slot::replaced );  // the decision ended without a row: the hold is dropped
+      g_win.hold.valid = false;
+    }
+    if ( g_win.p == p )
+    {
+      if ( g_win.ev != nullptr )
+        event_t::cancel( g_win.ev );
+      g_win.active = false;
+      g_win.drawn = false;
+      g_win.ev = nullptr;
+    }
+  }
+};
 }  // namespace
 
 void pending_queued( player_t* p, action_t* a, double queue_delay_s )
@@ -649,6 +1221,81 @@ void pending_discard_interrupt( player_t* p, action_t* a )
   discard_pending( g_queued, interrupt_slot( c ), INTERRUPT_NAMES[ static_cast<int>( c ) ] );
 }
 
+int& window_ms_storage()
+{
+  static int v = 250;
+  return v;
+}
+int& repoll_ms_storage()
+{
+  static int v = 25;
+  return v;
+}
+std::string& window_log_storage()
+{
+  static std::string s;
+  return s;
+}
+int& window_probe_storage()
+{
+  static int v = 0;
+  return v;
+}
+
+void window_arm( player_t* p, timespan_t ready_at )
+{
+  if ( window_enabled( p ) )
+    window_open( p, ready_at );
+}
+void window_arm_cast( player_t* p, timespan_t ends_at )
+{
+  if ( window_enabled( p ) )
+    window_open( p, ends_at );
+}
+void window_on_ready( player_t* p )
+{
+  if ( g_win.p == p && g_win.ev != nullptr )
+    event_t::cancel( g_win.ev );
+}
+void queue_window_open( player_t* p, action_t* a )
+{
+  if ( !window_enabled( p ) || !g_last_pick.valid || g_last_pick.action != a )
+    return;
+  if ( g_q.ev != nullptr )
+    event_t::cancel( g_q.ev );
+  g_q = queue_poll_t{};
+  g_q.valid = true;
+  g_q.sim = p->sim;
+  g_q.p = p;
+  g_q.action = a;
+  g_q.target = g_last_pick.target;
+  g_q.explored = g_last_pick.explored;
+  g_q.replaces = g_q_replaces_next;
+  g_q_replaces_next = 0;
+  arm_queue_chain( p, a );
+}
+void queue_rescheduled( player_t* p, action_t* a )
+{
+  if ( g_q.valid && g_q.p == p && g_q.action == a && g_q.ev == nullptr && p->queueing == a )
+    arm_queue_chain( p, a );
+}
+bool queue_fire_poll( player_t* p, action_t* a )
+{
+  if ( !g_q.valid || g_q.p != p || g_q.action != a )
+    return false;
+  if ( g_q.ev != nullptr )
+    event_t::cancel( g_q.ev );
+  if ( p->queueing != a )
+  {
+    g_q.valid = false;
+    return false;
+  }
+  const bool replaced = queue_poll_run( p, a, /*at_fire=*/true );
+  if ( !replaced )
+    g_q.valid = false;  // the press stands: its chain is over
+  return replaced;
+}
+
 void note_cast_interrupted( player_t* p )
 {
   if ( is_rl_actor( p ) && translog_on( p->sim ) )
@@ -663,6 +1310,14 @@ void note_cast_failed_at_end( player_t* p, action_t* a )
 
 void on_fight_end( sim_t* sim )
 {
+  // 261027-fts stage D: a hold the fight ended on never became a row (the fire never came).
+  if ( g_win.hold.valid && g_win.hold.sim == sim )
+  {
+    count( rl_translog::census_slot::fight_end );
+    g_win.hold.valid = false;
+  }
+  g_win.active = false;
+  g_q.valid = false;
   if ( g_queued.valid )
   {
     if ( g_queued.sim == sim )
@@ -702,7 +1357,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
   sim_t* sim = p->sim;
   if ( sim->solver_control_str.empty() && sim->solver_policy_str.empty() )
     return apl_choice;
-  if ( is_rl_actor( p ) && translog_on( sim ) )
+  if ( is_rl_actor( p ) && translog_on( sim ) && !g_poll )
     begin_boundary( p, et );
 
   // Defect (a) fix (2026-07-29 fix bundle): in live play, melee auto-attack
@@ -763,7 +1418,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
   // it is added because the block's entire purpose is to start THIS actor's swings, and a pet
   // consuming the one-shot would silently leave the real actor with no auto-attack for the whole
   // fight -- the exact failure the block was written to fix.
-  if ( et == execute_type::FOREGROUND && !sim->solver_control_auto_attack_started &&
+  if ( et == execute_type::FOREGROUND && !g_poll && !sim->solver_control_auto_attack_started &&
        std::strcmp( p->name(), RL_ACTOR_NAME ) == 0 && !p->is_pet() )
   {
     sim->solver_control_auto_attack_started = true;
@@ -902,7 +1557,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
   // The predicate is the file's own `is_rl_actor` idiom, verbatim in shape (`:144`): exact string
   // equality against RL_ACTOR_NAME -- never a prefix, which would match the actor's own pet
   // records (the registry's `$actorNameComment` warns of exactly this) -- plus `!p->is_pet()`.
-  if ( et == execute_type::FOREGROUND && !p->is_moving() &&
+  if ( et == execute_type::FOREGROUND && !g_poll && !p->is_moving() &&
        std::strcmp( p->name(), RL_ACTOR_NAME ) == 0 && !p->is_pet() )
   {
     if ( p->main_hand_attack && p->main_hand_attack->execute_event == nullptr )
@@ -959,6 +1614,9 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       return nullptr;
     }
   }
+
+  // 261027-fts stage D: an ordinary foreground decision of the RL actor ends whatever window preceded it (the hold is resolved in submit_decision, or dropped).
+  fire_guard_t fire_guard( sim, p, !g_poll && et == execute_type::FOREGROUND && is_rl_actor( p ) && sim->solver_control_str.empty() );
 
   // 261005-tch2 (solver_mask_no_enemy): at a background (off-GCD / cast-while-casting) boundary no wait
   // is legal (build_mask's R1), so with every cast masked there is nothing to press: this boundary is
@@ -1554,8 +2212,10 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // above): the refusal upstream already protocol_abort()s on an all-illegal natural `mask`,
     // and the fail-safe above falls back to that same natural mask whenever holding it empty
     // would leave nothing selectable -- so select_mask always has at least one legal entry.
+    // 261027-fts stage D: a window draws the button dial ONCE, at its first poll; the polls after it and the fire instant do not (an explored decision is held).
+    const bool skip_button_dial = g_skip_button_dial || ( !g_poll && g_win.drawn && g_win.p == p && g_win.sim == sim );
     const float exploration = sim->solver_policy_weights->exploration;
-    if ( exploration > 0.0f )
+    if ( exploration > 0.0f && !skip_button_dial )
     {
       // ONE draw decides whether to explore at all.
       if ( sim->solver_explore_rng.real() < exploration )
@@ -1613,6 +2273,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // override of selection itself, and should be refused only when true engine legality
     // disagrees, the same thing the FIFO arm's own forced_deviation.forced() checks.
     bool forced_here = false;  // 261005-branch-teacher: the teacher never overrides a forced press
+    if ( !g_poll )  // 261027-fts stage D: a forced decision is made at the ordinary decision only
     for ( const auto& [ forced_k, forced_action ] : sim->solver_force_decisions )
     {
       if ( static_cast<std::int64_t>( seq - 1 ) == forced_k )
@@ -1628,6 +2289,9 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
         break;
       }
     }
+
+    // 261027-fts stage D: the fire instant resolves against the hold of the window (no-op without one).
+    const bool hold_explored = window_resolve_final( sim, p, mask, idx, exploratory, table_play, forced_here );
 
     // 221-03 (ACT-05/ACT-06, Task 2 point 4): cleared for EVERY decision
     // (not just non-wait ones) -- same discipline as the FIFO arm's own
@@ -1693,6 +2357,12 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     {
       sim->solver_control_last_reply_type = "wait";
       sim->solver_control_has_pending_wait = false;
+      if ( g_poll )
+      {
+        g_poll_out.kind = poll_out_t::kind_t::wait;
+        g_poll_out.idx = idx;
+        g_poll_out.explored = exploratory;
+      }
       submit_decision( false, nullptr, &table_decision, sim, p, seq, obs, mask, idx, q_margin, top_q, rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK, false,
                        exploratory, row_held, nullptr, 0, 0, rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
                        sim->solver_record_apl_choice && apl_choice ? apl_choice->name() : nullptr, false,
@@ -1841,7 +2511,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
                   sim->solver_policy_weights->has_aim_section
                       ? sim->solver_policy_weights->aim.exploration
                       : 0.0f;
-              if ( candidate_exploration > 0.0f &&
+              if ( candidate_exploration > 0.0f && !g_poll && !hold_explored &&  // 261027-fts stage D: the aim dial is drawn at the fire instant only
                    sim->solver_explore_rng.real() < candidate_exploration )
               {
                 std::vector<rl_target_select::enemy_fact> legal =
@@ -1865,6 +2535,13 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
             }
           }
         }
+      }
+      if ( g_poll )
+      {
+        g_poll_out.kind = poll_out_t::kind_t::cast;
+        g_poll_out.idx = idx;
+        g_poll_out.target = chosen_target_actor_index;
+        g_poll_out.explored = exploratory;
       }
       // 261027-fts: the row is STAGED here (filled with everything the policy saw) and committed when the press executes (queue_execute() / the queue event);
       // the action pointer the engine will queue is set below, once accept_cast() has resolved it.
@@ -1901,6 +2578,8 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
         action_t* const resolved_cast = accept_cast( p, action.token, seq );
         if ( g_staged.valid && g_staged.sim == sim )
           g_staged.action = resolved_cast;
+        if ( !g_poll )
+          g_last_pick = last_pick_t{ true, resolved_cast, idx, chosen_target_actor_index, exploratory };
         return resolved_cast;
       }
       catch ( ... )
@@ -1951,6 +2630,12 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // build_wait() already computed -- never re-derived. Empty on the
     // FIFO arm by construction (never reaches this in-process branch).
     sim->solver_control_last_wait_source = wr.source;
+    if ( g_poll )
+    {
+      g_poll_out.kind = poll_out_t::kind_t::wait;
+      g_poll_out.idx = idx;
+      g_poll_out.explored = exploratory;
+    }
     // Flight recorder decision row, wait branch. wr.floored is the fifth
     // flag bit's only source -- it says the wait length came from the
     // floor rather than from a real timer. No-op when rl_translog= is
@@ -1974,8 +2659,9 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // survives it.
     try
     {
-      accept_wait( sim, et, wr.seconds,
-                   "in-process (seq=" + std::to_string( seq ) + ", source=" + wr.source + ")" );
+      if ( !g_poll )  // 261027-fts stage D: a poll sets no wait
+        accept_wait( sim, et, wr.seconds,
+                     "in-process (seq=" + std::to_string( seq ) + ", source=" + wr.source + ")" );
     }
     catch ( ... )
     {
@@ -2014,6 +2700,14 @@ void reset_iteration( sim_t* sim )
       rng::per_source_seed( sim->seed, sim->thread_index, sim->rng_iteration_index(), "sim|solver_target" ) );
 
   // 261027-fts: the census and the pending rows belong to ONE fight. on_fight_end() resolved whatever the last fight left; a survivor is a bug.
+  // 261027-fts stage D: the window and the queue chain belong to one fight; their events died with the fight's event queue (never cancelled through these
+  // pointers, which are stale by now).
+  g_win = window_t{};
+  g_q = queue_poll_t{};
+  g_q_replaces_next = 0;
+  g_last_pick = last_pick_t{};
+  g_poll = false;
+  g_skip_button_dial = false;
   if ( g_staged.valid || g_queued.valid )
     pending_invariant( fmt::format( "a {} decision (seq={}) survived into the next fight", g_queued.valid ? "queued" : "staged",
                                     g_queued.valid ? g_queued.seq : g_staged.seq ) );

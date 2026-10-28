@@ -4731,6 +4731,11 @@ void sim_t::create_options()
   add_option( opt_string( "solver_apl_stock_list", rl_stock_eval::list_name_storage() ) );
   // 261021-ezq: see sim.hpp's solver_policy_observe_stock doc comment. Default off.
   add_option( opt_bool( "solver_policy_observe_stock", solver_policy_observe_stock ) );
+  // 261027-fts stage D: the decision window and the re-poll (solver_control.hpp). Global storage; 0 = off.
+  add_option( opt_int( "solver_window_ms", solver_control::window_ms_storage() ) );
+  add_option( opt_int( "solver_repoll_ms", solver_control::repoll_ms_storage() ) );
+  add_option( opt_string( "solver_window_log", solver_control::window_log_storage() ) );
+  add_option( opt_int( "solver_window_probe", solver_control::window_probe_storage() ) );
   // 261025-bk4 (b2): the table player, see rl_table_policy.hpp. The values live in that module (a sim_t member would rebuild every file).
   add_option( opt_string( "solver_table_policy", rl_table_policy::path_storage() ) );
   add_option( opt_string( "solver_table_scope", rl_table_policy::scope_storage() ) );

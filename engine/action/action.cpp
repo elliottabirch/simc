@@ -152,6 +152,10 @@ struct queued_action_execute_event_t : public event_t
       return;
     }
 
+    // 261027-fts stage D: the poll at the fire instant (no-op unless a decision window is on): a different pick cancels this press and makes its own.
+    if ( type == execute_type::FOREGROUND && solver_control::queue_fire_poll( action->player, action ) )
+      return;
+
     if ( type == execute_type::FOREGROUND )
     {
       player_t* actor = action->player;
@@ -2666,6 +2670,9 @@ void action_t::queue_execute( execute_type et )
     player->queueing = this;
     // 261027-fts: the decision row of this press waits for the queue event (the commit) or for whatever takes the queue away (a discard).
     solver_control::pending_queued( player, this, queue_delay.total_seconds() );
+    // 261027-fts stage D: a queued foreground press is re-polled every solver_repoll_ms until its fire (no-op unless a decision window is on).
+    if ( et == execute_type::FOREGROUND )
+      solver_control::queue_window_open( player, this );
   }
   else
   {
@@ -2875,6 +2882,9 @@ void action_t::schedule_execute( action_state_t* state )
       player->current_execute_type = execute_type::CAST_WHILE_CASTING;
       assert( player->cast_while_casting_poll_event == nullptr );
       player->schedule_cwc_ready( timespan_t::zero() );
+      // 261027-fts stage D: a hard cast's decision window closes where the cast and its GCD end (no-op unless a decision window is on).
+      // The actor is ready again a queue lag after the later of the two: the window closes where Player-Ready will fire (the lag's mean; the draw is made at the cast end).
+      solver_control::window_arm_cast( player, std::max( execute_event->occurs(), player->gcd_ready ) + sim->queue_lag.mean );
     }
 
     if ( player->enable_spell_queue && time_to_execute > player->spell_queue_window )
@@ -5797,6 +5807,7 @@ void action_t::reschedule_queue_event()
     event_t::cancel( queue_event );
     queue_event = make_event<queued_action_execute_event_t>( *sim, this, new_queue_delay, et );
   }
+  solver_control::queue_rescheduled( player, this );  // 261027-fts stage D
 }
 rng::rng_t& action_t::rng()
 {

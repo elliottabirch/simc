@@ -347,6 +347,7 @@ struct player_ready_event_t : public player_event_t
   {
     p()->readying = nullptr;
     p()->current_execute_type = execute_type::FOREGROUND;
+    solver_control::window_on_ready( p() );  // 261027-fts stage D: the fire instant ends the decision window's poll chain
 
     // There are certain chains of events where an off-gcd ability can be queued such that the queue
     // time for the action exceeds Player-Ready event (essentially end of GCD). In this case, the
@@ -7244,6 +7245,8 @@ void player_t::schedule_ready( timespan_t delta_time, bool waiting )
   }
 
   readying = make_event<player_ready_event_t>( *sim, *this, delta_time );
+  if ( !waiting )
+    solver_control::window_arm( this, readying->occurs() );  // 261027-fts stage D: the decision window opens before this boundary (no-op unless on)
 
   if ( was_executing && was_executing->gcd() > 0_ms && !was_executing->background &&
        !was_executing->proc && !was_executing->repeating )
