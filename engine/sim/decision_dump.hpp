@@ -21,6 +21,7 @@
 
 struct player_t;
 struct action_t;
+struct sim_t;
 
 namespace decision_dump
 {
@@ -235,6 +236,12 @@ std::string boundary_name( execute_type et );
 // rl_policy::read_action_gate_bits -- see that function's own doc comment for the full mechanism.
 void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool solver_reply_gated,
                           bool boundary_is_foreground, bool is_decision_boundary );
+
+// 261027-fts (D12): one additive `resolve` line per decision line of the RL actor, written when the decision is resolved (the press fires, the queued press is
+// discarded, or the boundary produced no decision). `outcome` is "commit", "discard" or "none"; `reason` is the discard reason (null otherwise); `t` is the
+// instant of resolution, `t_decided` the decision line's instant, `seq` the committed row's decision number (-1 when there is no row). Decision-time lines are
+// unchanged; a reader that wants only decisions skips lines whose `type` is "resolve". Written only when a translog is on (the pending machinery is off without one).
+void record_resolve( sim_t* sim, const char* outcome, const char* reason, double t, double t_decided, long long seq );
 
 // JSON helpers shared with solver_control (P3b) so both hooks emit
 // byte-identical escaping/clamping for the same field kinds.

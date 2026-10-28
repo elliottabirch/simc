@@ -16,6 +16,10 @@
 //     2. the state id is bucketed from the observation and the mask         (`bucket`, the float32 pipeline of state.py)
 //     3. the plan: STOCK (defer) | NOSTATE (fallback) | FORCED_IDLE | STRATEGY, read-only; a background boundary with nothing to press is
 //        a no-op that consumes no decision number
+//     [261027-fts, D8: steps 4 and 6 moved. decide() runs 1-3 and 5 and changes no table state; commit(), at the instant the press becomes irrevocable (the
+//      translog row's `t`), runs the counter, step 4 and the record of step 6, with `damage now` = the damage at that commit and `damage at THAT decision` = the
+//      damage at THAT decision's commit. The order is therefore pick, then update (the pick could not know the commit-time damage of a press that had not fired).
+//      A decision whose queued press is discarded leaves the table untouched.]
 //     4. (STRATEGY plans only) the pending strategy decision's reward is folded in:  r = damage now - damage at THAT decision;
 //        N += 1; alpha_n = max(update_alpha, 1/N); Q = float32( Q_old + alpha_n * (r - Q_old) ) (float64 arithmetic on the widened float32 Q);
 //        M2 = N * (1 - alpha_n) * (M2_old / N_old + alpha_n * (r - Q_old)^2) (the exponentially weighted variance times N; N_old = 0 reads as variance 0)
@@ -115,6 +119,20 @@ void on_fight_end( sim_t* sim );
 // Called from rl_translog::write_footer after the `.apl` footer: writes the `.tbt` footer record (kind 2: decision and fight-end counts) and closes the trace. Does nothing without a trace.
 void close_trace( sim_t* sim );
 
+// What a decision hands to its commit (261027-fts, D8). decide() changes NO table state: the row counter, the pending strategy decision, the update and
+// the `.tbt` record all move to commit(), which the caller runs at the instant the press becomes irrevocable (the translog row's `t`). A decision that is
+// discarded (a queued press that never fires) therefore leaves the table exactly as it was.
+struct staged_t
+{
+  bool          valid = false;
+  bool          strategy = false;      // a STRATEGY plan: commit() folds the pending decision's reward in and makes this decision the pending one
+  std::uint32_t state = 0;             // the bucketed state of a strategy decision
+  int           button = -1;           // the button of a strategy decision
+  std::uint32_t decision_index = 0;    // the prospective row counter (== the counter at commit)
+  bool          has_trace = false;
+  unsigned char trace[ 800 ] = {};     // the kind-1 `.tbt` record as the pick saw the row (update block empty), written at commit
+};
+
 // One decision's answer.
 struct decision_t
 {
@@ -124,12 +142,19 @@ struct decision_t
   float                       q_margin = 0.0f;
   float                       top_q = 0.0f;
   rl_apl_choice::table_info_t info;          // the format-3 record's table fields
+  staged_t                    staged;        // what commit() needs
 };
 
 // Plans, updates, picks and traces one decision. `mask` is the FINAL legality mask (post allowed_actions AND), `obs` the observation built from it.
 // Throws sc_runtime_error (TABLE_FALLBACK_REFUSED:, TABLE_NO_LEGAL:, TABLE_STRATEGY:) by name; never draws from the simulator's own random streams.
 decision_t decide( sim_t* sim, player_t* p, bool foreground, std::uint64_t seq, const float* obs, const std::uint8_t* mask,
                    const rl_stock_eval::pick_t& stock );
+
+// Runs the table's side of a COMMIT (261027-fts): the row counter advances; a STRATEGY decision folds the pending strategy decision's reward in with
+// r = damage NOW (the commit instant, the same number the translog row carries) minus the damage at THAT decision's commit, then becomes the pending
+// decision; the `.tbt` record is written with the update block of this fold. The pick was made BEFORE this update (it could not know the commit-time
+// damage of a press that had not fired), so the row a decision picked from lacks the previous decision's update: the update order is pick, then update.
+void commit( sim_t* sim, player_t* p, std::uint64_t seq, const decision_t& d );
 
 // The sim-less probe (see rl_table_policy.cpp). `args` are the process arguments after the program name. Returns the exit code.
 int run_probe( const std::vector<std::string>& args );

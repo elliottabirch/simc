@@ -238,6 +238,8 @@ struct special_execute_event_t : public player_event_t
       // Cancel existing queued action, and queue the new one.
       if ( p()->queueing )
       {
+        // 261027-fts: the queued press is replaced by the new pick (its decision row is discarded; the new one follows queue_execute()).
+        solver_control::pending_discard( p(), p()->queueing, solver_control::discard_reason::replaced );
         event_t::cancel( p()->queueing->queue_event );
         p()->queueing = nullptr;
       }
@@ -352,6 +354,7 @@ struct player_ready_event_t : public player_event_t
     // the action list as normal.
     if ( p()->queueing )
     {
+      solver_control::pending_discard( p(), p()->queueing, solver_control::discard_reason::ready_preempts_queue );  // 261027-fts
       event_t::cancel( p()->queueing->queue_event );
       p()->queueing = nullptr;
     }
@@ -7150,6 +7153,7 @@ void player_t::schedule_ready( timespan_t delta_time, bool waiting )
   {
     sim->print_debug( "{} canceling queued action '{}' at {}", *this, queueing->name(),
                       queueing->queue_event->occurs() );
+    solver_control::pending_discard( this, queueing, solver_control::discard_reason::ready_cancelled );  // 261027-fts
     event_t::cancel( queueing->queue_event );
     queueing = nullptr;
   }

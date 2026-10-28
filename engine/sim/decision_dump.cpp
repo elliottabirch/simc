@@ -19,6 +19,7 @@
 #include "sim/rl_policy.hpp"
 #include "sim/rl_target_select.hpp"
 #include "sim/sim.hpp"
+#include "sim/solver_control.hpp"
 #include "util/concurrency.hpp"
 #include "util/io.hpp"
 
@@ -1533,6 +1534,34 @@ void write_state_fields( std::ostream& out, player_t* p, action_t* chosen, bool 
   out << ( obs_picks_text.empty() ? std::string( ",\"obs_picks\":null,\"obs_pick_enemies\":null" ) : obs_picks_text );
 }
 
+void record_resolve( sim_t* sim, const char* outcome, const char* reason, double t, double t_decided, long long seq )
+{
+  if ( sim->decision_dump_file_str.empty() )
+    return;
+  sim_t* root = sim;
+  while ( root->parent )
+    root = root->parent;
+  std::ostringstream line;
+  line << "{\"type\":\"resolve\",\"outcome\":\"" << outcome << "\"";
+  line << ",\"reason\":";
+  if ( reason != nullptr )
+    line << "\"" << json_escape( reason ) << "\"";
+  else
+    line << "null";
+  line << ",\"t\":" << fmt::format( "{}", t ) << ",\"t_decided\":" << fmt::format( "{}", t_decided ) << ",\"seq\":" << seq;
+  line << ",\"iteration\":" << sim->current_iteration << ",\"thread\":" << sim->thread_index << "}\n";
+  auto_lock_t lock( root->decision_dump_mutex );
+  if ( !root->decision_dump_stream )
+  {
+    root->decision_dump_stream = std::make_unique<io::ofstream>();
+    root->decision_dump_stream->open( root->decision_dump_file_str );
+  }
+  if ( !root->decision_dump_stream->is_open() )
+    return;
+  *root->decision_dump_stream << line.str();
+  root->decision_dump_stream->flush();
+}
+
 void record( player_t* p, action_t* chosen, execute_type et )
 {
   sim_t* sim = p->sim;
@@ -1665,5 +1694,7 @@ void record( player_t* p, action_t* chosen, execute_type et )
     *root->decision_dump_stream << line.str();
     root->decision_dump_stream->flush();
   }
+  // 261027-fts (D12): the resolve line of a decision that is already resolved (wait, idle, no decision), or none yet (a staged cast: its commit or discard writes it).
+  solver_control::dump_decision_written( sim );
 }
 } // namespace decision_dump

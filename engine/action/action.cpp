@@ -28,6 +28,7 @@
 #include "sim/rl_credit.hpp"
 #include "sim/rl_target_select.hpp"
 #include "sim/sim.hpp"
+#include "sim/solver_control.hpp"
 #include "sim/rl_rng_record.hpp"
 #include "util/generic.hpp"
 #include "util/io.hpp"
@@ -154,8 +155,14 @@ struct queued_action_execute_event_t : public event_t
     if ( type == execute_type::FOREGROUND )
     {
       player_t* actor = action->player;
-      if ( !action->ready() || !action->target_ready( action->target ) )
+      // 261027-fts: the same short-circuit test, split so the discarded decision row is counted under the check that refused it.
+      const bool queue_not_ready = !action->ready();
+      const bool queue_target_not_ready = !queue_not_ready && !action->target_ready( action->target );
+      if ( queue_not_ready || queue_target_not_ready )
       {
+        solver_control::pending_discard( actor, action,
+                                         queue_not_ready ? solver_control::discard_reason::queue_failed_not_ready
+                                                         : solver_control::discard_reason::queue_failed_target_not_ready );
         if ( action->starved_proc )
         {
           action->starved_proc->occur();
@@ -191,12 +198,15 @@ struct queued_action_execute_event_t : public event_t
       }
       else
       {
+        // 261027-fts: the queued press fires: its decision row is committed (t = now) immediately before the engine commits to it.
+        solver_control::pending_commit( actor, action, /*from_queue_event=*/true );
         action->schedule_execute();
       }
     }
     // Other execute types are specialized, and need separate handling
     else
     {
+      solver_control::pending_commit( action->player, action, /*from_queue_event=*/true );
       do_execute( action, type );
     }
   }
@@ -376,6 +386,9 @@ struct action_execute_event_t : public player_event_t
     }
     else
     {
+      // 261027-fts: a committed cast reached its execute event and could not execute (census only).
+      if ( !action->background && !action->repeating )
+        solver_control::note_cast_failed_at_end( p(), action );
       // Release assigned pre_execute_state, since we are not calling action->execute() (that does
       // it automatically)
       if ( action->pre_execute_state )
@@ -2651,11 +2664,15 @@ void action_t::queue_execute( execute_type et )
   {
     queue_event      = make_event<queued_action_execute_event_t>( *sim, this, queue_delay, et );
     player->queueing = this;
+    // 261027-fts: the decision row of this press waits for the queue event (the commit) or for whatever takes the queue away (a discard).
+    solver_control::pending_queued( player, this, queue_delay.total_seconds() );
   }
   else
   {
     if ( et == execute_type::FOREGROUND )
     {
+      // 261027-fts: no queue needed: the row is committed here, before schedule_execute() so the credit stamping sees the committed decision number.
+      solver_control::pending_commit( player, this, /*from_queue_event=*/false );
       schedule_execute();
     }
     else
@@ -2667,9 +2684,11 @@ void action_t::queue_execute( execute_type et )
       {
         queue_event      = make_event<queued_action_execute_event_t>( *sim, this, timespan_t::zero(), et );
         player->queueing = this;
+        solver_control::pending_queued( player, this, 0.0 );
       }
       else
       {
+        solver_control::pending_commit( player, this, /*from_queue_event=*/false );
         do_execute( this, et );
       }
     }
@@ -3726,6 +3745,7 @@ void action_t::cancel()
   if ( player->queueing == this )
   {
     was_busy         = true;
+    solver_control::pending_discard( player, this, solver_control::discard_reason::ready_cancelled );
     player->queueing = nullptr;
   }
   if ( player->executing == this )
@@ -3755,7 +3775,10 @@ void action_t::interrupt_action()
   if ( player->executing == this )
     player->executing = nullptr;
   if ( player->queueing == this )
+  {
+    solver_control::pending_discard_interrupt( player, this );
     player->queueing = nullptr;
+  }
 
   if ( player->channeling == this )
   {
@@ -3777,6 +3800,9 @@ void action_t::interrupt_action()
 
   if ( !background && execute_event )
   {
+    // 261027-fts: a hard cast whose bar was running (its row is committed since schedule_execute): census only.
+    if ( execute_event->remains() > timespan_t::zero() )
+      solver_control::note_cast_interrupted( player );
     // Interrupting a cast resets GCD, allowing the player to start doing
     // something else right away. The delay between interrupting a cast
     // and starting a new cast seems to be twice the current latency.

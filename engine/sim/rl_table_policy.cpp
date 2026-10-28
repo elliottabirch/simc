@@ -1537,16 +1537,15 @@ decision_t decide( sim_t* sim, player_t* p, bool foreground, std::uint64_t seq, 
     refuse( "TABLE_NO_LEGAL", fmt::format( "seq={} t={:.3f}: no decided button, no deferred stock press and no legal idle button", seq, sim->current_time().total_seconds() ) );
   }
 
+  // 261027-fts (D8): decide() changes no table state. The row counter advances at commit() (the prospective index is the counter as it stands: only one
+  // decision is ever uncommitted), so a discarded decision burns no index and the next decision draws from the same key.
   const std::uint32_t decision_index = static_cast<std::uint32_t>( g_rt.rows );
-  ++g_rt.rows;
   rl_apl_choice::table_info_t& info = d.info;
   info.state_id = in_domain ? static_cast<std::uint32_t>( sid ) : rl_apl_choice::STATE_ID_NONE;
   info.decision_index = decision_index;
   d.q_margin = std::numeric_limits<float>::quiet_NaN();
   d.top_q = std::numeric_limits<float>::quiet_NaN();
 
-  const double  now_damage = p->solver_damage_so_far;
-  update_info_t upd;
   choice_t      choice;
   bool          have_choice = false;
   switch ( plan )
@@ -1576,13 +1575,8 @@ decision_t decide( sim_t* sim, player_t* p, bool foreground, std::uint64_t seq, 
       break;
     case plan_t::strategy:
     {
-      // The pending strategy decision's reward (the damage since IT: a deferred press, a forced idle or a NOSTATE row in between neither updated nor moved it)
-      // is folded in BEFORE the pick, then the strategy chooses on the updated row.
-      if ( g_rt.pending.valid )
-      {
-        upd = apply_update( g_rt.pending, now_damage );
-        g_rt.pending = pending_t();
-      }
+      // 261027-fts (D8): the pending strategy decision's reward is folded in at commit() (the damage since IT: a deferred press, a forced idle or a NOSTATE
+      // row in between neither updated nor moved it), AFTER this pick: the strategy chooses on the row as the previous commit left it.
       const std::size_t row = static_cast<std::size_t>( sid ) * BUTTONS;
       double            Qd[ BUTTONS ];
       std::int64_t      Nd[ BUTTONS ];
@@ -1620,13 +1614,14 @@ decision_t decide( sim_t* sim, player_t* p, bool foreground, std::uint64_t seq, 
       }
       d.top_q = best;
       d.q_margin = n_legal >= 2 ? best - second : std::numeric_limits<float>::quiet_NaN();
-      g_rt.pending.valid = true;
-      g_rt.pending.state = static_cast<std::uint32_t>( sid );
-      g_rt.pending.button = d.idx;
-      g_rt.pending.damage = now_damage;
+      d.staged.strategy = true;
+      d.staged.state = static_cast<std::uint32_t>( sid );
+      d.staged.button = d.idx;
       break;
     }
   }
+  d.staged.valid = true;
+  d.staged.decision_index = decision_index;
 
   if ( g_rt.trace )
   {
@@ -1660,10 +1655,44 @@ decision_t decide( sim_t* sim, player_t* p, bool foreground, std::uint64_t seq, 
     }
     for ( int b = 0; b < BUTTONS; ++b )
       r.prob[ b ] = have_choice && choice.has_probs ? choice.probs[ b ] : 0.0;
+    // The update block stays empty here (has_update = 0): commit() fills it with the fold applied at the commit and writes the record.
+    static_assert( sizeof( d.staged.trace ) == sizeof( r ), "the staged .tbt record is a trace_record_t" );
+    std::memcpy( d.staged.trace, &r, sizeof( r ) );
+    d.staged.has_trace = true;
+  }
+  return d;
+}
+
+void commit( sim_t* sim, player_t* p, std::uint64_t seq, const decision_t& d )
+{
+  if ( !g_loaded || !d.staged.valid )
+    return;
+  (void)sim;
+  if ( d.staged.decision_index != static_cast<std::uint32_t>( g_rt.rows ) )
+    refuse( "TABLE_STRATEGY", fmt::format( "decision-index drift at commit: decided as {} but the row counter is {} (seq={})", d.staged.decision_index, g_rt.rows, seq ) );
+  ++g_rt.rows;
+  update_info_t upd;
+  if ( d.staged.strategy )
+  {
+    const double now_damage = p->solver_damage_so_far;
+    if ( g_rt.pending.valid )
+    {
+      upd = apply_update( g_rt.pending, now_damage );
+      g_rt.pending = pending_t();
+    }
+    g_rt.pending.valid = true;
+    g_rt.pending.state = d.staged.state;
+    g_rt.pending.button = d.staged.button;
+    g_rt.pending.damage = now_damage;
+  }
+  if ( g_rt.trace && d.staged.has_trace )
+  {
+    trace_record_t r{};
+    std::memcpy( &r, d.staged.trace, sizeof( r ) );
+    r.seq = static_cast<std::uint32_t>( seq );
     fill_update( r, upd );
     write_trace( r );
   }
-  return d;
 }
 
 // ---- (6) the sim-less probe --------------------------------------------------------------------------------------------------------------

@@ -2491,6 +2491,8 @@ void sim_t::combat_end()
   // close row is written on BOTH transports and with neither (D-08).
   // No-op when rl_translog= is unset.
   // 261025-bk4 (b2): the table player closes the fight's last strategy decision with the final damage, before the close row records it.
+  // 261027-fts: a press still queued (or staged) at the fight end never fired: discard it (census fight_end) before anything reads the fight's rows.
+  solver_control::on_fight_end( this );
   rl_table_policy::on_fight_end( this );
   rl_translog::record_close( this );
   // Phase 268 (268-05, G268-8): opt-in credit census, one JSON line per non-enemy player (observer only).

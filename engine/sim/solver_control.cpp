@@ -369,11 +369,340 @@ static bool no_attackable_enemy( player_t* p )
   return true;
 }
 
+// ==========================================================================
+// 261027-fts stage B: decision rows stamped at execution. The contract is in solver_control.hpp; this is the machinery.
+// ==========================================================================
+interrupt_cause_t& current_interrupt_cause()
+{
+  static interrupt_cause_t cause = interrupt_cause_t::other;
+  return cause;
+}
+
+namespace
+{
+inline bool is_rl_actor( const player_t* p )
+{
+  return std::strcmp( p->name(), RL_ACTOR_NAME ) == 0 && !p->is_pet();
+}
+
+inline sim_t* root_sim( sim_t* s )
+{
+  while ( s->parent )
+    s = s->parent;
+  return s;
+}
+
+inline bool translog_on( sim_t* s )
+{
+  return !root_sim( s )->rl_translog_file_str.empty();
+}
+
+// One decision's row, filled at the decision and held until its press becomes irrevocable.
+struct pending_row_t
+{
+  bool                                  valid = false;
+  bool                                  queued = false;          // false: STAGED, true: QUEUED
+  bool                                  seq_given_back = false;  // true while QUEUED: solver_control_seq does not count this row yet
+  sim_t*                                sim = nullptr;
+  player_t*                             p = nullptr;
+  action_t*                             action = nullptr;
+  rl_translog::decision_record          rec{};
+  std::uint64_t                         seq = 0;
+  bool                                  has_apl_name = false;
+  std::string                           apl_name;
+  bool                                  has_stock = false;
+  rl_stock_eval::pick_t                 stock;
+  bool                                  has_table = false;
+  rl_table_policy::decision_t           table;
+  timespan_t                            decided_at = timespan_t::zero();
+  timespan_t                            expected_fire = timespan_t::zero();
+};
+
+pending_row_t g_staged;
+pending_row_t g_queued;
+
+// The resolve line of the decision-dump (D12). g_line_written: the decision line of the current boundary is already in the file.
+struct dump_outcome_t
+{
+  bool        set = false;
+  const char* outcome = "none";
+  const char* reason = nullptr;
+  double      t = 0.0;
+  double      t_decided = 0.0;
+  long long   seq = -1;
+};
+dump_outcome_t g_dump_outcome;
+bool           g_line_written = true;
+
+[[noreturn]] void pending_invariant( const std::string& what )
+{
+  protocol_abort( "PENDING_INVARIANT: " + what );
+}
+
+inline void count( std::uint32_t slot )
+{
+  ++rl_translog::fight_census().n[ slot ];
+}
+
+const char* const DISCARD_NAMES[] = { "queue_failed:not_ready", "queue_failed:target_not_ready", "cooldown_reset", "ready_cancelled",
+                                      "ready_preempts_queue", "replaced", "fight_end", "branch_cut", "staged_not_queued" };
+const char* const INTERRUPT_NAMES[] = { "interrupt:other", "interrupt:movement", "interrupt:stun", "interrupt:invulnerable", "interrupt:raid_event" };
+// interrupt_cause_t order is other, movement, stun, invulnerable, raid_event; census slots 0-4 are movement, stun, invulnerable, raid_event, other.
+constexpr std::uint32_t interrupt_slot( interrupt_cause_t c )
+{
+  switch ( c )
+  {
+    case interrupt_cause_t::movement: return rl_translog::census_slot::interrupt_movement;
+    case interrupt_cause_t::stun: return rl_translog::census_slot::interrupt_stun;
+    case interrupt_cause_t::invulnerable: return rl_translog::census_slot::interrupt_invulnerable;
+    case interrupt_cause_t::raid_event: return rl_translog::census_slot::interrupt_raid_event;
+    case interrupt_cause_t::other: break;
+  }
+  return rl_translog::census_slot::interrupt_other;
+}
+static_assert( rl_translog::census_slot::queue_failed_not_ready == 5 && rl_translog::census_slot::staged_not_queued == 13 &&
+                   rl_translog::census_slot::DISCARD_COUNT == 14,
+               "discard_reason order is census slots 5..13" );
+
+void dump_resolve( sim_t* sim, const char* outcome, const char* reason, double t, double t_decided, long long seq )
+{
+  if ( sim->decision_dump_file_str.empty() )
+    return;
+  if ( g_line_written )
+  {
+    decision_dump::record_resolve( sim, outcome, reason, t, t_decided, seq );
+    return;
+  }
+  g_dump_outcome.set = true;
+  g_dump_outcome.outcome = outcome;
+  g_dump_outcome.reason = reason;
+  g_dump_outcome.t = t;
+  g_dump_outcome.t_decided = t_decided;
+  g_dump_outcome.seq = seq;
+}
+
+void commit_pending( pending_row_t& pd, bool via_queue_event )
+{
+  sim_t*    sim = pd.sim;
+  player_t* p = pd.p;
+  if ( pd.seq_given_back )
+  {
+    if ( sim->solver_control_seq + 1 != pd.seq )
+      pending_invariant( fmt::format( "commit of queued decision seq={} but the counter is {} (it must be {})", pd.seq, sim->solver_control_seq, pd.seq - 1 ) );
+    ++sim->solver_control_seq;
+  }
+  else if ( sim->solver_control_seq != pd.seq )
+    pending_invariant( fmt::format( "commit of staged decision seq={} but the counter is {}", pd.seq, sim->solver_control_seq ) );
+  rl_translog::stamp_commit( sim, p, pd.rec );
+  rl_translog::write_row( sim, p, pd.rec, pd.has_apl_name ? pd.apl_name.c_str() : nullptr, pd.has_stock ? &pd.stock : nullptr,
+                          pd.has_table ? &pd.table.info : nullptr );
+  if ( pd.has_table )
+    rl_table_policy::commit( sim, p, pd.seq, pd.table );
+  const timespan_t now = sim->current_time();
+  if ( via_queue_event )
+  {
+    count( rl_translog::census_slot::committed_queued );
+    if ( now - pd.expected_fire > timespan_t::from_millis( 2 ) )
+      count( rl_translog::census_slot::delayed );
+  }
+  dump_resolve( sim, "commit", nullptr, now.total_seconds(), pd.decided_at.total_seconds(), static_cast<long long>( pd.seq ) );
+  pd.valid = false;
+}
+
+void discard_pending( pending_row_t& pd, std::uint32_t slot, const char* name )
+{
+  sim_t* sim = pd.sim;
+  if ( !pd.seq_given_back )
+  {
+    // STAGED: the decision number was taken at the decision and nothing was stamped with it yet that a row will carry; give it back.
+    if ( sim->solver_control_seq != pd.seq )
+      pending_invariant( fmt::format( "discard of staged decision seq={} but the counter is {}", pd.seq, sim->solver_control_seq ) );
+    --sim->solver_control_seq;
+  }
+  count( slot );
+  dump_resolve( sim, "discard", name, sim->current_time().total_seconds(), pd.decided_at.total_seconds(), -1 );
+  pd.valid = false;
+}
+
+// A new boundary of the RL actor: whatever the last boundary left STAGED was not queued by the engine (an off-GCD pick for the action already queued,
+// or one that was not usable). It is resolved here, before the dump flags move on to the new boundary.
+void begin_boundary( player_t* p, execute_type et )
+{
+  sim_t* sim = p->sim;
+  if ( g_staged.valid )
+  {
+    if ( g_staged.sim == sim )
+      discard_pending( g_staged, rl_translog::census_slot::staged_not_queued, DISCARD_NAMES[ static_cast<int>( discard_reason::staged_not_queued ) ] );
+    else
+      pending_invariant( "a staged decision of another simulator" );
+  }
+  if ( g_queued.valid && et == execute_type::FOREGROUND )
+    pending_invariant( fmt::format( "a foreground decision at t={:.3f} with the queued press '{}' of seq={} still unresolved (its queue was taken away without a hook)",
+                                    sim->current_time().total_seconds(), g_queued.action ? g_queued.action->name() : "?", g_queued.seq ) );
+  g_line_written = false;
+  g_dump_outcome = dump_outcome_t{};
+}
+
+// The row of one decision. deferred = a cast that goes through queue_execute(): staged, committed or discarded later. Not deferred (wait, idle, a decision with
+// no press): committed at once, byte for byte what record_decision() wrote.
+void submit_decision( bool deferred, action_t* act, const rl_table_policy::decision_t* table, sim_t* sim, player_t* p, std::uint64_t seq,
+                      const float obs[ RL_OBS_DIM ], const std::uint8_t mask[ RL_ACTION_DIM ], int action_index, float q_margin, float top_q,
+                      std::uint16_t chosen_target_actor_index, bool wait_floored, bool exploratory, bool held, const float* candidate_features,
+                      std::uint16_t candidate_mask, std::uint8_t candidate_count, std::uint8_t chosen_candidate_slot, const char* apl_choice_name,
+                      bool aim_explored, std::uint8_t rules_candidate_slot, std::uint8_t observed_candidate_slot,
+                      std::uint16_t chosen_enemy_actor_index, const rl_stock_eval::pick_t* stock_pick )
+{
+  if ( !translog_on( sim ) )
+    return;
+  rl_translog::decision_record r = rl_translog::fill_decision( sim, p, seq, obs, mask, action_index, q_margin, top_q, chosen_target_actor_index, wait_floored,
+                                                               exploratory, held, candidate_features, candidate_mask, candidate_count, chosen_candidate_slot,
+                                                               aim_explored, rules_candidate_slot, observed_candidate_slot, chosen_enemy_actor_index );
+  count( rl_translog::census_slot::staged );
+  if ( !deferred )
+  {
+    rl_translog::write_row( sim, p, r, apl_choice_name, stock_pick, table != nullptr ? &table->info : nullptr );
+    if ( table != nullptr )
+      rl_table_policy::commit( sim, p, seq, *table );
+    const double now = sim->current_time().total_seconds();
+    dump_resolve( sim, "commit", nullptr, now, now, static_cast<long long>( seq ) );
+    return;
+  }
+  if ( g_staged.valid )
+    pending_invariant( fmt::format( "a second staged decision (seq={}) while seq={} is staged", seq, g_staged.seq ) );
+  pending_row_t& pd = g_staged;
+  pd.valid = true;
+  pd.queued = false;
+  pd.seq_given_back = false;
+  pd.sim = sim;
+  pd.p = p;
+  pd.action = act;
+  pd.rec = r;
+  pd.seq = seq;
+  pd.has_apl_name = apl_choice_name != nullptr;
+  pd.apl_name = apl_choice_name != nullptr ? apl_choice_name : "";
+  pd.has_stock = stock_pick != nullptr;
+  if ( stock_pick != nullptr )
+    pd.stock = *stock_pick;
+  pd.has_table = table != nullptr;
+  if ( table != nullptr )
+    pd.table = *table;
+  pd.decided_at = sim->current_time();
+  pd.expected_fire = pd.decided_at;
+}
+
+// A throw out of accept_cast()/accept_wait() must not lose the row of the decision that was refused: it is exactly the row a later investigation wants.
+void flush_staged_on_abort( sim_t* sim )
+{
+  if ( g_staged.valid && g_staged.sim == sim )
+    commit_pending( g_staged, false );
+}
+}  // namespace
+
+void pending_queued( player_t* p, action_t* a, double queue_delay_s )
+{
+  if ( !g_staged.valid || g_staged.p != p || g_staged.action != a )
+    return;
+  sim_t* sim = g_staged.sim;
+  const solver_branch::config_t& bc = solver_branch::cfg();
+  if ( bc.branch_at >= 0 || bc.teacher || solver_branch::is_child() )
+    protocol_abort( "PENDING_BRANCH: a queued press under a solver_branch mode (branch / teacher / child): the window cut and the pending row are not defined together "
+                    "(261027-fts, decision 11: no branch mode with fire-time rows)" );
+  if ( g_queued.valid )
+    pending_invariant( fmt::format( "a second queued press (seq={}) while seq={} is queued", g_staged.seq, g_queued.seq ) );
+  if ( sim->solver_control_seq != g_staged.seq )
+    pending_invariant( fmt::format( "queueing staged decision seq={} but the counter is {}", g_staged.seq, sim->solver_control_seq ) );
+  --sim->solver_control_seq;  // the number is not spent until the press fires: damage landing in the queue window belongs to the previous row
+  g_staged.seq_given_back = true;
+  g_staged.queued = true;
+  g_staged.expected_fire = sim->current_time() + timespan_t::from_seconds( queue_delay_s );
+  count( rl_translog::census_slot::queued );
+  std::swap( g_queued, g_staged );
+  g_staged.valid = false;
+}
+
+void pending_commit( player_t* p, action_t* a, bool from_queue_event )
+{
+  if ( !from_queue_event )
+  {
+    if ( g_staged.valid && g_staged.p == p && g_staged.action == a )
+      commit_pending( g_staged, false );
+    return;
+  }
+  if ( g_queued.valid && g_queued.p == p && g_queued.action == a )
+    commit_pending( g_queued, true );
+}
+
+void pending_discard( player_t* p, action_t* a, discard_reason reason )
+{
+  if ( !g_queued.valid || g_queued.p != p || ( a != nullptr && g_queued.action != a ) )
+    return;
+  const int i = static_cast<int>( reason );
+  discard_pending( g_queued, rl_translog::census_slot::queue_failed_not_ready + static_cast<std::uint32_t>( i ), DISCARD_NAMES[ i ] );
+}
+
+void pending_discard_interrupt( player_t* p, action_t* a )
+{
+  if ( !g_queued.valid || g_queued.p != p || ( a != nullptr && g_queued.action != a ) )
+    return;
+  const interrupt_cause_t c = current_interrupt_cause();
+  discard_pending( g_queued, interrupt_slot( c ), INTERRUPT_NAMES[ static_cast<int>( c ) ] );
+}
+
+void note_cast_interrupted( player_t* p )
+{
+  if ( is_rl_actor( p ) && translog_on( p->sim ) )
+    count( rl_translog::census_slot::cast_interrupted );
+}
+
+void note_cast_failed_at_end( player_t* p, action_t* a )
+{
+  if ( is_rl_actor( p ) && translog_on( p->sim ) && a == p->last_foreground_action )
+    count( rl_translog::census_slot::cast_failed_at_end );
+}
+
+void on_fight_end( sim_t* sim )
+{
+  if ( g_queued.valid )
+  {
+    if ( g_queued.sim == sim )
+      discard_pending( g_queued, rl_translog::census_slot::fight_end, DISCARD_NAMES[ static_cast<int>( discard_reason::fight_end ) ] );
+    else
+      pending_invariant( "a queued press of another simulator at the fight end" );
+  }
+  if ( g_staged.valid )
+  {
+    if ( g_staged.sim == sim )
+      discard_pending( g_staged, rl_translog::census_slot::staged_not_queued, DISCARD_NAMES[ static_cast<int>( discard_reason::staged_not_queued ) ] );
+    else
+      pending_invariant( "a staged decision of another simulator at the fight end" );
+  }
+}
+
+void dump_decision_written( sim_t* sim )
+{
+  if ( !translog_on( sim ) )
+    return;
+  g_line_written = true;
+  if ( g_dump_outcome.set )
+  {
+    const dump_outcome_t o = g_dump_outcome;
+    g_dump_outcome = dump_outcome_t{};
+    decision_dump::record_resolve( sim, o.outcome, o.reason, o.t, o.t_decided, o.seq );
+    return;
+  }
+  if ( g_staged.valid || g_queued.valid )
+    return;  // its commit or discard writes the line
+  const double now = sim->current_time().total_seconds();
+  decision_dump::record_resolve( sim, "none", nullptr, now, now, -1 );
+}
+
 action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
 {
   sim_t* sim = p->sim;
   if ( sim->solver_control_str.empty() && sim->solver_policy_str.empty() )
     return apl_choice;
+  if ( is_rl_actor( p ) && translog_on( sim ) )
+    begin_boundary( p, et );
 
   // Defect (a) fix (2026-07-29 fix bundle): in live play, melee auto-attack
   // begins implicitly with combat -- the player never has to "choose" it via
@@ -1096,14 +1425,16 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       sim->solver_control_last_wait_source.clear();
       try
       {
-        rl_translog::record_decision( sim, p, seq, obs, mask, observe_idx, nan, nan, observe_target, false, false, false, nullptr,
-                                       0, 0, rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
-                                       apl_choice != nullptr ? apl_choice->name() : nullptr, false,
-                                       rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
-                                       rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK, chosen_enemy_index_of( p ), &stock_pick );
+        // 261027-fts: a press is staged (committed when it fires); the idle row is committed at once.
+        submit_decision( !idle_row, apl_choice, nullptr, sim, p, seq, obs, mask, observe_idx, nan, nan, observe_target, false, false, false, nullptr,
+                         0, 0, rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
+                         apl_choice != nullptr ? apl_choice->name() : nullptr, false,
+                         rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
+                         rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK, chosen_enemy_index_of( p ), &stock_pick );
       }
       catch ( ... )
       {
+        flush_staged_on_abort( sim );
         rl_translog::flush_pending( sim );
         throw;
       }
@@ -1357,11 +1688,11 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     {
       sim->solver_control_last_reply_type = "wait";
       sim->solver_control_has_pending_wait = false;
-      rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, top_q, rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK, false,
-                                     exploratory, row_held, nullptr, 0, 0, rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
-                                     sim->solver_record_apl_choice && apl_choice ? apl_choice->name() : nullptr, false,
-                                     rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK, rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
-                                     chosen_enemy_index_of( p ), &stock_pick, &table_decision.info );
+      submit_decision( false, nullptr, &table_decision, sim, p, seq, obs, mask, idx, q_margin, top_q, rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK, false,
+                       exploratory, row_held, nullptr, 0, 0, rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
+                       sim->solver_record_apl_choice && apl_choice ? apl_choice->name() : nullptr, false,
+                       rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK, rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
+                       chosen_enemy_index_of( p ), &stock_pick );
       return nullptr;
     }
 
@@ -1530,7 +1861,9 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
           }
         }
       }
-      rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, top_q,
+      // 261027-fts: the row is STAGED here (filled with everything the policy saw) and committed when the press executes (queue_execute() / the queue event);
+      // the action pointer the engine will queue is set below, once accept_cast() has resolved it.
+      submit_decision( true, nullptr, table_play ? &table_decision : nullptr, sim, p, seq, obs, mask, idx, q_margin, top_q,
                                      chosen_target_actor_index, false,
                                      exploratory, row_held,
                                      candidate_block_features, candidate_block_mask,
@@ -1550,9 +1883,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
                                      // recomputed here.
                                      chosen_enemy_index_of( p ),
                                      // 271.4-03: the dry stock-rotation pick (null when the option is off).
-                                     rl_stock_eval::enabled( sim ) ? &stock_pick : nullptr,
-                                     // 261025-bk4: the table player's choice (null: chooser NONE).
-                                     table_play ? &table_decision.info : nullptr );
+                                     rl_stock_eval::enabled( sim ) ? &stock_pick : nullptr );
       // 212-CR-FIX WR-06: accept_cast() can refuse a not-ready action via
       // protocol_abort() (a throw), which unwinds past combat_end()'s
       // record_close() hook entirely for this fight -- without this catch,
@@ -1562,10 +1893,14 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       // propagate the original exception unchanged.
       try
       {
-        return accept_cast( p, action.token, seq );
+        action_t* const resolved_cast = accept_cast( p, action.token, seq );
+        if ( g_staged.valid && g_staged.sim == sim )
+          g_staged.action = resolved_cast;
+        return resolved_cast;
       }
       catch ( ... )
       {
+        flush_staged_on_abort( sim );
         rl_translog::flush_pending( sim );
         throw;
       }
@@ -1616,7 +1951,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // floor rather than from a real timer. No-op when rl_translog= is
     // unset. 228-09 (D-23/TGT-08): a wait has no action to pick a target
     // for -- always the sentinel.
-    rl_translog::record_decision( sim, p, seq, obs, mask, idx, q_margin, top_q,
+    submit_decision( false, nullptr, nullptr, sim, p, seq, obs, mask, idx, q_margin, top_q,
                                    rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK, wr.floored, exploratory,
                                    row_held, nullptr, 0, 0,
                                    rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
@@ -1672,6 +2007,14 @@ void reset_iteration( sim_t* sim )
   // the thread, the fight index and a source name of its own; seeding takes nothing from any other stream.
   sim->solver_target_rng.seed(
       rng::per_source_seed( sim->seed, sim->thread_index, sim->rng_iteration_index(), "sim|solver_target" ) );
+
+  // 261027-fts: the census and the pending rows belong to ONE fight. on_fight_end() resolved whatever the last fight left; a survivor is a bug.
+  if ( g_staged.valid || g_queued.valid )
+    pending_invariant( fmt::format( "a {} decision (seq={}) survived into the next fight", g_queued.valid ? "queued" : "staged",
+                                    g_queued.valid ? g_queued.seq : g_staged.seq ) );
+  std::memset( rl_translog::fight_census().n, 0, sizeof( rl_translog::fight_census().n ) );
+  g_line_written = true;
+  g_dump_outcome = dump_outcome_t{};
 
   if ( sim->solver_control_str.empty() && sim->solver_policy_str.empty() )
     return;

@@ -21,6 +21,7 @@
 #include "config.hpp"
 #include "sc_enums.hpp"
 
+#include <cstdint>
 #include <string>
 
 struct player_t;
@@ -124,4 +125,71 @@ void finish( sim_t* sim );
 // never touched here -- the channel is one continuous stream across every
 // fight of a launch, by design.
 void reset_iteration( sim_t* sim );
+
+// ==========================================================================
+// 261027-fts stage B: DECISION ROWS ARE STAMPED AT EXECUTION.
+//
+// A foreground cast the policy picks can need a queue: the action's cooldown ends within the engine's 250 ms tolerance, so queue_execute() puts a
+// queued_action_execute_event_t on the clock and the press fires later (or never: movement, a stun, a cooldown reset, the fight end). The translog
+// row of such a press is written when the press fires (the COMMIT), not when the policy chose it; a press that never fires writes no row and is
+// counted in the close row's census. The pieces:
+//   STAGED  choose() filled a row (rl_translog::fill_decision) and handed the action back; the row waits for queue_execute().
+//   QUEUED  queue_execute() found a queue delay: the row is held, solver_control_seq is given back (damage landing in the queue window is credited to the
+//           previous row, which is the point), and the queue event is the clock of the commit.
+//   COMMIT  the press is irrevocable (immediately before schedule_execute for a cast, do_execute for a non-foreground action, or the decision itself for a
+//           wait/idle row): stamp_commit() re-reads `t` and every cumulative counter, the decision number is taken again, the row/`.apl`/table record is written.
+//   DISCARD every other end of a QUEUED press, by the reason the engine took the queue away (census). A STAGED row the engine did not queue is a discard too.
+// All of it is a no-op unless rl_translog= is set. Invariants (PENDING_INVARIANT): at most one STAGED and one QUEUED, each resolved exactly once, the
+// decision number given back and taken again is the one the row carries, a commit precedes schedule_execute, nothing pending survives reset_iteration.
+// ==========================================================================
+
+// Why the engine interrupted the actor: the raid-event entry points set it around the call that ends in player_t::interrupt() (default: other).
+enum class interrupt_cause_t : std::uint8_t
+{
+  other = 0,
+  movement,
+  stun,
+  invulnerable,
+  raid_event
+};
+interrupt_cause_t& current_interrupt_cause();
+struct interrupt_scope_t
+{
+  explicit interrupt_scope_t( interrupt_cause_t c ) : previous( current_interrupt_cause() ) { current_interrupt_cause() = c; }
+  ~interrupt_scope_t() { current_interrupt_cause() = previous; }
+  interrupt_scope_t( const interrupt_scope_t& ) = delete;
+  interrupt_scope_t& operator=( const interrupt_scope_t& ) = delete;
+  interrupt_cause_t previous;
+};
+
+// The reasons a staged/queued decision ends without a row (census slots 5-13 of rl_translog::census_slot; the interrupt reasons come from the cause).
+enum class discard_reason : std::uint8_t
+{
+  queue_failed_not_ready,
+  queue_failed_target_not_ready,
+  cooldown_reset,
+  ready_cancelled,
+  ready_preempts_queue,
+  replaced,
+  fight_end,
+  branch_cut,
+  staged_not_queued
+};
+
+// action_t::queue_execute() created a queue event for `a` (delay in seconds): the staged row of the RL actor, if it is this action's, becomes QUEUED.
+void pending_queued( player_t* p, action_t* a, double queue_delay_s );
+// The press `a` is about to execute (immediately before schedule_execute / do_execute): commits the STAGED row (no queue needed) or, with
+// from_queue_event, the QUEUED row (the queue event fired).
+void pending_commit( player_t* p, action_t* a, bool from_queue_event );
+// The queued press `a` ends without executing. The interrupt form classifies by current_interrupt_cause().
+void pending_discard( player_t* p, action_t* a, discard_reason reason );
+void pending_discard_interrupt( player_t* p, action_t* a );
+// Census-only events of a COMMITTED cast (no state change): the cast bar was interrupted / the cast reached its execute event and could not execute.
+void note_cast_interrupted( player_t* p );
+void note_cast_failed_at_end( player_t* p, action_t* a );
+// sim_t::combat_end(), immediately before rl_table_policy::on_fight_end and the close row: whatever is still staged or queued is discarded (fight_end).
+void on_fight_end( sim_t* sim );
+// decision_dump::record(), right after it wrote the decision line of the RL actor: writes the resolve line of a decision that is already resolved (a wait, an
+// idle row, a boundary that produced no decision); a staged decision's line follows at its commit or discard. No-op without a translog.
+void dump_decision_written( sim_t* sim );
 }

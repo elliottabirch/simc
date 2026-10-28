@@ -288,10 +288,14 @@
 // changes WHAT is written (scaled and gated), never the shape. The `.attr` sidecar moves to its
 // own version 2 in the same phase (see the rl_attr namespace below): records grow 24 -> 32 bytes.
 //
+// Version 16 (quick 261027-fts, 2026-10-27): decision rows are stamped at EXECUTION (`t_decided`, the census in the close row,
+// seq at commit; see FORMAT_VERSION below). The fight-list number moves 15 -> 17 with it; everything said next about a list
+// file holds with 16/17 in place of 14/15.
+//
 // Fight-list files (quick 261005-mix, plan 01, branch 261005-fight-list): `FORMAT_VERSION_FIGHT_LIST`
-// = 15 is written ONLY by a process driven with `rl_fight_list=` (several fights, each built from its
-// own sim_t, appended to one file); every other file stays format 14 and `FORMAT_VERSION` stays 14.
-// A format-15 file has the same record_size (3672 at width 444; was 3568 at 419) and header_size (272) as format 14; what differs
+// is written ONLY by a process driven with `rl_fight_list=` (several fights, each built from its
+// own sim_t, appended to one file); every other file carries `FORMAT_VERSION`.
+// A list file has the same record_size (3672 at width 444; was 3568 at 419) and header_size (272) as an ordinary file; what differs
 // is (a) the header words fight_shape_index, funnel_mode and chooser_state read LIST_WORD_SENTINEL
 // ("per fight; read the close rows"), (b) the first eight 32-bit words of a fight-close row's formerly
 // zero region are `fight_tag` (entry index, fight shape, set-up, stat split, deal slot, funnel word,
@@ -337,7 +341,20 @@ namespace rl_translog
 // trailing NUL is part of the magic itself.
 inline constexpr char MAGIC[ 4 ] = { 'R', 'L', 'T', 'L' };
 inline constexpr std::uint32_t ENDIAN_CANARY = 0x01020304u;
-inline constexpr std::uint32_t FORMAT_VERSION = 14u;  // 261002-8rv (format 14, 2026-10-02): width 419, 22 buttons
+inline constexpr std::uint32_t FORMAT_VERSION = 16u;  // 261027-fts (format 16, 2026-10-27): decision rows are stamped at EXECUTION. A row's `t`
+                                                        // and every cumulative counter (damage, damage_expected, the proc block, the credit
+                                                        // blocks, the chosen-enemy block) are read at the COMMIT instant (the moment the press
+                                                        // is irrevocable: schedule_execute for a cast, the decision itself for a wait); the
+                                                        // observation, mask, action and picks are the DECISION's. The new float32 `t_decided`
+                                                        // (the 4 spare bytes after chosen_enemy_actor_index, record size unchanged at 3672 at
+                                                        // width 444) is the decision instant (== `t` when the press needs no queue).
+                                                        // A queued press that never fires (movement, stun, a cooldown reset, the fight end)
+                                                        // writes NO row: it is counted in the close row's census (CENSUS below, first words
+                                                        // of the close row's formerly zero region). `seq` is assigned at commit and stays
+                                                        // gap-free. Format 15 was the fight-list number and is not reused for an ordinary
+                                                        // file: the list number moves to 17 in the same change, so a reader refuses either
+                                                        // old layout by name.
+                                                        // 261002-8rv (format 14, 2026-10-02): width 419, 22 buttons
                                                         // (talent layout, item 261002-8rt); nothing in the row or
                                                         // header changes shape, the number moves so a reader
                                                         // refuses a format-13 record by name.
@@ -362,10 +379,11 @@ inline constexpr std::uint32_t FORMAT_VERSION = 14u;  // 261002-8rv (format 14, 
                                                         // top-of-file version-11 comment); 10 was
                                                         // 260918-cbc's credit-by-cause block
 // 261005-fight-list (quick 261005-mix, plan 01): the format number a LIST file (one process, several
-// fights, `rl_fight_list=`) carries. Declared AFTER FORMAT_VERSION on purpose: FORMAT_VERSION stays 14, so
+// fights, `rl_fight_list=`) carries. Declared AFTER FORMAT_VERSION on purpose: FORMAT_VERSION is the ordinary-file number, so
 // every ordinary file, scoring log and repin reader is untouched (the repin regex
-// `FORMAT_VERSION\s*=\s*(\d+)u?` does not match this name). A list file is the only writer of 15.
-inline constexpr std::uint32_t FORMAT_VERSION_FIGHT_LIST = 15u;
+// `FORMAT_VERSION\s*=\s*(\d+)u?` does not match this name). A list file is the only writer of 17
+// (261027-fts moved it from 15 with FORMAT_VERSION from 14 to 16: same layout as 16, see there).
+inline constexpr std::uint32_t FORMAT_VERSION_FIGHT_LIST = 17u;
 // The value a format-15 header writes into its per-fight words (fight_shape_index, funnel_mode,
 // chooser_state): "per fight -- read the close rows".
 inline constexpr std::uint32_t LIST_WORD_SENTINEL = 0xFFFFFFFFu;
@@ -385,7 +403,7 @@ inline constexpr std::uint32_t LIST_WORD_SENTINEL = 0xFFFFFFFFu;
 // pinned value, and the only declaration of RECORD_SIZE that obs_transport_coupling.selftest.py's source parse sees).
 inline constexpr std::uint32_t RECORD_SIZE =
     ( ( 45u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) +
-        4u * static_cast<std::uint32_t>( RL_TARGET_SLOTS ) * static_cast<std::uint32_t>( RL_TARGET_FEATURES ) + 7u + 7u ) / 8u ) * 8u +
+        4u * static_cast<std::uint32_t>( RL_TARGET_SLOTS ) * static_cast<std::uint32_t>( RL_TARGET_FEATURES ) + 7u + 4u + 7u ) / 8u ) * 8u +
     8u * rl_proc::COUNT + 8u * 2u * rl_credit::STREAM_COUNT + ( 16u + 8u * 2u * rl_credit::STREAM_COUNT );
 #else
 inline constexpr std::uint32_t RECORD_SIZE = 3672u;  // 290C6 (format 14 unchanged, 2026-10-20): 3568 -> 3672 at width 444
@@ -524,8 +542,10 @@ inline constexpr std::uint32_t RECORD_SIZE = 3672u;  // 290C6 (format 14 unchang
 inline constexpr std::uint32_t PROC_BLOCK_OFFSET =
     ( ( 45u + 4u * static_cast<std::uint32_t>( RL_OBS_DIM ) +
         4u * static_cast<std::uint32_t>( RL_TARGET_SLOTS ) * static_cast<std::uint32_t>( RL_TARGET_FEATURES ) +
-        7u + 7u ) / 8u ) * 8u;  // 266-21: +7 (was +5) -- chosen_enemy_actor_index takes two more bytes
-                                // (259-05: +5 was +4 -- observed_candidate_slot took one more byte)
+        7u + 4u + 7u ) / 8u ) * 8u;  // 261027-fts: +4 -- t_decided (float32) takes the four bytes that were padding at width 444 and at the arms
+                                     // width 506 (data end 3300 -> 3304 and 3356 -> 3360); the row size is unchanged at both, any other width may grow by 8
+                                     // 266-21: +7 (was +5) -- chosen_enemy_actor_index takes two more bytes
+                                     // (259-05: +5 was +4 -- observed_candidate_slot took one more byte)
 inline constexpr std::uint32_t PROC_BLOCK_SIZE = 8u * rl_proc::COUNT;
 #ifndef RL_SPEC_HEADER   // 268-06: enhancement's width pin; another spec's row size is the formula's value, checked below
 static_assert( PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE == 3464u,
@@ -665,7 +685,7 @@ struct decision_record
   double damage_expected;     // @8  -- version 5 (260901-pb1 Task 3, D-3/D-4): the crit-
                                //         expectation-corrected sibling, p->solver_damage_expected_so_far
                                //         at this boundary -- see top-of-file comment
-  float t;                    // @16 -- sim->current_time().total_seconds()
+  float t;                    // @16 -- sim->current_time().total_seconds() at the COMMIT instant (version 16; the decision instant is t_decided)
   float obs[ RL_OBS_DIM ];    // @20 -- @20..(19+4W) -- the full, live obs
                                //         vector, copied straight across (version 2: no separate
                                //         frozen-width literal, see top-of-file comment)
@@ -717,6 +737,10 @@ struct decision_record
                                //         player_t::rl_chosen_enemy) at this boundary, or
                                //         CHOSEN_TARGET_SENTINEL_NO_PICK (0xFFFF) when no tag is set.
                                //         Costs no bytes: it sits in the padding before the 8-aligned proc block.
+  float t_decided;            // @52+4W+4SF -- version 16 (261027-fts; was padding): the instant the policy decided this press,
+                               //         sim->current_time().total_seconds(). `t` above is the COMMIT instant (the press became irrevocable)
+                               //         and `t_decided <= t`; the two are equal for every wait and for every cast that needs no queue.
+                               //         `obs`, `mask`, `action` and the picks describe t_decided; every cumulative counter describes t.
   // Version 9 (260917-pcn): the per-fight CUMULATIVE proc-roll observer block, struct-of-arrays,
   // alignas(8) so it starts exactly at PROC_BLOCK_OFFSET (= the version-7 row size) at any width W.
   // A window's counts are consecutive-row differences, exactly like `damage`. Sits AFTER `reserved`
@@ -741,6 +765,59 @@ struct decision_record
   double credit_exp_chosen[ rl_credit::STREAM_COUNT ];   // @CHOSEN_BLOCK_OFFSET + 16 + 8*STREAM_COUNT
 };
 
+// 261027-fts (version 16): the CENSUS. One uint32 per slot, written at the start of the close row's formerly zero region
+// (close_record::zero12_rest, @52; the first eight words of the region before it stay the fight-list tag), counted over the fight
+// that the close row closes. A press the policy chose that never became a row is counted under the reason it was lost; the others
+// count events around the pending decision. Slot order is part of the format (a reader indexes by position).
+//   0-4   interrupt:movement, interrupt:stun, interrupt:invulnerable, interrupt:raid_event, interrupt:other  (the queued press was interrupted)
+//   5-6   queue_failed:not_ready, queue_failed:target_not_ready  (the queue event fired and the engine's own check refused the press)
+//   7     cooldown_reset      (cooldown_t::set_max_charges cancelled the queue)
+//   8     ready_cancelled     (schedule_ready() or action_t::cancel() with the press queued)
+//   9     ready_preempts_queue (Player-Ready fired with the press queued)
+//   10    replaced            (an off-GCD / cast-while-casting re-decision cancelled the queued press and queued another)
+//   11    fight_end           (the fight ended with the press still queued)
+//   12    branch_cut          (solver_branch window cut; the combination with a queued press is refused, so this stays 0)
+//   13    staged_not_queued   (the policy chose, the engine did not queue it: an off-GCD pick for the action already queued, or not usable)
+//   14    delayed             (committed press whose fire moved later than its queue event was scheduled for at the decision, by more than 2 ms)
+//   15    repolls             (stage D: re-polls that kept the pending press)
+//   16    replaced_by_wait    (stage D: a wait pick inside the window left the queued press open)
+//   17    flipflop_bound      (stage D: the replace bound was reached and the pending press held)
+//   18    cast_interrupted    (a committed hard cast was interrupted while the cast bar ran: the row exists, the damage is zero)
+//   19    cast_failed_at_end  (a committed cast reached its execute event and could not execute)
+//   20    staged              (decisions that reached the pending machinery: rows + the discards 0-13 below equal this)
+//   21    queued              (staged decisions that needed a queue, i.e. queue_delay > 0)
+//   22    committed_queued    (queued decisions that became a row)
+// Invariant (checked by a reader): decision_count == staged - sum(slots 0-13).
+namespace census_slot
+{
+inline constexpr std::uint32_t interrupt_movement = 0;
+inline constexpr std::uint32_t interrupt_stun = 1;
+inline constexpr std::uint32_t interrupt_invulnerable = 2;
+inline constexpr std::uint32_t interrupt_raid_event = 3;
+inline constexpr std::uint32_t interrupt_other = 4;
+inline constexpr std::uint32_t queue_failed_not_ready = 5;
+inline constexpr std::uint32_t queue_failed_target_not_ready = 6;
+inline constexpr std::uint32_t cooldown_reset = 7;
+inline constexpr std::uint32_t ready_cancelled = 8;
+inline constexpr std::uint32_t ready_preempts_queue = 9;
+inline constexpr std::uint32_t replaced = 10;
+inline constexpr std::uint32_t fight_end = 11;
+inline constexpr std::uint32_t branch_cut = 12;
+inline constexpr std::uint32_t staged_not_queued = 13;
+inline constexpr std::uint32_t delayed = 14;
+inline constexpr std::uint32_t repolls = 15;
+inline constexpr std::uint32_t replaced_by_wait = 16;
+inline constexpr std::uint32_t flipflop_bound = 17;
+inline constexpr std::uint32_t cast_interrupted = 18;
+inline constexpr std::uint32_t cast_failed_at_end = 19;
+inline constexpr std::uint32_t staged = 20;
+inline constexpr std::uint32_t queued = 21;
+inline constexpr std::uint32_t committed_queued = 22;
+inline constexpr std::uint32_t COUNT = 23;
+inline constexpr std::uint32_t DISCARD_COUNT = 14;  // slots 0-13 are the reasons a staged decision never became a row
+}  // namespace census_slot
+static_assert( census_slot::COUNT <= RL_OBS_DIM + 2 - 8, "the census must fit the close row's formerly zero region" );
+
 struct close_record
 {
   double final_damage_total;            // @0  -- p->solver_damage_so_far, complete by combat_end
@@ -755,7 +832,7 @@ struct close_record
   // solver_funnel_mode, bit 1 = solver_random_chosen_enemy), [6] entry_crc32 (CRC-32/IEEE of the entry file's
   // bytes), [7] entry_bytes.
   std::uint32_t fight_tag[ 8 ];
-  std::uint32_t zero12_rest[ RL_OBS_DIM + 2 - 8 ]; // @52..(27+4W) -- written zero
+  std::uint32_t zero12_rest[ RL_OBS_DIM + 2 - 8 ]; // @52..(27+4W) -- version 16: the first census_slot::COUNT words are the CENSUS (above), the rest written zero
                                           //         (version 4: sized as W+2 to keep decision_count
                                           //         aligned with decision_record's own shifted seq
                                           //         offset, see top-of-file comment)
@@ -791,6 +868,7 @@ struct close_record
   std::uint8_t reserved;                      // @48+4W+4SF -- written zero (decision_record's rules_candidate_slot)
   std::uint8_t reserved2;                     // @49+4W+4SF -- version 11: written zero (decision_record's observed_candidate_slot)
   std::uint16_t zero_chosen_enemy;            // @50+4W+4SF -- version 13 (266-21): written zero (decision_record's chosen_enemy_actor_index)
+  float zero_t_decided;                       // @52+4W+4SF -- version 16 (261027-fts): written zero (decision_record's t_decided)
   // Version 9 (260917-pcn): the per-fight FINAL proc-roll observer totals -- named the same as
   // decision_record's own fields (not a zero-twin) so a reader gets the fight's closing counts.
   alignas( 8 ) std::uint16_t proc_attempts[ rl_proc::COUNT ];   // @PROC_BLOCK_OFFSET
@@ -863,6 +941,7 @@ struct footer_record
   std::uint8_t reserved;                 // @48+4W+4SF -- written zero (decision_record's rules_candidate_slot)
   std::uint8_t reserved2;                // @49+4W+4SF -- version 11: written zero (decision_record's observed_candidate_slot)
   std::uint16_t zero_chosen_enemy;       // @50+4W+4SF -- version 13 (266-21): written zero (decision_record's chosen_enemy_actor_index)
+  float zero_t_decided;                  // @52+4W+4SF -- version 16 (261027-fts): written zero (decision_record's t_decided)
   // Version 9 (260917-pcn): written zero -- no fight owns the footer.
   alignas( 8 ) std::uint8_t zero_proc_block[ PROC_BLOCK_SIZE ];  // @PROC_BLOCK_OFFSET
   // Version 10 (260918-cbc): written zero -- no fight owns the footer, matching the proc
@@ -985,6 +1064,9 @@ static_assert( offsetof( decision_record, observed_candidate_slot ) == 49u + 4u 
 static_assert( offsetof( decision_record, chosen_enemy_actor_index ) == 50u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 static_assert( offsetof( decision_record, chosen_enemy_actor_index ) + sizeof( std::uint16_t ) <= PROC_BLOCK_OFFSET,
                "chosen_enemy_actor_index must end at or before the proc block" );
+// 261027-fts (version 16): t_decided sits in the four padding bytes after chosen_enemy_actor_index, so the proc block keeps its offset.
+static_assert( offsetof( decision_record, t_decided ) == 52u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( decision_record, t_decided ) + sizeof( float ) <= PROC_BLOCK_OFFSET, "t_decided must end at or before the proc block" );
 
 // close_record field offsets -- version 7, same W/SF-parametrised form.
 static_assert( offsetof( close_record, final_damage_total ) == 0 );
@@ -1009,6 +1091,7 @@ static_assert( offsetof( close_record, kind ) == 47u + 4u * RL_OBS_DIM + 4u * TA
 static_assert( offsetof( close_record, reserved ) == 48u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 static_assert( offsetof( close_record, reserved2 ) == 49u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 static_assert( offsetof( close_record, zero_chosen_enemy ) == 50u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( close_record, zero_t_decided ) == 52u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 
 // footer_record field offsets -- version 7, same W/SF-parametrised form.
 static_assert( offsetof( footer_record, engine_run_aggregate ) == 0 );
@@ -1032,6 +1115,7 @@ static_assert( offsetof( footer_record, kind ) == 47u + 4u * RL_OBS_DIM + 4u * T
 static_assert( offsetof( footer_record, reserved ) == 48u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 static_assert( offsetof( footer_record, reserved2 ) == 49u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 static_assert( offsetof( footer_record, zero_chosen_enemy ) == 50u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
+static_assert( offsetof( footer_record, zero_t_decided ) == 52u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 
 // file_header field offsets
 static_assert( offsetof( file_header, magic ) == 0 );
@@ -1062,6 +1146,8 @@ static_assert( offsetof( close_record, reserved ) == offsetof( footer_record, re
 static_assert( offsetof( close_record, reserved2 ) == offsetof( footer_record, reserved2 ) );
 static_assert( offsetof( decision_record, chosen_enemy_actor_index ) == offsetof( close_record, zero_chosen_enemy ) );
 static_assert( offsetof( close_record, zero_chosen_enemy ) == offsetof( footer_record, zero_chosen_enemy ) );
+static_assert( offsetof( decision_record, t_decided ) == offsetof( close_record, zero_t_decided ) );
+static_assert( offsetof( close_record, zero_t_decided ) == offsetof( footer_record, zero_t_decided ) );
 static_assert( offsetof( decision_record, rules_candidate_slot ) == 48u + 4u * RL_OBS_DIM + 4u * TARGET_BLOCK_FLOATS );
 // 228-09 (version 6): the new chosen-target field also lands at the same offset across all
 // three row shapes -- decision_record's own NAMED field, close/footer's zero-written twins.
@@ -1478,6 +1564,19 @@ decision_record fill_decision( sim_t* sim, player_t* p, std::uint64_t seq, const
 
 void write_row( sim_t* sim, player_t* p, const decision_record& r, const char* apl_choice_name,
                 const rl_stock_eval::pick_t* stock_pick, const rl_apl_choice::table_info_t* table_info );
+
+// 261027-fts stage B: re-reads, at the COMMIT instant, the fields of a filled row that describe "now": `t`, damage, damage_expected, the proc
+// block, the credit blocks and the chosen-enemy block. Everything else in the row (observation, mask, action, picks, flags, seq, t_decided)
+// stays as the decision filled it. A row committed at its own decision instant comes out byte-identical to a row that was never staged.
+void stamp_commit( sim_t* sim, player_t* p, decision_record& r );
+
+// 261027-fts stage B: the census of the fight in progress (one fight runs at a time in a process that writes a translog: threads=1 is
+// forced). Cleared by solver_control::reset_iteration, written into the close row by record_close().
+struct census_t
+{
+  std::uint32_t n[ census_slot::COUNT ];
+};
+census_t& fight_census();
 
 // Called from inside the in-process arm of solver_control::choose(), once
 // per decision boundary that arm answers. Appends only -- no flush; the

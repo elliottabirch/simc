@@ -10,6 +10,7 @@
 #include "sim/expressions.hpp"
 #include "sim/rl_buff_ledger.hpp"
 #include "sim/sim.hpp"
+#include "sim/solver_control.hpp"
 
 #include <limits>
 
@@ -886,6 +887,7 @@ void cooldown_t::set_max_charges( int new_max_charges )
   // If the player is queueing an action that uses this cooldown, cancel it.
   if ( player && player->queueing && player->queueing->cooldown == this )
   {
+    solver_control::pending_discard( player, player->queueing, solver_control::discard_reason::cooldown_reset );  // 261027-fts
     event_t::cancel( player->queueing->queue_event );
     player->queueing = nullptr;
     if ( !player->executing && !player->channeling && !player->readying )

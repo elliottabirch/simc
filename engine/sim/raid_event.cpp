@@ -21,6 +21,7 @@
 #include "sim/rl_rng_record.hpp"
 #include "sim/sheet_fight.hpp"
 #include "sim/sim.hpp"
+#include "sim/solver_control.hpp"
 #include "util/rng.hpp"
 #include <cstdlib>  // TEMPORARY (260919-scb T1) -- getenv() for rl_trace_rng_enabled()
 #include "player/action_priority_list.hpp"
@@ -1529,6 +1530,7 @@ struct invulnerable_event_t final : public raid_event_t
     range::for_each( sim->player_non_sleeping_list, []( player_t* p ) {
       p->in_combat =
           true;  // FIXME? this is done to ensure we don't end up in infinite loops of non-harmful actions with gcd=0
+      solver_control::interrupt_scope_t interrupt_cause( solver_control::interrupt_cause_t::invulnerable );  // 261027-fts: census reason of a queued press
       p->halt();
     } );
 
@@ -1797,6 +1799,7 @@ struct movement_event_t final : public raid_event_t
         continue;
       p->in_combat =
           true;  // FIXME? this is done to ensure we don't end up in infinite loops of non-harmful actions with gcd=0
+      solver_control::interrupt_scope_t interrupt_cause( solver_control::interrupt_cause_t::movement );  // 261027-fts
       p->moving();
     }
 
@@ -1831,6 +1834,7 @@ void sheet_fight_movement_begin( sim_t* sim, const std::vector<player_t*>& playe
     if ( p->buffs.stunned->check() )
       continue;
     p->in_combat = true;  // FIXME? this is done to ensure we don't end up in infinite loops of non-harmful actions with gcd=0
+    solver_control::interrupt_scope_t interrupt_cause( solver_control::interrupt_cause_t::movement );  // 261027-fts
     p->moving();
   }
   if ( !players.empty() )
@@ -1850,6 +1854,7 @@ void sheet_fight_stun_start( player_t* p )
     p->sim->sheet_fight->stun_claim_add( p );
   p->buffs.stunned->increment();
   p->in_combat = true;  // FIXME? this is done to ensure we don't end up in infinite loops of non-harmful actions with gcd=0
+  solver_control::interrupt_scope_t interrupt_cause( solver_control::interrupt_cause_t::stun );  // 261027-fts
   p->stun();
 }
 
@@ -1909,6 +1914,7 @@ struct interrupt_event_t final : public raid_event_t
   {
     for ( auto p : affected_players )
     {
+      solver_control::interrupt_scope_t interrupt_cause( solver_control::interrupt_cause_t::raid_event );  // 261027-fts
       p->interrupt();
     }
   }

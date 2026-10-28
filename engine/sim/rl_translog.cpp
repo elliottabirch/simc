@@ -697,6 +697,9 @@ decision_record fill_decision( sim_t* sim, player_t* p, std::uint64_t seq, const
   // sibling, read exactly the same way as r.damage above.
   r.damage_expected = p->solver_damage_expected_so_far;
   r.t = static_cast<float>( sim->current_time().total_seconds() );
+  // 261027-fts (version 16): a row filled and written at once is committed at its own decision instant. A staged row is re-stamped by
+  // stamp_commit() when the press becomes irrevocable; t_decided keeps this instant.
+  r.t_decided = r.t;
   std::memcpy( r.obs, obs, sizeof( r.obs ) );
   r.q_margin = q_margin;
   r.top_q = top_q;   // version 3: best legal Q, or NaN -- see rl_translog.hpp's own field comment
@@ -791,6 +794,29 @@ decision_record fill_decision( sim_t* sim, player_t* p, std::uint64_t seq, const
   std::memcpy( r.credit_exp_chosen, p->rl_credit_chosen.exp, sizeof( r.credit_exp_chosen ) );
 
   return r;
+}
+
+void stamp_commit( sim_t* sim, player_t* p, decision_record& r )
+{
+  // The same reads, in the same order, as fill_decision() makes for the "cumulative at this instant" half of the row.
+  r.damage = p->solver_damage_so_far;
+  r.damage_expected = p->solver_damage_expected_so_far;
+  r.t = static_cast<float>( sim->current_time().total_seconds() );
+  std::memcpy( r.proc_attempts, p->rl_proc_counters.attempts, sizeof( r.proc_attempts ) );
+  std::memcpy( r.proc_successes, p->rl_proc_counters.successes, sizeof( r.proc_successes ) );
+  std::memcpy( r.proc_chance_sum, p->rl_proc_counters.chance_sum, sizeof( r.proc_chance_sum ) );
+  std::memcpy( r.credit_real, p->rl_credit.real, sizeof( r.credit_real ) );
+  std::memcpy( r.credit_exp, p->rl_credit.exp, sizeof( r.credit_exp ) );
+  r.damage_chosen = p->solver_chosen_damage_so_far;
+  r.damage_expected_chosen = p->solver_chosen_damage_expected_so_far;
+  std::memcpy( r.credit_real_chosen, p->rl_credit_chosen.real, sizeof( r.credit_real_chosen ) );
+  std::memcpy( r.credit_exp_chosen, p->rl_credit_chosen.exp, sizeof( r.credit_exp_chosen ) );
+}
+
+census_t& fight_census()
+{
+  static census_t c{};
+  return c;
 }
 
 void write_row( sim_t* sim, player_t* p, const decision_record& r, const char* apl_choice_name,
@@ -933,6 +959,8 @@ void record_close( sim_t* sim )
   r.fight_length = static_cast<float>( p->iteration_fight_length.total_seconds() );
   std::memset( r.fight_tag, 0, sizeof( r.fight_tag ) );
   std::memset( r.zero12_rest, 0, sizeof( r.zero12_rest ) );
+  // 261027-fts (version 16): the fight's census, the first census_slot::COUNT words of the formerly zero region (see rl_translog.hpp).
+  std::memcpy( r.zero12_rest, fight_census().n, sizeof( fight_census().n ) );
   r.decision_count = root->rl_translog_pending_decisions;
   r.zero_mask = 0;   // version 4: widened to uint32 to sit at decision_record's own mask offset
   r.iteration = static_cast<std::uint16_t>( fight_index( sim ) );  // 261005-fight-list: the entry index in a list
