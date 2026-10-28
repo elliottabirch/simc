@@ -11,6 +11,10 @@
 // reader share that description. A file is written whole with `schemaVersion`, `actor` and `buffs`, rows sorted by
 // (holder, kind, name), identical rows of different enemies merged into one.
 //
+// 261028-fzl: in a fight list (sim_t::rl_list_active) the file is JSON Lines: one line per entry at its combat end, {schemaVersion 2, kind "buff",
+// entry, crc32, signature (sha256 of the table bytes), table (once per distinct signature in the process, else null), reach} where reach maps
+// "<holder>/<kind>/<name>" to {startCount, triggered, applied} for every row with any of them set. The table's rows carry no reach flags then.
+//
 // Sim hooks (src: sim.cpp). No-ops unless the sim option rl_buff_census=<path> is set. The module only READS: it never calls
 // up() (that mutates benefit bookkeeping), never triggers, expires or rolls anything, and allocates nothing on the decision
 // path (the two hooks run once per fight, at init-finished and at combat end). It changes no decision, no random draw and no

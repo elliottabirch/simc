@@ -22,6 +22,7 @@
 #include "player/actor_target_data.hpp"
 #include "player/ground_aoe.hpp"
 #include "player/pet.hpp"
+#include "sim/rl_action_census.hpp"
 #include "player/pet_spawner.hpp"
 #include "action/action_callback.hpp"
 #include "action/parse_effects.hpp"
@@ -7519,8 +7520,18 @@ struct fire_nova_explosion_t : public shaman_spell_t
   }
 };
 
-struct fire_nova_t : public shaman_spell_t
+struct fire_nova_t : public shaman_spell_t, public rl_action_census::shape_provider_t
 {
+  // 261028-fzl (D2): Fire Nova hits the carriers of the actor's own Flame Shock (available_targets below), the explosion counted round each one.
+  // The census declares it as a target set; there is no geometric shape to name.
+  bool rl_census_target_set( rl_action_census::target_set_t& ts ) const override
+  {
+    ts.kind   = "dot_carriers";
+    ts.dot    = "flame_shock";
+    ts.impact = impact_action ? impact_action->name_str : std::string();
+    return true;
+  }
+
   fire_nova_t( shaman_t* p, unsigned type_ )
     : shaman_spell_t( "fire_nova", p, p->find_spell( 333974 ), type_ )
   {

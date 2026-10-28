@@ -19,7 +19,11 @@
 //                           Lightning and rebuilds caches), never calls set_target, never
 //                           allocates and never draws a random number.
 //   * on_init_finished() / on_combat_end()  write the census JSON when the sim option
-//                           rl_action_census=<path> is set (init, then rewritten at fight end).
+//                           rl_action_census=<path> is set (init, then rewritten at fight end). 261028-fzl: schemaVersion 2 adds the
+//                           `actions` array (every action object of the actor and its pets) and, per row, the reach of the fight played
+//                           (`executes`, `byButton`, `byClass`, from the cause tally note_execute feeds). In a fight list
+//                           (sim_t::rl_list_active) the file is JSON Lines instead: one line per entry at its combat end, the table once per
+//                           distinct signature (sha256 of its bytes) in the process, the reach on every line.
 // Plan 271-10 then switched the arms hit columns to count_engine_hits (walk_classified below).
 //
 // The census only READS. It changes no decision, no random draw and no damage.
@@ -92,11 +96,25 @@ struct distance_override_t
   double  range  = 0.0;
 };
 
+// 261028-fzl (S1-F1a, D2): an action whose hit set is NOT a geometric shape but a list of enemies: the carriers of one of the actor's own DoTs
+// (Fire Nova: every enemy with the actor's Flame Shock on it), the impact action then counted round each carrier. The one bespoke shape hook of
+// the hits family; the class module declares it, the census writes it as `targetSet`, count_target_set_hits() counts it.
+struct target_set_t
+{
+  std::string kind;    // "dot_carriers"
+  std::string dot;     // the actor's own dot, by name (flame_shock)
+  std::string impact;  // the impact action's name (fire_nova_explosion)
+};
+
 // Implemented by a class module's action base. Found with dynamic_cast, so an action that does not
 // derive from it is simply read from its stock fields.
 struct shape_provider_t
 {
   virtual ~shape_provider_t() = default;
+  virtual bool rl_census_target_set( target_set_t& ) const
+  {
+    return false;
+  }
   virtual bool rl_census_filter( filter_descriptor_t& ) const
   {
     return false;
@@ -197,6 +215,9 @@ struct node_t
   filter_descriptor_t filter;
   std::vector<widen_t> widened_by;
   bool                proc_only = false;
+  // 261028-fzl (D2): the enemy list this node hits when it is a set of carriers rather than a shape (see target_set_t); has_target_set false otherwise.
+  bool                has_target_set = false;
+  target_set_t        target_set;
   // 261013-aimx class B: the sample behind the proc verdict. Set by mark_proc_children (fight end only) on a child node that has its own
   // statistics and is not dual: the child's execute count and its root's execute count over the iteration the census file describes (a root that
   // never ran reads rootExecutes 0, and then no verdict was possible). -1 when none applies (the init walk, a non-child node, a node that shares
@@ -292,6 +313,21 @@ std::vector<token_t> walk_classified( player_t* p );
 // centre plus every live enemy passing the node's shape (and filter), capped by the live
 // n_targets() read (-1 uncapped). A CHAIN node returns the chain-hop count of the stamped decision.
 int count_engine_hits( const node_t& node, const player_t* centre );
+
+// 261028-fzl (D2): the hits of a node with a target set (Fire Nova): the sum over every enemy that carries the actor's own `n.target_set.dot` of
+// count_engine_hits( impact node, carrier ), the engine's own per-carrier cap applying through count_engine_hits. Reads only; it finds the dot with
+// find_dot (never get_dot, which would create one). The 3-argument form takes the impact node resolved once by the caller (no allocation); the
+// 2-argument form resolves it from n.action->impact_action on every call (it allocates a node: census use and tests, not the decision path).
+int count_target_set_hits( const node_t& n, const node_t& impact, const player_t* actor );
+int count_target_set_hits( const node_t& n, const player_t* actor );
+
+// 261028-fzl (D4): the cause tally of the action census, a pure observer. action_t::execute() calls note_execute for every execute while a census
+// path is set; `cause_class` is the stamp's class byte (rl_cause_class), `button` the owner of the bottom-most CAST frame of the actor's
+// rl_cause_stack (null when there is none). Only the buttons of the active header (RL_ACTIONS cast tokens) are counted in byButton. `decision_seq` is
+// the stamp's decision number: a PROC_OF_CAST that runs on a later event (empty cause stack, no button) is attributed to the button pressed in
+// that decision, remembered from the CAST execute of the same decision.
+bool tally_active();
+void note_execute( const action_t* a, unsigned char cause_class, const action_t* button, long long decision_seq );
 
 // Sim hooks (src: sim.cpp). No-ops unless rl_action_census=<path> is set.
 std::string& path_storage();

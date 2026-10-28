@@ -6,6 +6,7 @@
 #include "sim/rl_action_census.hpp"
 
 #include "action/action.hpp"
+#include "action/dot.hpp"
 #include "buff/buff.hpp"
 #include "dbc/dbc.hpp"
 #include "fmt/format.h"
@@ -13,6 +14,7 @@
 #include "player/pet.hpp"
 #include "player/stats.hpp"
 #include "sim/rl_census_lines.hpp"
+#include "sim/rl_credit.hpp"
 #include "sim/rl_policy_constants_select.h"
 #include "sim/rl_target_select.hpp"
 #include "sim/sim.hpp"
@@ -167,6 +169,14 @@ void fill_node( node_t& n, action_t* a, const char* via, player_t* p )
   shape_t under = four_rule_shape( ground, radius, range );
 
   const auto* provider = dynamic_cast<const shape_provider_t*>( a );
+  {
+    target_set_t ts;
+    if ( provider && provider->rl_census_target_set( ts ) )
+    {
+      n.has_target_set = true;
+      n.target_set     = ts;
+    }
+  }
   distance_override_t ov;
   if ( provider && provider->rl_census_distance_override( ov ) && ov.active )
   {
@@ -714,17 +724,56 @@ struct reach_t
   std::map<std::string, long long> by_class;
 };
 
-reach_t reach_of( const action_row_t& r )
+// 261028-fzl (D4): the census-only cause tally, per sim and action object. A pure observer fed by action_t::execute (note_execute below).
+struct tally_t
+{
+  long long                        total = 0;
+  long long                        by_class[ 7 ] = {};
+  std::map<std::string, long long> by_button;
+};
+std::unordered_map<const sim_t*, std::unordered_map<const action_t*, tally_t>> g_tally;
+// decision number -> the header button pressed in that decision, per sim (see note_execute)
+std::unordered_map<const sim_t*, std::unordered_map<long long, std::string>> g_button_of_seq;
+
+const char* const CLASS_KEYS[ 7 ] = { "cast", "procOfCast", "dot", "procOfDot", "auto", "procOfAuto", "orphan" };
+
+// The cast tokens of the active header: the only buttons byButton names.
+bool is_header_button( const std::string& name )
+{
+  static const std::set<std::string> buttons = [] {
+    std::set<std::string> b;
+    for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+      if ( RL_ACTIONS[ i ].kind == rl_action_kind::cast && RL_ACTIONS[ i ].token != nullptr )
+        b.insert( RL_ACTIONS[ i ].token );
+    return b;
+  }();
+  return buttons.count( name ) != 0;
+}
+
+// Reach of one row over the fight just played. executes is the number of times an object of this row ran action_t::execute(); the class split
+// sums to it by construction (every execute is tallied once, in one class). Dual or stats-sharing actions need no special case.
+reach_t reach_of( const sim_t* sim, const action_row_t& r )
 {
   reach_t out;
-  // Objects of one row can share a stats object (stats are per player and name): count each stats object once.
-  std::set<const void*> counted;
+  std::lock_guard<std::mutex> lock( g_mutex );
+  const auto                  per_sim = g_tally.find( sim );
+  if ( per_sim == g_tally.end() )
+    return out;
   for ( const action_t* a : r.objects )
   {
-    if ( !a || !a->stats || !counted.insert( a->stats ).second )
+    const auto it = per_sim->second.find( a );
+    if ( it == per_sim->second.end() )
       continue;
-    out.executes += static_cast<long long>( a->stats->iteration_num_executes );
+    out.executes += it->second.total;
+    for ( int c = 0; c < 7; ++c )
+      if ( it->second.by_class[ c ] > 0 )
+        out.by_class[ CLASS_KEYS[ c ] ] += it->second.by_class[ c ];
+    for ( const auto& kv : it->second.by_button )
+      out.by_button[ kv.first ] += kv.second;
   }
+  if ( out.executes > 0 )
+    for ( const char* key : CLASS_KEYS )
+      out.by_class.emplace( key, 0 );  // all seven keys on every reached row (zeros included)
   return out;
 }
 
@@ -749,10 +798,15 @@ std::string reach_json( const reach_t& r )
 std::string action_row_json( const action_row_t& r, const reach_t* reach )
 {
   const std::string node = node_json( r.node );  // starts with {"name": ...
-  std::string       o    = fmt::format( "{{\"holder\":{},\"pet\":{},\"parent\":{},\"background\":{},\"harmful\":{},\"targetSet\":null,\"objectCount\":{},",
+  const std::string target_set =
+      r.node.has_target_set
+          ? fmt::format( "{{\"kind\":{},\"dot\":{},\"impact\":{}}}", esc( r.node.target_set.kind ), esc( r.node.target_set.dot ),
+                         esc( r.node.target_set.impact ) )
+          : std::string( "null" );
+  std::string       o    = fmt::format( "{{\"holder\":{},\"pet\":{},\"parent\":{},\"background\":{},\"harmful\":{},\"targetSet\":{},\"objectCount\":{},",
                                  esc( r.holder ), r.pet.empty() ? std::string( "null" ) : esc( r.pet ),
                                  r.parent.empty() ? std::string( "null" ) : esc( r.parent ), r.background ? "true" : "false",
-                                 r.harmful ? "true" : "false", r.object_count );
+                                 r.harmful ? "true" : "false", target_set, r.object_count );
   o += node.substr( 1 );
   if ( reach )
   {
@@ -766,7 +820,7 @@ std::string action_row_json( const action_row_t& r, const reach_t* reach )
 // Rendered rows by key. `self_override` (list mode) replaces the actor's own rows with the ones rendered at init-finished.
 using rendered_rows_t = std::map<std::string, std::string>;
 
-rendered_rows_t render_rows( const action_walk_t& w, bool with_reach, const rendered_rows_t* self_override )
+rendered_rows_t render_rows( const sim_t* sim, const action_walk_t& w, bool with_reach, const rendered_rows_t* self_override )
 {
   rendered_rows_t out;
   if ( self_override )
@@ -777,7 +831,7 @@ rendered_rows_t render_rows( const action_walk_t& w, bool with_reach, const rend
       continue;
     if ( with_reach )
     {
-      const reach_t reach = reach_of( kv.second );
+      const reach_t reach = reach_of( sim, kv.second );
       out[ kv.first ] = action_row_json( kv.second, &reach );
     }
     else
@@ -798,9 +852,9 @@ std::string join_rows( const rendered_rows_t& rows )
   return o + "]";
 }
 
-std::string actions_json( const action_walk_t& w, bool with_reach )
+std::string actions_json( const sim_t* sim, const action_walk_t& w, bool with_reach )
 {
-  return join_rows( render_rows( w, with_reach, nullptr ) );
+  return join_rows( render_rows( sim, w, with_reach, nullptr ) );
 }
 
 std::string tokens_json( const std::vector<token_t>& tokens )
@@ -848,9 +902,9 @@ bool g_printed_init = false;
 bool g_printed_end  = false;
 
 // Ordinary single-process file: one object, written at init (no reach) and rewritten at combat end (reach merged into the rows).
-void write_file( player_t* p, const std::vector<token_t>& tokens, const action_walk_t& walk, bool init_matches_end, bool with_reach )
+void write_file( sim_t* sim, player_t* p, const std::vector<token_t>& tokens, const action_walk_t& walk, bool init_matches_end, bool with_reach )
 {
-  const std::string body = table_json( p, tokens_json( tokens ), actions_json( walk, with_reach ), init_matches_end ) + "\n";
+  const std::string body = table_json( p, tokens_json( tokens ), actions_json( sim, walk, with_reach ), init_matches_end ) + "\n";
   if ( !rl_census_lines::write_text( g_path, body, "wb" ) )
     fmt::print( stderr, "rl_action_census: cannot open '{}' for writing\n", g_path );
 }
@@ -864,7 +918,7 @@ void append_list_line( sim_t* sim, player_t* p, const std::string& table, const 
   bool             first_row = true;
   for ( const auto& kv : end_walk.rows )
   {
-    const reach_t r = reach_of( kv.second );
+    const reach_t r = reach_of( sim, kv.second );
     if ( r.executes <= 0 )
       continue;
     reach += ( first_row ? "" : "," ) + esc( kv.first ) + ":" + reach_json( r );
@@ -1295,6 +1349,75 @@ int count_engine_hits( const node_t& n, const player_t* centre )
   return cap > 0 ? std::min( cap, hits ) : hits;
 }
 
+bool tally_active()
+{
+  return !g_path.empty();
+}
+
+void note_execute( const action_t* a, unsigned char cause_class, const action_t* button, long long decision_seq )
+{
+  if ( g_path.empty() || a == nullptr )
+    return;
+  const unsigned base = rl_cause_base( cause_class );
+  const int      idx  = base < 7 ? static_cast<int>( base ) : 6;
+  std::lock_guard<std::mutex> lock( g_mutex );
+  tally_t& t = g_tally[ a->sim ][ a ];
+  ++t.total;
+  ++t.by_class[ idx ];
+  // Only the foreground press and what it set off name a button; a button is a cast token of the active header.
+  if ( idx != RL_CAUSE_CAST && idx != RL_CAUSE_PROC_OF_CAST )
+    return;
+  auto& button_of_seq = g_button_of_seq[ a->sim ];
+  if ( button != nullptr && is_header_button( button->name_str ) )
+  {
+    // The press of this decision, remembered for the procs it schedules (below).
+    if ( idx == RL_CAUSE_CAST )
+      button_of_seq[ decision_seq ] = button->name_str;
+    ++t.by_button[ button->name_str ];
+  }
+  else if ( button == nullptr && idx == RL_CAUSE_PROC_OF_CAST )
+  {
+    // A proc that runs on a later event (the cause stack is empty by then) still carries the decision number of the press that caused it.
+    const auto it = button_of_seq.find( decision_seq );
+    if ( it != button_of_seq.end() )
+      ++t.by_button[ it->second ];
+  }
+}
+
+int count_target_set_hits( const node_t& n, const node_t& impact, const player_t* actor )
+{
+  if ( !n.has_target_set || actor == nullptr || actor->sim == nullptr )
+    return 0;
+  const sim_t* sim  = actor->sim;
+  int          hits = 0;
+  for ( player_t* carrier : sim->target_non_sleeping_list )
+  {
+    if ( !carrier || !carrier->is_enemy() || !rl_target_select::rl_counts_as_enemy( carrier ) || sim->is_untargetable_enemy( carrier ) )
+      continue;
+    bool carries = false;
+    for ( const dot_t* d : carrier->dot_list )
+    {
+      if ( d && d->source == actor && d->name_str == n.target_set.dot && d->is_ticking() )
+      {
+        carries = true;
+        break;
+      }
+    }
+    if ( carries )
+      hits += count_engine_hits( impact, carrier );
+  }
+  return hits;
+}
+
+int count_target_set_hits( const node_t& n, const player_t* actor )
+{
+  if ( !n.has_target_set || n.action == nullptr || n.action->impact_action == nullptr )
+    return 0;
+  node_t impact;
+  fill_node( impact, n.action->impact_action, "impact", n.action->player );
+  return count_target_set_hits( n, impact, actor );
+}
+
 void on_init_finished( sim_t* sim )
 {
   if ( g_path.empty() )
@@ -1312,7 +1435,7 @@ void on_init_finished( sim_t* sim )
     st.tokens_sig  = g_init_signature[ sim ];
     st.actions_sig = actions_signature( walk );
     st.tokens      = tokens_json( tokens );
-    st.self_rows   = render_rows( walk, false, nullptr );
+    st.self_rows   = render_rows( sim, walk, false, nullptr );
     g_init_state[ sim ] = std::move( st );
   }
   if ( sim->rl_list_active )
@@ -1326,7 +1449,7 @@ void on_init_finished( sim_t* sim )
     }
     return;
   }
-  write_file( p, tokens, walk, false, false );
+  write_file( sim, p, tokens, walk, false, false );
 }
 
 void on_combat_end( sim_t* sim )
@@ -1354,13 +1477,15 @@ void on_combat_end( sim_t* sim )
     }
     const std::vector<token_t> end_tokens = walk_all( p, false );
     const bool                 match      = !st.tokens_sig.empty() && st.tokens_sig == signature( end_tokens ) && st.actions_sig == actions_signature( end_walk );
-    const std::string          table      = match ? table_json( p, st.tokens, join_rows( render_rows( end_walk, false, &st.self_rows ) ), true )
-                                                  : table_json( p, tokens_json( end_tokens ), actions_json( end_walk, false ), false );
+    const std::string          table      = match ? table_json( p, st.tokens, join_rows( render_rows( sim, end_walk, false, &st.self_rows ) ), true )
+                                                  : table_json( p, tokens_json( end_tokens ), actions_json( sim, end_walk, false ), false );
     append_list_line( sim, p, table, end_walk );
     {
       std::lock_guard<std::mutex> lock( g_mutex );
       g_init_state.erase( sim );
       g_init_signature.erase( sim );
+      g_tally.erase( sim );
+      g_button_of_seq.erase( sim );
     }
     return;
   }
@@ -1374,7 +1499,13 @@ void on_combat_end( sim_t* sim )
     match   = it != g_init_signature.end() && it->second == signature( tokens ) && st != g_init_state.end() &&
             st->second.actions_sig == actions_signature( end_walk );
   }
-  write_file( p, tokens, end_walk, match, true );
+  write_file( sim, p, tokens, end_walk, match, true );
+  {
+    // The next iteration of an ordinary process starts its tally over.
+    std::lock_guard<std::mutex> lock( g_mutex );
+    g_tally.erase( sim );
+    g_button_of_seq.erase( sim );
+  }
 }
 
 }  // namespace rl_action_census

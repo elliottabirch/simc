@@ -24,6 +24,7 @@
 #include "sim/event.hpp"
 #include "sim/expressions.hpp"
 #include "sim/proc.hpp"
+#include "sim/rl_action_census.hpp"
 #include "sim/rl_buff_ledger.hpp"
 #include "sim/rl_credit.hpp"
 #include "sim/rl_target_select.hpp"
@@ -2127,6 +2128,29 @@ void action_t::execute()
     const std::int32_t rl_l = rl_buff_ledger::note_launch( this, target, "execute" );
     if ( rl_l >= 0 )
       rl_cause.launch = rl_l;
+  }
+
+  // 261028-fzl (S1-F1a, D4): the action census's cause tally -- a pure observer, no-op unless a census path is set. The triggering button of a
+  // CAST / PROC_OF_CAST execute is the owner of the bottom-most CAST frame of this player's cause stack (the foreground press); a CAST with no
+  // frame yet (a direct execute() with no entry-point wrapper) is its own button. Pets keep their own stack (empty -> no button).
+  if ( rl_action_census::tally_active() )
+  {
+    const action_t* rl_button = nullptr;
+    const auto      rl_base   = rl_cause_base( rl_cause.cls );
+    if ( rl_base == RL_CAUSE_CAST || rl_base == RL_CAUSE_PROC_OF_CAST )
+    {
+      for ( const auto& frame : player->rl_cause_stack )
+      {
+        if ( rl_cause_base( frame.cause.cls ) == RL_CAUSE_CAST )
+        {
+          rl_button = frame.owner;
+          break;
+        }
+      }
+      if ( rl_button == nullptr && rl_base == RL_CAUSE_CAST )
+        rl_button = this;
+    }
+    rl_action_census::note_execute( this, rl_cause.cls, rl_button, static_cast<long long>( rl_cause.seq ) );
   }
 
   // The per-target work (tick_action snapshotting included) that stamps every action_state_t
