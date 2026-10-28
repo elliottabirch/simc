@@ -627,6 +627,7 @@ void collect_holder( player_t* holder, const char* holder_kind, const std::strin
   for ( action_t* a : objects )
     link_children( a, 0, parent_of, extra );
   // Objects reachable only through a child link (not in the holder's own list) follow the list, in discovery order.
+  std::map<std::string, int> objects_per_key;
   std::set<const action_t*> listed( objects.begin(), objects.end() );
   for ( action_t* c : extra )
     if ( listed.insert( c ).second )
@@ -639,9 +640,12 @@ void collect_holder( player_t* holder, const char* holder_kind, const std::strin
     ++object_total;
     const std::string key = fmt::format( "{}/{}/{}", holder_kind, pet_name.empty() ? std::string( "-" ) : pet_name, a->name_str );
     auto              it  = rows.find( key );
+    const int         held_here = ++objects_per_key[ key ];
     if ( it != rows.end() )
     {
-      ++it->second.object_count;
+      // objectCount is "objects with this key in ONE holder": several pets of one name (Feral Spirit wolves) must not make the row depend on how
+      // many of them this fight happened to summon, or the table signature would differ between fights of one build.
+      it->second.object_count = std::max( it->second.object_count, held_here );
       it->second.objects.push_back( a );
       continue;
     }
