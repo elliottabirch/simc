@@ -349,7 +349,15 @@ const char* const FIGHT_LIST_PROCESS_OPTIONS[] = {
     // 261027-ol (owner order): the observer/APL corpora run through the list. The stock-list NAME is process-level (one global
     // in rl_stock_eval, one .apl format per file); the observer switch is compared too so the .apl never mixes observer and
     // net-play records. An entry that disagrees is refused by name like the others.
-    "solver_apl_stock_list", "solver_policy_observe_stock" };
+    "solver_apl_stock_list", "solver_policy_observe_stock",
+    // 261028-ovn (owner order): the table player runs through the list. These are module-global storage in rl_table_policy (one table file,
+    // one resolved strategy/defer/fallback set per process), so every entry must read the same; the table's per-fight state (row counter, pending
+    // reward, Q/N/M2 copied from the immutable file) is reset by on_fight_start in each entry's own reset_iteration. solver_table_trace is compared
+    // too but only the value 0 is accepted (the launcher always writes solver_table_trace=0; the .tbt writer is opened once per process at the first
+    // entry's setup). solver_table_save stays refused by name (FIGHT_LIST_REFUSED_NAMES): it fires at the end of every entry (each entry has
+    // iterations=1, so every fight is the "kept" one).
+    "solver_table_policy", "solver_table_scope", "solver_table_fallback", "solver_table_defer", "solver_table_wait", "solver_table_trace",
+    "solver_table_clock" };
 
 // Options refused in any entry, by name prefix (PLAN-A section 2.3). Each exists for one reason: the feature
 // keeps process-global state this driver does not carry (solver_branch, rl_buff_*), reads only one process
@@ -362,8 +370,10 @@ const char* const FIGHT_LIST_REFUSED_PREFIXES[] = {
 // solver_apl_stock_list (Phase 271.4) is a per-process option (one list name applies to every entry of the fight list, and the
 // .apl format is chosen once per process); since 261027-ol it is compared in FIGHT_LIST_PROCESS_OPTIONS instead of refused.
 const char* const FIGHT_LIST_REFUSED_NAMES[] = { "solver_control", "decision_dump", "rl_bind_report",
-                                                   // 261025-bk4: the table player is per process too (one table, one trace, one runtime).
-                                                   "solver_table_policy" };
+                                                   // 261025-bk4 refused the whole table player (one table, one trace, one runtime); since 261028-ovn the table
+                                                   // options are compared in FIGHT_LIST_PROCESS_OPTIONS and only the end-of-fight table save stays refused
+                                                   // (and a solver_table_trace other than 0, checked where the names are).
+                                                   "solver_table_save" };
 
 // The LAST value an entry's options give `name` (later options win in sim_t, as here), or nullptr when absent.
 const std::string* fight_list_option( const sim_control_t& control, const std::string& name )
@@ -510,6 +520,11 @@ std::vector<fight_list_entry_t> fight_list_read_and_validate( const std::string&
           fight_list_refuse( fmt::format( "entry {} ('{}') sets '{}', which a fight list refuses (every option starting "
                                           "'{}' is refused)", k, e.path, tuple.name, prefix ) );
         }
+      }
+      if ( tuple.name == "solver_table_trace" && tuple.value != "0" )
+      {
+        fight_list_refuse( fmt::format( "entry {} ('{}') sets solver_table_trace={}, which a fight list refuses (only 0: the .tbt writer is "
+                                        "opened once per process)", k, e.path, tuple.value ) );
       }
       for ( const char* name : FIGHT_LIST_REFUSED_NAMES )
       {

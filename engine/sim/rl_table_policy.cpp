@@ -1429,6 +1429,7 @@ void on_fight_start( sim_t* )
     return;
   g_rt.rows = 0;
   g_rt.pending = pending_t();
+  g_rt.actor = nullptr;  // 261028-ovn: in a fight list the previous entry's player is gone; decide() sets it again
   // scope fight: Q, N and M2 start from the immutable file at every fight start (the warm-up fight and the kept fight alike).
   g_rt.Q = g_table.Q;
   g_rt.N = g_table.N;
