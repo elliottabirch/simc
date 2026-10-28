@@ -14,6 +14,7 @@
 #include "player/player.hpp"
 #include "sim/cooldown.hpp"
 #include "sim/proc_rng.hpp"
+#include "sim/rl_census_lines.hpp"
 #include "sim/sim.hpp"
 
 #include <algorithm>
@@ -51,6 +52,7 @@ struct row_t
   bool        applied             = false;
   bool        channeled           = false;  // a dot: its applying action is a channel (the dot is the channel's tick carrier, not an aura on the enemy)
   bool        triggered           = false;  // a buff: executed at least once this fight (last_trigger_time is set only by buff_t::execute)
+  long long   start_count         = 0;      // 261028-fzl: buff_t::start_count summed over the objects of this key (reach only; 0 for a dot)
 };
 
 using key_t = std::tuple<std::string, std::string, std::string>;
@@ -117,6 +119,7 @@ void add_row( std::map<key_t, row_t>& rows, const row_t& r )
   old.applied           = old.applied || r.applied;
   old.channeled         = old.channeled || r.channeled;
   old.triggered         = old.triggered || r.triggered;
+  old.start_count += r.start_count;
 }
 
 row_t buff_row( const buff_t* b, const char* holder, bool fight_played )
@@ -143,6 +146,7 @@ row_t buff_row( const buff_t* b, const char* holder, bool fight_played )
   // execute: for them only a time above zero counts. The actor's own buffs are reset to the minimum, so time zero is a real trigger.
   const bool lazily_made = r.holder == "enemy";
   r.triggered = fight_played && ( lazily_made ? b->last_trigger_time() > timespan_t::zero() : b->last_trigger_time() >= timespan_t::zero() );
+  r.start_count = fight_played ? static_cast<long long>( b->start_count_for_census() ) : 0;
   return r;
 }
 
@@ -164,7 +168,7 @@ row_t dot_row( const dot_t* d )
   return r;
 }
 
-std::string row_json( const row_t& r )
+std::string row_json( const row_t& r, bool with_reach_fields = true )
 {
   std::string o = fmt::format( "{{\"holder\":\"{}\",\"kind\":\"{}\",\"name\":{},\"spellId\":{},\"maxStack\":{},"
                                "\"stackBehavior\":\"{}\",\"baseDurationSeconds\":{},\"cooldownSeconds\":{},"
@@ -174,9 +178,16 @@ std::string row_json( const row_t& r )
                                r.asynchronous ? "asynchronous" : "default", num( r.base_duration ), num( r.cooldown ),
                                num( r.internal_cooldown ), r.has_rppm ? "true" : "false", num( r.rppm_frequency ),
                                num( r.default_chance ), r.constant ? "true" : "false" );
+  // 261028-fzl: in a fight list the reach flags (applied / triggered) are not table fields: they are per-entry reach (C-1), so the table
+  // object stays equal across entries of one build and its signature dedupes. The ordinary single-process file keeps them in the rows.
   if ( r.kind == "dot" )
-    o += fmt::format( ",\"applied\":{},\"channeled\":{}", r.applied ? "true" : "false", r.channeled ? "true" : "false" );
-  else
+  {
+    if ( with_reach_fields )
+      o += fmt::format( ",\"applied\":{},\"channeled\":{}", r.applied ? "true" : "false", r.channeled ? "true" : "false" );
+    else
+      o += fmt::format( ",\"channeled\":{}", r.channeled ? "true" : "false" );
+  }
+  else if ( with_reach_fields )
     o += fmt::format( ",\"triggered\":{}", r.triggered ? "true" : "false" );
   return o + "}";
 }
@@ -280,7 +291,53 @@ void write_table( sim_t* sim, bool fight_played )
         add_row( rows, dot_row( d ) );
   }
 
-  std::string body = fmt::format( "{{\"schemaVersion\":1,\"actor\":{},\"buffs\":[", esc( actor->name_str ) );
+  // 261028-fzl (C-1): in a fight list the table object omits the reach flags and each entry appends one line at combat end; the table is written
+  // once per distinct signature (sha256 of its bytes) in this process. The init-finished write of a list is only the truncation at entry 0.
+  if ( sim->rl_list_active )
+  {
+    if ( !fight_played )
+    {
+      if ( sim->rl_list_index == 0 )
+      {
+        rl_census_lines::reset_signatures( 1 );
+        if ( !rl_census_lines::write_text( g_path, std::string(), "wb" ) )
+          fmt::print( stderr, "rl_buff_census: cannot open '{}' for writing\n", g_path );
+      }
+      return;
+    }
+    std::string table = fmt::format( "{{\"schemaVersion\":2,\"actor\":{},\"buffs\":[", esc( actor->name_str ) );
+    std::string reach = "{";
+    bool        first_row = true;
+    bool        first_reach = true;
+    for ( const auto& kv : rows )
+    {
+      const row_t& r = kv.second;
+      table += ( first_row ? "" : "," ) + row_json( r, false );
+      first_row = false;
+      const bool any = r.start_count > 0 || r.triggered || r.applied;
+      if ( any )
+      {
+        reach += ( first_reach ? "" : "," ) +
+                 fmt::format( "{}:{{\"startCount\":{},\"triggered\":{},\"applied\":{}}}",
+                              esc( r.holder + "/" + r.kind + "/" + r.name ), r.start_count, r.triggered ? "true" : "false", r.applied ? "true" : "false" );
+        first_reach = false;
+      }
+    }
+    table += "]";
+    table += proc_objects_json( actor );
+    table += "}";
+    reach += "}";
+    const std::string signature = rl_census_lines::sha256_hex( table );
+    const bool        first     = rl_census_lines::first_time_signature( 1, signature );
+    const std::string line =
+        fmt::format( "{{\"schemaVersion\":2,\"kind\":\"buff\",\"entry\":{},\"crc32\":{},\"signature\":\"{}\",\"table\":{},\"reach\":{}}}\n",
+                     sim->rl_list_index, sim->rl_list_crc32, signature, first ? table : std::string( "null" ), reach );
+    if ( !rl_census_lines::write_text( g_path, line, "ab" ) )
+      fmt::print( stderr, "rl_buff_census: cannot open '{}' for appending\n", g_path );
+    return;
+  }
+
+  std::string body = fmt::format( "{{\"schemaVersion\":2,\"actor\":{},\"buffs\":[", esc( actor->name_str ) );
   bool        first = true;
   for ( const auto& kv : rows )
   {
@@ -291,14 +348,8 @@ void write_table( sim_t* sim, bool fight_played )
   body += proc_objects_json( actor );
   body += "}\n";
 
-  std::FILE* f = std::fopen( g_path.c_str(), "wb" );
-  if ( !f )
-  {
+  if ( !rl_census_lines::write_text( g_path, body, "wb" ) )
     fmt::print( stderr, "rl_buff_census: cannot open '{}' for writing\n", g_path );
-    return;
-  }
-  std::fwrite( body.data(), 1, body.size(), f );
-  std::fclose( f );
 }
 
 }  // namespace

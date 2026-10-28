@@ -357,7 +357,10 @@ const char* const FIGHT_LIST_PROCESS_OPTIONS[] = {
     // entry's setup). solver_table_save stays refused by name (FIGHT_LIST_REFUSED_NAMES): it fires at the end of every entry (each entry has
     // iterations=1, so every fight is the "kept" one).
     "solver_table_policy", "solver_table_scope", "solver_table_fallback", "solver_table_defer", "solver_table_wait", "solver_table_trace",
-    "solver_table_clock" };
+    "solver_table_clock",
+    // 261028-fzl (owner order, S1-F1a): the two discovery censuses run over a fight list. The path is process-level (one file per census; the
+    // list writes one JSON line per entry to it, see rl_action_census.hpp / rl_buff_census.hpp), so every entry must read the same.
+    "rl_action_census", "rl_buff_census" };
 
 // Options refused in any entry, by name prefix (PLAN-A section 2.3). Each exists for one reason: the feature
 // keeps process-global state this driver does not carry (solver_branch, rl_buff_*), reads only one process
@@ -515,6 +518,10 @@ std::vector<fight_list_entry_t> fight_list_read_and_validate( const std::string&
     {
       for ( const char* prefix : FIGHT_LIST_REFUSED_PREFIXES )
       {
+        // 261028-fzl: exactly the name rl_buff_census passes the 'rl_buff_' prefix refusal (a process-level list option now);
+        // rl_buff_ledger*, rl_buff_credit* and every other rl_buff_ name stay refused.
+        if ( tuple.name == "rl_buff_census" )
+          continue;
         if ( tuple.name.compare( 0, std::strlen( prefix ), prefix ) == 0 )
         {
           fight_list_refuse( fmt::format( "entry {} ('{}') sets '{}', which a fight list refuses (every option starting "

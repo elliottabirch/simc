@@ -10,7 +10,9 @@
 #include "dbc/dbc.hpp"
 #include "fmt/format.h"
 #include "player/player.hpp"
+#include "player/pet.hpp"
 #include "player/stats.hpp"
+#include "sim/rl_census_lines.hpp"
 #include "sim/rl_policy_constants_select.h"
 #include "sim/rl_target_select.hpp"
 #include "sim/sim.hpp"
@@ -21,6 +23,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <set>
 #include <string>
@@ -572,7 +575,240 @@ std::vector<token_t> walk_all( player_t* p, bool at_fight_end )
   return tokens;
 }
 
-void write_file( sim_t* sim, player_t* p, const std::vector<token_t>& tokens, bool init_matches_end )
+// ==========================================================================================================================================
+// 261028-fzl (S1-F1a, owner order 2026-10-28): the WHOLE action list. The token walk above reads only the buttons of the registry header
+// and what hangs off them; the hits family needs every action the build can fire (proc actions, item procs, pet actions). C-2 of the plan:
+// one row per distinct (holder, pet, name), taken from the first object with that key, `objectCount` = how many objects share it.
+// ==========================================================================================================================================
+
+struct action_row_t
+{
+  std::string                       key;     // "<holder>/<pet or ->/<name>"
+  std::string                       holder;  // "self" | "pet"
+  std::string                       pet;     // pet name_str, empty for self
+  std::string                       parent;  // empty when the object is reached from no other action
+  node_t                            node;
+  bool                              background = false;
+  bool                              harmful    = false;
+  int                               object_count = 0;
+  std::vector<const action_t*>      objects;  // every object with this key (reach sums over them)
+};
+
+struct child_link_t
+{
+  const action_t* parent = nullptr;
+  const char*     via    = "list";
+};
+
+void link_children( action_t* a, int depth, std::unordered_map<const action_t*, child_link_t>& parent_of, std::vector<action_t*>& extra )
+{
+  if ( !a || depth >= MAX_DEPTH )
+    return;
+  auto link = [ & ]( action_t* c, const char* via ) {
+    if ( !c || c == a || parent_of.count( c ) )
+      return;
+    parent_of[ c ] = child_link_t{ a, via };
+    extra.push_back( c );
+    link_children( c, depth + 1, parent_of, extra );
+  };
+  link( a->impact_action, "impact" );
+  link( a->execute_action, "execute" );
+  link( a->tick_action, "tick" );
+  for ( action_t* c : a->child_action )
+    link( c, "child" );
+}
+
+void collect_holder( player_t* holder, const char* holder_kind, const std::string& pet_name, std::map<std::string, action_row_t>& rows,
+                     std::size_t& object_total )
+{
+  std::unordered_map<const action_t*, child_link_t> parent_of;
+  std::vector<action_t*>                            extra;
+  std::vector<action_t*>                            objects( holder->action_list.begin(), holder->action_list.end() );
+  for ( action_t* a : objects )
+    link_children( a, 0, parent_of, extra );
+  // Objects reachable only through a child link (not in the holder's own list) follow the list, in discovery order.
+  std::set<const action_t*> listed( objects.begin(), objects.end() );
+  for ( action_t* c : extra )
+    if ( listed.insert( c ).second )
+      objects.push_back( c );
+
+  for ( action_t* a : objects )
+  {
+    if ( !a )
+      continue;
+    ++object_total;
+    const std::string key = fmt::format( "{}/{}/{}", holder_kind, pet_name.empty() ? std::string( "-" ) : pet_name, a->name_str );
+    auto              it  = rows.find( key );
+    if ( it != rows.end() )
+    {
+      ++it->second.object_count;
+      it->second.objects.push_back( a );
+      continue;
+    }
+    action_row_t r;
+    r.key    = key;
+    r.holder = holder_kind;
+    r.pet    = pet_name;
+    const auto link = parent_of.find( a );
+    const char* via = link == parent_of.end() ? "list" : link->second.via;
+    if ( link != parent_of.end() && link->second.parent )
+      r.parent = link->second.parent->name_str;
+    fill_node( r.node, a, via, holder );
+    r.background   = a->background;
+    r.harmful      = a->harmful;
+    r.object_count = 1;
+    r.objects.push_back( a );
+    rows.emplace( key, std::move( r ) );
+  }
+}
+
+struct action_walk_t
+{
+  std::map<std::string, action_row_t> rows;
+  std::size_t                         self_objects = 0;
+  std::size_t                         pets         = 0;
+  std::size_t                         pet_objects  = 0;
+};
+
+action_walk_t collect_actions( player_t* p )
+{
+  action_walk_t w;
+  collect_holder( p, "self", std::string(), w.rows, w.self_objects );
+  for ( player_t* pet : p->pet_list )
+  {
+    if ( !pet )
+      continue;
+    ++w.pets;
+    collect_holder( pet, "pet", pet->name_str, w.rows, w.pet_objects );
+  }
+  return w;
+}
+
+// What must agree between the init walk and the fight-end walk for the table to be written from the init walk: structure, never live values.
+// Pet rows are left out: no pet exists at init-finished (measured: pets=0 at init, pets>0 at combat end, A1), so the init walk can only vouch for
+// the actor's own actions. The pets' rows are always taken from the combat-end walk.
+std::string actions_signature( const action_walk_t& w )
+{
+  std::string s;
+  for ( const auto& kv : w.rows )
+  {
+    const action_row_t& r = kv.second;
+    if ( r.holder != "self" )
+      continue;
+    const node_t&       n = r.node;
+    s += fmt::format( "{}|{}|{}|{},{},{},{},{},{},{},{},{},{};\n", r.key, r.parent, n.via, n.spell_id, shape_name( n.shape ), n.radius, n.range,
+                      n.cap_static, n.soft_cap, n.chain, static_cast<int>( n.filter.kind ), r.object_count, r.harmful );
+  }
+  return s;
+}
+
+// Reach of one row over the fight just played: executes (and, once the cause tally lands, the button and class split).
+struct reach_t
+{
+  long long                       executes = 0;
+  std::map<std::string, long long> by_button;
+  std::map<std::string, long long> by_class;
+};
+
+reach_t reach_of( const action_row_t& r )
+{
+  reach_t out;
+  // Objects of one row can share a stats object (stats are per player and name): count each stats object once.
+  std::set<const void*> counted;
+  for ( const action_t* a : r.objects )
+  {
+    if ( !a || !a->stats || !counted.insert( a->stats ).second )
+      continue;
+    out.executes += static_cast<long long>( a->stats->iteration_num_executes );
+  }
+  return out;
+}
+
+std::string map_json( const std::map<std::string, long long>& m )
+{
+  std::string o = "{";
+  bool        first = true;
+  for ( const auto& kv : m )
+  {
+    o += ( first ? "" : "," ) + esc( kv.first ) + ":" + std::to_string( kv.second );
+    first = false;
+  }
+  return o + "}";
+}
+
+std::string reach_json( const reach_t& r )
+{
+  return fmt::format( "{{\"executes\":{},\"byButton\":{},\"byClass\":{}}}", r.executes, map_json( r.by_button ), map_json( r.by_class ) );
+}
+
+// The row object of C-2. `reach` non-null merges the reach fields into the row (the ordinary single-process file).
+std::string action_row_json( const action_row_t& r, const reach_t* reach )
+{
+  const std::string node = node_json( r.node );  // starts with {"name": ...
+  std::string       o    = fmt::format( "{{\"holder\":{},\"pet\":{},\"parent\":{},\"background\":{},\"harmful\":{},\"targetSet\":null,\"objectCount\":{},",
+                                 esc( r.holder ), r.pet.empty() ? std::string( "null" ) : esc( r.pet ),
+                                 r.parent.empty() ? std::string( "null" ) : esc( r.parent ), r.background ? "true" : "false",
+                                 r.harmful ? "true" : "false", r.object_count );
+  o += node.substr( 1 );
+  if ( reach )
+  {
+    o.pop_back();
+    o += fmt::format( ",\"executes\":{},\"byButton\":{},\"byClass\":{}}}", reach->executes, map_json( reach->by_button ),
+                      map_json( reach->by_class ) );
+  }
+  return o;
+}
+
+// Rendered rows by key. `self_override` (list mode) replaces the actor's own rows with the ones rendered at init-finished.
+using rendered_rows_t = std::map<std::string, std::string>;
+
+rendered_rows_t render_rows( const action_walk_t& w, bool with_reach, const rendered_rows_t* self_override )
+{
+  rendered_rows_t out;
+  if ( self_override )
+    out = *self_override;
+  for ( const auto& kv : w.rows )
+  {
+    if ( self_override && kv.second.holder == "self" )
+      continue;
+    if ( with_reach )
+    {
+      const reach_t reach = reach_of( kv.second );
+      out[ kv.first ] = action_row_json( kv.second, &reach );
+    }
+    else
+      out[ kv.first ] = action_row_json( kv.second, nullptr );
+  }
+  return out;
+}
+
+std::string join_rows( const rendered_rows_t& rows )
+{
+  std::string o = "[";
+  bool        first = true;
+  for ( const auto& kv : rows )
+  {
+    o += ( first ? "" : "," ) + kv.second;
+    first = false;
+  }
+  return o + "]";
+}
+
+std::string actions_json( const action_walk_t& w, bool with_reach )
+{
+  return join_rows( render_rows( w, with_reach, nullptr ) );
+}
+
+std::string tokens_json( const std::vector<token_t>& tokens )
+{
+  std::string o = "[";
+  for ( size_t i = 0; i < tokens.size(); ++i )
+    o += ( i ? "," : "" ) + token_json( tokens[ i ] );
+  return o + "]";
+}
+
+// The C-2 table object (no reach fields). `tokens` and `actions` are the already-rendered arrays.
+std::string table_json( player_t* p, const std::string& tokens, const std::string& actions, bool init_matches_end )
 {
   // Phase 271.6 plan 18 (G271.6-37): the spell ids of the buffs that lock this actor's class-module actions, sorted ascending.
   std::vector<unsigned> lock_auras = p->channel_lock_aura_spell_ids();
@@ -581,19 +817,61 @@ void write_file( sim_t* sim, player_t* p, const std::vector<token_t>& tokens, bo
   for ( size_t i = 0; i < lock_auras.size(); ++i )
     lock_list += ( i ? "," : "" ) + std::to_string( lock_auras[ i ] );
   lock_list += "]";
-  std::string body = fmt::format( "{{\"schemaVersion\":1,\"actor\":{},\"initMatchesEnd\":{},\"lockAuraSpellIds\":{},\"tokens\":[",
-                                  esc( p->name_str ), init_matches_end ? "true" : "false", lock_list );
-  for ( size_t i = 0; i < tokens.size(); ++i )
-    body += ( i ? "," : "" ) + token_json( tokens[ i ] );
-  body += "]}\n";
-  std::FILE* f = std::fopen( g_path.c_str(), "wb" );
-  if ( !f )
-  {
-    fmt::print( stderr, "rl_action_census: cannot open '{}' for writing\n", g_path );
+  return fmt::format( "{{\"schemaVersion\":2,\"actor\":{},\"initMatchesEnd\":{},\"lockAuraSpellIds\":{},\"tokens\":{},\"actions\":{}}}",
+                      esc( p->name_str ), init_matches_end ? "true" : "false", lock_list, tokens, actions );
+}
+
+// Per-sim state the list mode keeps from the init walk (erased at combat end, research A2 item 3: a freed entry's address is reused).
+struct init_state_t
+{
+  std::string     tokens_sig;
+  std::string     actions_sig;  // the actor's own rows only (see actions_signature)
+  std::string     tokens;       // rendered init-walk tokens (procOnly false, no evidence)
+  rendered_rows_t self_rows;    // rendered init-walk rows of the actor's own actions (no reach)
+};
+std::unordered_map<const sim_t*, init_state_t> g_init_state;
+
+// A1 measurement (plan task S1-F1a-T1): are the pet action lists populated at init? Printed once per process per phase.
+void note_counts( const action_walk_t& w, const char* at, bool& printed )
+{
+  if ( printed )
     return;
+  printed = true;
+  fmt::print( stderr, "[RL_ACTION_CENSUS] actions={} pets={} petActions={} rows={} at={}\n", w.self_objects, w.pets, w.pet_objects, w.rows.size(), at );
+  std::fflush( stderr );
+}
+bool g_printed_init = false;
+bool g_printed_end  = false;
+
+// Ordinary single-process file: one object, written at init (no reach) and rewritten at combat end (reach merged into the rows).
+void write_file( player_t* p, const std::vector<token_t>& tokens, const action_walk_t& walk, bool init_matches_end, bool with_reach )
+{
+  const std::string body = table_json( p, tokens_json( tokens ), actions_json( walk, with_reach ), init_matches_end ) + "\n";
+  if ( !rl_census_lines::write_text( g_path, body, "wb" ) )
+    fmt::print( stderr, "rl_action_census: cannot open '{}' for writing\n", g_path );
+}
+
+// List mode: one JSON line per entry at its combat end (C-1).
+void append_list_line( sim_t* sim, player_t* p, const std::string& table, const action_walk_t& end_walk )
+{
+  const std::string signature = rl_census_lines::sha256_hex( table );
+  const bool        first     = rl_census_lines::first_time_signature( 0, signature );
+  std::string      reach = "{";
+  bool             first_row = true;
+  for ( const auto& kv : end_walk.rows )
+  {
+    const reach_t r = reach_of( kv.second );
+    if ( r.executes <= 0 )
+      continue;
+    reach += ( first_row ? "" : "," ) + esc( kv.first ) + ":" + reach_json( r );
+    first_row = false;
   }
-  std::fwrite( body.data(), 1, body.size(), f );
-  std::fclose( f );
+  reach += "}";
+  const std::string line = fmt::format( "{{\"schemaVersion\":2,\"kind\":\"action\",\"entry\":{},\"crc32\":{},\"signature\":\"{}\",\"table\":{},\"reach\":{}}}\n",
+                                        sim->rl_list_index, sim->rl_list_crc32, signature, first ? table : std::string( "null" ), reach );
+  (void)p;
+  if ( !rl_census_lines::write_text( g_path, line, "ab" ) )
+    fmt::print( stderr, "rl_action_census: cannot open '{}' for appending\n", g_path );
 }
 
 }  // namespace
@@ -1021,11 +1299,30 @@ void on_init_finished( sim_t* sim )
   if ( !p )
     return;
   const std::vector<token_t> tokens = walk_all( p, false );
+  const action_walk_t        walk   = collect_actions( p );
+  note_counts( walk, "init", g_printed_init );
   {
     std::lock_guard<std::mutex> lock( g_mutex );
     g_init_signature[ sim ] = signature( tokens );
+    init_state_t st;
+    st.tokens_sig  = g_init_signature[ sim ];
+    st.actions_sig = actions_signature( walk );
+    st.tokens      = tokens_json( tokens );
+    st.self_rows   = render_rows( walk, false, nullptr );
+    g_init_state[ sim ] = std::move( st );
   }
-  write_file( sim, p, tokens, false );
+  if ( sim->rl_list_active )
+  {
+    // List mode (261028-fzl C-1): entry 0 truncates the file and starts the signature set over; every entry appends its own line at combat end.
+    if ( sim->rl_list_index == 0 )
+    {
+      rl_census_lines::reset_signatures( 0 );
+      if ( !rl_census_lines::write_text( g_path, std::string(), "wb" ) )
+        fmt::print( stderr, "rl_action_census: cannot open '{}' for writing\n", g_path );
+    }
+    return;
+  }
+  write_file( p, tokens, walk, false, false );
 }
 
 void on_combat_end( sim_t* sim )
@@ -1035,14 +1332,45 @@ void on_combat_end( sim_t* sim )
   player_t* p = census_actor( sim );
   if ( !p )
     return;
+  const action_walk_t end_walk = collect_actions( p );
+  note_counts( end_walk, "end", g_printed_end );
+
+  if ( sim->rl_list_active )
+  {
+    // The table's token rows and the actor's own action rows come from the INIT walk when the fight-end structure equals it (stable per build, so
+    // one signature per build); the pets' rows come from the fight-end walk (no pet exists at init, A1). A build whose end structure differs
+    // writes the end structure under initMatchesEnd false (its own signature). procOnly / evidence are not table fields here: the reader derives
+    // them from the reach (child executes against root executes).
+    init_state_t st;
+    {
+      std::lock_guard<std::mutex> lock( g_mutex );
+      auto it = g_init_state.find( sim );
+      if ( it != g_init_state.end() )
+        st = it->second;
+    }
+    const std::vector<token_t> end_tokens = walk_all( p, false );
+    const bool                 match      = !st.tokens_sig.empty() && st.tokens_sig == signature( end_tokens ) && st.actions_sig == actions_signature( end_walk );
+    const std::string          table      = match ? table_json( p, st.tokens, join_rows( render_rows( end_walk, false, &st.self_rows ) ), true )
+                                                  : table_json( p, tokens_json( end_tokens ), actions_json( end_walk, false ), false );
+    append_list_line( sim, p, table, end_walk );
+    {
+      std::lock_guard<std::mutex> lock( g_mutex );
+      g_init_state.erase( sim );
+      g_init_signature.erase( sim );
+    }
+    return;
+  }
+
   const std::vector<token_t> tokens = walk_all( p, true );
   bool                       match  = false;
   {
     std::lock_guard<std::mutex> lock( g_mutex );
     auto it = g_init_signature.find( sim );
-    match   = it != g_init_signature.end() && it->second == signature( tokens );
+    auto st = g_init_state.find( sim );
+    match   = it != g_init_signature.end() && it->second == signature( tokens ) && st != g_init_state.end() &&
+            st->second.actions_sig == actions_signature( end_walk );
   }
-  write_file( sim, p, tokens, match );
+  write_file( p, tokens, end_walk, match, true );
 }
 
 }  // namespace rl_action_census

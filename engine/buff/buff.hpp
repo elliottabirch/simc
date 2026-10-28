@@ -381,6 +381,8 @@ public:
   timespan_t elapsed( timespan_t t ) const { return last_start == timespan_t::min() ? 0_ms : t - last_start; }
   timespan_t last_trigger_time() const { return last_trigger; }
   timespan_t last_expire_time() const { return last_expire; }
+  // 261028-fzl (S1-F1a): read-only accessor for the census (rl_buff_census reach `startCount`); start_count itself is protected. No behaviour.
+  unsigned int start_count_for_census() const { return start_count; }
   bool remains_gt( timespan_t time ) const;
   bool remains_lt( timespan_t time ) const;
   bool has_common_school( school_e ) const;
