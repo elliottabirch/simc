@@ -200,6 +200,12 @@ void on_fight_end( sim_t* sim );
 //   solver_window_log=<f>  off by default: one JSON line per policy call that is NOT an ordinary decision boundary (diagnostic and the D3 count).
 //   solver_window_probe=1  off by default, a purity probe: every poll runs (the window opens, the chain polls, the queue is re-polled) but nothing is ever
 //                          held or replaced, so the launch must be byte-identical to solver_window_ms=0 -- proof that a poll leaves the simulation untouched.
+//   solver_explore_casts_only=<0|1>  default 0 (owner decision 2026-10-27, 261027-fts). The exploration (button dial) draw is restricted to CASTS: with probability
+//                          `exploration` the pick is uniform over the legal casts alone and the wait family is not an option (default 0: the wait family is ONE
+//                          option beside each legal cast, then uniform within waits, byte for byte as before). With no legal cast the draw falls through to the
+//                          greedy pick: no exploration at that boundary (the row is not flagged exploratory; there is no close-row census slot for it, so it is not
+//                          counted). The single draw site is the one the window uses (a window draws once, at its first poll), so the rule applies to a held
+//                          window pick and to the ordinary decision alike. The aim (candidate) dial is a different dial and is untouched.
 // A window poll is a REAL decision boundary for the policy (read_state(..., true), the mask, the forward pass or the table's pick, the pick's target) and
 // NOTHING ELSE: no row, no decision number kept, no retarget, no wait set, no APL walk. Its outcome is one HOLD (the pick that would be pressed):
 //   - a cast pick becomes the hold; a later poll that picks the same button and target keeps it AND its payload (the observation, mask, picks and flags of the
@@ -219,6 +225,7 @@ int&         window_ms_storage();
 int&         repoll_ms_storage();
 std::string& window_log_storage();
 int&         window_probe_storage();
+bool&        explore_casts_only_storage();
 
 // player_t::schedule_ready() made a Player-Ready event for a non-waiting boundary at `ready_at`; action_t::schedule_execute() started a hard cast whose bar and
 // GCD end at `ends_at`. Both open the window if it is on, for the RL actor only. No-ops otherwise.

@@ -1241,6 +1241,11 @@ int& window_probe_storage()
   static int v = 0;
   return v;
 }
+bool& explore_casts_only_storage()
+{
+  static bool v = false;
+  return v;
+}
 
 void window_arm( player_t* p, timespan_t ready_at )
 {
@@ -2233,7 +2238,9 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
           else
             legal_casts[ n_casts++ ] = static_cast<int>( i );
         }
-        const std::size_t n_options = n_casts + ( n_waits > 0 ? 1u : 0u );
+        // 261027-fts owner decision 2026-10-27: solver_explore_casts_only removes the wait family from the draw (default off: the draw above is untouched).
+        // With no legal cast the draw falls through to the greedy pick (no exploration at this boundary; not counted -- the close row has no census slot for it).
+        const std::size_t n_options = explore_casts_only_storage() ? n_casts : n_casts + ( n_waits > 0 ? 1u : 0u );
         if ( n_options > 0 )
         {
           std::size_t pick = static_cast<std::size_t>(

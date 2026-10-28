@@ -4736,6 +4736,8 @@ void sim_t::create_options()
   add_option( opt_int( "solver_repoll_ms", solver_control::repoll_ms_storage() ) );
   add_option( opt_string( "solver_window_log", solver_control::window_log_storage() ) );
   add_option( opt_int( "solver_window_probe", solver_control::window_probe_storage() ) );
+  // 261027-fts (owner 2026-10-27): the exploration draw over casts only (solver_control.hpp). Default off.
+  add_option( opt_bool( "solver_explore_casts_only", solver_control::explore_casts_only_storage() ) );
   // 261025-bk4 (b2): the table player, see rl_table_policy.hpp. The values live in that module (a sim_t member would rebuild every file).
   add_option( opt_string( "solver_table_policy", rl_table_policy::path_storage() ) );
   add_option( opt_string( "solver_table_scope", rl_table_policy::scope_storage() ) );
