@@ -345,7 +345,11 @@ struct fight_list_entry_t
 const char* const FIGHT_LIST_PROCESS_OPTIONS[] = {
     "rl_translog",        "solver_policy",         "threads",          "per_source_rng",
     "output",             "queue_lag_stddev",      "gcd_lag_stddev",   "channel_lag_stddev",
-    "default_world_lag_stddev", "solver_record_apl_choice" };
+    "default_world_lag_stddev", "solver_record_apl_choice",
+    // 261027-ol (owner order): the observer/APL corpora run through the list. The stock-list NAME is process-level (one global
+    // in rl_stock_eval, one .apl format per file); the observer switch is compared too so the .apl never mixes observer and
+    // net-play records. An entry that disagrees is refused by name like the others.
+    "solver_apl_stock_list", "solver_policy_observe_stock" };
 
 // Options refused in any entry, by name prefix (PLAN-A section 2.3). Each exists for one reason: the feature
 // keeps process-global state this driver does not carry (solver_branch, rl_buff_*), reads only one process
@@ -355,9 +359,9 @@ const char* const FIGHT_LIST_REFUSED_PREFIXES[] = {
 
 // Options refused in any entry, by exact name. rl_bind_report (Phase 271.3) is a one-shot per-process report, like
 // rl_obs_names_out: one path, rewritten by each entry's init, would keep only the last fight's bind.
-// solver_apl_stock_list (Phase 271.4) is a per-process option (one list name would apply to every entry of the fight
-// list, and the .apl format is chosen once per process), so an entry may not set it.
-const char* const FIGHT_LIST_REFUSED_NAMES[] = { "solver_control", "decision_dump", "rl_bind_report", "solver_apl_stock_list",
+// solver_apl_stock_list (Phase 271.4) is a per-process option (one list name applies to every entry of the fight list, and the
+// .apl format is chosen once per process); since 261027-ol it is compared in FIGHT_LIST_PROCESS_OPTIONS instead of refused.
+const char* const FIGHT_LIST_REFUSED_NAMES[] = { "solver_control", "decision_dump", "rl_bind_report",
                                                    // 261025-bk4: the table player is per process too (one table, one trace, one runtime).
                                                    "solver_table_policy" };
 
