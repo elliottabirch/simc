@@ -1464,6 +1464,21 @@ static_assert( offsetof( footer_record, zero ) == 8 );
 // writes the 256-byte header.
 void open_and_write_header( sim_t* sim );
 
+// 261027-fts stage A (F0): record_decision() below is fill_decision() then write_row(), called back to back. fill_decision() builds the
+// row (no I/O, no sim state written beyond assert_write_site_ranges' reads) from the same arguments record_decision takes minus the three
+// that only the `.apl` record uses; write_row() appends the row to the buffer, stamps the fight's first seq, records the seq in
+// rl_translog_pending_seqs and writes the `.apl` record. write_row() and record_decision() are no-ops when rl_translog= is not set;
+// fill_decision() does not test that -- call it only when a row is going to be written.
+decision_record fill_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float obs[ RL_OBS_DIM ],
+                               const std::uint8_t mask[ RL_ACTION_DIM ], int action_index, float q_margin, float top_q,
+                               std::uint16_t chosen_target_actor_index, bool wait_floored, bool exploratory, bool held,
+                               const float* candidate_features, std::uint16_t candidate_mask, std::uint8_t candidate_count,
+                               std::uint8_t chosen_candidate_slot, bool aim_explored, std::uint8_t rules_candidate_slot,
+                               std::uint8_t observed_candidate_slot, std::uint16_t chosen_enemy_actor_index );
+
+void write_row( sim_t* sim, player_t* p, const decision_record& r, const char* apl_choice_name,
+                const rl_stock_eval::pick_t* stock_pick, const rl_apl_choice::table_info_t* table_info );
+
 // Called from inside the in-process arm of solver_control::choose(), once
 // per decision boundary that arm answers. Appends only -- no flush; the
 // fight's close row flushes the whole fight at once (D-13).

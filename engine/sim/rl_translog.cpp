@@ -674,21 +674,21 @@ void open_and_write_header( sim_t* sim )
   }
 }
 
-void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float obs[ RL_OBS_DIM ],
-                       const std::uint8_t mask[ RL_ACTION_DIM ], int action_index, float q_margin,
-                       float top_q, std::uint16_t chosen_target_actor_index, bool wait_floored,
-                       bool exploratory, bool held,
-                       const float* candidate_features, std::uint16_t candidate_mask,
-                       std::uint8_t candidate_count, std::uint8_t chosen_candidate_slot,
-                       const char* apl_choice_name, bool aim_explored,
-                       std::uint8_t rules_candidate_slot, std::uint8_t observed_candidate_slot,
-                       std::uint16_t chosen_enemy_actor_index, const rl_stock_eval::pick_t* stock_pick,
-                       const rl_apl_choice::table_info_t* table_info )
+// 261027-fts stage A (F0, a no-op refactor): record_decision() is split in two so a later stage can hold a filled row (a "pending
+// decision") between the moment the policy decides and the moment the press executes. fill_decision() builds the row -- the
+// observation, mask, action, target pick, flags, candidate block and every cumulative counter -- with no I/O and no sim state written;
+// write_row() appends it and writes the `.apl` record. record_decision() below is the two called back to back, which is exactly what the
+// pre-split function did (same reads, same order, same bytes).
+decision_record fill_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float obs[ RL_OBS_DIM ],
+                               const std::uint8_t mask[ RL_ACTION_DIM ], int action_index, float q_margin,
+                               float top_q, std::uint16_t chosen_target_actor_index, bool wait_floored,
+                               bool exploratory, bool held,
+                               const float* candidate_features, std::uint16_t candidate_mask,
+                               std::uint8_t candidate_count, std::uint8_t chosen_candidate_slot,
+                               bool aim_explored,
+                               std::uint8_t rules_candidate_slot, std::uint8_t observed_candidate_slot,
+                               std::uint16_t chosen_enemy_actor_index )
 {
-  sim_t* root = root_of( sim );
-  if ( root->rl_translog_file_str.empty() )
-    return;
-
   assert_write_site_ranges( sim );
 
   decision_record r{};
@@ -790,6 +790,20 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float ob
   std::memcpy( r.credit_real_chosen, p->rl_credit_chosen.real, sizeof( r.credit_real_chosen ) );
   std::memcpy( r.credit_exp_chosen, p->rl_credit_chosen.exp, sizeof( r.credit_exp_chosen ) );
 
+  return r;
+}
+
+void write_row( sim_t* sim, player_t* p, const decision_record& r, const char* apl_choice_name,
+                const rl_stock_eval::pick_t* stock_pick, const rl_apl_choice::table_info_t* table_info )
+{
+  sim_t* root = root_of( sim );
+  if ( root->rl_translog_file_str.empty() )
+    return;
+
+  // The decision number the row carries (r.seq is the same value narrowed to 32 bits, which record_decision's callers never exceed:
+  // see the NT-02 note in fill_decision).
+  const std::uint64_t seq = r.seq;
+
   // Stage F1 (260918-atr): the first decision row THIS FIGHT writes stamps
   // p->rl_fight_first_seq -- see player.hpp's own doc comment for why this is the one site that
   // can name it. Cleared (rl_fight_first_seq_set = false) alongside rl_credit at the top of
@@ -867,6 +881,28 @@ void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float ob
     }
     ++root->rl_translog_apl_decisions;
   }
+}
+
+void record_decision( sim_t* sim, player_t* p, std::uint64_t seq, const float obs[ RL_OBS_DIM ],
+                       const std::uint8_t mask[ RL_ACTION_DIM ], int action_index, float q_margin,
+                       float top_q, std::uint16_t chosen_target_actor_index, bool wait_floored,
+                       bool exploratory, bool held,
+                       const float* candidate_features, std::uint16_t candidate_mask,
+                       std::uint8_t candidate_count, std::uint8_t chosen_candidate_slot,
+                       const char* apl_choice_name, bool aim_explored,
+                       std::uint8_t rules_candidate_slot, std::uint8_t observed_candidate_slot,
+                       std::uint16_t chosen_enemy_actor_index, const rl_stock_eval::pick_t* stock_pick,
+                       const rl_apl_choice::table_info_t* table_info )
+{
+  sim_t* root = root_of( sim );
+  if ( root->rl_translog_file_str.empty() )
+    return;
+
+  const decision_record r = fill_decision( sim, p, seq, obs, mask, action_index, q_margin, top_q, chosen_target_actor_index,
+                                           wait_floored, exploratory, held, candidate_features, candidate_mask, candidate_count,
+                                           chosen_candidate_slot, aim_explored, rules_candidate_slot, observed_candidate_slot,
+                                           chosen_enemy_actor_index );
+  write_row( sim, p, r, apl_choice_name, stock_pick, table_info );
 }
 
 void record_close( sim_t* sim )
