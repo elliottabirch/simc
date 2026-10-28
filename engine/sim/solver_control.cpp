@@ -9,6 +9,7 @@
 #include "action/attack.hpp"
 #include "buff/buff.hpp"
 #include "decision_dump.hpp"
+#include "player/action_priority_list.hpp"
 #include "player/player.hpp"
 #include "sim/event.hpp"
 #include "sim/rl_button_bind.hpp"
@@ -1382,6 +1383,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       const bool      idle_row = ( apl_choice == nullptr );
       int             observe_idx = -1;
       std::uint16_t   observe_target = rl_translog::CHOSEN_TARGET_SENTINEL_NO_PICK;
+      bool            observe_explored = false;
       if ( idle_row )
       {
         // The first poll of an idle stretch: the wait_next_event button, resolved by its registry label (never a literal index).
@@ -1406,6 +1408,9 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
                                        observe_idx ) );
         sim->solver_observe_idle_open = false;
         sim->solver_control_last_reply_type = "cast";
+        // 261025-xpl: an exploration press is a leaf that sits DIRECTLY in the walked list (the launcher's explore_default holds the
+        // exploration lines; every stock leaf sits in a list the walked one calls). The main-translog FLAG_EXPLORATORY bit says so.
+        observe_explored = apl_choice->action_list != nullptr && apl_choice->action_list->name_str == rl_stock_eval::list_name_storage();
         // A targeted button records its target as the net path does (the actor index of the enemy SimC's pick aims at); an
         // untargeted one records no pick.
         if ( apl_choice->target != nullptr && rl_target_select::is_targeted_action( apl_choice ) )
@@ -1426,7 +1431,7 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       try
       {
         // 261027-fts: a press is staged (committed when it fires); the idle row is committed at once.
-        submit_decision( !idle_row, apl_choice, nullptr, sim, p, seq, obs, mask, observe_idx, nan, nan, observe_target, false, false, false, nullptr,
+        submit_decision( !idle_row, apl_choice, nullptr, sim, p, seq, obs, mask, observe_idx, nan, nan, observe_target, false, observe_explored, false, nullptr,
                          0, 0, rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
                          apl_choice != nullptr ? apl_choice->name() : nullptr, false,
                          rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK,
