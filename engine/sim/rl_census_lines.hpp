@@ -122,11 +122,11 @@ inline std::string sha256_hex( const std::string& bytes )
   return hex;
 }
 
-// The per-process set of table signatures already written, one set per census kind (0 = action, 1 = buff). Not keyed by sim address.
+// The per-process set of table signatures already written, one set per census kind (0 = action, 1 = buff, 2 = the buff lines' enemy-row bytes). Not keyed by sim address.
 struct signature_state_t
 {
   std::mutex            mutex;
-  std::set<std::string> written[ 2 ];
+  std::set<std::string> written[ 3 ];
 };
 
 inline signature_state_t& signature_state()

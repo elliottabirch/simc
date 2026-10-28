@@ -411,6 +411,14 @@ void write_since_applied_json( std::ostream& out, player_t* p );
 double apply_leaf_scale( double raw, rl_kind kind, bool has_div, double div, bool has_clip_div,
                          double clip_div );
 
+// 261028-fzl (C-4): the clip sidecar's counters. clips_begin() (the translog writer opening a file) zeroes them and switches the raw capture in
+// build_obs() on; clips_note_row(obs) (fill_decision(), once per filled decision row) adds the raw values the build_obs() call that filled `obs`
+// saw (a no-op returning false when that call did not fill this buffer); clips_write(path) (the writer's footer) writes `<translog base>.clips.json`
+// and switches the capture off. Pure bookkeeping: nothing here changes an observation, a decision or a draw.
+void clips_begin();
+bool clips_note_row( const float* obs );
+bool clips_write( const std::string& path );
+
 // capability_effective_bit: capability `capability_index`'s EFFECTIVE bit (own detector AND every
 // required capability) for actor `p`, memoised per actor -- the same value the observation's
 // capability.<id> column and its governed-slot rebind read. Constant for the actor's whole

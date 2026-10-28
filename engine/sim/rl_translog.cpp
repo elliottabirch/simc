@@ -560,6 +560,10 @@ void open_and_write_header( sim_t* sim )
   root->rl_translog_stream->flush();
   assert_stream_ok( root, "open_and_write_header" );
 
+  // 261028-fzl (C-4): the clip sidecar's counters start over with each translog file (a fight list opens its file once, at entry 0, and the counters
+  // accumulate over every entry); the sidecar itself is written at the footer.
+  rl_policy::clips_begin();
+
   // Version 9 (260917-pcn): a JSON sidecar naming the proc-counter registry, written once per
   // translog file right next to it (`<path>.procs.json`), plain text and deliberately NOT part
   // of the binary format itself -- so a Python reader never hand-types the 20 registry names in
@@ -690,6 +694,9 @@ decision_record fill_decision( sim_t* sim, player_t* p, std::uint64_t seq, const
                                std::uint16_t chosen_enemy_actor_index )
 {
   assert_write_site_ranges( sim );
+
+  // 261028-fzl (C-4): count the raw values behind this row's observation (a no-op unless the writer opened a file and build_obs filled this buffer).
+  rl_policy::clips_note_row( obs );
 
   decision_record r{};
   r.damage = p->solver_damage_so_far;
@@ -1383,6 +1390,10 @@ void write_footer( sim_t* sim )
   root->rl_translog_stream->close();
   ZSTD_freeCStream( reinterpret_cast<ZSTD_CStream*>( root->rl_translog_zstd_cstream ) );
   root->rl_translog_zstd_cstream = nullptr;
+
+  // 261028-fzl (C-4): `<translog base>.clips.json`, once, at the writer's close (a list: accumulated over every entry).
+  if ( !rl_policy::clips_write( root->rl_translog_file_str + ".clips.json" ) )
+    throw sc_runtime_error( fmt::format( "rl_translog=: unable to write '{}.clips.json'.", root->rl_translog_file_str ) );
 
   // Stage F1 (260918-atr): the .attr sidecar's own FOOTER record, then close it -- mirrors the
   // main stream's own footer-then-close sequence immediately above. n_fights is the SAME

@@ -53,6 +53,8 @@ struct row_t
   bool        channeled           = false;  // a dot: its applying action is a channel (the dot is the channel's tick carrier, not an aura on the enemy)
   bool        triggered           = false;  // a buff: executed at least once this fight (last_trigger_time is set only by buff_t::execute)
   long long   start_count         = 0;      // 261028-fzl: buff_t::start_count summed over the objects of this key (reach only; 0 for a dot)
+  std::string refresh_behavior    = "none"; // 261028-fzl C-3: buff_refresh_behavior enum name, lower case; a dot row says "none"
+  int         object_count        = 0;      // 261028-fzl C-3 / D7: objects with this (holder, kind, name) on ONE owner (max over the owners); > 1 is a duplicate name
 };
 
 using key_t = std::tuple<std::string, std::string, std::string>;
@@ -122,6 +124,22 @@ void add_row( std::map<key_t, row_t>& rows, const row_t& r )
   old.start_count += r.start_count;
 }
 
+const char* refresh_behavior_name( buff_refresh_behavior b )
+{
+  switch ( b )
+  {
+    case buff_refresh_behavior::NONE: return "none";
+    case buff_refresh_behavior::DISABLED: return "disabled";
+    case buff_refresh_behavior::DURATION: return "duration";
+    case buff_refresh_behavior::EXTEND: return "extend";
+    case buff_refresh_behavior::PANDEMIC: return "pandemic";
+    case buff_refresh_behavior::TICK: return "tick";
+    case buff_refresh_behavior::MAX: return "max";
+    case buff_refresh_behavior::CUSTOM: return "custom";
+  }
+  return "none";
+}
+
 row_t buff_row( const buff_t* b, const char* holder, bool fight_played )
 {
   row_t r;
@@ -139,21 +157,22 @@ row_t buff_row( const buff_t* b, const char* holder, bool fight_played )
   r.rppm_frequency    = b->rppm != nullptr ? b->rppm->get_frequency() : 0.0;
   r.default_chance    = b->default_chance;
   r.constant          = b->constant;
+  r.refresh_behavior  = refresh_behavior_name( b->refresh_behavior );
   // Quiet buffs are left out of the JSON report entirely (report_helper.cpp buff_is_dynamic), so the report cannot witness them. The
   // engine's own last-trigger time can: buff_t::reset() sets it to the minimum and only buff_t::execute() writes the current time.
   // Before the fight is played (the init-finished write) the field still holds its constructor value, so it says nothing yet.
   // An enemy's buffs are made lazily, after the iteration reset, so they still hold the constructor value zero until their first
   // execute: for them only a time above zero counts. The actor's own buffs are reset to the minimum, so time zero is a real trigger.
-  const bool lazily_made = r.holder == "enemy";
+  const bool lazily_made = r.holder != "self";
   r.triggered = fight_played && ( lazily_made ? b->last_trigger_time() > timespan_t::zero() : b->last_trigger_time() >= timespan_t::zero() );
   r.start_count = fight_played ? static_cast<long long>( b->start_count_for_census() ) : 0;
   return r;
 }
 
-row_t dot_row( const dot_t* d )
+row_t dot_row( const dot_t* d, const char* holder )
 {
   row_t r;
-  r.holder    = "enemy";
+  r.holder    = holder;
   r.kind      = "dot";
   r.name      = d->name_str;
   r.max_stack = std::max( d->max_stack, 1 );
@@ -173,11 +192,12 @@ std::string row_json( const row_t& r, bool with_reach_fields = true )
   std::string o = fmt::format( "{{\"holder\":\"{}\",\"kind\":\"{}\",\"name\":{},\"spellId\":{},\"maxStack\":{},"
                                "\"stackBehavior\":\"{}\",\"baseDurationSeconds\":{},\"cooldownSeconds\":{},"
                                "\"internalCooldownSeconds\":{},\"hasRppm\":{},\"rppmFrequency\":{},\"defaultChance\":{},"
-                               "\"constant\":{}",
+                               "\"constant\":{},\"startCount\":{},\"refreshBehavior\":\"{}\",\"objectCount\":{}",
                                r.holder, r.kind, esc( r.name ), r.spell_id, r.max_stack,
                                r.asynchronous ? "asynchronous" : "default", num( r.base_duration ), num( r.cooldown ),
                                num( r.internal_cooldown ), r.has_rppm ? "true" : "false", num( r.rppm_frequency ),
-                               num( r.default_chance ), r.constant ? "true" : "false" );
+                               num( r.default_chance ), r.constant ? "true" : "false", with_reach_fields ? r.start_count : 0LL, r.refresh_behavior,
+                               r.object_count );
   // 261028-fzl: in a fight list the reach flags (applied / triggered) are not table fields: they are per-entry reach (C-1), so the table
   // object stays equal across entries of one build and its signature dedupes. The ordinary single-process file keeps them in the rows.
   if ( r.kind == "dot" )
@@ -257,11 +277,30 @@ std::string proc_objects_json( const player_t* actor )
     if ( !c )
       continue;
     o += ( first ? "" : "," ) +
-         fmt::format( "{{\"name\":{},\"durationSeconds\":{},\"heldByAction\":{},\"heldByBuff\":{}}}", esc( c->name_str ),
-                      num( c->duration.total_seconds() ), held_by_action.count( c ) ? "true" : "false", held_by_buff.count( c ) ? "true" : "false" );
+         fmt::format( "{{\"name\":{},\"durationSeconds\":{},\"charges\":{},\"heldByAction\":{},\"heldByBuff\":{}}}", esc( c->name_str ),
+                      num( c->duration.total_seconds() ), c->charges, held_by_action.count( c ) ? "true" : "false",
+                      held_by_buff.count( c ) ? "true" : "false" );
     first = false;
   }
   return o + "]";
+}
+
+// 261028-fzl (C-3): after one owner's objects are added, fold its per-key object counts into the rows: object_count is the MOST objects one owner holds
+// of a (holder, kind, name), so two enemies each holding the one Flame Shock dot is 1, and a duplicate on the actor (D7) is 2.
+void fold_object_counts( std::map<key_t, row_t>& rows, const std::map<key_t, int>& owner_counts )
+{
+  for ( const auto& kv : owner_counts )
+  {
+    auto it = rows.find( kv.first );
+    if ( it != rows.end() )
+      it->second.object_count = std::max( it->second.object_count, kv.second );
+  }
+}
+
+void add_counted( std::map<key_t, row_t>& rows, std::map<key_t, int>& owner_counts, const row_t& r )
+{
+  add_row( rows, r );
+  ++owner_counts[ key_t( r.holder, r.kind, r.name ) ];
 }
 
 void write_table( sim_t* sim, bool fight_played )
@@ -273,26 +312,39 @@ void write_table( sim_t* sim, bool fight_played )
   std::map<key_t, row_t> rows;
 
   // The actor's own buffs. Buffs for talents not taken still exist (make_buff is unconditional), so this is the full engine set.
-  for ( const buff_t* b : actor->buff_list )
-    if ( b )
-      add_row( rows, buff_row( b, "self", fight_played ) );
+  {
+    std::map<key_t, int> owner_counts;
+    for ( const buff_t* b : actor->buff_list )
+      if ( b )
+        add_counted( rows, owner_counts, buff_row( b, "self", fight_played ) );
+    fold_object_counts( rows, owner_counts );
+  }
 
-  // Buffs and dots an enemy holds whose source is the actor. The target data objects are made lazily, so none exist at
-  // init-finished; at combat end every enemy has demised and left the non-sleeping list, hence the actor list.
+  // Buffs and dots an enemy holds. The target data objects are made lazily, so none exist at init-finished; at combat end every enemy has
+  // demised and left the non-sleeping list, hence the actor list. 261028-fzl (C-3): an object whose source is the actor is holder "enemy"
+  // (as before); every other enemy buff or dot (the enemy's own auras, an aura a pet put on it) is holder "enemy_foreign".
   for ( const player_t* e : sim->actor_list )
   {
     if ( !e || !e->is_enemy() )
       continue;
+    std::map<key_t, int> owner_counts;
     for ( const buff_t* b : e->buff_list )
-      if ( b && b->source == actor )
-        add_row( rows, buff_row( b, "enemy", fight_played ) );
+      if ( b )
+        add_counted( rows, owner_counts, buff_row( b, b->source == actor ? "enemy" : "enemy_foreign", fight_played ) );
     for ( const dot_t* d : e->dot_list )
-      if ( d && d->source == actor )
-        add_row( rows, dot_row( d ) );
+      if ( d )
+        add_counted( rows, owner_counts, dot_row( d, d->source == actor ? "enemy" : "enemy_foreign" ) );
+    fold_object_counts( rows, owner_counts );
   }
 
   // 261028-fzl (C-1): in a fight list the table object omits the reach flags and each entry appends one line at combat end; the table is written
   // once per distinct signature (sha256 of its bytes) in this process. The init-finished write of a list is only the truncation at entry 0.
+  //
+  // The signature and the table cover the INIT rows only (owner note after S1, receipt S1-F1a finding d): the actor's own buffs and the actor-side
+  // arrays (callbacks, procObjects, cooldowns), which exist at init-finished. Enemy rows (holder enemy / enemy_foreign) are made lazily during
+  // play, so a table that held them would split one build into several signatures. They travel beside it in the line's additive `enemyRows` array:
+  // each enemy row's bytes are written the first time they are seen in this process and not again (a changed ceiling is new bytes, so it is written
+  // too; the reader merges rows of one key with the same rule as across fights). The per-entry flags stay in `reach`.
   if ( sim->rl_list_active )
   {
     if ( !fight_played )
@@ -300,20 +352,32 @@ void write_table( sim_t* sim, bool fight_played )
       if ( sim->rl_list_index == 0 )
       {
         rl_census_lines::reset_signatures( 1 );
+        rl_census_lines::reset_signatures( 2 );
         if ( !rl_census_lines::write_text( g_path, std::string(), "wb" ) )
           fmt::print( stderr, "rl_buff_census: cannot open '{}' for writing\n", g_path );
       }
       return;
     }
     std::string table = fmt::format( "{{\"schemaVersion\":2,\"actor\":{},\"buffs\":[", esc( actor->name_str ) );
+    std::string enemy_rows = "[";
     std::string reach = "{";
     bool        first_row = true;
+    bool        first_enemy = true;
     bool        first_reach = true;
     for ( const auto& kv : rows )
     {
       const row_t& r = kv.second;
-      table += ( first_row ? "" : "," ) + row_json( r, false );
-      first_row = false;
+      const std::string bytes = row_json( r, false );
+      if ( r.holder == "self" )
+      {
+        table += ( first_row ? "" : "," ) + bytes;
+        first_row = false;
+      }
+      else if ( rl_census_lines::first_time_signature( 2, bytes ) )
+      {
+        enemy_rows += ( first_enemy ? "" : "," ) + bytes;
+        first_enemy = false;
+      }
       const bool any = r.start_count > 0 || r.triggered || r.applied;
       if ( any )
       {
@@ -326,12 +390,13 @@ void write_table( sim_t* sim, bool fight_played )
     table += "]";
     table += proc_objects_json( actor );
     table += "}";
+    enemy_rows += "]";
     reach += "}";
     const std::string signature = rl_census_lines::sha256_hex( table );
     const bool        first     = rl_census_lines::first_time_signature( 1, signature );
     const std::string line =
-        fmt::format( "{{\"schemaVersion\":2,\"kind\":\"buff\",\"entry\":{},\"crc32\":{},\"signature\":\"{}\",\"table\":{},\"reach\":{}}}\n",
-                     sim->rl_list_index, sim->rl_list_crc32, signature, first ? table : std::string( "null" ), reach );
+        fmt::format( "{{\"schemaVersion\":2,\"kind\":\"buff\",\"entry\":{},\"crc32\":{},\"signature\":\"{}\",\"table\":{},\"enemyRows\":{},\"reach\":{}}}\n",
+                     sim->rl_list_index, sim->rl_list_crc32, signature, first ? table : std::string( "null" ), enemy_rows, reach );
     if ( !rl_census_lines::write_text( g_path, line, "ab" ) )
       fmt::print( stderr, "rl_buff_census: cannot open '{}' for appending\n", g_path );
     return;

@@ -49,8 +49,11 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -1652,6 +1655,13 @@ double apply_leaf_scale( double raw, rl_kind kind, bool has_div, double div, boo
     case rl_kind::k_int:
     case rl_kind::k_float:
     {
+      // 261028-fzl (C-5): an integer count with a declared ceiling saturates exactly like a clipped time: clamp(raw, 0, clip)/clip. Only k_int takes this
+      // branch (k_float keeps raw/div); a k_int without clip_div is raw/div as before.
+      if ( kind == rl_kind::k_int && has_clip_div )
+      {
+        const double clipped = std::max( std::min( raw, clip_div ), 0.0 );
+        return clipped / clip_div;
+      }
       const double d = has_div ? div : 1.0;
       return raw / d;
     }
@@ -1697,6 +1707,59 @@ double encode_bucket_ordinal( double raw, const double* buckets, std::size_t n )
 }
 
 enum class lookup_status { absent, present, permanent };
+
+// ---------------------------------------------------------------------------
+// 261028-fzl (C-4): the clip sidecar's bookkeeping. build_obs() writes the raw value, the effective ceiling and the present flag of every slot into a
+// thread-local capture when the translog writer has switched capture on (g_clips_capture_on, a plain flag read once per slot); fill_decision() calls
+// clips_note_row(obs) with the very buffer build_obs() filled, and the counters below take the capture's values. Counted on the RAW value before the scale:
+//   clipped  = rows with raw > the slot's clip_div (slots that clip), overDiv = rows with raw > div (slots that divide only),
+//   rawMin / rawMax over the rows where the slot was PRESENT (an absent slot encodes its `missing` constant, which is not a reading; a permanent
+//   buff is not a number). A row counted here is a row FILLED for the translog (a staged row the queue protocol later discards, or a poll the
+//   fire-time window replaces, was filled too): the sidecar says how often the policy was SHOWN a saturated value, which is what a ceiling must cover.
+// ---------------------------------------------------------------------------
+bool g_clips_capture_on = false;
+
+struct clips_capture_t
+{
+  const float*  obs = nullptr;
+  double        raw[ RL_OBS_DIM ];
+  double        eff[ RL_OBS_DIM ];
+  double        stat_ceiling[ RL_OBS_DIM ];
+  std::uint8_t  present[ RL_OBS_DIM ];
+  std::uint8_t  has_clip[ RL_OBS_DIM ];
+  std::uint8_t  has_div[ RL_OBS_DIM ];
+  std::uint8_t  kind[ RL_OBS_DIM ];
+};
+thread_local clips_capture_t g_clips_capture;
+
+void clips_capture_slot( std::size_t slot, const rl_leaf_desc& f, bool present, double raw, double eff_ceiling )
+{
+  clips_capture_t& c = g_clips_capture;
+  c.raw[ slot ]          = raw;
+  c.eff[ slot ]          = eff_ceiling;
+  c.stat_ceiling[ slot ] = f.has_clip_div ? f.clip_div : ( f.has_div ? f.div : 0.0 );
+  c.present[ slot ]      = present ? 1 : 0;
+  c.has_clip[ slot ]     = f.has_clip_div ? 1 : 0;
+  c.has_div[ slot ]      = f.has_div ? 1 : 0;
+  c.kind[ slot ]         = static_cast<std::uint8_t>( f.kind );
+}
+
+struct clip_stat_t
+{
+  std::uint64_t clipped  = 0;
+  std::uint64_t over_div = 0;
+  double        raw_min  = 0.0;
+  double        raw_max  = 0.0;
+  bool          any      = false;
+  bool          meta     = false;
+  rl_kind       kind     = rl_kind::k_float;
+  bool          has_clip = false;
+  bool          has_div  = false;
+  double        ceiling  = 0.0;
+};
+std::mutex                              g_clips_mutex;
+std::uint64_t                           g_clips_rows = 0;
+std::array<clip_stat_t, RL_OBS_DIM>     g_clips_stats;
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -4769,6 +4832,8 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
     // apply_scale() is ever reached with a permanent status.
 
     double encoded;
+    // 261028-fzl (C-4): the ceiling this slot is encoded against right now (the clock slot's is the fight length, set below).
+    double eff_ceiling = f.has_clip_div ? f.clip_div : ( f.has_div ? f.div : 0.0 );
     if ( f.kind == rl_kind::k_bucket )
     {
       // obs.py:253-278: an "absent" bucket leaf encodes its `missing`
@@ -4829,16 +4894,22 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
                                     : f.clip_div;
       const double clipped = std::max( std::min( raw, fight_len ), 0.0 );
       encoded = clipped / fight_len;
+      eff_ceiling = fight_len;
     }
     else
     {
       encoded = apply_scale( raw, f.kind, f );
     }
 
+    if ( g_clips_capture_on )
+      clips_capture_slot( slot, f, status == lookup_status::present, raw, eff_ceiling );
+
     // Arithmetic in double throughout; assign to the float output only at
     // the very end (AP-7).
     out_obs[ slot ] = static_cast<float>( encoded );
   }
+  if ( g_clips_capture_on )
+    g_clips_capture.obs = out_obs;  // 261028-fzl (C-4): the capture now belongs to this buffer
 
   // 259-07 (R6): the head ran BEFORE this observation existed, on six indicators evaluated
   // straight from the slot table; prove they equal what the observation just wrote. Real-
@@ -5406,4 +5477,95 @@ std::size_t process_cache_entries()
          ( ( g_aim_context_pending.valid || g_aim_context_pending.p != nullptr ) ? 1u : 0u ) +
          g_capability_bits.size() + g_slot_table_cache.size() + g_enemy_handle_cache.size() + g_census_hit_actors.size();
 }
+// ---- 261028-fzl (C-4): the clip sidecar ----
+
+void clips_begin()
+{
+  std::lock_guard<std::mutex> lock( g_clips_mutex );
+  g_clips_rows = 0;
+  g_clips_stats.fill( clip_stat_t{} );
+  g_clips_capture_on = true;
+}
+
+bool clips_note_row( const float* obs )
+{
+  if ( !g_clips_capture_on )
+    return false;
+  const clips_capture_t& c = g_clips_capture;
+  if ( c.obs == nullptr || c.obs != obs )
+    return false;
+  std::lock_guard<std::mutex> lock( g_clips_mutex );
+  ++g_clips_rows;
+  for ( std::size_t i = 0; i < RL_OBS_DIM; ++i )
+  {
+    clip_stat_t& st = g_clips_stats[ i ];
+    if ( !st.meta )
+    {
+      st.meta     = true;
+      st.kind     = static_cast<rl_kind>( c.kind[ i ] );
+      st.has_clip = c.has_clip[ i ] != 0;
+      st.has_div  = c.has_div[ i ] != 0;
+      st.ceiling  = c.stat_ceiling[ i ];
+    }
+    if ( c.present[ i ] == 0 )
+      continue;
+    const double raw = c.raw[ i ];
+    if ( !st.any )
+    {
+      st.raw_min = raw;
+      st.raw_max = raw;
+      st.any     = true;
+    }
+    else
+    {
+      st.raw_min = std::min( st.raw_min, raw );
+      st.raw_max = std::max( st.raw_max, raw );
+    }
+    if ( c.has_clip[ i ] != 0 )
+    {
+      if ( raw > c.eff[ i ] )
+        ++st.clipped;
+    }
+    else if ( c.has_div[ i ] != 0 )
+    {
+      if ( raw > c.eff[ i ] )
+        ++st.over_div;
+    }
+  }
+  return true;
+}
+
+bool clips_write(const std::string& path)
+{
+  std::string out;
+  {
+    std::lock_guard<std::mutex> lock( g_clips_mutex );
+    g_clips_capture_on = false;
+    auto num = []( double v ) { return std::isfinite( v ) ? fmt::format( "{}", v ) : std::string( "0" ); };
+    out = fmt::format( "{{\"schemaVersion\":1,\"width\":{},\"rows\":{},\"slots\":[", RL_OBS_DIM, g_clips_rows );
+    for ( std::size_t i = 0; i < RL_OBS_DIM; ++i )
+    {
+      const clip_stat_t& st = g_clips_stats[ i ];
+      const char*        kind_name = "float";
+      switch ( st.kind )
+      {
+        case rl_kind::k_int: kind_name = "int"; break;
+        case rl_kind::k_float: kind_name = "float"; break;
+        case rl_kind::k_seconds: kind_name = "seconds"; break;
+        case rl_kind::k_bucket: kind_name = "bucket"; break;
+      }
+      const std::string ceiling = ( st.has_clip || st.has_div ) ? num( st.ceiling ) : std::string( "null" );
+      out += fmt::format( "{}{{\"slot\":{},\"name\":\"{}\",\"kind\":\"{}\",\"ceiling\":{},\"clipped\":{},\"overDiv\":{},\"rawMin\":{},\"rawMax\":{}}}",
+                          i == 0 ? "" : ",", i, RL_OBS_NAMES[ i ], kind_name, ceiling, st.clipped, st.over_div, num( st.raw_min ), num( st.raw_max ) );
+    }
+    out += "]}\n";
+  }
+  std::FILE* f = std::fopen( path.c_str(), "wb" );
+  if ( !f )
+    return false;
+  const bool ok = std::fwrite( out.data(), 1, out.size(), f ) == out.size();
+  return std::fclose( f ) == 0 && ok;
+}
+
+
 } // namespace rl_policy

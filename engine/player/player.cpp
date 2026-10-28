@@ -9298,6 +9298,16 @@ struct stop_moving_t : public action_t
 
 // ===== Racial Abilities ===================================================
 
+// 261028-fzl (D7): a racial ACTION makes its own buff in its constructor, and the action is constructed once per action-list line that names it (the stock
+// enhancement default list names berserking in more than one list, and the RL fight's own action table walks a second set). Each construction made a
+// NEW buff object with the same name; buff_t::find (and so the RL observation binding, the first-name bind) read the first object while the pressed action
+// triggered its own, so the slot player_buffs.berserking.remains read 0 on 121 of 121 recorded rows (research A5). The racial actions below reuse the
+// buff already on the player when there is one, so one name is one buff object and the press is visible to every reader.
+static buff_t* existing_racial_buff( player_t* p, std::string_view name )
+{
+  return buff_t::find( p->buff_list, name );
+}
+
 struct racial_spell_t : public spell_t
 {
   racial_spell_t( player_t* p, util::string_view token, const spell_data_t* spell ) :
@@ -9422,9 +9432,11 @@ struct berserking_t : public racial_spell_t
     target = p;
 
     // Make a fallback since it's possible some APLs may want to use haste buffs like this as a conditional
-    buff = make_buff_fallback( data().ok(), p, "berserking", &data() )
-      ->set_cooldown( 0_ms )
-      ->set_pct_buff_type_from_data( true );
+    buff = existing_racial_buff( p, "berserking" );
+    if ( !buff )
+      buff = make_buff_fallback( data().ok(), p, "berserking", &data() )
+        ->set_cooldown( 0_ms )
+        ->set_pct_buff_type_from_data( true );
   }
 
   void execute() override
@@ -9450,10 +9462,12 @@ struct blood_fury_t : public racial_spell_t
 
     if ( data().ok() )
     {
-      buff = make_buff<stat_buff_t>( p, "blood_fury", &data() )
-        ->add_invalidate( CACHE_SPELL_POWER )
-        ->add_invalidate( CACHE_ATTACK_POWER )
-        ->set_cooldown( 0_ms );
+      buff = existing_racial_buff( p, "blood_fury" );
+      if ( !buff )
+        buff = make_buff<stat_buff_t>( p, "blood_fury", &data() )
+          ->add_invalidate( CACHE_SPELL_POWER )
+          ->add_invalidate( CACHE_ATTACK_POWER )
+          ->set_cooldown( 0_ms );
     }
   }
 
@@ -9478,7 +9492,11 @@ struct darkflight_t : public racial_spell_t
     target = p;
 
     if ( data().ok() )
-      buff = make_buff( p, "darkflight", &data() )->set_movement_speed_buff_from_data();
+    {
+      buff = existing_racial_buff( p, "darkflight" );
+      if ( !buff )
+        buff = make_buff( p, "darkflight", &data() )->set_movement_speed_buff_from_data();
+    }
   }
 
   void execute() override
@@ -9684,7 +9702,8 @@ struct ancestral_call_t : public racial_spell_t
         auto stat_ = util::translate_all_rating_mod( data_->effectN( 1 ).misc_value1() ).front();
         auto name_ = util::tokenize_fn( data_->name_cstr() );
 
-        stat_values.emplace_back( make_buff<stat_buff_t>( p, name_, data_ ), stat_, 0.0 );
+        buff_t* existing_ = existing_racial_buff( p, name_ );
+        stat_values.emplace_back( existing_ ? existing_ : make_buff<stat_buff_t>( p, name_, data_ ), stat_, 0.0 );
       }
     }
   }
@@ -9721,8 +9740,10 @@ struct fireblood_t : public racial_spell_t
     {
       auto stat_amount = p->find_spell( 265226 )->effectN( 1 ).average( p ) * 3.0;
 
-      buff = make_buff<stat_buff_t>( p, "fireblood", p->find_spell( 273104 ) )
-        ->add_stat( p->convert_hybrid_stat( STAT_STR_AGI_INT ), stat_amount );
+      buff = existing_racial_buff( p, "fireblood" );
+      if ( !buff )
+        buff = make_buff<stat_buff_t>( p, "fireblood", p->find_spell( 273104 ) )
+          ->add_stat( p->convert_hybrid_stat( STAT_STR_AGI_INT ), stat_amount );
     }
   }
 
