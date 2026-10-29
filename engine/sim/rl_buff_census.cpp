@@ -360,6 +360,34 @@ std::string layout_json( const sim_t* sim, const player_t* actor )
                       num( sim->expected_iteration_time.total_seconds() ), num( move_max ), num( spawn_max ), num( reach_max ), num( height_max ) );
 }
 
+// 261028-fzl (S5c-F3a, owner ruling 11): the actor's STAT BUDGET, written beside `layout` on the entry's line: everything a reader needs to turn "1.2 x
+// the summed secondary budget" into a rating divisor and into the mastery_value / damage_versatility divisors without a typed coefficient. The
+// engine's own conversion, which the fields mirror line for line:
+//   composite_rating( r )            player.cpp:5868  round( current.stats.<r>_rating * current.rating_multiplier[ r ] ); `current = initial` at reset (player.cpp:6837)
+//   crit      composite_melee_crit_rating()          / current.rating.attack_crit          then apply_combat_rating_dr   (player.cpp:5188, :5019)
+//   haste     composite_melee_haste_rating()         / current.rating.attack_haste         (player.cpp:5041)
+//   mastery   composite_mastery_rating()             / current.rating.mastery              = mastery points, + current.mastery   (player.cpp:5487)
+//   vers.     composite_damage_versatility_rating()  / current.rating.damage_versatility   + current.versatility               (player.cpp:5509)
+//   mastery_value = cache.mastery() * mastery_coefficient()                                                                   (player.cpp:6006, :15409)
+// initialRatings are initial.stats.*_rating (the gear at init, before any buff); ratingMultipliers are initial.rating_multiplier for the four
+// ratings (composite_rating applies them); ratingPerPercent are the player's current.rating divisors exactly as the engine divides by them (crit,
+// haste and versatility: rating per 1.0 of the fraction; mastery: rating per mastery point, rating_t::init divides the table value by 100);
+// baseMasteryValue is current.mastery (mastery points at zero rating, 8 before talents) and baseVersatility current.versatility (the fraction at zero rating).
+std::string stat_budget_json( const player_t* actor )
+{
+  return fmt::format(
+      "{{\"initialRatings\":{{\"crit\":{},\"haste\":{},\"mastery\":{},\"versatility\":{}}},"
+      "\"ratingMultipliers\":{{\"crit\":{},\"haste\":{},\"mastery\":{},\"versatility\":{}}},"
+      "\"ratingPerPercent\":{{\"crit\":{},\"haste\":{},\"mastery\":{},\"versatility\":{}}},"
+      "\"masteryCoefficient\":{},\"baseMasteryValue\":{},\"baseVersatility\":{}}}",
+      num( actor->initial.stats.crit_rating ), num( actor->initial.stats.haste_rating ), num( actor->initial.stats.mastery_rating ),
+      num( actor->initial.stats.versatility_rating ), num( actor->initial.rating_multiplier[ RATING_MELEE_CRIT ] ),
+      num( actor->initial.rating_multiplier[ RATING_MELEE_HASTE ] ), num( actor->initial.rating_multiplier[ RATING_MASTERY ] ),
+      num( actor->initial.rating_multiplier[ RATING_DAMAGE_VERSATILITY ] ), num( actor->current.rating.attack_crit ),
+      num( actor->current.rating.attack_haste ), num( actor->current.rating.mastery ), num( actor->current.rating.damage_versatility ),
+      num( actor->mastery_coefficient() ), num( actor->current.mastery ), num( actor->current.versatility ) );
+}
+
 void write_table( sim_t* sim, bool fight_played )
 {
   player_t* actor = census_actor( sim );
@@ -452,9 +480,9 @@ void write_table( sim_t* sim, bool fight_played )
     const std::string signature = rl_census_lines::sha256_hex( table );
     const bool        first     = rl_census_lines::first_time_signature( 1, signature );
     const std::string line =
-        fmt::format( "{{\"schemaVersion\":2,\"kind\":\"buff\",\"entry\":{},\"crc32\":{},\"signature\":\"{}\",\"table\":{},\"enemyRows\":{},\"reach\":{},\"layout\":{}}}\n",
+        fmt::format( "{{\"schemaVersion\":2,\"kind\":\"buff\",\"entry\":{},\"crc32\":{},\"signature\":\"{}\",\"table\":{},\"enemyRows\":{},\"reach\":{},\"layout\":{},\"statBudget\":{}}}\n",
                      sim->rl_list_index, sim->rl_list_crc32, signature, first ? table : std::string( "null" ), enemy_rows, reach,
-                     layout_json( sim, actor ) );
+                     layout_json( sim, actor ), stat_budget_json( actor ) );
     if ( !rl_census_lines::write_text( g_path, line, "ab" ) )
       fmt::print( stderr, "rl_buff_census: cannot open '{}' for appending\n", g_path );
     return;
