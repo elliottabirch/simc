@@ -13046,37 +13046,34 @@ void shaman_t::trigger_tempest( T resource_count )
     // -- the counter was previously reset only in shaman_t::reset() (once per
     // FIGHT), making it a per-fight cast count wearing a per-deck name (it
     // could exceed the deck's own n_success, which an addon tracking "procs
-    // since the last reshuffle" never could). Detect the reshuffle EDGE by
-    // comparing entry_remains() around the draw loop: shuffled_rng_t::trigger()
-    // reshuffles transparently and only ever INSIDE a trigger() call, so an
-    // exact draw-count decrease means no reshuffle occurred; anything else
-    // means the deck topped itself back up at least once during this loop.
-    const unsigned draws_remaining_before = rng_obj.tempest_enh.entry_remains();
-
+    // since the last reshuffle" never could).
+    //
+    // 261028-fzl (S5-F2, integer-counters walk, owner ruling 5): the first fix compared entry_remains() around
+    // the WHOLE loop and reset the counter after it, so a consume that drew a success from the old deck and
+    // then crossed the lazy reshuffle (shuffled_rng_t::trigger() reshuffles only when the position is at the
+    // end, inside the call) counted that old-deck success into the new deck: 1,376 of 29,178 Tempest rows
+    // read 3 on a 2-success deck. The reshuffle edge is therefore taken PER DRAW: a draw that starts on an
+    // exhausted deck draws from the NEW deck, so the counter is zeroed before it, and every success is
+    // counted as it is drawn. After this the counter equals (the deck's success cards - tempest_proc_left)
+    // on every row.
     for ( auto draw = 0U; draw < as<unsigned>( resource_count ); ++draw )
     {
+      if ( rng_obj.tempest_enh.entry_remains() == 0 )
+        tempest_procs_this_deck = 0U;
       const double c = rng::deck_draw_chance( rng_obj.tempest_enh );
       const bool ok = rng_obj.tempest_enh.trigger();
       rl_count_proc( this, rl_proc::id::tempest_deck, c, ok );
       if ( ok )
       {
-        assert( !success );
+        tempest_procs_this_deck++;
         success = true;
       }
-    }
-
-    const unsigned draws_remaining_after = rng_obj.tempest_enh.entry_remains();
-    const auto expected_after = as<int64_t>( draws_remaining_before ) - as<int64_t>( resource_count );
-    if ( as<int64_t>( draws_remaining_after ) != expected_after )
-    {
-      tempest_procs_this_deck = 0U;
     }
 
     if ( success )
     {
       buff.tempest->trigger();
       tempest_spends_since_proc = 0U;
-      tempest_procs_this_deck++;
     }
   }
   else if ( specialization() == SHAMAN_ELEMENTAL )
