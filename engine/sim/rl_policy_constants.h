@@ -135,7 +135,7 @@ inline constexpr std::size_t RL_ACTION_DIM = 22;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
-inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v7:7a6b264a4c6309fdf9971a9924f1ecda55b196544e468dbea5fcb5297d065643";
+inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v7:a627cbbf49e6f4cb395291aaf4143aa546ff84f3f928cb7d2bfa07c6cc374868";
 inline constexpr const char* RL_MASK_RULES_SHA = "3f930294d36b217dca01fc51600c0da9d0568e20152fb53c588b6e8ddccf7662";
 inline constexpr const char* RL_ACTION_SPACE_SHA = "5e5f43d009948f4adbe65e86b1238e725596c593452d89a40e31c1b8e8e21684";
 
@@ -731,7 +731,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_16[] = {
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_17[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
-    { "since_applied", rl_kind::k_seconds, 100.0, false, 1.0, true, 100.0, nullptr, 0, false },
+    { "since_applied", rl_kind::k_seconds, 150.0, false, 1.0, true, 150.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_18[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
@@ -1567,7 +1567,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "lashing_flames_carrier_count", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "lightning_rod_carrier_count", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "longest_time_to_die", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, false },
-    { "nearest_enemy_distance", rl_kind::k_float, 0.0, true, 20.0, false, 1.0, nullptr, 0, false },
+    { "nearest_enemy_distance", rl_kind::k_float, 0.0, true, 50.01, false, 1.0, nullptr, 0, false },
     { "soonest_time_to_die", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, false },
     { "hits.chain_lightning", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "hits.tempest", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
@@ -2154,7 +2154,7 @@ inline constexpr bool RL_HIT_ROW_CONDITIONAL[RL_HIT_PROVIDER_COUNT] = { false, f
 // Generated from the registry by sylvanas_rl.contract.quant_table.derive; the Python shard codec and the GPU decode read the same table (data/specs/<spec>/quant-table.json).
 // A slot's value is stored without clipping: the encoder aborts the entry on a value outside its class (RL_SHARD_OUT_OF_CLASS).
 
-inline constexpr const char* RL_QUANT_TABLE_SHA256 = "3ad461a2a72a68839c6f645e86a6ecd17764f7631eb1a5d8c9996c73abf897f3";
+inline constexpr const char* RL_QUANT_TABLE_SHA256 = "6d0ca4a3c785650182d232bf199d336c572dbab905c8c25e1026d1b9faa183e4";
 inline constexpr std::size_t RL_QUANT_BIT_COUNT = 177;
 inline constexpr std::size_t RL_QUANT_U8_COUNT = 98;
 inline constexpr std::size_t RL_QUANT_U16_COUNT = 4;
@@ -2545,13 +2545,13 @@ inline constexpr rl_quant_slot RL_QUANT_SLOTS[RL_OBS_DIM] = {
   { rl_quant_class::u8_lattice, 65, 196.0, 0.0, 0.0, 0.0, 0.0 }, // 353 deck.tempest_spends_since_proc.value
   { rl_quant_class::bit, 82, 0.0, 0.0, 0.0, 0.0, 0.0 }, // 354 deck.ti_chain_lightning.value
   { rl_quant_class::i16_fixed, 202, 0.0, 0.0, 1.0, 1.5259021896696422e-05, 65535.0 }, // 355 stats.crit.value
-  { rl_quant_class::i16_fixed, 203, 0.0, 0.0, 1.0, 1.5259021896696422e-05, 65535.0 }, // 356 stats.crit_rating.value
-  { rl_quant_class::i16_fixed, 204, 0.0, 0.0, 1.0, 1.5259021896696422e-05, 65535.0 }, // 357 stats.damage_versatility.value
+  { rl_quant_class::i16_fixed, 203, 0.0, -2.0, 2.0, 6.103608758678569e-05, 16383.75 }, // 356 stats.crit_rating.value
+  { rl_quant_class::i16_fixed, 204, 0.0, 0.0, 2.0, 3.0518043793392844e-05, 32767.5 }, // 357 stats.damage_versatility.value
   { rl_quant_class::i16_fixed, 205, 0.0, 0.0, 2.0, 3.0518043793392844e-05, 32767.5 }, // 358 stats.haste.value
-  { rl_quant_class::i16_fixed, 206, 0.0, 0.0, 1.0, 1.5259021896696422e-05, 65535.0 }, // 359 stats.haste_rating.value
-  { rl_quant_class::i16_fixed, 207, 0.0, 0.0, 1.0, 1.5259021896696422e-05, 65535.0 }, // 360 stats.mastery_rating.value
+  { rl_quant_class::i16_fixed, 206, 0.0, 0.0, 2.0, 3.0518043793392844e-05, 32767.5 }, // 359 stats.haste_rating.value
+  { rl_quant_class::i16_fixed, 207, 0.0, -2.0, 2.0, 6.103608758678569e-05, 16383.75 }, // 360 stats.mastery_rating.value
   { rl_quant_class::i16_fixed, 208, 0.0, 0.0, 2.0, 3.0518043793392844e-05, 32767.5 }, // 361 stats.mastery_value.value
-  { rl_quant_class::i16_fixed, 209, 0.0, -1.0, 1.0, 3.0518043793392844e-05, 32767.5 }, // 362 stats.versatility_rating.value
+  { rl_quant_class::i16_fixed, 209, 0.0, -2.0, 2.0, 6.103608758678569e-05, 16383.75 }, // 362 stats.versatility_rating.value
   { rl_quant_class::i16_fixed, 210, 0.0, 0.0, 1.0, 1.5259021896696422e-05, 65535.0 }, // 363 swing_cast.auto_attack_interval.value
   { rl_quant_class::i16_fixed, 211, 0.0, 0.0, 1.0, 1.5259021896696422e-05, 65535.0 }, // 364 swing_cast.gcd_length.value
   { rl_quant_class::i16_fixed, 212, 0.0, 0.0, 1.0, 1.5259021896696422e-05, 65535.0 }, // 365 swing_cast.swing_mh_remains.value
