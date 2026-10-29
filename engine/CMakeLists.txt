@@ -64,6 +64,9 @@ endif()
 # book/ch04_strategies.py). A fused multiply-add would change a rounding Python does not fuse, so this one file is compiled without contraction.
 set_source_files_properties(sim/rl_table_policy.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 
+# 261029-trp S2-F3: the shard stream's reward sums and fixed-point rounding must round exactly as numpy does (contract/shard.py, sim/shard_derive.py); same reason, same flag.
+set_source_files_properties(sim/rl_shard.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+
 target_compile_definitions(engine PRIVATE "SC_GIT_REV=\"${GIT_COMMIT_HASH}\"" "SC_GIT_BRANCH=\"${GIT_BRANCH}\"")
 
 # Phase 268 (G268-2): which registry spec's RL constants header this build compiles. The default keeps the

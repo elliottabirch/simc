@@ -377,6 +377,7 @@ sim/rl_button_bind.cpp
 sim/rl_stock_eval.cpp
 sim/rl_table_policy.cpp
 sim/rl_target_select.cpp
+sim/rl_shard.cpp
 sim/rl_translog.cpp
 sim/rl_rng_record.cpp
 sim/sheet_fight.cpp

@@ -843,6 +843,10 @@ struct sim_t : private sc_thread_t
   // used only when rl_list_active); rl_list_shared_weights lets entries after the first reuse the loaded
   // net. The three rl_list_sum_* / rl_list_kept_count members are the footer accumulators of
   // rl_translog::end_entry() (collected entries only), handed from entry to entry with the writer state.
+  // 261029-trp S2-F3: `rl_shard=<path>` (process-level, compared across entries; a fight list only) asks the list to write the compact shard stream beside the
+  // translog (rl_shard.hpp); `rl_shard_plant=<row>:<slot>:<value>` (entry-level, test only) overwrites one observation value of one row in the translog and the shard.
+  std::string rl_shard_str;
+  std::string rl_shard_plant_str;
   bool rl_list_active = false;
   bool rl_list_warmup = false;
   bool rl_list_last = false;

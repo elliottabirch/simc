@@ -618,6 +618,7 @@ struct rl_weights_t
   std::uint32_t generation     = 0;
   float         exploration    = 0.0f;   // D-01: plan 210-06 refuses any non-zero value
   rl_body_type  body           = rl_body_type::mlp;
+  std::uint8_t  file_sha256[ 32 ] = {};  // 261029-trp S2-F3: sha256 of the RLW1 bytes load_rlw1 read (the shard's net identity per fight)
   std::string   obs_schema_sha;          // "rl-obs-v1:<64hex>" -- NOT a bare 64-hex
   std::string   mask_rules_sha;          // bare 64 hex
   std::string   action_space_sha;        // bare 64 hex

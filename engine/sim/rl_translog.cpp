@@ -17,6 +17,7 @@
 #include "sim/rl_buff_ledger.hpp"
 #include "sim/rl_policy.hpp"
 #include "sim/rl_rng_record.hpp"
+#include "sim/rl_shard.hpp"
 #include "sim/rl_stock_eval.hpp"
 #include "sim/rl_table_policy.hpp"
 #include "sim/rl_target_select.hpp"
@@ -826,12 +827,17 @@ census_t& fight_census()
   return c;
 }
 
-void write_row( sim_t* sim, player_t* p, const decision_record& r, const char* apl_choice_name,
+void write_row( sim_t* sim, player_t* p, const decision_record& r_staged, const char* apl_choice_name,
                 const rl_stock_eval::pick_t* stock_pick, const rl_apl_choice::table_info_t* table_info )
 {
   sim_t* root = root_of( sim );
   if ( root->rl_translog_file_str.empty() )
     return;
+
+  // 261029-trp S2-F3 (test hook rl_shard_plant=): the row written is the staged one, or a copy with one planted observation value. Without the option this is one
+  // empty-string test; the scratch record is never touched.
+  decision_record r_scratch;
+  const decision_record& r = sim->rl_shard_plant_str.empty() ? r_staged : rl_shard::plant( r_staged, root->rl_translog_pending_decisions, r_scratch );
 
   // The decision number the row carries (r.seq is the same value narrowed to 32 bits, which record_decision's callers never exceed:
   // see the NT-02 note in fill_decision).
@@ -858,6 +864,9 @@ void write_row( sim_t* sim, player_t* p, const decision_record& r, const char* a
   // Append only -- no flush. The fight's close row flushes the whole
   // fight at once (D-13).
   append_row( root, &r );
+  // 261029-trp S2-F3: the shard stream reads the row exactly as the translog now holds it.
+  if ( rl_shard::active() )
+    rl_shard::add_row( r );
   ++root->rl_translog_pending_decisions;
   // Stage F1 (260918-atr): captured in write order, alongside the counter immediately above --
   // record_close()'s .attr DECISION records read this back rather than assuming a gapless seq
@@ -1227,6 +1236,10 @@ void record_close( sim_t* sim )
   // the credit module folds the fight's hits per decision over the translog's own decisions. No-op unless rl_buff_credit=nobody|full.
   if ( root->rl_bc_on )
     rl_buff_credit::write_fight( *root->rl_bc_state, r.iteration, collected, root->solver_funnel_mode, root->rl_translog_pending_seqs );
+  // 261029-trp S2-F3: the fight's shard frame (rewards, damage to the end, the packed rows), from the rows buffered by write_row and the numbers just written above.
+  // Reads only; the translog and its sidecars are the same bytes with the stream on and off.
+  if ( rl_shard::active() )
+    rl_shard::close_fight( sim, p, r );
   root->rl_translog_pending_seqs.clear();
 
   root->rl_translog_pending_decisions = 0;

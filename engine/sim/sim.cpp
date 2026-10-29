@@ -4701,6 +4701,9 @@ void sim_t::create_options()
   // Flight recorder (phase 212, plan 212-01, TLOG-01/02/03). Mirrors
   // decision_dump=: empty = disabled (default), zero overhead.
   add_option( opt_string( "rl_translog", rl_translog_file_str ) );
+  // 261029-trp S2-F3: the compact shard stream (rl_shard.hpp). Validated in setup() below.
+  add_option( opt_string( "rl_shard", rl_shard_str ) );
+  add_option( opt_string( "rl_shard_plant", rl_shard_plant_str ) );
   // tstl-sylvanas phase 218, plan 218-02 (RIG-01). No validation, no
   // clamping, no default other than 0 -- 0 is the declared
   // pre-mix/unknown sentinel and must stay reachable by simply omitting
@@ -6107,6 +6110,16 @@ void sim_t::setup( sim_control_t* c )
     throw sc_runtime_error(
         "solver_mask_no_enemy=1 requires solver_policy= and no solver_control= (in-process transport "
         "only)." );
+  }
+
+  // 261029-trp S2-F3: the shard stream lives in the fight-list driver (one file per process, one frame per entry) and describes the translog's rows.
+  if ( !rl_shard_str.empty() && ( !rl_list_active || rl_translog_file_str.empty() ) )
+  {
+    throw sc_runtime_error( "rl_shard= requires an rl_fight_list= entry with rl_translog= (the shard is written beside the list's translog)." );
+  }
+  if ( !rl_shard_plant_str.empty() && rl_shard_str.empty() )
+  {
+    throw sc_runtime_error( "rl_shard_plant= requires rl_shard= (it plants a value into the shard's and the translog's row)." );
   }
 
   // 260927-d1 (D1 patchwerk disagreement census, Stage 1 Task 2): solver_record_apl_choice=1 has

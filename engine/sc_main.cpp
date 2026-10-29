@@ -26,6 +26,7 @@
 // from entry to entry (rl_translog::carry_t) and empties the RL modules' process-wide caches between entries.
 #include "sim/rl_target_select.hpp"
 #include "sim/rl_table_policy.hpp"
+#include "sim/rl_shard.hpp"
 #include "sim/rl_translog.hpp"
 #include "sim/sim.hpp"
 #include "sim/scale_factor_control.hpp"
@@ -360,7 +361,9 @@ const char* const FIGHT_LIST_PROCESS_OPTIONS[] = {
     "solver_table_clock",
     // 261028-fzl (owner order, S1-F1a): the two discovery censuses run over a fight list. The path is process-level (one file per census; the
     // list writes one JSON line per entry to it, see rl_action_census.hpp / rl_buff_census.hpp), so every entry must read the same.
-    "rl_action_census", "rl_buff_census" };
+    "rl_action_census", "rl_buff_census",
+    // 261029-trp S2-F3: the compact shard stream (rl_shard.hpp) is one file per process, opened after entry 0's setup and closed after the last entry.
+    "rl_shard" };
 
 // Options refused in any entry, by name prefix (PLAN-A section 2.3). Each exists for one reason: the feature
 // keeps process-global state this driver does not carry (solver_branch, rl_buff_*), reads only one process
@@ -698,6 +701,9 @@ int run_fight_list( const std::vector<std::string>& args )
       if ( k == 0 )
       {
         shared_weights = sim->solver_policy_weights;
+        // 261029-trp S2-F3: the shard stream opens once, with the sha256 of the RLW1 bytes this process loaded.
+        if ( !sim->rl_shard_str.empty() )
+          rl_shard::open( sim->rl_shard_str, sim->rl_translog_file_str, shared_weights->file_sha256 );
         // the version banner, once (the ordinary path prints it after setup)
         print_version_info( *sim->dbc );
         fmt::print( "\n" );
@@ -705,6 +711,9 @@ int run_fight_list( const std::vector<std::string>& args )
 
       sim->report_progress = 0;
       sim->progress_bar.set_base( "Baseline" );
+
+      if ( rl_shard::enabled() )
+        rl_shard::begin_entry( sim.get(), k );
 
       const auto t_run = std::chrono::steady_clock::now();
       if ( !( sim->execute() && !sim->rethrow_exception_queue() ) )
@@ -740,6 +749,8 @@ int run_fight_list( const std::vector<std::string>& args )
                   total_ms + e.parse_ms );
       std::fflush( stderr );
     }
+
+    rl_shard::finish();  // 261029-trp S2-F3: the close frame; a process that dies before this leaves a shard no reader accepts (shard-unclosed)
 
     fmt::print( stderr, "[RL_FIGHT_LIST] done entries={} kept={} wall_ms={:.1f}\n", entry_count, kept_count,
                 fight_list_ms( process_start, std::chrono::steady_clock::now() ) );

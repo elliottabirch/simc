@@ -58,6 +58,7 @@
 // C++ reproduce the training-side torch computation bit-for-bit) are this
 // engine's own implementation of that same Python module's `DuelingBody`.
 
+#include "sim/rl_census_lines.hpp"
 #include "sim/rl_policy.hpp"
 
 #include "fmt/format.h"
@@ -516,6 +517,11 @@ rl_weights_t load_rlw1( const std::string& path )
   }
 
   rl_weights_t w;
+  {
+    rl_census_lines::sha256_t digest;  // 261029-trp S2-F3: the net's identity per shard fight, over exactly the bytes parsed below
+    digest.update( data.data(), data.size() );
+    digest.finish( w.file_sha256 );
+  }
   w.format_version = format_version;
   std::memcpy( &w.generation, data.data() + 8, 4 );
   std::memcpy( &w.exploration, data.data() + 12, 4 );
