@@ -14,8 +14,11 @@
 #pragma once
 
 #include <cstddef>
+#include <string>
+#include <vector>
 
 #include "sim/rl_target_select.hpp"
+#include "util/timespan.hpp"
 
 struct action_t;
 struct player_t;
@@ -68,6 +71,27 @@ struct rl_class_hit_provider
   rl_hit_reading  reading;
 };
 
+// 261028-fzl (S5c-F3a, owner ruling 5): a periodic pulse of one of the class's pets (a totem's pulse event), written on the buff census table as
+// `petPulses [{name, periodSeconds, hasted}]`. `name` is the pet's name as the engine spells it (the `pets.<name>.pulse_event_remains` leaf), `period_seconds`
+// the base period the pet's constructor sets, `hasted` whether the pulse event scales that period by the owner's spell haste (totem_pulse_event_t).
+struct rl_pet_pulse
+{
+  std::string name;
+  double      period_seconds;
+  bool        hasted;
+};
+
+// Nullable hook (a class with no periodic pet leaves it null): the pulses of `owner`'s pets, read from the same helpers and constants the pets'
+// constructors use, so the census and the engine cannot drift.
+using rl_pet_pulses_fn = std::vector<rl_pet_pulse> ( * )( const player_t* owner );
+
+// The shaman's shared pulse constants. Defined in sc_shaman.cpp, where the surging and searing totem constructors read them, and read again by the
+// shaman plugin's petPulses hook (rl_class_plugins.cpp).
+timespan_t rl_shaman_surging_totem_pulse_period( const player_t* owner );
+timespan_t rl_shaman_searing_totem_pulse_period( const player_t* owner );
+inline constexpr bool RL_SHAMAN_SURGING_TOTEM_PULSE_HASTED = true;
+inline constexpr bool RL_SHAMAN_SEARING_TOTEM_PULSE_HASTED = false;
+
 struct rl_class_plugin
 {
   const char*                class_name;
@@ -79,6 +103,7 @@ struct rl_class_plugin
   std::size_t                n_geometry_facts;
   const rl_class_hit_provider* hit_providers;      // may point at a one-row null sentinel when n_hit_providers is 0
   std::size_t                n_hit_providers;
+  rl_pet_pulses_fn           pet_pulses;           // nullable (261028-fzl S5c-F3a)
 };
 
 // The plugin for a player's class. Never null: a class without a plugin gets the generic one, whose

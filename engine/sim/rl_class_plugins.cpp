@@ -174,6 +174,14 @@ const rl_class_hit_provider SHAMAN_HIT_PROVIDERS[] = {
   { "shaman.voltaic_blaze_new_flame_shocks", rl_hit_reading::voltaic_blaze_new_flame_shocks },
 };
 
+// 261028-fzl (S5c-F3a, owner ruling 5): the shaman's periodic pets. Periods and the haste flag come from the helpers sc_shaman.cpp's surging and
+// searing totem constructors read (rl_class_plugins.hpp), so the census value is the engine value by construction.
+std::vector<rl_pet_pulse> shaman_pet_pulses( const player_t* owner )
+{
+  return { { "searing_totem", rl_shaman_searing_totem_pulse_period( owner ).total_seconds(), RL_SHAMAN_SEARING_TOTEM_PULSE_HASTED },
+           { "surging_totem", rl_shaman_surging_totem_pulse_period( owner ).total_seconds(), RL_SHAMAN_SURGING_TOTEM_PULSE_HASTED } };
+}
+
 // A zero-row table holds one all-null sentinel row (a zero-length array is not valid C++); readers
 // iterate by n_rules / n_geometry_facts, never by array size.
 const rl_class_rule    NO_RULES[]    = { { nullptr, nullptr } };
@@ -188,13 +196,14 @@ const rl_class_plugin SHAMAN_PLUGIN = { "shaman",
                                         SHAMAN_GEOMETRY,
                                         sizeof( SHAMAN_GEOMETRY ) / sizeof( SHAMAN_GEOMETRY[ 0 ] ),
                                         SHAMAN_HIT_PROVIDERS,
-                                        sizeof( SHAMAN_HIT_PROVIDERS ) / sizeof( SHAMAN_HIT_PROVIDERS[ 0 ] ) };
+                                        sizeof( SHAMAN_HIT_PROVIDERS ) / sizeof( SHAMAN_HIT_PROVIDERS[ 0 ] ),
+                                        shaman_pet_pulses };
 // Arms' aiming rules and facts are all generic or declared. 271-10 (owner decision H-3): the three hand-written warrior hit
 // providers (cleave, whirlwind, sweeping strikes) are retired; the arms hit columns are the generated "census.<button>" rows,
 // resolved by rl_policy_obs.cpp through rl_action_census and counted with count_engine_hits. The warrior table is therefore the
 // documented zero-row sentinel, like the generic one.
-const rl_class_plugin WARRIOR_PLUGIN = { "warrior", NO_RULES, 0, nullptr, nullptr, NO_GEOMETRY, 0, NO_HIT_PROVIDERS, 0 };
-const rl_class_plugin GENERIC_PLUGIN = { "generic", NO_RULES, 0, nullptr, nullptr, NO_GEOMETRY, 0, NO_HIT_PROVIDERS, 0 };
+const rl_class_plugin WARRIOR_PLUGIN = { "warrior", NO_RULES, 0, nullptr, nullptr, NO_GEOMETRY, 0, NO_HIT_PROVIDERS, 0, nullptr };
+const rl_class_plugin GENERIC_PLUGIN = { "generic", NO_RULES, 0, nullptr, nullptr, NO_GEOMETRY, 0, NO_HIT_PROVIDERS, 0, nullptr };
 
 }  // namespace
 

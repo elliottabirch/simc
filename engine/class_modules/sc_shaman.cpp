@@ -23,6 +23,7 @@
 #include "player/ground_aoe.hpp"
 #include "player/pet.hpp"
 #include "sim/rl_action_census.hpp"
+#include "sim/rl_class_plugins.hpp"
 #include "player/pet_spawner.hpp"
 #include "action/action_callback.hpp"
 #include "action/parse_effects.hpp"
@@ -900,6 +901,18 @@ double rl_deck_expected_hits( const deck_rng_wrapper_t<T>& d, unsigned c )
 // - Review target caps
 
 // Resto DPS?
+
+// 261028-fzl (S5c-F3a, owner ruling 5): the totem pulse periods, shared by the totem constructors below and by the shaman plugin's petPulses hook
+// (rl_class_plugins.cpp) through the declarations in sim/rl_class_plugins.hpp, so the buff census reports the period the engine uses.
+timespan_t rl_shaman_surging_totem_pulse_period( const player_t* owner )
+{
+  return owner->find_spell( owner->specialization() == SHAMAN_ENHANCEMENT ? 455593 : 45594 )->effectN( 1 ).period();
+}
+
+timespan_t rl_shaman_searing_totem_pulse_period( const player_t* owner )
+{
+  return owner->find_spell( 3606 )->cast_time();
+}
 
 namespace
 {  // UNNAMED NAMESPACE
@@ -9881,7 +9894,7 @@ struct surging_totem_pulse_t : public spell_totem_action_t
   {
     aoe          = -1;
     reduced_aoe_targets = as<double>( data().effectN( 2 ).base_value() );
-    hasted_pulse = true;
+    hasted_pulse = RL_SHAMAN_SURGING_TOTEM_PULSE_HASTED;
   }
 
   double miss_chance( double hit, player_t* t ) const override
@@ -9964,8 +9977,7 @@ struct surging_totem_t : public spell_totem_pet_t
   surging_totem_t( shaman_t* owner ) : spell_totem_pet_t( owner, "surging_totem" ),
     surging_bolt( nullptr ), earthsurge( nullptr )
   {
-    pulse_amplitude = owner->find_spell(
-      owner->specialization() == SHAMAN_ENHANCEMENT ? 455593 : 45594 )->effectN( 1 ).period();
+    pulse_amplitude = rl_shaman_surging_totem_pulse_period( owner );
     npc_id = 225409;
   }
 
@@ -10065,6 +10077,7 @@ struct searing_totem_pulse_t : public spell_totem_action_t
     : spell_totem_action_t( "searing_bolt", totem, totem->find_spell( 3606 ) )
   {
     //hasted_pulse = true;
+    hasted_pulse = RL_SHAMAN_SEARING_TOTEM_PULSE_HASTED;
   }
 
   void init() override
@@ -10113,7 +10126,7 @@ struct searing_totem_t : public spell_totem_pet_t
 
   searing_totem_t( shaman_t* owner ) : spell_totem_pet_t( owner, "searing_totem" ), volley( nullptr )
   {
-    pulse_amplitude = owner->find_spell( 3606 )->cast_time();
+    pulse_amplitude = rl_shaman_searing_totem_pulse_period( owner );
     npc_id = 2523;
   }
 

@@ -15,6 +15,7 @@
 #include "player/spawner_base.hpp"
 #include "sim/cooldown.hpp"
 #include "sim/proc_rng.hpp"
+#include "sim/rl_class_plugins.hpp"
 #include "sim/raid_event.hpp"
 #include "sim/rl_census_lines.hpp"
 #include "sim/sim.hpp"
@@ -225,6 +226,7 @@ std::string row_json( const row_t& r, bool with_reach_fields = true )
 //                  successEntries (its success cards, count_total( SUCCESS )), the engine's own deck sizes the deck counters' scales divide by
 //   cooldowns[]    one per entry of the actor's cooldown_list: name, durationSeconds, heldByAction (some action of the actor holds it),
 //                  heldByBuff (some buff of the actor holds it as its cooldown)
+//   petPulses[]    261028-fzl (S5c-F3a, ruling 5): one per periodic pet of the class plugin's petPulses hook: name, periodSeconds, hasted
 //   spawners[]     261028-fzl (S5-F2, ruling 7): one per entry of the actor's spawners: name, maxPets (the engine cap on active pets of the
 //                  spawner; 0 is "unlimited", a dynamic spawner that sets no cap)
 std::string buff_name_of( const buff_t* b )
@@ -302,6 +304,17 @@ std::string proc_objects_json( const player_t* actor )
     o += ( first ? "" : "," ) + fmt::format( "{{\"name\":{},\"maxPets\":{}}}", esc( sp->name() ), sp->max_pets() );
     first = false;
   }
+  // 261028-fzl (S5c-F3a, owner ruling 5): the class plugin's periodic pets, [] for a class whose plugin has no hook.
+  o += "],\"petPulses\":[";
+  first = true;
+  if ( const rl_pet_pulses_fn pulses = rl_class_plugin_for( actor ).pet_pulses )
+    for ( const rl_pet_pulse& pulse : pulses( actor ) )
+    {
+      o += ( first ? "" : "," ) +
+           fmt::format( "{{\"name\":{},\"periodSeconds\":{},\"hasted\":{}}}", esc( pulse.name ), num( pulse.period_seconds ),
+                        pulse.hasted ? "true" : "false" );
+      first = false;
+    }
   return o + "]";
 }
 
