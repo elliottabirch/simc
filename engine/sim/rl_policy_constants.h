@@ -135,7 +135,7 @@ inline constexpr std::size_t RL_ACTION_DIM = 22;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
-inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v7:d98eee33bccbabc81d71aeb10e1d9fe6a2febfc44b81d42ecc6680ad484a6a35";
+inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v7:7a6b264a4c6309fdf9971a9924f1ecda55b196544e468dbea5fcb5297d065643";
 inline constexpr const char* RL_MASK_RULES_SHA = "3f930294d36b217dca01fc51600c0da9d0568e20152fb53c588b6e8ddccf7662";
 inline constexpr const char* RL_ACTION_SPACE_SHA = "5e5f43d009948f4adbe65e86b1238e725596c593452d89a40e31c1b8e8e21684";
 
@@ -747,7 +747,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_20[] = {
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_21[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 15.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
-    { "since_applied", rl_kind::k_seconds, 750.0, false, 1.0, true, 750.0, nullptr, 0, false },
+    { "since_applied", rl_kind::k_seconds, 600.0, false, 1.0, true, 600.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_22[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
@@ -878,7 +878,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_53[] = {
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_54[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
-    { "since_applied", rl_kind::k_seconds, 750.0, false, 1.0, true, 750.0, nullptr, 0, false },
+    { "since_applied", rl_kind::k_seconds, 600.0, false, 1.0, true, 600.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_55[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
@@ -1015,7 +1015,7 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_COOLDOWNS_MEMBERS[] = {
 
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_0[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
+    { "distance", rl_kind::k_float, 0.0, true, 50.0, false, 1.0, nullptr, 0, false },
     { "in_reach", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_range", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_front", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -1043,7 +1043,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_0[] = {
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_1[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
+    { "distance", rl_kind::k_float, 0.0, true, 6.0, false, 1.0, nullptr, 0, false },
     { "in_reach", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_range", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_front", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -1071,7 +1071,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_1[] = {
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_2[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
+    { "distance", rl_kind::k_float, 0.0, true, 50.0, false, 1.0, nullptr, 0, false },
     { "in_reach", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_range", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_front", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -1099,7 +1099,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_2[] = {
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_3[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
+    { "distance", rl_kind::k_float, 0.0, true, 6.0, false, 1.0, nullptr, 0, false },
     { "in_reach", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_range", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_front", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -1127,7 +1127,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_3[] = {
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_4[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
+    { "distance", rl_kind::k_float, 0.0, true, 50.0, false, 1.0, nullptr, 0, false },
     { "in_reach", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_range", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_front", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -1155,7 +1155,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_4[] = {
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_5[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
+    { "distance", rl_kind::k_float, 0.0, true, 50.0, false, 1.0, nullptr, 0, false },
     { "in_reach", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_range", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_front", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -1183,7 +1183,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_5[] = {
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_6[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 40.0, nullptr, 0, false },
+    { "distance", rl_kind::k_float, 0.0, true, 40.0, false, 1.0, nullptr, 0, false },
     { "in_reach", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_range", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_front", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -1253,7 +1253,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_5[] = {
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_6[] = {
     { "ready", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_flight", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "in_flight_remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 0.5, nullptr, 0, false },
+    { "in_flight_remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 0.75, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_ACTION_LEAVES_LEAVES_7[] = {
     { "ready", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -1345,7 +1345,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_DECK_LEAVES_12[] = {
     { "value", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_DECK_LEAVES_13[] = {
-    { "value", rl_kind::k_int, 0.0, true, 200.0, false, 1.0, nullptr, 0, false },
+    { "value", rl_kind::k_int, 0.0, true, 196.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_DECK_LEAVES_14[] = {
     { "value", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -1372,25 +1372,25 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_0[] = {
     { "value", rl_kind::k_float, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_1[] = {
-    { "value", rl_kind::k_float, 0.0, true, 4000.0, false, 1.0, nullptr, 0, false },
+    { "value", rl_kind::k_float, 0.0, true, 3826.8, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_2[] = {
-    { "value", rl_kind::k_float, 0.0, true, 0.2, false, 1.0, nullptr, 0, false },
+    { "value", rl_kind::k_float, 0.0, true, 0.708666667, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_3[] = {
-    { "value", rl_kind::k_float, 0.0, true, 1.2, false, 1.0, nullptr, 0, false },
+    { "value", rl_kind::k_float, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_4[] = {
-    { "value", rl_kind::k_float, 0.0, true, 5000.0, false, 1.0, nullptr, 0, false },
+    { "value", rl_kind::k_float, 0.0, true, 3826.8, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_5[] = {
-    { "value", rl_kind::k_float, 0.0, true, 5000.0, false, 1.0, nullptr, 0, false },
+    { "value", rl_kind::k_float, 0.0, true, 3826.8, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_6[] = {
-    { "value", rl_kind::k_float, 0.0, true, 2.5, false, 1.0, nullptr, 0, false },
+    { "value", rl_kind::k_float, 0.0, true, 1.883826087, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_STATS_LEAVES_7[] = {
-    { "value", rl_kind::k_float, 0.0, true, 1000.0, false, 1.0, nullptr, 0, false },
+    { "value", rl_kind::k_float, 0.0, true, 3826.8, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_obs_member RL_OBS_FAMILY_STATS_MEMBERS[] = {
   { "crit", "crit", RL_OBS_FAMILY_STATS_LEAVES_0, 1 },
@@ -1404,16 +1404,16 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_STATS_MEMBERS[] = {
 };
 
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_SWING_CAST_LEAVES_0[] = {
-    { "value", rl_kind::k_seconds, 0.0, false, 1.0, true, 3.0, nullptr, 0, false },
+    { "value", rl_kind::k_seconds, 0.0, false, 1.0, true, 2.6, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_SWING_CAST_LEAVES_1[] = {
-    { "value", rl_kind::k_seconds, 0.0, false, 1.0, true, 2.0, nullptr, 0, false },
+    { "value", rl_kind::k_seconds, 0.0, false, 1.0, true, 1.5, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_SWING_CAST_LEAVES_2[] = {
-    { "value", rl_kind::k_seconds, 0.0, false, 1.0, true, 4.0, nullptr, 0, false },
+    { "value", rl_kind::k_seconds, 0.0, false, 1.0, true, 2.6, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_SWING_CAST_LEAVES_3[] = {
-    { "value", rl_kind::k_seconds, 0.0, false, 1.0, true, 4.0, nullptr, 0, false },
+    { "value", rl_kind::k_seconds, 0.0, false, 1.0, true, 2.6, nullptr, 0, false },
 };
 inline constexpr rl_obs_member RL_OBS_FAMILY_SWING_CAST_MEMBERS[] = {
   { "auto_attack_interval", "auto_attack_interval", RL_OBS_FAMILY_SWING_CAST_LEAVES_0, 1 },
@@ -1426,7 +1426,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PETS_LEAVES_0[] = {
     { "active", rl_kind::k_int, 0.0, true, 10.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PETS_LEAVES_1[] = {
-    { "pulse_event_remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 7.5, nullptr, 0, false },
+    { "pulse_event_remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
 };
 inline constexpr rl_obs_member RL_OBS_FAMILY_PETS_MEMBERS[] = {
   { "searing_totem", "searing_totem", RL_OBS_FAMILY_PETS_LEAVES_0, 1 },
@@ -1444,7 +1444,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_RAID_EVENTS_LEAVES_0[] = {
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_RAID_EVENTS_LEAVES_1[] = {
     { "in", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
-    { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 250.0, nullptr, 0, false },
+    { "distance", rl_kind::k_float, 0.0, true, 174.699, false, 1.0, nullptr, 0, false },
     { "up", rl_kind::k_int, 0.0, false, 1.0, true, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_obs_member RL_OBS_FAMILY_RAID_EVENTS_MEMBERS[] = {
@@ -1540,10 +1540,10 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_LEGALITY_MEMBERS[] = {
 };
 
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PROC_CHANCES_LEAVES_0[] = {
-    { "value", rl_kind::k_float, 0.0, true, 0.4, false, 1.0, nullptr, 0, false },
+    { "value", rl_kind::k_float, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PROC_CHANCES_LEAVES_1[] = {
-    { "value", rl_kind::k_float, 0.0, true, 0.8, false, 1.0, nullptr, 0, false },
+    { "value", rl_kind::k_float, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_obs_member RL_OBS_FAMILY_PROC_CHANCES_MEMBERS[] = {
   { "stormsurge", "stormsurge_proc_chance_current", RL_OBS_FAMILY_PROC_CHANCES_LEAVES_0, 1 },
@@ -1553,7 +1553,7 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_PROC_CHANCES_MEMBERS[] = {
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "fight_remains", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, true },
     { "active_enemies", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
-    { "raid_event_next_in", rl_kind::k_seconds, 0.0, false, 1.0, true, 1000.0, nullptr, 0, false },
+    { "raid_event_next_in", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, false },
     { "dying_within_5s", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "dying_within_15s", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "enemies_in_front", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
@@ -1567,7 +1567,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "lashing_flames_carrier_count", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "lightning_rod_carrier_count", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "longest_time_to_die", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, false },
-    { "nearest_enemy_distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 25.0, nullptr, 0, false },
+    { "nearest_enemy_distance", rl_kind::k_float, 0.0, true, 20.0, false, 1.0, nullptr, 0, false },
     { "soonest_time_to_die", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, false },
     { "hits.chain_lightning", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "hits.tempest", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
@@ -1586,8 +1586,8 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "hits.searing_volley", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "hits.tremor", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "hits.venomfang_burst", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
-    { "hits.lava_lash.flame_shock_spread", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
-    { "hits.voltaic_blaze.new_flame_shocks", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
+    { "hits.lava_lash.flame_shock_spread", rl_kind::k_int, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
+    { "hits.voltaic_blaze.new_flame_shocks", rl_kind::k_int, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
     { "capability.racial_berserking", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "capability.trinket_voracious_heart_of_ulatek", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "capability.consumable_potion_of_recklessness", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -1922,14 +1922,14 @@ struct rl_aim_fact_desc
 };
 
 inline constexpr rl_aim_fact_desc RL_AIM_FACT_DESCS[RL_TARGET_FEATURES] = {
-  { "distance", rl_kind::k_seconds, false, 1.0, true, 50.0, -1 },
+  { "distance", rl_kind::k_float, true, 50.0, false, 1.0, -1 },
   { "in_reach", rl_kind::k_int, true, 1.0, false, 1.0, -1 },
   { "in_range", rl_kind::k_int, true, 1.0, false, 1.0, -1 },
   { "in_front", rl_kind::k_int, true, 1.0, false, 1.0, -1 },
   { "alive", rl_kind::k_int, true, 1.0, false, 1.0, -1 },
   { "immune", rl_kind::k_int, true, 1.0, false, 1.0, -1 },
   { "immunity_remaining", rl_kind::k_seconds, false, 1.0, true, 600.0, -1 },
-  { "time_to_die", rl_kind::k_seconds, false, 1.0, true, 60.0, -1 },
+  { "time_to_die", rl_kind::k_seconds, true, 600.0, false, 1.0, -1 },
   { "health_pct", rl_kind::k_float, true, 100.0, false, 1.0, -1 },
   { "is_boss", rl_kind::k_int, true, 1.0, false, 1.0, -1 },
   { "flame_shock_remaining", rl_kind::k_seconds, false, 1.0, true, 25.0, -1 },
@@ -1973,7 +1973,7 @@ inline constexpr const char* RL_AIM_SPELLS[RL_AIM_SPELL_COUNT] = {
 };
 
 inline constexpr std::size_t RL_AIM_INPUT_COUNT = 32;
-inline constexpr const char* RL_AIM_SHA = "aim-v1:c3addf9acdb8ce47ffa46e3051c30f7cb849d30606a756d9b411f81cb562dab4";
+inline constexpr const char* RL_AIM_SHA = "aim-v1:cb6f9394477c50e9df832f88164533b39087f49544d7e7cf3e8a8c3fc89360c6";
 
 
 // ---- Generic spec tables (C-A, appended; every line above is unchanged) ----
