@@ -799,6 +799,11 @@ struct decision_record
 //   21    queued              (staged decisions that needed a queue, i.e. queue_delay > 0)
 //   22    committed_queued    (queued decisions that became a row)
 // Invariant (checked by a reader): decision_count == staged - sum(slots 0-13).
+// 261028-fzl (S5c-F3a, owner ruling 16): after the COUNT words above, the census carries RL_ACTION_DIM further words, one per BUTTON INDEX (the
+// header's RL_ACTIONS order): observerReachDisagreements[b], the observer-mode decisions of the fight in which SimC's own APL pressed button b
+// while the mask had it illegal ONLY because a reach rule (the melee-reach rule of the EXEMPT presses, the SHAPE reach rule of a strike shape)
+// masked it. The APL played its pick, the row records the mask exactly as computed (bit 0), and this count says how often. A pick masked by a
+// legality bit still aborts OBSERVE_STOCK_MASK_DISAGREES. Zero outside observer mode. Slots 0-22 keep their positions (additive).
 namespace census_slot
 {
 inline constexpr std::uint32_t interrupt_movement = 0;
@@ -826,8 +831,10 @@ inline constexpr std::uint32_t queued = 21;
 inline constexpr std::uint32_t committed_queued = 22;
 inline constexpr std::uint32_t COUNT = 23;
 inline constexpr std::uint32_t DISCARD_COUNT = 14;  // slots 0-13 are the reasons a staged decision never became a row
+inline constexpr std::uint32_t OBSERVER_REACH_FIRST = COUNT;  // first of RL_ACTION_DIM words: observerReachDisagreements by button index
+inline constexpr std::uint32_t TOTAL = COUNT + static_cast<std::uint32_t>( RL_ACTION_DIM );
 }  // namespace census_slot
-static_assert( census_slot::COUNT <= RL_OBS_DIM + 2 - 8, "the census must fit the close row's formerly zero region" );
+static_assert( census_slot::TOTAL <= RL_OBS_DIM + 2 - 8, "the census must fit the close row's formerly zero region" );
 
 struct close_record
 {
@@ -1585,7 +1592,7 @@ void stamp_commit( sim_t* sim, player_t* p, decision_record& r );
 // forced). Cleared by solver_control::reset_iteration, written into the close row by record_close().
 struct census_t
 {
-  std::uint32_t n[ census_slot::COUNT ];
+  std::uint32_t n[ census_slot::TOTAL ];
 };
 census_t& fight_census();
 

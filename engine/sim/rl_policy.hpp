@@ -172,6 +172,10 @@ struct rl_state_t
   // (wait actions resolve to no `action_t*` and skip R0 entirely).
   std::uint8_t action_resolvable[ RL_ACTION_DIM ] = {};
   std::uint8_t action_ready     [ RL_ACTION_DIM ] = {};
+  // 261028-fzl (S5c-F3a, owner ruling 16): 1 where `action_ready` is 0 ONLY because the reach rule (the melee-reach rule of the seven EXEMPT
+  // presses, the SHAPE reach rule of a strike shape) masks the button: every other conjunct of the legality bit (resolvable, ready(),
+  // the target gate, the boundary's pressability) holds. Derived in the same expression as `action_ready`, never by button name.
+  std::uint8_t action_reach_blocked[ RL_ACTION_DIM ] = {};
 
   std::vector<buff_reading>     buffs;
   std::vector<cooldown_reading> cooldowns;
@@ -207,9 +211,13 @@ resource_e rl_spec_resource();
 // when no cache exists for the current stamp (a scripted actor with decision_dump= and no solver
 // arm never takes the boundary path), computes the plain gate bits without bumping the stamp and
 // without filling any pick, and reports that via `out_used_dump_time_compute` below.
+//
+// 261028-fzl (S5c-F3a): `out_reach_blocked` (optional, RL_ACTION_DIM wide) is 1 for a button whose `out_ready` bit is 0 only because the reach
+// rule masks it (see rl_state_t::action_reach_blocked); the decision-boundary cache carries it with the other two arrays.
 void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_ACTION_DIM ],
                              std::uint8_t out_ready[ RL_ACTION_DIM ], bool is_decision_boundary,
-                             bool* out_used_dump_time_compute = nullptr, bool boundary_is_foreground = true );
+                             bool* out_used_dump_time_compute = nullptr, bool boundary_is_foreground = true,
+                             std::uint8_t* out_reach_blocked = nullptr );
 
 // 221-03 (ACT-05/ACT-06) -- the ONE shared raid-event walk, called from
 // read_state() (this file), build_obs()'s raid_event_next_in leaf

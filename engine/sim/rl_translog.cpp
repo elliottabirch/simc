@@ -966,7 +966,7 @@ void record_close( sim_t* sim )
   r.fight_length = static_cast<float>( p->iteration_fight_length.total_seconds() );
   std::memset( r.fight_tag, 0, sizeof( r.fight_tag ) );
   std::memset( r.zero12_rest, 0, sizeof( r.zero12_rest ) );
-  // 261027-fts (version 16): the fight's census, the first census_slot::COUNT words of the formerly zero region (see rl_translog.hpp).
+  // 261027-fts (version 16): the fight's census, the first census_slot::TOTAL words of the formerly zero region (see rl_translog.hpp).
   std::memcpy( r.zero12_rest, fight_census().n, sizeof( fight_census().n ) );
   r.decision_count = root->rl_translog_pending_decisions;
   r.zero_mask = 0;   // version 4: widened to uint32 to sit at decision_record's own mask offset

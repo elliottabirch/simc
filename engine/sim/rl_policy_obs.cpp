@@ -436,6 +436,7 @@ struct gate_bits_cache_entry
   bool          has_stamp = false;
   std::uint8_t  resolvable[ RL_ACTION_DIM ] = {};
   std::uint8_t  ready     [ RL_ACTION_DIM ] = {};
+  std::uint8_t  reach_blocked[ RL_ACTION_DIM ] = {};
 };
 std::unordered_map<const player_t*, gate_bits_cache_entry> g_gate_bits_cache;
 
@@ -1064,7 +1065,7 @@ rl_state_t read_state( const player_t* p, bool boundary_is_foreground, bool is_d
   // write_state_fields' own adjacent read_action_gate_bits call already correctly does. Now
   // threaded straight from this function's own parameter -- see rl_policy.hpp's own doc comment.
   read_action_gate_bits( p, s.action_resolvable, s.action_ready, is_decision_boundary, nullptr,
-                         boundary_is_foreground );
+                         boundary_is_foreground, s.action_reach_blocked );
 
   return s;
 }
@@ -1463,10 +1464,13 @@ static bool pressable_at_boundary( const player_t* p, const action_t* a, bool bo
 
 void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_ACTION_DIM ],
                              std::uint8_t out_ready[ RL_ACTION_DIM ], bool is_decision_boundary,
-                             bool* out_used_dump_time_compute, bool boundary_is_foreground )
+                             bool* out_used_dump_time_compute, bool boundary_is_foreground, std::uint8_t* out_reach_blocked )
 {
   if ( out_used_dump_time_compute )
     *out_used_dump_time_compute = false;
+  // 261028-fzl (S5c-F3a): the reach-blocked bits are always computed into a local array, so the cache below holds them whether or not this
+  // caller asked; the caller's pointer is filled at the one exit of each path.
+  std::uint8_t reach_blocked_local[ RL_ACTION_DIM ] = {};
 
   // Same WR-12 single-sim/single-thread precondition bind_slots() asserts
   // above -- this cache is keyed on a bare const player_t* with no sim
@@ -1491,6 +1495,8 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
     {
       std::memcpy( out_resolvable, cache_it->second.resolvable, RL_ACTION_DIM );
       std::memcpy( out_ready, cache_it->second.ready, RL_ACTION_DIM );
+      if ( out_reach_blocked != nullptr )
+        std::memcpy( out_reach_blocked, cache_it->second.reach_blocked, RL_ACTION_DIM );
       return;
     }
     if ( out_used_dump_time_compute )
@@ -1687,9 +1693,13 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
         assert( found &&
                 "rl_target_select: a pick just filled for this decision must be immediately "
                 "readable (228-02, D-12)" );
-        out_ready[ i ] = ( a->ready() && pick != nullptr && a->target_ready( pick ) &&
-                           reach_rule_allows( p, reach_gates[ i ], pick ) &&
-                           pressable_at_boundary( p, a, boundary_is_foreground ) ) ? 1 : 0;
+        {
+          const bool without_reach = a->ready() && pick != nullptr && a->target_ready( pick ) &&
+                                     pressable_at_boundary( p, a, boundary_is_foreground );
+          const bool reach_ok      = !without_reach || reach_rule_allows( p, reach_gates[ i ], pick );
+          out_ready[ i ]           = ( without_reach && reach_ok ) ? 1 : 0;
+          reach_blocked_local[ i ] = ( without_reach && !reach_ok ) ? 1 : 0;
+        }
         // 240-05 Task 2: record this action for the target head's own pass, immediately after
         // this loop -- see that pass's own comment (below) for why identical gating matters.
         targeted_actions_this_decision[ targeted_actions_count++ ] = a;
@@ -1701,9 +1711,13 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
         // boundary path) -- compute the plain gate bits off the action's CURRENT target rather
         // than a per-decision selector pick, since none was ever stamped for this decision. No
         // stamp bump, no fill_pick -- both would corrupt a stamp a boundary call never opened.
-        out_ready[ i ] = ( a->ready() && a->target != nullptr && a->target_ready( a->target ) &&
-                           reach_rule_allows( p, reach_gates[ i ], a->target ) &&
-                           pressable_at_boundary( p, a, boundary_is_foreground ) ) ? 1 : 0;
+        {
+          const bool without_reach = a->ready() && a->target != nullptr && a->target_ready( a->target ) &&
+                                     pressable_at_boundary( p, a, boundary_is_foreground );
+          const bool reach_ok      = !without_reach || reach_rule_allows( p, reach_gates[ i ], a->target );
+          out_ready[ i ]           = ( without_reach && reach_ok ) ? 1 : 0;
+          reach_blocked_local[ i ] = ( without_reach && !reach_ok ) ? 1 : 0;
+        }
       }
       if ( out_ready[ i ] )
         any_targeted_action_ready = true;
@@ -1720,10 +1734,13 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
     // resolved cast action; `a->target != nullptr` is an explicit guard
     // against dereferencing a null target inside `target_ready`'s first
     // line (`candidate_target->is_sleeping()`).
-    out_ready[ i ] = ( out_resolvable[ i ] && a->ready() && a->target != nullptr &&
-                        a->target_ready( a->target ) &&
-                        reach_rule_allows( p, reach_gates[ i ], a->target ) &&
-                        pressable_at_boundary( p, a, boundary_is_foreground ) ) ? 1 : 0;
+    {
+      const bool without_reach = out_resolvable[ i ] && a->ready() && a->target != nullptr && a->target_ready( a->target ) &&
+                                 pressable_at_boundary( p, a, boundary_is_foreground );
+      const bool reach_ok      = !without_reach || reach_rule_allows( p, reach_gates[ i ], a->target );
+      out_ready[ i ]           = ( without_reach && reach_ok ) ? 1 : 0;
+      reach_blocked_local[ i ] = ( without_reach && !reach_ok ) ? 1 : 0;
+    }
   }
 
   // 246.1-05 (CAP-02): freshly computed this call (never on the cache-hit early return above,
@@ -1782,7 +1799,10 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
     entry.has_stamp = true;
     std::memcpy( entry.resolvable, out_resolvable, RL_ACTION_DIM );
     std::memcpy( entry.ready, out_ready, RL_ACTION_DIM );
+    std::memcpy( entry.reach_blocked, reach_blocked_local, RL_ACTION_DIM );
   }
+  if ( out_reach_blocked != nullptr )
+    std::memcpy( out_reach_blocked, reach_blocked_local, RL_ACTION_DIM );
 }
 
 // ---------------------------------------------------------------------------

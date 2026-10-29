@@ -1897,70 +1897,75 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // episode.py's Python-side D-04 site (mask.legal() computed before
     // obs.encode()) and this quick task's own top-of-file order comment.
     std::uint8_t mask[ RL_ACTION_DIM ];
-    rl_policy::build_mask( state, mask );
-    // NET-01 (arm subsets, Phase 222): a config-declared action allow-list,
-    // carried on the loaded blob, ANDed ONCE here so every downstream
-    // consumer -- build_obs's own legality slots below, masked_argmax, the
-    // epsilon draw's legal_indices, the Q-margin/top_q diagnostics, and
-    // record_decision's translog row -- sees the SAME restricted mask.
-    // build_mask stays PURE over the POD (unchanged, Phase 221's own
-    // ruling); the translog therefore records the RESTRICTED mask
-    // alongside the obs vector whose OWN legality slots now carry this
-    // SAME restricted mask too (260831-mk7) -- the log stays arm-
-    // independent and the Python side does its own gather for everything
-    // EXCEPT the legality slots, which are baked in at this width already.
-    {
-      const std::uint32_t allowed = sim->solver_policy_weights->allowed_actions;
-      for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
-        mask[ i ] = static_cast<std::uint8_t>( mask[ i ] & ( ( allowed >> static_cast<std::uint32_t>( i ) ) & 1u ) );
-    }
-
-    // S1 (260927-s1-spend-timing, todo 2026-09-27-s1-maelstrom-spend-timing-override-probe.md):
-    // engine-side spend-threshold override -- forbids lightning_bolt and tempest (and, 261002-8rs,
-    // primordial_storm when the build's action table offers that button -- it is also a Maelstrom
-    // Weapon spender) ONLY; the third
-    // Lightning-family action is NEVER touched anywhere in this block, the owner's standing rule
-    // "never mask Chain Lightning at one target" holds by construction, not by threshold. Fires
-    // whenever the player's current Maelstrom Weapon stack count is below solver_min_maelstrom_spend.
-    // Deliberately placed AFTER the allow-list AND directly above (so a narrow arm's own subset
-    // can never re-legalize what this forbids) and BEFORE the all-illegal refusal below (that
-    // refusal still guards the genuinely-pathological all-illegal case; this override alone
-    // cannot manufacture one on its own -- the wait actions and every non-Lightning-family cast
-    // stay untouched). Reads the SAME buff object the observation encoder fills for obs slot 32
-    // (rl_state_t::buffs, populated once in read_state() above) via find_buff() -- never a
-    // re-derivation, so this can never disagree with what the net itself sees as its own stack
-    // count. sim->solver_min_maelstrom_spend == 0 (default, or the option simply absent) is a
-    // single int comparison and skips the whole block -- byte-identical to a run built before
-    // this option existed (proof (a), ABSENT = IDENTICAL). The two action indices were resolved
-    // ONCE by name from RL_ACTIONS in sim.cpp's setup() (never a hard-coded index here).
-    if ( sim->solver_min_maelstrom_spend > 0 )
-    {
-      const rl_policy::buff_reading* mw = state.find_buff( "maelstrom_weapon" );
-      const double mw_stacks = ( mw != nullptr && mw->has_stacks ) ? mw->stacks : 0.0;
-      if ( mw_stacks < static_cast<double>( sim->solver_min_maelstrom_spend ) )
+    // 261028-fzl (S5c-F3a, owner ruling 16): the whole mask derivation is ONE lambda over a state, so the observer's reach-only test can run the
+    // SAME derivation on the counterfactual state (reach-blocked buttons offered) and never a second hand-copied chain of edits.
+    const auto complete_mask = [&]( const rl_policy::rl_state_t& st, std::uint8_t ( &m )[ RL_ACTION_DIM ] ) {
+      rl_policy::build_mask( st, m );
+      // NET-01 (arm subsets, Phase 222): a config-declared action allow-list,
+      // carried on the loaded blob, ANDed ONCE here so every downstream
+      // consumer -- build_obs's own legality slots below, masked_argmax, the
+      // epsilon draw's legal_indices, the Q-margin/top_q diagnostics, and
+      // record_decision's translog row -- sees the SAME restricted mask.
+      // build_mask stays PURE over the POD (unchanged, Phase 221's own
+      // ruling); the translog therefore records the RESTRICTED mask
+      // alongside the obs vector whose OWN legality slots now carry this
+      // SAME restricted mask too (260831-mk7) -- the log stays arm-
+      // independent and the Python side does its own gather for everything
+      // EXCEPT the legality slots, which are baked in at this width already.
       {
-        mask[ sim->solver_min_maelstrom_spend_lightning_bolt_idx ] = 0;
-        mask[ sim->solver_min_maelstrom_spend_tempest_idx ] = 0;
-        if ( sim->solver_min_maelstrom_spend_primordial_storm_idx >= 0 )
-          mask[ sim->solver_min_maelstrom_spend_primordial_storm_idx ] = 0;
+        const std::uint32_t allowed = sim->solver_policy_weights->allowed_actions;
+        for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+          m[ i ] = static_cast<std::uint8_t>( m[ i ] & ( ( allowed >> static_cast<std::uint32_t>( i ) ) & 1u ) );
       }
-    }
 
-    // 261005-tch2 (owner, 2026-10-05: "can we just mask all spells to be uncastable while not in
-    // combat?"): solver_mask_no_enemy. While no enemy can be attacked (no_attackable_enemy above:
-    // the walk between packs on a route layout) every non-wait button is masked. Placed with S1:
-    // after the allow-list AND (a narrow arm cannot re-legalize it) and before the all-illegal
-    // refusal and build_obs, so the net's own legality inputs, the legal top_q/q_margin and the
-    // translog row all carry the masked set. Only a foreground boundary reaches here with the
-    // condition true (the background case returned before the seq increment), and at a foreground
-    // boundary the unanchored wait stays legal, so this cannot manufacture an all-illegal mask on
-    // its own. Off (default): one bool test, byte-identical to a run built before this option.
-    if ( sim->solver_mask_no_enemy && no_attackable_enemy( p ) )
-    {
-      for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
-        if ( RL_ACTIONS[ i ].kind != rl_action_kind::wait )
-          mask[ i ] = 0;
-    }
+      // S1 (260927-s1-spend-timing, todo 2026-09-27-s1-maelstrom-spend-timing-override-probe.md):
+      // engine-side spend-threshold override -- forbids lightning_bolt and tempest (and, 261002-8rs,
+      // primordial_storm when the build's action table offers that button -- it is also a Maelstrom
+      // Weapon spender) ONLY; the third
+      // Lightning-family action is NEVER touched anywhere in this block, the owner's standing rule
+      // "never mask Chain Lightning at one target" holds by construction, not by threshold. Fires
+      // whenever the player's current Maelstrom Weapon stack count is below solver_min_maelstrom_spend.
+      // Deliberately placed AFTER the allow-list AND directly above (so a narrow arm's own subset
+      // can never re-legalize what this forbids) and BEFORE the all-illegal refusal below (that
+      // refusal still guards the genuinely-pathological all-illegal case; this override alone
+      // cannot manufacture one on its own -- the wait actions and every non-Lightning-family cast
+      // stay untouched). Reads the SAME buff object the observation encoder fills for obs slot 32
+      // (rl_state_t::buffs, populated once in read_state() above) via find_buff() -- never a
+      // re-derivation, so this can never disagree with what the net itself sees as its own stack
+      // count. sim->solver_min_maelstrom_spend == 0 (default, or the option simply absent) is a
+      // single int comparison and skips the whole block -- byte-identical to a run built before
+      // this option existed (proof (a), ABSENT = IDENTICAL). The two action indices were resolved
+      // ONCE by name from RL_ACTIONS in sim.cpp's setup() (never a hard-coded index here).
+      if ( sim->solver_min_maelstrom_spend > 0 )
+      {
+        const rl_policy::buff_reading* mw = st.find_buff( "maelstrom_weapon" );
+        const double mw_stacks = ( mw != nullptr && mw->has_stacks ) ? mw->stacks : 0.0;
+        if ( mw_stacks < static_cast<double>( sim->solver_min_maelstrom_spend ) )
+        {
+          m[ sim->solver_min_maelstrom_spend_lightning_bolt_idx ] = 0;
+          m[ sim->solver_min_maelstrom_spend_tempest_idx ] = 0;
+          if ( sim->solver_min_maelstrom_spend_primordial_storm_idx >= 0 )
+            m[ sim->solver_min_maelstrom_spend_primordial_storm_idx ] = 0;
+        }
+      }
+
+      // 261005-tch2 (owner, 2026-10-05: "can we just mask all spells to be uncastable while not in
+      // combat?"): solver_mask_no_enemy. While no enemy can be attacked (no_attackable_enemy above:
+      // the walk between packs on a route layout) every non-wait button is masked. Placed with S1:
+      // after the allow-list AND (a narrow arm cannot re-legalize it) and before the all-illegal
+      // refusal and build_obs, so the net's own legality inputs, the legal top_q/q_margin and the
+      // translog row all carry the masked set. Only a foreground boundary reaches here with the
+      // condition true (the background case returned before the seq increment), and at a foreground
+      // boundary the unanchored wait stays legal, so this cannot manufacture an all-illegal mask on
+      // its own. Off (default): one bool test, byte-identical to a run built before this option.
+      if ( sim->solver_mask_no_enemy && no_attackable_enemy( p ) )
+      {
+        for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+          if ( RL_ACTIONS[ i ].kind != rl_action_kind::wait )
+            m[ i ] = 0;
+      }
+    };
+    complete_mask( state, mask );
 
     // 222-07 (CR-04): the allow-list AND above can manufacture an
     // all-illegal mask that build_mask's own upstream refusal already
@@ -2066,9 +2071,28 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
           protocol_abort( fmt::format( "OBSERVE_STOCK_UNMAPPED_LEAF: seq={} t={:.3f} SimC's own pick '{}' is a ready leaf with no "
                                        "registry button", seq, sim->current_time().total_seconds(), apl_choice->name() ) );
         if ( !mask[ observe_idx ] )
-          protocol_abort( fmt::format( "OBSERVE_STOCK_MASK_DISAGREES: seq={} t={:.3f} SimC's own pick '{}' (button {}) is masked "
-                                       "illegal by the catalog", seq, sim->current_time().total_seconds(), apl_choice->name(),
-                                       observe_idx ) );
+        {
+          // 261028-fzl (S5c-F3a, owner ruling 16): a pick masked ONLY by a reach rule is tolerated and counted. "Only by a reach rule" is
+          // decided from the mask's own derivation, never by button name: the same derivation (complete_mask) re-run on the state with every
+          // reach-blocked button offered must offer this pick. A pick masked by a legality bit (not resolvable, not ready, target gate, the
+          // boundary's pressability, the allow-list, the spend override, the no-enemy mask) stays illegal in that mask and aborts by name.
+          bool reach_only = false;
+          if ( state.action_reach_blocked[ observe_idx ] )
+          {
+            rl_policy::rl_state_t reach_free = state;
+            for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+              if ( reach_free.action_reach_blocked[ i ] )
+                reach_free.action_ready[ i ] = 1;
+            std::uint8_t reach_free_mask[ RL_ACTION_DIM ];
+            complete_mask( reach_free, reach_free_mask );
+            reach_only = reach_free_mask[ observe_idx ] != 0;
+          }
+          if ( !reach_only )
+            protocol_abort( fmt::format( "OBSERVE_STOCK_MASK_DISAGREES: seq={} t={:.3f} SimC's own pick '{}' (button {}) is masked "
+                                         "illegal by the catalog", seq, sim->current_time().total_seconds(), apl_choice->name(),
+                                         observe_idx ) );
+          ++rl_translog::fight_census().n[ rl_translog::census_slot::OBSERVER_REACH_FIRST + static_cast<std::uint32_t>( observe_idx ) ];
+        }
         sim->solver_observe_idle_open = false;
         sim->solver_control_last_reply_type = "cast";
         // 261025-xpl: an exploration press is a leaf that sits DIRECTLY in the walked list (the launcher's explore_default holds the
