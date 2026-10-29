@@ -85,6 +85,19 @@ struct rl_pet_pulse
 // constructors use, so the census and the engine cannot drift.
 using rl_pet_pulses_fn = std::vector<rl_pet_pulse> ( * )( const player_t* owner );
 
+// 261028-fzl (S5c-F3a, owner ruling 18, F7): a count a hand-written hit provider reads (a number of NEW damage-over-time applications, not enemies hit) has
+// a cap no census node carries. The class plugin declares it per button: `name` is the provider's name exactly as a header's RL_HIT_PROVIDERS spells it,
+// `cap` the most the provider can count. The action census writes the list on the button's token row (`declaredCounts`).
+struct rl_declared_count
+{
+  std::string name;
+  int         cap;
+};
+
+// Nullable hook: the declared counts of the action behind `token` for `p`, empty for a token with none. Called from the census walk at init and at
+// combat end; reads only.
+using rl_declared_counts_fn = std::vector<rl_declared_count> ( * )( player_t* p, const char* token );
+
 // The shaman's shared pulse constants. Defined in sc_shaman.cpp, where the surging and searing totem constructors read them, and read again by the
 // shaman plugin's petPulses hook (rl_class_plugins.cpp).
 timespan_t rl_shaman_surging_totem_pulse_period( const player_t* owner );
@@ -104,6 +117,7 @@ struct rl_class_plugin
   const rl_class_hit_provider* hit_providers;      // may point at a one-row null sentinel when n_hit_providers is 0
   std::size_t                n_hit_providers;
   rl_pet_pulses_fn           pet_pulses;           // nullable (261028-fzl S5c-F3a)
+  rl_declared_counts_fn      declared_counts;      // nullable (261028-fzl S5c-F3a)
 };
 
 // The plugin for a player's class. Never null: a class without a plugin gets the generic one, whose

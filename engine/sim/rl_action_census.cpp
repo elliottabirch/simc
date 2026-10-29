@@ -14,6 +14,7 @@
 #include "player/pet.hpp"
 #include "player/stats.hpp"
 #include "sim/rl_census_lines.hpp"
+#include "sim/rl_class_plugins.hpp"
 #include "sim/rl_credit.hpp"
 #include "sim/rl_policy_constants_select.h"
 #include "sim/rl_target_select.hpp"
@@ -30,6 +31,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace rl_action_census
@@ -536,14 +538,18 @@ std::string token_json( const token_t& t )
   for ( size_t i = 0; i < t.disagreements.size(); ++i )
     dis += ( i ? "," : "" ) + esc( t.disagreements[ i ] );
   dis += "]";
+  std::string declared = "[";
+  for ( size_t i = 0; i < t.declared_counts.size(); ++i )
+    declared += fmt::format( "{}{{\"name\":{},\"cap\":{}}}", i ? "," : "", esc( t.declared_counts[ i ].first ), t.declared_counts[ i ].second );
+  declared += "]";
   return fmt::format(
       "{{\"token\":{},\"actionFound\":{},\"spellId\":{},\"rangeYards\":{},\"minRangeYards\":{},\"radiusYards\":{},"
       "\"multiTarget\":{},\"multiWhile\":{},\"nodes\":{},\"chosenNode\":{},\"disagreements\":{},\"gateClass\":{},"
-      "\"refusedWhileLocked\":{},\"needsMeleeReach\":{},\"travelSpeed\":{},\"travelDelay\":{},\"minTravelTime\":{}}}",
+      "\"refusedWhileLocked\":{},\"needsMeleeReach\":{},\"travelSpeed\":{},\"travelDelay\":{},\"minTravelTime\":{},\"declaredCounts\":{}}}",
       esc( t.token ), t.found ? "true" : "false", t.spell_id, num( t.range ), num( t.min_range ), num( t.radius ),
       t.multi_target ? "true" : "false", t.has_multi_while ? widen_json( t.multi_while ) : std::string( "null" ), nodes,
       t.chosen_node, dis, esc( gate_class_name( t.gate_class ) ), t.refused_while_locked ? "true" : "false",
-      needs_melee_reach( t ) ? "true" : "false", num( t.travel_speed ), num( t.travel_delay ), num( t.min_travel_time ) );
+      needs_melee_reach( t ) ? "true" : "false", num( t.travel_speed ), num( t.travel_delay ), num( t.min_travel_time ), declared );
 }
 
 // What must agree between the init walk and the fight-end walk: structure, never live values
@@ -1164,6 +1170,9 @@ std::vector<token_t> walk( player_t* p )
       t.travel_speed         = root->travel_speed;
       t.travel_delay         = root->travel_delay;
       t.min_travel_time      = root->min_travel_time;
+      if ( const rl_declared_counts_fn declared_counts = rl_class_plugin_for( p ).declared_counts )
+        for ( rl_declared_count& d_count : declared_counts( p, d.token ) )
+          t.declared_counts.emplace_back( std::move( d_count.name ), d_count.cap );
       std::set<const action_t*> seen;
       walk_node( root, "root", 0, p, seen, t.nodes );
     }

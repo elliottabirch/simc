@@ -263,6 +263,9 @@ struct token_t
   double               travel_speed = 0.0;
   double               travel_delay = 0.0;
   double               min_travel_time = 0.0;
+  // 261028-fzl (S5c-F3a, owner ruling 18, F7): the caps of the counts a class plugin's hand-written hit providers read for this button, [{name, cap}]
+  // (name = the provider's name in a header's RL_HIT_PROVIDERS). Empty for a button with none. Filled in walk() from rl_class_plugin::declared_counts.
+  std::vector<std::pair<std::string, int>> declared_counts;
 };
 
 // The ONE gate-class function (271.6-07, G271.6-28 as revised). The class the spell DATA gives a button: UNIT when any implicit

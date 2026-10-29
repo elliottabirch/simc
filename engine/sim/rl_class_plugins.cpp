@@ -182,6 +182,19 @@ std::vector<rl_pet_pulse> shaman_pet_pulses( const player_t* owner )
            { "surging_totem", rl_shaman_surging_totem_pulse_period( owner ).total_seconds(), RL_SHAMAN_SURGING_TOTEM_PULSE_HASTED } };
 }
 
+// 261028-fzl (S5c-F3a, owner ruling 18, F7): the two hand-written DoT-count providers' caps. They are the very fields the counting code above passes to
+// count_new_flame_shock_neighbours (resolve_vb_lava_lash_geometry: the Molten Assault effect for Lava Lash's spread, voltaic_blaze_damage's own aoe for
+// Voltaic Blaze's new Flame Shocks), read through the same per-actor geometry, so the declared cap and the counting cap are one value. The names are the
+// provider names of SHAMAN_HIT_PROVIDERS, the strings a header's RL_HIT_PROVIDERS rows carry.
+std::vector<rl_declared_count> shaman_declared_counts( player_t* p, const char* token )
+{
+  if ( std::strcmp( token, "lava_lash" ) == 0 )
+    return { { "shaman.lava_lash_flame_shock_spread", rl_target_select::resolve_vb_lava_lash_geometry( p ).lava_lash_cap } };
+  if ( std::strcmp( token, "voltaic_blaze" ) == 0 )
+    return { { "shaman.voltaic_blaze_new_flame_shocks", rl_target_select::resolve_vb_lava_lash_geometry( p ).vb_cap } };
+  return {};
+}
+
 // A zero-row table holds one all-null sentinel row (a zero-length array is not valid C++); readers
 // iterate by n_rules / n_geometry_facts, never by array size.
 const rl_class_rule    NO_RULES[]    = { { nullptr, nullptr } };
@@ -197,13 +210,14 @@ const rl_class_plugin SHAMAN_PLUGIN = { "shaman",
                                         sizeof( SHAMAN_GEOMETRY ) / sizeof( SHAMAN_GEOMETRY[ 0 ] ),
                                         SHAMAN_HIT_PROVIDERS,
                                         sizeof( SHAMAN_HIT_PROVIDERS ) / sizeof( SHAMAN_HIT_PROVIDERS[ 0 ] ),
-                                        shaman_pet_pulses };
+                                        shaman_pet_pulses,
+                                        shaman_declared_counts };
 // Arms' aiming rules and facts are all generic or declared. 271-10 (owner decision H-3): the three hand-written warrior hit
 // providers (cleave, whirlwind, sweeping strikes) are retired; the arms hit columns are the generated "census.<button>" rows,
 // resolved by rl_policy_obs.cpp through rl_action_census and counted with count_engine_hits. The warrior table is therefore the
 // documented zero-row sentinel, like the generic one.
-const rl_class_plugin WARRIOR_PLUGIN = { "warrior", NO_RULES, 0, nullptr, nullptr, NO_GEOMETRY, 0, NO_HIT_PROVIDERS, 0, nullptr };
-const rl_class_plugin GENERIC_PLUGIN = { "generic", NO_RULES, 0, nullptr, nullptr, NO_GEOMETRY, 0, NO_HIT_PROVIDERS, 0, nullptr };
+const rl_class_plugin WARRIOR_PLUGIN = { "warrior", NO_RULES, 0, nullptr, nullptr, NO_GEOMETRY, 0, NO_HIT_PROVIDERS, 0, nullptr, nullptr };
+const rl_class_plugin GENERIC_PLUGIN = { "generic", NO_RULES, 0, nullptr, nullptr, NO_GEOMETRY, 0, NO_HIT_PROVIDERS, 0, nullptr, nullptr };
 
 }  // namespace
 
