@@ -135,7 +135,7 @@ inline constexpr std::size_t RL_ACTION_DIM = 22;
 inline constexpr double RL_EPISODE_MAX_TIME = 300.0;
 inline constexpr double RL_WAIT_FLOOR_SECONDS = 0.05;
 inline constexpr double RL_PERMANENT_SATURATION = 1.0;
-inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v7:df14d354a96a86080d3d4d40f61dbe4b9aad25d289310455b35e7ab7a32f7d61";
+inline constexpr const char* RL_OBS_SCHEMA_SHA = "rl-obs-v7:d98eee33bccbabc81d71aeb10e1d9fe6a2febfc44b81d42ecc6680ad484a6a35";
 inline constexpr const char* RL_MASK_RULES_SHA = "3f930294d36b217dca01fc51600c0da9d0568e20152fb53c588b6e8ddccf7662";
 inline constexpr const char* RL_ACTION_SPACE_SHA = "5e5f43d009948f4adbe65e86b1238e725596c593452d89a40e31c1b8e8e21684";
 
@@ -665,7 +665,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_1[] = {
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_2[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
-    { "since_applied", rl_kind::k_seconds, 30.0, false, 1.0, true, 30.0, nullptr, 0, false },
+    { "since_applied", rl_kind::k_seconds, 600.0, false, 1.0, true, 600.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_3[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
@@ -699,7 +699,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_9[] = {
     { "expiry_2", rl_kind::k_seconds, 0.0, false, 1.0, true, 12.0, nullptr, 0, false },
     { "expiry_3", rl_kind::k_seconds, 0.0, false, 1.0, true, 12.0, nullptr, 0, false },
     { "stack_seconds", rl_kind::k_seconds, 0.0, false, 1.0, true, 250.0, nullptr, 0, false },
-    { "since_applied", rl_kind::k_seconds, 30.0, false, 1.0, true, 30.0, nullptr, 0, false },
+    { "since_applied", rl_kind::k_seconds, 600.0, false, 1.0, true, 600.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_10[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
@@ -715,7 +715,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_12[] = {
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_13[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
-    { "since_applied", rl_kind::k_seconds, 30.0, false, 1.0, true, 30.0, nullptr, 0, false },
+    { "since_applied", rl_kind::k_seconds, 500.0, false, 1.0, true, 500.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_14[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 600.0, nullptr, 0, false },
@@ -723,7 +723,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_14[] = {
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_15[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 3.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
-    { "since_applied", rl_kind::k_seconds, 30.0, false, 1.0, true, 30.0, nullptr, 0, false },
+    { "since_applied", rl_kind::k_seconds, 60.0, false, 1.0, true, 60.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_16[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
@@ -742,12 +742,12 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_19[] = {
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_20[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
-    { "since_applied", rl_kind::k_seconds, 30.0, false, 1.0, true, 30.0, nullptr, 0, false },
+    { "since_applied", rl_kind::k_seconds, 400.0, false, 1.0, true, 400.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_21[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 15.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
-    { "since_applied", rl_kind::k_seconds, 30.0, false, 1.0, true, 30.0, nullptr, 0, false },
+    { "since_applied", rl_kind::k_seconds, 750.0, false, 1.0, true, 750.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_22[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
@@ -755,7 +755,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_22[] = {
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_23[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 3.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
-    { "since_applied", rl_kind::k_seconds, 30.0, false, 1.0, true, 30.0, nullptr, 0, false },
+    { "since_applied", rl_kind::k_seconds, 400.0, false, 1.0, true, 400.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_24[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 10.0, false, 1.0, nullptr, 0, false },
@@ -764,12 +764,12 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_24[] = {
     { "expiry_2", rl_kind::k_seconds, 0.0, false, 1.0, true, 8.0, nullptr, 0, false },
     { "expiry_3", rl_kind::k_seconds, 0.0, false, 1.0, true, 8.0, nullptr, 0, false },
     { "stack_seconds", rl_kind::k_seconds, 0.0, false, 1.0, true, 100.0, nullptr, 0, false },
-    { "since_applied", rl_kind::k_seconds, 30.0, false, 1.0, true, 30.0, nullptr, 0, false },
+    { "since_applied", rl_kind::k_seconds, 500.0, false, 1.0, true, 500.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_25[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 10.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
-    { "since_applied", rl_kind::k_seconds, 30.0, false, 1.0, true, 30.0, nullptr, 0, false },
+    { "since_applied", rl_kind::k_seconds, 200.0, false, 1.0, true, 200.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_26[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
@@ -814,7 +814,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_38[] = {
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_39[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 20.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
-    { "since_applied", rl_kind::k_seconds, 30.0, false, 1.0, true, 30.0, nullptr, 0, false },
+    { "since_applied", rl_kind::k_seconds, 60.0, false, 1.0, true, 60.0, nullptr, 0, false },
     { "next_expiry", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
     { "expiry_2", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
     { "expiry_3", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
@@ -823,7 +823,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_39[] = {
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_40[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 5.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 15.0, nullptr, 0, false },
-    { "since_applied", rl_kind::k_seconds, 30.0, false, 1.0, true, 30.0, nullptr, 0, false },
+    { "since_applied", rl_kind::k_seconds, 400.0, false, 1.0, true, 400.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_41[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
@@ -834,7 +834,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_42[] = {
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_43[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
-    { "since_applied", rl_kind::k_seconds, 30.0, false, 1.0, true, 30.0, nullptr, 0, false },
+    { "since_applied", rl_kind::k_seconds, 500.0, false, 1.0, true, 500.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_44[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
@@ -852,12 +852,12 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_47[] = {
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_48[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 30.0, nullptr, 0, false },
-    { "since_applied", rl_kind::k_seconds, 30.0, false, 1.0, true, 30.0, nullptr, 0, false },
+    { "since_applied", rl_kind::k_seconds, 600.0, false, 1.0, true, 600.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_49[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 10.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 25.0, nullptr, 0, false },
-    { "since_applied", rl_kind::k_seconds, 30.0, false, 1.0, true, 30.0, nullptr, 0, false },
+    { "since_applied", rl_kind::k_seconds, 600.0, false, 1.0, true, 600.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_50[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 15.0, false, 1.0, nullptr, 0, false },
@@ -878,7 +878,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_53[] = {
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_54[] = {
     { "stacks", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
-    { "since_applied", rl_kind::k_seconds, 30.0, false, 1.0, true, 30.0, nullptr, 0, false },
+    { "since_applied", rl_kind::k_seconds, 750.0, false, 1.0, true, 750.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_55[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
@@ -891,7 +891,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_57[] = {
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_58[] = {
     { "remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 25.0, nullptr, 0, false },
-    { "since_applied", rl_kind::k_seconds, 30.0, false, 1.0, true, 30.0, nullptr, 0, false },
+    { "since_applied", rl_kind::k_seconds, 500.0, false, 1.0, true, 500.0, nullptr, 0, false },
 };
 inline constexpr rl_obs_member RL_OBS_FAMILY_PLAYER_BUFFS_MEMBERS[] = {
   { "akilzons_rite", "akilzons_rite", RL_OBS_FAMILY_PLAYER_BUFFS_LEAVES_0, 1 },
@@ -1015,18 +1015,18 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_COOLDOWNS_MEMBERS[] = {
 
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_0[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "in_reach", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_range", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_front", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "alive", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "immune", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "immunity_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "immunity_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 600.0, nullptr, 0, false },
     { "time_to_die", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, false },
     { "health_pct", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
     { "is_boss", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "flame_shock_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 25.0, nullptr, 0, false },
-    { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 16.0, nullptr, 0, false },
+    { "neighbours_within_radius", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "burning_core_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
     { "lightning_rod_stacks", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -1034,9 +1034,9 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_0[] = {
     { "venomfang_debuff_stacks", rl_kind::k_int, 0.0, true, 20.0, false, 1.0, nullptr, 0, false },
     { "venomfang_debuff_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 8.0, nullptr, 0, false },
     { "rune_of_unleashed_fire_lingering_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
-    { "chain_hop_count", rl_kind::k_seconds, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
-    { "vb_new_flame_shocks_within_10yd", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
-    { "lava_lash_spread_within_12yd", rl_kind::k_seconds, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
+    { "chain_hop_count", rl_kind::k_int, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
+    { "vb_new_flame_shocks_within_10yd", rl_kind::k_int, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
+    { "lava_lash_spread_within_12yd", rl_kind::k_int, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
     { "flametongue_attack_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 1.0, nullptr, 0, false },
     { "lashing_flames_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
     { "marked_for_execution_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
@@ -1049,12 +1049,12 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_1[] = {
     { "in_front", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "alive", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "immune", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "immunity_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "immunity_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 600.0, nullptr, 0, false },
     { "time_to_die", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, false },
     { "health_pct", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
     { "is_boss", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "flame_shock_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 25.0, nullptr, 0, false },
-    { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 16.0, nullptr, 0, false },
+    { "neighbours_within_radius", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "burning_core_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
     { "lightning_rod_stacks", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -1062,27 +1062,27 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_1[] = {
     { "venomfang_debuff_stacks", rl_kind::k_int, 0.0, true, 20.0, false, 1.0, nullptr, 0, false },
     { "venomfang_debuff_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 8.0, nullptr, 0, false },
     { "rune_of_unleashed_fire_lingering_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
-    { "chain_hop_count", rl_kind::k_seconds, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
-    { "vb_new_flame_shocks_within_10yd", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
-    { "lava_lash_spread_within_12yd", rl_kind::k_seconds, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
+    { "chain_hop_count", rl_kind::k_int, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
+    { "vb_new_flame_shocks_within_10yd", rl_kind::k_int, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
+    { "lava_lash_spread_within_12yd", rl_kind::k_int, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
     { "flametongue_attack_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 1.0, nullptr, 0, false },
     { "lashing_flames_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
     { "marked_for_execution_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_2[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "in_reach", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_range", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_front", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "alive", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "immune", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "immunity_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "immunity_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 600.0, nullptr, 0, false },
     { "time_to_die", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, false },
     { "health_pct", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
     { "is_boss", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "flame_shock_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 25.0, nullptr, 0, false },
-    { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 16.0, nullptr, 0, false },
+    { "neighbours_within_radius", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "burning_core_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
     { "lightning_rod_stacks", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -1090,9 +1090,9 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_2[] = {
     { "venomfang_debuff_stacks", rl_kind::k_int, 0.0, true, 20.0, false, 1.0, nullptr, 0, false },
     { "venomfang_debuff_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 8.0, nullptr, 0, false },
     { "rune_of_unleashed_fire_lingering_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
-    { "chain_hop_count", rl_kind::k_seconds, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
-    { "vb_new_flame_shocks_within_10yd", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
-    { "lava_lash_spread_within_12yd", rl_kind::k_seconds, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
+    { "chain_hop_count", rl_kind::k_int, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
+    { "vb_new_flame_shocks_within_10yd", rl_kind::k_int, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
+    { "lava_lash_spread_within_12yd", rl_kind::k_int, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
     { "flametongue_attack_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 1.0, nullptr, 0, false },
     { "lashing_flames_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
     { "marked_for_execution_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
@@ -1105,12 +1105,12 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_3[] = {
     { "in_front", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "alive", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "immune", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "immunity_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "immunity_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 600.0, nullptr, 0, false },
     { "time_to_die", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, false },
     { "health_pct", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
     { "is_boss", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "flame_shock_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 25.0, nullptr, 0, false },
-    { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 16.0, nullptr, 0, false },
+    { "neighbours_within_radius", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "burning_core_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
     { "lightning_rod_stacks", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -1118,27 +1118,27 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_3[] = {
     { "venomfang_debuff_stacks", rl_kind::k_int, 0.0, true, 20.0, false, 1.0, nullptr, 0, false },
     { "venomfang_debuff_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 8.0, nullptr, 0, false },
     { "rune_of_unleashed_fire_lingering_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
-    { "chain_hop_count", rl_kind::k_seconds, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
-    { "vb_new_flame_shocks_within_10yd", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
-    { "lava_lash_spread_within_12yd", rl_kind::k_seconds, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
+    { "chain_hop_count", rl_kind::k_int, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
+    { "vb_new_flame_shocks_within_10yd", rl_kind::k_int, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
+    { "lava_lash_spread_within_12yd", rl_kind::k_int, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
     { "flametongue_attack_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 1.0, nullptr, 0, false },
     { "lashing_flames_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
     { "marked_for_execution_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_4[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "in_reach", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_range", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_front", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "alive", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "immune", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "immunity_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "immunity_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 600.0, nullptr, 0, false },
     { "time_to_die", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, false },
     { "health_pct", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
     { "is_boss", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "flame_shock_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 25.0, nullptr, 0, false },
-    { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 16.0, nullptr, 0, false },
+    { "neighbours_within_radius", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "burning_core_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
     { "lightning_rod_stacks", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -1146,27 +1146,27 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_4[] = {
     { "venomfang_debuff_stacks", rl_kind::k_int, 0.0, true, 20.0, false, 1.0, nullptr, 0, false },
     { "venomfang_debuff_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 8.0, nullptr, 0, false },
     { "rune_of_unleashed_fire_lingering_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
-    { "chain_hop_count", rl_kind::k_seconds, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
-    { "vb_new_flame_shocks_within_10yd", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
-    { "lava_lash_spread_within_12yd", rl_kind::k_seconds, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
+    { "chain_hop_count", rl_kind::k_int, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
+    { "vb_new_flame_shocks_within_10yd", rl_kind::k_int, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
+    { "lava_lash_spread_within_12yd", rl_kind::k_int, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
     { "flametongue_attack_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 1.0, nullptr, 0, false },
     { "lashing_flames_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
     { "marked_for_execution_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_5[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "in_reach", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_range", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_front", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "alive", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "immune", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "immunity_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "immunity_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 600.0, nullptr, 0, false },
     { "time_to_die", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, false },
     { "health_pct", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
     { "is_boss", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "flame_shock_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 25.0, nullptr, 0, false },
-    { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 16.0, nullptr, 0, false },
+    { "neighbours_within_radius", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "burning_core_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
     { "lightning_rod_stacks", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -1174,27 +1174,27 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_5[] = {
     { "venomfang_debuff_stacks", rl_kind::k_int, 0.0, true, 20.0, false, 1.0, nullptr, 0, false },
     { "venomfang_debuff_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 8.0, nullptr, 0, false },
     { "rune_of_unleashed_fire_lingering_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
-    { "chain_hop_count", rl_kind::k_seconds, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
-    { "vb_new_flame_shocks_within_10yd", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
-    { "lava_lash_spread_within_12yd", rl_kind::k_seconds, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
+    { "chain_hop_count", rl_kind::k_int, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
+    { "vb_new_flame_shocks_within_10yd", rl_kind::k_int, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
+    { "lava_lash_spread_within_12yd", rl_kind::k_int, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
     { "flametongue_attack_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 1.0, nullptr, 0, false },
     { "lashing_flames_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
     { "marked_for_execution_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_6[] = {
     { "found", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 40.0, nullptr, 0, false },
     { "in_reach", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_range", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "in_front", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "alive", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "immune", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
-    { "immunity_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "immunity_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 600.0, nullptr, 0, false },
     { "time_to_die", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, false },
     { "health_pct", rl_kind::k_float, 0.0, true, 100.0, false, 1.0, nullptr, 0, false },
     { "is_boss", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "flame_shock_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 25.0, nullptr, 0, false },
-    { "neighbours_within_radius", rl_kind::k_seconds, 0.0, false, 1.0, true, 16.0, nullptr, 0, false },
+    { "neighbours_within_radius", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "is_current_target", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
     { "burning_core_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
     { "lightning_rod_stacks", rl_kind::k_int, 0.0, true, 1.0, false, 1.0, nullptr, 0, false },
@@ -1202,9 +1202,9 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_TARGET_FACTS_LEAVES_6[] = {
     { "venomfang_debuff_stacks", rl_kind::k_int, 0.0, true, 20.0, false, 1.0, nullptr, 0, false },
     { "venomfang_debuff_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 8.0, nullptr, 0, false },
     { "rune_of_unleashed_fire_lingering_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 10.0, nullptr, 0, false },
-    { "chain_hop_count", rl_kind::k_seconds, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
-    { "vb_new_flame_shocks_within_10yd", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
-    { "lava_lash_spread_within_12yd", rl_kind::k_seconds, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
+    { "chain_hop_count", rl_kind::k_int, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
+    { "vb_new_flame_shocks_within_10yd", rl_kind::k_int, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
+    { "lava_lash_spread_within_12yd", rl_kind::k_int, 0.0, false, 1.0, true, 5.0, nullptr, 0, false },
     { "flametongue_attack_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 1.0, nullptr, 0, false },
     { "lashing_flames_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
     { "marked_for_execution_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 20.0, nullptr, 0, false },
@@ -1342,7 +1342,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_DECK_LEAVES_11[] = {
     { "value", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_DECK_LEAVES_12[] = {
-    { "value", rl_kind::k_int, 0.0, true, 4.0, false, 1.0, nullptr, 0, false },
+    { "value", rl_kind::k_int, 0.0, true, 2.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_DECK_LEAVES_13[] = {
     { "value", rl_kind::k_int, 0.0, true, 200.0, false, 1.0, nullptr, 0, false },
@@ -1426,7 +1426,7 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_PETS_LEAVES_0[] = {
     { "active", rl_kind::k_int, 0.0, true, 10.0, false, 1.0, nullptr, 0, false },
 };
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_PETS_LEAVES_1[] = {
-    { "pulse_event_remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 6.0, nullptr, 0, false },
+    { "pulse_event_remains", rl_kind::k_seconds, 0.0, false, 1.0, true, 7.5, nullptr, 0, false },
 };
 inline constexpr rl_obs_member RL_OBS_FAMILY_PETS_MEMBERS[] = {
   { "searing_totem", "searing_totem", RL_OBS_FAMILY_PETS_LEAVES_0, 1 },
@@ -1553,7 +1553,7 @@ inline constexpr rl_obs_member RL_OBS_FAMILY_PROC_CHANCES_MEMBERS[] = {
 inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "fight_remains", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, true },
     { "active_enemies", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
-    { "raid_event_next_in", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "raid_event_next_in", rl_kind::k_seconds, 0.0, false, 1.0, true, 1000.0, nullptr, 0, false },
     { "dying_within_5s", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "dying_within_15s", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "enemies_in_front", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
@@ -1562,12 +1562,12 @@ inline constexpr rl_leaf_desc RL_OBS_FAMILY_SCALARS_LEAVES_0[] = {
     { "enemies_within_8yd", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "enemies_within_40yd", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "flame_shock_carrier_count", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
-    { "immunity_in", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "immunity_in", rl_kind::k_seconds, 0.0, false, 1.0, true, 600.0, nullptr, 0, false },
     { "immunity_remaining", rl_kind::k_seconds, 0.0, false, 1.0, true, 600.0, nullptr, 0, false },
     { "lashing_flames_carrier_count", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "lightning_rod_carrier_count", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "longest_time_to_die", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, false },
-    { "nearest_enemy_distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 60.0, nullptr, 0, false },
+    { "nearest_enemy_distance", rl_kind::k_seconds, 0.0, false, 1.0, true, 25.0, nullptr, 0, false },
     { "soonest_time_to_die", rl_kind::k_seconds, 0.0, true, 600.0, false, 1.0, nullptr, 0, false },
     { "hits.chain_lightning", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
     { "hits.tempest", rl_kind::k_int, 0.0, false, 1.0, true, 50.0, nullptr, 0, false },
@@ -1922,18 +1922,18 @@ struct rl_aim_fact_desc
 };
 
 inline constexpr rl_aim_fact_desc RL_AIM_FACT_DESCS[RL_TARGET_FEATURES] = {
-  { "distance", rl_kind::k_seconds, false, 1.0, true, 60.0, -1 },
+  { "distance", rl_kind::k_seconds, false, 1.0, true, 50.0, -1 },
   { "in_reach", rl_kind::k_int, true, 1.0, false, 1.0, -1 },
   { "in_range", rl_kind::k_int, true, 1.0, false, 1.0, -1 },
   { "in_front", rl_kind::k_int, true, 1.0, false, 1.0, -1 },
   { "alive", rl_kind::k_int, true, 1.0, false, 1.0, -1 },
   { "immune", rl_kind::k_int, true, 1.0, false, 1.0, -1 },
-  { "immunity_remaining", rl_kind::k_seconds, false, 1.0, true, 60.0, -1 },
+  { "immunity_remaining", rl_kind::k_seconds, false, 1.0, true, 600.0, -1 },
   { "time_to_die", rl_kind::k_seconds, false, 1.0, true, 60.0, -1 },
   { "health_pct", rl_kind::k_float, true, 100.0, false, 1.0, -1 },
   { "is_boss", rl_kind::k_int, true, 1.0, false, 1.0, -1 },
   { "flame_shock_remaining", rl_kind::k_seconds, false, 1.0, true, 25.0, -1 },
-  { "neighbours_within_radius", rl_kind::k_seconds, false, 1.0, true, 16.0, -1 },
+  { "neighbours_within_radius", rl_kind::k_int, false, 1.0, true, 50.0, -1 },
   { "is_current_target", rl_kind::k_int, true, 1.0, false, 1.0, -1 },
   { "burning_core_remaining", rl_kind::k_seconds, false, 1.0, true, 6.0, -1 },
   { "lightning_rod_stacks", rl_kind::k_int, true, 1.0, false, 1.0, -1 },
@@ -1941,9 +1941,9 @@ inline constexpr rl_aim_fact_desc RL_AIM_FACT_DESCS[RL_TARGET_FEATURES] = {
   { "venomfang_debuff_stacks", rl_kind::k_int, true, 20.0, false, 1.0, -1 },
   { "venomfang_debuff_remaining", rl_kind::k_seconds, false, 1.0, true, 8.0, -1 },
   { "rune_of_unleashed_fire_lingering_remaining", rl_kind::k_seconds, false, 1.0, true, 10.0, -1 },
-  { "chain_hop_count", rl_kind::k_seconds, false, 1.0, true, 5.0, -1 },
-  { "vb_new_flame_shocks_within_10yd", rl_kind::k_seconds, false, 1.0, true, 6.0, -1 },
-  { "lava_lash_spread_within_12yd", rl_kind::k_seconds, false, 1.0, true, 5.0, -1 },
+  { "chain_hop_count", rl_kind::k_int, false, 1.0, true, 5.0, -1 },
+  { "vb_new_flame_shocks_within_10yd", rl_kind::k_int, false, 1.0, true, 6.0, -1 },
+  { "lava_lash_spread_within_12yd", rl_kind::k_int, false, 1.0, true, 5.0, -1 },
   { "flametongue_attack_remaining", rl_kind::k_seconds, false, 1.0, true, 1.0, -1 },
   { "lashing_flames_remaining", rl_kind::k_seconds, false, 1.0, true, 20.0, -1 },
   { "marked_for_execution_remaining", rl_kind::k_seconds, false, 1.0, true, 20.0, -1 },
@@ -1973,7 +1973,7 @@ inline constexpr const char* RL_AIM_SPELLS[RL_AIM_SPELL_COUNT] = {
 };
 
 inline constexpr std::size_t RL_AIM_INPUT_COUNT = 32;
-inline constexpr const char* RL_AIM_SHA = "aim-v1:35c7584837a6cc69be489e858e400dfda338c9b062d53756bc835665e8037d78";
+inline constexpr const char* RL_AIM_SHA = "aim-v1:c3addf9acdb8ce47ffa46e3051c30f7cb849d30606a756d9b411f81cb562dab4";
 
 
 // ---- Generic spec tables (C-A, appended; every line above is unchanged) ----
