@@ -4031,6 +4031,13 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
   // can never read a spell's current crit chance or damage multiplier), leaving this cache,
   // its lambda, and the shared action_state_t it snapshotted with no remaining consumer.
 
+  // 261029-trp (S2-F1): the target-fact leaves of one (action, pick) are read one after the other; inside a poll memo scope the fact of the previous leaf is
+  // reused for the next leaf of the same (action, pick) instead of being asked for again (build_obs changes no state, so the second answer cannot differ).
+  // Outside a scope every leaf asks, as before.
+  const action_t*                 leaf_fact_action = nullptr;
+  const player_t*                 leaf_fact_pick = nullptr;
+  rl_target_select::enemy_fact    leaf_fact;
+
   for ( std::size_t slot = 0; slot < RL_OBS_DIM; ++slot )
   {
     const slot_binding& b = t.bindings[ slot ];
@@ -4721,8 +4728,13 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
             status = lookup_status::absent;
             break;
           }
-          const rl_target_select::enemy_fact fact =
-              rl_target_select::build_enemy_fact( b.bound_action, pick );
+          if ( !( rl_target_select::poll_memo_active() && leaf_fact_action == b.bound_action && leaf_fact_pick == pick ) )
+          {
+            leaf_fact = rl_target_select::build_enemy_fact( b.bound_action, pick );
+            leaf_fact_action = b.bound_action;
+            leaf_fact_pick = pick;
+          }
+          const rl_target_select::enemy_fact& fact = leaf_fact;
 
           // 232-04 (OBS-02, R-T): the pre-cast is_current_target snapshot. On the REAL decision
           // (is_decision_boundary == true), stamp what was just computed above -- BEFORE

@@ -196,10 +196,16 @@ void on_fight_end( sim_t* sim );
 //   solver_window_ms=<n>   default 250. The window: for every foreground GCD (and cast end) the policy is first asked n ms before the instant the actor
 //                          is ready again (the Player-Ready event; for a hard cast the cast end), then every solver_repoll_ms after that, then once
 //                          more at the instant itself (the ordinary Player-Ready decision). 0 = off: the stage-B behaviour, byte for byte.
-//   solver_repoll_ms=<n>   default 25 (the live addon's cadence).
+//   solver_repoll_ms=<n>   default 50 (owner 2026-10-29, 261029-trp S2-F1; it was 25, the live addon's cadence, which the addon follows).
 //   solver_window_log=<f>  off by default: one JSON line per policy call that is NOT an ordinary decision boundary (diagnostic and the D3 count).
 //   solver_window_probe=1  off by default, a purity probe: every poll runs (the window opens, the chain polls, the queue is re-polled) but nothing is ever
 //                          held or replaced, so the launch must be byte-identical to solver_window_ms=0 -- proof that a poll leaves the simulation untouched.
+//   solver_poll_incremental=<0|1>  default 1 (261029-trp S2-F1): THE INCREMENTAL POLL, see the block below. 0 = every poll and every decision rebuilds its
+//                          observation from scratch (the behaviour before the item), the A side of the identity check.
+//   solver_poll_probe=1    off by default, the identity probe of the incremental poll (beside solver_window_probe): every choose() runs a second, full pass
+//                          (no memo) over the same state, BEFORE the real pass, and compares observation, mask, candidate tables and q, bit for bit; any
+//                          difference aborts the entry with RL_POLL_INCREMENTAL_DIFFERS slot=<index>:<leaf> incremental=<%a> full=<%a> t=<t>. It roughly
+//                          doubles the cost of a decision and changes no pick.
 //   solver_explore_casts_only=<0|1>  default 0 (owner decision 2026-10-27, 261027-fts). The exploration (button dial) draw is restricted to CASTS: with probability
 //                          `exploration` the pick is uniform over the legal casts alone and the wait family is not an option (default 0: the wait family is ONE
 //                          option beside each legal cast, then uniform within waits, byte for byte as before). With no legal cast the draw falls through to the
@@ -221,10 +227,27 @@ void on_fight_end( sim_t* sim );
 // Census: staged counts a HOLD once when it is made (a hold that reaches the fire is the row's staging); replaced / replaced_by_wait / flipflop_bound /
 // repolls as in the table of rl_translog.hpp.
 // ==========================================================================
+// ==========================================================================
+// 261029-trp S2-F1: THE INCREMENTAL POLL (owner rulings 2026-10-29). A decision window of 250 ms re-polled every 50 ms costs five full observation builds per
+// press; almost all of that is the same engine state read again. Inside choose() the span read_state .. build_obs runs under a rl_target_select::poll_memo_scope
+// (rl_target_select.hpp has what it memoizes and why each part is exact):
+//   - the EPOCH is the number of engine events executed so far minus the policy's own poll events (a poll is pure: it changes no engine state), plus a bump
+//     after every scope that is not a pure poll event (a decision, or the poll inside a queue event, is followed by a press that changes state) and after a
+//     re-poll that replaces a queued press. Two scopes with the same epoch saw the same engine state, differing only in the clock.
+//   - the observation facts of a candidate (distance, reach, front, alive, immune, neighbours, the geometry counts) are kept per epoch; the clock-driven ones
+//     (time_to_die, health, auras' remains, immunity) are re-read when the time moved; the name lookups of the auras are kept while the lists are unchanged.
+//   - the forward pass is skipped when the mask and the observation are bit-equal to the previous pass's (the forward pass is a pure function of them): the
+//     previous q stands, so the previous pick does.
+// Census (rl_translog.hpp, census_slot::poll_*): polls, polls at an unchanged epoch, polls whose forward pass was skipped.
+// With solver_poll_probe=1 every pass is checked against a full rebuild (see the option). With solver_poll_incremental=0 nothing is memoized or skipped.
+// Net and table play only: the observer arm is never memoized.
+// ==========================================================================
 int&         window_ms_storage();
 int&         repoll_ms_storage();
 std::string& window_log_storage();
 int&         window_probe_storage();
+int&         poll_incremental_storage();
+int&         poll_probe_storage();
 bool&        explore_casts_only_storage();
 
 // player_t::schedule_ready() made a Player-Ready event for a non-waiting boundary at `ready_at`; action_t::schedule_execute() started a hard cast whose bar and

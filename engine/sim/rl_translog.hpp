@@ -804,6 +804,7 @@ struct decision_record
 // while the mask had it illegal ONLY because a reach rule (the melee-reach rule of the EXEMPT presses, the SHAPE reach rule of a strike shape)
 // masked it. The APL played its pick, the row records the mask exactly as computed (bit 0), and this count says how often. A pick masked by a
 // legality bit still aborts OBSERVE_STOCK_MASK_DISAGREES. Zero outside observer mode. Slots 0-22 keep their positions (additive).
+// 261029-trp (S2-F1): then POLL_WORDS further words, the incremental-poll counters (poll_total, poll_epoch_reused, poll_forward_skipped; see the constants below).
 namespace census_slot
 {
 inline constexpr std::uint32_t interrupt_movement = 0;
@@ -832,7 +833,18 @@ inline constexpr std::uint32_t committed_queued = 22;
 inline constexpr std::uint32_t COUNT = 23;
 inline constexpr std::uint32_t DISCARD_COUNT = 14;  // slots 0-13 are the reasons a staged decision never became a row
 inline constexpr std::uint32_t OBSERVER_REACH_FIRST = COUNT;  // first of RL_ACTION_DIM words: observerReachDisagreements by button index
-inline constexpr std::uint32_t TOTAL = COUNT + static_cast<std::uint32_t>( RL_ACTION_DIM );
+// 261029-trp (S2-F1): the three INCREMENTAL-POLL words, right after the per-button words (additive; every slot above keeps its position).
+//   poll_total             every window poll and queue re-poll the policy ran (the fire-instant decision is not a poll)
+//   poll_epoch_reused      polls whose engine state was provably the previous poll's (no event other than the policy's own polls ran between them): the
+//                          fact memo's static parts were reused, only the clock-driven parts were re-read
+//   poll_forward_skipped   polls whose mask and observation were bit-equal to the previous forward pass's: the forward pass was skipped and its q kept
+// `repolls` (slot 15) keeps its meaning: polls that picked the pending press again and kept it. A kept poll may or may not have skipped its forward pass.
+inline constexpr std::uint32_t POLL_FIRST = OBSERVER_REACH_FIRST + static_cast<std::uint32_t>( RL_ACTION_DIM );
+inline constexpr std::uint32_t poll_total = POLL_FIRST;
+inline constexpr std::uint32_t poll_epoch_reused = POLL_FIRST + 1;
+inline constexpr std::uint32_t poll_forward_skipped = POLL_FIRST + 2;
+inline constexpr std::uint32_t POLL_WORDS = 3;
+inline constexpr std::uint32_t TOTAL = POLL_FIRST + POLL_WORDS;
 }  // namespace census_slot
 static_assert( census_slot::TOTAL <= RL_OBS_DIM + 2 - 8, "the census must fit the close row's formerly zero region" );
 

@@ -33,6 +33,7 @@
 #include <fstream>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -65,6 +66,45 @@ constexpr double WAIT_END_OF_FIGHT_EPSILON_SECONDS = 0.001;
   throw std::runtime_error( "solver_control protocol violation: " + msg );
 }
 
+// 261029-trp S2-F1: the identity probe of the incremental poll (solver_poll_probe=1). `full` is the pass that ran without the memo, `inc` the real one.
+std::string probe_hexfloat( double v )
+{
+  return fmt::format( "{:a}", v );
+}
+[[noreturn]] void probe_differs( const sim_t* sim, const std::string& slot, double inc, double full )
+{
+  protocol_abort( fmt::format( "RL_POLL_INCREMENTAL_DIFFERS slot={} incremental={} full={} t={:.6f}", slot, probe_hexfloat( inc ), probe_hexfloat( full ),
+                               sim->current_time().total_seconds() ) );
+}
+void poll_probe_compare_q( const sim_t* sim, const float inc[ RL_ACTION_DIM ], const float full[ RL_ACTION_DIM ] )
+{
+  for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+    if ( std::memcmp( &inc[ i ], &full[ i ], sizeof( float ) ) != 0 )
+      probe_differs( sim, fmt::format( "q{}:{}", i, RL_ACTIONS[ i ].label ), static_cast<double>( inc[ i ] ), static_cast<double>( full[ i ] ) );
+}
+void poll_probe_compare( const sim_t* sim, player_t* p, const float full_obs[ RL_OBS_DIM ], const std::uint8_t full_mask[ RL_ACTION_DIM ],
+                         const std::vector<rl_target_select::table_digest_entry>& full_tables, const float inc_obs[ RL_OBS_DIM ],
+                         const std::uint8_t inc_mask[ RL_ACTION_DIM ] )
+{
+  for ( std::size_t i = 0; i < RL_ACTION_DIM; ++i )
+    if ( inc_mask[ i ] != full_mask[ i ] )
+      probe_differs( sim, fmt::format( "mask{}:{}", i, RL_ACTIONS[ i ].label ), static_cast<double>( inc_mask[ i ] ), static_cast<double>( full_mask[ i ] ) );
+  for ( std::size_t k = 0; k < RL_OBS_DIM; ++k )
+    if ( std::memcmp( &inc_obs[ k ], &full_obs[ k ], sizeof( float ) ) != 0 )
+      probe_differs( sim, fmt::format( "{}:{}", k, RL_OBS_NAMES[ k ] ), static_cast<double>( inc_obs[ k ] ), static_cast<double>( full_obs[ k ] ) );
+  std::vector<rl_target_select::table_digest_entry> inc_tables;
+  rl_target_select::decision_tables_digest( p, inc_tables );
+  if ( inc_tables.size() != full_tables.size() )
+    probe_differs( sim, fmt::format( "tables:size" ), static_cast<double>( inc_tables.size() ), static_cast<double>( full_tables.size() ) );
+  for ( std::size_t k = 0; k < inc_tables.size(); ++k )
+  {
+    const double a = inc_tables[ k ].value;
+    const double b = full_tables[ k ].value;
+    if ( inc_tables[ k ].label != full_tables[ k ].label || std::memcmp( &a, &b, sizeof( double ) ) != 0 )
+      probe_differs( sim, fmt::format( "tables:{}", inc_tables[ k ].label ), a, b );
+  }
+}
+
 // ==========================================================================
 // 261027-fts stage D: POLL MODE (the contract is in solver_control.hpp, "THE DECISION WINDOW"). A window poll or a queue re-poll runs choose() with g_poll set:
 // the policy decides (read_state at a real decision boundary, mask, forward pass or the table's pick, the pick's target) and NOTHING ELSE happens: no row
@@ -91,6 +131,45 @@ struct poll_out_t
 thread_local bool       g_poll = false;               // this choose() call is a poll
 thread_local bool       g_skip_button_dial = false;   // the poll must not draw the exploration (button) dial
 thread_local poll_out_t g_poll_out;
+
+// ==========================================================================
+// 261029-trp S2-F1: THE INCREMENTAL POLL (contract: solver_control.hpp, "THE INCREMENTAL POLL"). One fight's state, thread_local like the window's.
+// ==========================================================================
+thread_local std::uint64_t g_pure_poll_events = 0;     // window_poll_event_t executions this fight: a poll event changes no engine state
+thread_local std::uint64_t g_epoch_bumps = 0;          // scopes after which the engine state may have changed without an event of its own
+thread_local bool          g_in_pure_poll_event = false;
+thread_local bool          g_prev_epoch_valid = false; // the epoch of the previous memo scope, for the census word poll_epoch_reused
+thread_local std::uint64_t g_prev_epoch = 0;
+// The last forward pass: its inputs and its q. The forward pass is a pure function of the weights, the mask and the observation.
+struct forward_cache_t
+{
+  bool          valid = false;
+  const void*   weights = nullptr;
+  float         obs[ RL_OBS_DIM ];
+  std::uint8_t  mask[ RL_ACTION_DIM ];
+  float         q[ RL_ACTION_DIM ];
+};
+thread_local forward_cache_t g_fwd;
+
+inline std::uint64_t poll_epoch( const sim_t* sim )
+{
+  return sim->event_mgr.events_processed - g_pure_poll_events + g_epoch_bumps;
+}
+
+// The memo scope of one choose(): alive from read_state to the end of build_obs. A scope that is not a pure poll event (a decision, or the poll inside a queue
+// event) is followed by a press, so it bumps the epoch when it ends.
+struct obs_memo_guard_t
+{
+  rl_target_select::poll_memo_scope scope;
+  bool                              pure_poll;
+  obs_memo_guard_t( const sim_t* sim, bool is_poll ) : scope( sim, poll_epoch( sim ), true ), pure_poll( is_poll && g_in_pure_poll_event ) {}
+  ~obs_memo_guard_t()
+  {
+    if ( !pure_poll )
+      ++g_epoch_bumps;
+  }
+};
+
 constexpr int WINDOW_MAX_REPLACES = 4;   // flip-flop bound (DECISIONS.md): a window or a queue may replace its pick at most this many times
 
 // The last cast choose() handed to the engine (not a poll): queue_window_open() reads its target and exploration flag.
@@ -1033,12 +1112,20 @@ bool queue_poll_run( player_t* p, action_t* a, bool at_fire )
   g_last_pick = last_pick_t{ true, out.action, out.idx, out.target, out.explored };
   g_q_replaces_next = replaces;
   press_chosen( p, out.action );
+  ++g_epoch_bumps;  // 261029-trp S2-F1: the engine state changed inside a poll event (the queued press was cancelled and a new one made)
   g_q_replaces_next = 0;  // taken by queue_window_open() if the new press queued; a press that fired at once has no chain to carry it into
   return true;
 }
 
 void window_poll_event_t::execute()
 {
+  // 261029-trp S2-F1: this event is a pure poll (it changes no engine state): it does not count toward the incremental poll's epoch.
+  ++g_pure_poll_events;
+  struct pure_poll_flag_t
+  {
+    pure_poll_flag_t() { g_in_pure_poll_event = true; }
+    ~pure_poll_flag_t() { g_in_pure_poll_event = false; }
+  } pure_poll_flag;
   player_t* p = actor;
   sim_t*    sim = &this->sim();
   if ( queue_chain )
@@ -1228,7 +1315,17 @@ int& window_ms_storage()
 }
 int& repoll_ms_storage()
 {
-  static int v = 25;
+  static int v = 50;  // 261029-trp S2-F1 (owner 2026-10-29): was 25
+  return v;
+}
+int& poll_incremental_storage()
+{
+  static int v = 1;
+  return v;
+}
+int& poll_probe_storage()
+{
+  static int v = 0;
   return v;
 }
 std::string& window_log_storage()
@@ -1876,21 +1973,6 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
     // (see the two-segment note above).
     const rl_policy::slot_table& table = rl_policy::bind_slots( p );
 
-    const chrono::wall_clock::time_point read_state_t0 =
-        obs_timing ? chrono::wall_clock::now() : chrono::wall_clock::time_point{};
-    // 228-11 Task 2: this call is ALWAYS the real decision boundary (the in-process arm's own
-    // per-decision state read, before any reply/accept_cast has run) -- see rl_policy.hpp's own
-    // doc comment on read_state for why decision_dump.cpp's diagnostic call must pass false.
-    const rl_policy::rl_state_t state = rl_policy::read_state( p, foreground, /*is_decision_boundary=*/true );
-    // The removed pre-decision behind-enemy stamp (R6-27, 233.1-01) was here -- deleted with
-    // the whole turn action; nothing downstream reads it anymore.
-    std::chrono::nanoseconds obs_timing_ns{ 0 };
-    if ( obs_timing )
-    {
-      const chrono::wall_clock::time_point read_state_t1 = chrono::wall_clock::now();
-      obs_timing_ns += std::chrono::duration_cast<std::chrono::nanoseconds>( read_state_t1 - read_state_t0 );
-    }
-
     // 260831-mk7 (D-3): build_mask MOVES UP, ahead of build_obs -- the
     // engine's own order is now read_state -> build_mask -> [allow-list
     // AND] -> [all-illegal refusal] -> build_obs -> forward, matching
@@ -1965,6 +2047,51 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
             m[ i ] = 0;
       }
     };
+
+    // 261029-trp S2-F1: THE INCREMENTAL POLL (solver_control.hpp). The span read_state .. build_obs runs under a memo scope; with solver_poll_probe=1 a full
+    // pass (no memo) runs over the same state FIRST, so the real pass, whose tables the rest of the decision reads, is the incremental one, and the two are
+    // compared bit for bit once the real pass has built the observation.
+    const bool incremental = poll_incremental_storage() != 0 && !sim->solver_policy_observe_stock;
+    const bool probe = incremental && poll_probe_storage() != 0;
+    float                                                probe_obs[ RL_OBS_DIM ];
+    std::uint8_t                                         probe_mask[ RL_ACTION_DIM ];
+    std::vector<rl_target_select::table_digest_entry>    probe_tables;
+    if ( probe )
+    {
+      const rl_policy::rl_state_t full_state = rl_policy::read_state( p, foreground, /*is_decision_boundary=*/true );
+      complete_mask( full_state, probe_mask );
+      rl_policy::build_obs( p, full_state, table, probe_mask, probe_obs );
+      rl_target_select::decision_tables_digest( p, probe_tables );
+    }
+    std::optional<obs_memo_guard_t> memo_guard;
+    if ( incremental )
+    {
+      memo_guard.emplace( sim, g_poll );
+      if ( g_poll )
+      {
+        count( rl_translog::census_slot::poll_total );
+        if ( g_prev_epoch_valid && g_prev_epoch == poll_epoch( sim ) )
+          count( rl_translog::census_slot::poll_epoch_reused );
+      }
+      g_prev_epoch = poll_epoch( sim );
+      g_prev_epoch_valid = true;
+    }
+
+    const chrono::wall_clock::time_point read_state_t0 =
+        obs_timing ? chrono::wall_clock::now() : chrono::wall_clock::time_point{};
+    // 228-11 Task 2: this call is ALWAYS the real decision boundary (the in-process arm's own
+    // per-decision state read, before any reply/accept_cast has run) -- see rl_policy.hpp's own
+    // doc comment on read_state for why decision_dump.cpp's diagnostic call must pass false.
+    const rl_policy::rl_state_t state = rl_policy::read_state( p, foreground, /*is_decision_boundary=*/true );
+    // The removed pre-decision behind-enemy stamp (R6-27, 233.1-01) was here -- deleted with
+    // the whole turn action; nothing downstream reads it anymore.
+    std::chrono::nanoseconds obs_timing_ns{ 0 };
+    if ( obs_timing )
+    {
+      const chrono::wall_clock::time_point read_state_t1 = chrono::wall_clock::now();
+      obs_timing_ns += std::chrono::duration_cast<std::chrono::nanoseconds>( read_state_t1 - read_state_t0 );
+    }
+
     complete_mask( state, mask );
 
     // 222-07 (CR-04): the allow-list AND above can manufacture an
@@ -2035,6 +2162,9 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
         obs_timing ? chrono::wall_clock::now() : chrono::wall_clock::time_point{};
     float obs[ RL_OBS_DIM ];
     rl_policy::build_obs( p, state, table, mask, obs );
+    memo_guard.reset();  // 261029-trp S2-F1: the memo scope ends with the observation
+    if ( probe )
+      poll_probe_compare( sim, p, probe_obs, probe_mask, probe_tables, obs, mask );
     if ( obs_timing )
     {
       const chrono::wall_clock::time_point build_obs_t1 = chrono::wall_clock::now();
@@ -2162,7 +2292,35 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
       std::fill( std::begin( q ), std::end( q ), 0.0f );
     }
     else
-      rl_policy::forward( *sim->solver_policy_weights, obs, mask, q );
+    {
+      // 261029-trp S2-F1: the forward pass is a pure function of (weights, observation, mask); bit-equal inputs to the previous pass's keep its q.
+      const void* weights_id = sim->solver_policy_weights.get();
+      if ( incremental && g_fwd.valid && g_fwd.weights == weights_id && std::memcmp( g_fwd.obs, obs, sizeof( obs ) ) == 0 &&
+           std::memcmp( g_fwd.mask, mask, sizeof( mask ) ) == 0 )
+      {
+        std::memcpy( q, g_fwd.q, sizeof( q ) );
+        if ( g_poll )
+          count( rl_translog::census_slot::poll_forward_skipped );
+        if ( probe )
+        {
+          float fresh_q[ RL_ACTION_DIM ];
+          rl_policy::forward( *sim->solver_policy_weights, obs, mask, fresh_q );
+          poll_probe_compare_q( sim, q, fresh_q );
+        }
+      }
+      else
+      {
+        rl_policy::forward( *sim->solver_policy_weights, obs, mask, q );
+        if ( incremental )
+        {
+          g_fwd.valid = true;
+          g_fwd.weights = weights_id;
+          std::memcpy( g_fwd.obs, obs, sizeof( obs ) );
+          std::memcpy( g_fwd.mask, mask, sizeof( mask ) );
+          std::memcpy( g_fwd.q, q, sizeof( q ) );
+        }
+      }
+    }
 
     // 260922-mfh (D3): hold windows restrict SELECTION ONLY -- they must never touch the
     // `mask` that build_obs/forward above, the q_margin/top_q diagnostics below, and BOTH
@@ -2738,6 +2896,12 @@ void reset_iteration( sim_t* sim )
   g_win = window_t{};
   g_q = queue_poll_t{};
   g_q_replaces_next = 0;
+  g_pure_poll_events = 0;  // 261029-trp S2-F1: the incremental poll's state belongs to one fight
+  g_epoch_bumps = 0;
+  g_in_pure_poll_event = false;
+  g_prev_epoch_valid = false;
+  g_prev_epoch = 0;
+  g_fwd.valid = false;
   g_last_pick = last_pick_t{};
   g_poll = false;
   g_skip_button_dial = false;

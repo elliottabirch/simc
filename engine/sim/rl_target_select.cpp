@@ -190,6 +190,158 @@ struct actor_cache_key_hash_t
 std::unordered_map<actor_cache_key_t, vb_lava_lash_geometry_t, actor_cache_key_hash_t>
     g_vb_lava_lash_geometry_cache;
 
+// ==========================================================================
+// 261029-trp (S2-F1): THE INCREMENTAL POLL's memo (rl_target_select.hpp, poll_memo_scope; the contract is solver_control.hpp, "THE INCREMENTAL POLL").
+// Everything below is consulted ONLY while a poll_memo_scope is alive (g_memo.active); outside one the original code runs, byte for byte.
+// ==========================================================================
+struct memo_ctx_t
+{
+  bool          active = false;
+  const sim_t*  sim = nullptr;
+  std::uint64_t epoch = 0;       // the count of engine events that can have changed the state the memo reads (solver_control.cpp, poll_epoch), plus 1:
+                                 // a default-constructed entry (epoch 0) therefore never matches
+  timespan_t    now = timespan_t::zero();
+};
+memo_ctx_t g_memo;
+
+struct pair_key_t
+{
+  const void* a;
+  const void* b;
+  bool operator==( const pair_key_t& o ) const
+  {
+    return a == o.a && b == o.b;
+  }
+};
+inline std::size_t mix_pointer( const void* p )
+{
+  std::uint64_t x = static_cast<std::uint64_t>( reinterpret_cast<std::uintptr_t>( p ) );
+  x ^= x >> 33;
+  x *= 0xff51afd7ed558ccdULL;
+  x ^= x >> 33;
+  return static_cast<std::size_t>( x );
+}
+struct pair_key_hash_t
+{
+  std::size_t operator()( const pair_key_t& k ) const
+  {
+    return mix_pointer( k.a ) * 31u + mix_pointer( k.b );
+  }
+};
+
+// One built fact, with the epoch and the sim time it was built at.
+struct fact_entry_t
+{
+  std::uint64_t epoch = 0;
+  timespan_t    time = timespan_t::zero();
+  enemy_fact    fact;
+};
+std::unordered_map<pair_key_t, fact_entry_t, pair_key_hash_t> g_fact_memo;  // (action, candidate)
+
+// The clock-driven fields that depend on the candidate alone, shared by every action's fact for it at one (epoch, time).
+struct candidate_time_entry_t
+{
+  std::uint64_t epoch = 0;
+  timespan_t    time = timespan_t::zero();
+  bool          valid = false;
+  double        immunity_remaining = 0.0;
+  double        time_to_die = 0.0;
+  double        health_pct = 0.0;
+};
+std::unordered_map<const player_t*, candidate_time_entry_t> g_candidate_time_memo;
+
+// The declared aura values of (source, candidate) at one (epoch, time): they depend on the actor that put the aura on the candidate, not on the action.
+struct declared_entry_t
+{
+  std::uint64_t epoch = 0;
+  timespan_t    time = timespan_t::zero();
+  bool          valid = false;
+  std::array<double, ( RL_DECLARED_FACT_COUNT > 0 ? RL_DECLARED_FACT_COUNT : 1 )> values{};
+};
+std::unordered_map<pair_key_t, declared_entry_t, pair_key_hash_t> g_declared_memo;  // (source, candidate)
+
+// count_new_flame_shock_neighbours: a pure function of the engine state (positions, which enemies are alive, which Flame Shocks tick), so a value is
+// good for one epoch.
+struct count_key_t
+{
+  const player_t* caster;
+  const player_t* candidate;
+  double          radius;
+  int             cap;
+  bool            include_pick;
+  bool operator==( const count_key_t& o ) const
+  {
+    return caster == o.caster && candidate == o.candidate && radius == o.radius && cap == o.cap && include_pick == o.include_pick;
+  }
+};
+struct count_key_hash_t
+{
+  std::size_t operator()( const count_key_t& k ) const
+  {
+    return mix_pointer( k.caster ) * 31u + mix_pointer( k.candidate ) * 17u + static_cast<std::size_t>( k.cap ) * 5u + ( k.include_pick ? 1u : 0u ) +
+           static_cast<std::size_t>( k.radius * 1024.0 );
+  }
+};
+struct count_entry_t
+{
+  std::uint64_t epoch = 0;
+  int           value = 0;
+};
+std::unordered_map<count_key_t, count_entry_t, count_key_hash_t> g_count_memo;
+
+// The name lookups of the declared facts: the object a name resolves to is a pure function of the contents of the candidate's lists, and the lists
+// only grow, so a result stays good while the three list sizes are unchanged (any growth re-resolves). Good across epochs. One set per (source,
+// candidate), one lookup record per declared fact row.
+struct aura_lookup_t
+{
+  bool    dot_resolved = false;
+  bool    buff_resolved = false;
+  dot_t*  dot = nullptr;
+  buff_t* buff = nullptr;
+};
+struct aura_set_t
+{
+  std::size_t dot_list_size = static_cast<std::size_t>( -1 );
+  std::size_t buff_list_size = static_cast<std::size_t>( -1 );
+  std::size_t fallback_size = static_cast<std::size_t>( -1 );
+  std::array<aura_lookup_t, ( RL_DECLARED_FACT_COUNT > 0 ? RL_DECLARED_FACT_COUNT : 1 )> rows{};
+};
+std::unordered_map<pair_key_t, aura_set_t, pair_key_hash_t> g_aura_memo;  // (source, candidate)
+
+aura_set_t& aura_set_for( player_t* source, player_t* candidate )
+{
+  aura_set_t&       e = g_aura_memo[ pair_key_t{ source, candidate } ];
+  const std::size_t dots = candidate->dot_list.size();
+  const std::size_t buffs = candidate->buff_list.size();
+  const std::size_t fallbacks = candidate->fallback_buff_names.size();
+  if ( e.dot_list_size != dots || e.buff_list_size != buffs || e.fallback_size != fallbacks )
+  {
+    e.dot_list_size = dots;
+    e.buff_list_size = buffs;
+    e.fallback_size = fallbacks;
+    e.rows.fill( aura_lookup_t{} );
+  }
+  return e;
+}
+inline dot_t* memo_find_dot( aura_lookup_t& e, const rl_declared_fact& row, player_t* source, player_t* candidate )
+{
+  if ( !e.dot_resolved )
+  {
+    e.dot = candidate->find_dot( row.name, source );
+    e.dot_resolved = true;
+  }
+  return e.dot;
+}
+inline buff_t* memo_find_buff( aura_lookup_t& e, const rl_declared_fact& row, player_t* source, player_t* candidate )
+{
+  if ( !e.buff_resolved )
+  {
+    e.buff = buff_t::find( candidate, row.name, source );
+    e.buff_resolved = true;
+  }
+  return e.buff;
+}
+
 } // anonymous namespace
 
 // 260914-rbp Task 1 (R5, HIT-INPUTS-DESIGN.md ss2.1): see rl_target_select.hpp's own declaration
@@ -272,6 +424,14 @@ int count_new_flame_shock_neighbours( player_t* caster, player_t* candidate, dou
 {
   if ( radius <= 0.0 || cap <= 0 )
     return 0;
+  // 261029-trp (S2-F1): inside a poll memo scope the count is good for the epoch it was made in (a pure function of the engine state).
+  count_entry_t* memo_slot = nullptr;
+  if ( g_memo.active )
+  {
+    memo_slot = &g_count_memo[ count_key_t{ caster, candidate, radius, cap, include_pick } ];
+    if ( memo_slot->epoch == g_memo.epoch )
+      return memo_slot->value;
+  }
   int count = 0;
   for ( player_t* other : caster->sim->target_non_sleeping_list )
   {
@@ -298,7 +458,13 @@ int count_new_flame_shock_neighbours( player_t* caster, player_t* candidate, dou
     if ( !pick_fs || !pick_fs->is_ticking() )
       ++count;
   }
-  return std::min( cap, count );
+  const int result = std::min( cap, count );
+  if ( memo_slot != nullptr )
+  {
+    memo_slot->epoch = g_memo.epoch;
+    memo_slot->value = result;
+  }
+  return result;
 }
 
 bool rl_counts_as_enemy( const player_t* t )
@@ -1041,7 +1207,8 @@ bool obs_is_boss( const player_t* enemy )
 // Phase 268 plan 03 (G268-6, FORK-03, owner D6): declared per-candidate facts. See the declaration in the header for the two
 // kinds. Both read the aura the actor itself (`source`) put on the candidate, by its engine name, with the non-creating
 // find_dot / buff_t::find idiom (WR-04: get_dot / buff_t::get CREATE the object on a candidate that never had it).
-double read_declared_fact( const rl_declared_fact& fact, player_t* source, player_t* candidate )
+// The worker. `lookup` is the memo's record of this row for (source, candidate), or null (no scope: the name walks run, as before).
+static double read_declared_fact_with( const rl_declared_fact& fact, player_t* source, player_t* candidate, aura_lookup_t* lookup )
 {
   switch ( fact.kind )
   {
@@ -1050,15 +1217,17 @@ double read_declared_fact( const rl_declared_fact& fact, player_t* source, playe
     // plain "dot found, return its remains" read answered 0 for a live debuff of the same name. Each kind therefore prefers
     // its own object type while that object is ACTIVE, and falls through to the other type when it is not. The float layout
     // of the declared facts is unchanged.
+    // 261029-trp (S2-F1): inside a poll memo scope the two name lookups are answered by the aura memo (the same object the name walk would return, see
+    // aura_set_t); the values are read from the object each time, so they are the live ones.
     case rl_fact_kind::dot_remaining:
     {
       double       dot_seconds = 0.0;
-      const dot_t* d           = candidate->find_dot( fact.name, source );
+      const dot_t* d           = lookup != nullptr ? memo_find_dot( *lookup, fact, source, candidate ) : candidate->find_dot( fact.name, source );
       if ( d != nullptr )
         dot_seconds = d->remains().total_seconds();
       if ( dot_seconds > 0.0 )
         return dot_seconds;
-      if ( buff_t* b = buff_t::find( candidate, fact.name, source ) )
+      if ( buff_t* b = lookup != nullptr ? memo_find_buff( *lookup, fact, source, candidate ) : buff_t::find( candidate, fact.name, source ) )
         return b->remains().total_seconds();
       return dot_seconds;
     }
@@ -1066,16 +1235,23 @@ double read_declared_fact( const rl_declared_fact& fact, player_t* source, playe
     {
       // check(), never up(): up() mutates benefit bookkeeping (see rl_policy_obs.cpp's note on buff reads).
       double stacks = 0.0;
-      if ( buff_t* b = buff_t::find( candidate, fact.name, source ) )
+      if ( buff_t* b = lookup != nullptr ? memo_find_buff( *lookup, fact, source, candidate ) : buff_t::find( candidate, fact.name, source ) )
         stacks = static_cast<double>( b->check() );
       if ( stacks > 0.0 )
         return stacks;
-      if ( dot_t* d = candidate->find_dot( fact.name, source ) )
+      if ( dot_t* d = lookup != nullptr ? memo_find_dot( *lookup, fact, source, candidate ) : candidate->find_dot( fact.name, source ) )
         return static_cast<double>( d->current_stack() );
       return stacks;
     }
   }
   return 0.0;
+}
+
+double read_declared_fact( const rl_declared_fact& fact, player_t* source, player_t* candidate )
+{
+  if ( g_memo.active && RL_DECLARED_FACT_COUNT > 0 && &fact >= &RL_DECLARED_FACTS[ 0 ] && &fact < &RL_DECLARED_FACTS[ 0 ] + RL_DECLARED_FACT_COUNT )
+    return read_declared_fact_with( fact, source, candidate, &aura_set_for( source, candidate ).rows[ static_cast<std::size_t>( &fact - &RL_DECLARED_FACTS[ 0 ] ) ] );
+  return read_declared_fact_with( fact, source, candidate, nullptr );
 }
 
 std::size_t declared_fact_index_for_feature( const char* feature_name )
@@ -1086,7 +1262,8 @@ std::size_t declared_fact_index_for_feature( const char* feature_name )
   return RL_DECLARED_FACT_COUNT;
 }
 
-enemy_fact build_enemy_fact( const action_t* a, player_t* candidate )
+// The original builder, unchanged: what every call outside a poll memo scope runs, and what a memo miss runs (so a stored fact is exactly this function's).
+static enemy_fact build_enemy_fact_full( const action_t* a, player_t* candidate )
 {
   enemy_fact f;
   f.candidate    = candidate;
@@ -1152,6 +1329,72 @@ enemy_fact build_enemy_fact( const action_t* a, player_t* candidate )
   if ( plugin.fill_class_fields != nullptr )
     plugin.fill_class_fields( a, candidate, f );
 
+  return f;
+}
+
+// 261029-trp (S2-F1): the clock-driven fields of one candidate's fact. Each expression is the one build_enemy_fact_full evaluates (the fuzzed estimate with no
+// clip, the live health percentage, the live invulnerability remains); the memo only decides whether they are re-read (a different epoch or time) or taken from
+// the last read at this very epoch and time.
+static void fill_candidate_time_fields( player_t* candidate, enemy_fact& f )
+{
+  candidate_time_entry_t& e = g_candidate_time_memo[ candidate ];
+  if ( !e.valid || e.epoch != g_memo.epoch || e.time != g_memo.now )
+  {
+    e.immunity_remaining = candidate->debuffs.invulnerable ? candidate->debuffs.invulnerable->remains().total_seconds() : 0.0;
+    e.time_to_die = rl_policy::observed_time_to_die( candidate->sim, candidate, candidate->time_to_percent( 0 ).total_seconds() );
+    e.health_pct = candidate->health_percentage();
+    e.epoch = g_memo.epoch;
+    e.time = g_memo.now;
+    e.valid = true;
+  }
+  f.immunity_remaining = e.immunity_remaining;
+  f.time_to_die = e.time_to_die;
+  f.health_pct = e.health_pct;
+}
+
+static void fill_declared_time_fields( player_t* source, player_t* candidate, enemy_fact& f )
+{
+  declared_entry_t& e = g_declared_memo[ pair_key_t{ source, candidate } ];
+  if ( !e.valid || e.epoch != g_memo.epoch || e.time != g_memo.now )
+  {
+    aura_set_t& auras = aura_set_for( source, candidate );
+    for ( std::size_t k = 0; k < RL_DECLARED_FACT_COUNT; ++k )
+      e.values[ k ] = read_declared_fact_with( RL_DECLARED_FACTS[ k ], source, candidate, &auras.rows[ k ] );
+    e.epoch = g_memo.epoch;
+    e.time = g_memo.now;
+    e.valid = true;
+  }
+  for ( std::size_t k = 0; k < RL_DECLARED_FACT_COUNT; ++k )
+    f.declared[ k ] = e.values[ k ];
+}
+
+enemy_fact build_enemy_fact( const action_t* a, player_t* candidate )
+{
+  if ( !g_memo.active )
+    return build_enemy_fact_full( a, candidate );
+  fact_entry_t& e = g_fact_memo[ pair_key_t{ a, candidate } ];
+  if ( e.epoch != g_memo.epoch )
+  {
+    // Not built in this epoch (or never): the original builder, stored.
+    e.fact = build_enemy_fact_full( a, candidate );
+    e.epoch = g_memo.epoch;
+    e.time = g_memo.now;
+    return e.fact;
+  }
+  if ( e.time != g_memo.now )
+  {
+    // Same engine state, later clock: the clock-driven fields are read again, the rest is the stored state's.
+    fill_candidate_time_fields( candidate, e.fact );
+    fill_declared_time_fields( a->player, candidate, e.fact );
+    e.time = g_memo.now;
+  }
+  enemy_fact f = e.fact;
+  // Always read fresh: the field that reads the player's target, and the class's own part (the named aura fields from the declared values, the chain-hop
+  // count from the per-decision stash, the geometry counts through their own epoch memo).
+  f.is_current_target = ( candidate == a->player->target );
+  const rl_class_plugin& plugin = rl_class_plugin_for( a->player );
+  if ( plugin.fill_class_fields != nullptr )
+    plugin.fill_class_fields( a, candidate, f );
   return f;
 }
 
@@ -1989,6 +2232,61 @@ std::uint64_t get_target_head_no_block_count()
   return g_target_head_no_block_count;
 }
 
+void decision_tables_digest( player_t* p, std::vector<table_digest_entry>& out )
+{
+  for ( action_t* a : p->action_list )
+  {
+    if ( !is_targeted_action( a ) )
+      continue;
+    const std::string base = a->name();
+    bool              found = false;
+    player_t*         pick = lookup_pick( a, &found );
+    out.push_back( { base + ".pick_found", found ? 1.0 : 0.0 } );
+    out.push_back( { base + ".pick_actor", pick != nullptr ? static_cast<double>( pick->actor_index ) : -1.0 } );
+    bool            block_found = false;
+    candidate_block cb = lookup_candidate_block( a, &block_found );
+    out.push_back( { base + ".block_found", block_found ? 1.0 : 0.0 } );
+    if ( !block_found )
+      continue;
+    out.push_back( { base + ".block_count", static_cast<double>( cb.count ) } );
+    out.push_back( { base + ".block_mask", static_cast<double>( cb.mask ) } );
+    out.push_back( { base + ".block_chosen_slot", static_cast<double>( cb.chosen_slot ) } );
+    out.push_back( { base + ".block_rules_slot", static_cast<double>( cb.rules_slot ) } );
+    out.push_back( { base + ".block_observed_slot", static_cast<double>( cb.observed_slot ) } );
+    for ( std::size_t slot = 0; slot < RL_TARGET_SLOTS; ++slot )
+    {
+      if ( ( cb.mask & ( 1u << slot ) ) == 0 )
+        continue;
+      for ( std::size_t f = 0; f < RL_TARGET_FEATURES; ++f )
+        out.push_back( { fmt::format( "{}.block_slot{}.{}", base, slot, RL_TARGET_FEATURE_NAMES[ f ] ),
+                         static_cast<double>( cb.features[ slot * RL_TARGET_FEATURES + f ] ) } );
+    }
+  }
+}
+
+bool poll_memo_active()
+{
+  return g_memo.active;
+}
+
+poll_memo_scope::poll_memo_scope( const sim_t* sim, std::uint64_t epoch, bool enabled ) : entered_( false )
+{
+  if ( !enabled || multi_sim_or_multi_thread( sim ) )
+    return;  // the memo is single-sim/single-thread by construction, like every other module global here
+  assert( !g_memo.active && "a poll memo scope does not nest" );
+  g_memo.active = true;
+  g_memo.sim = sim;
+  g_memo.epoch = epoch + 1;  // see memo_ctx_t::epoch
+  g_memo.now = sim->current_time();
+  entered_ = true;
+}
+
+poll_memo_scope::~poll_memo_scope()
+{
+  if ( entered_ )
+    g_memo.active = false;
+}
+
 void reset( sim_t* )
 {
   // WR-11 (260902/cr4): called from sim_t::reset() (sim.cpp), once per iteration -- clears every
@@ -2002,6 +2300,12 @@ void reset( sim_t* )
   // the call site.
   g_decision_stamp.clear();
   g_pick_table.clear();
+  g_memo = memo_ctx_t{};  // 261029-trp (S2-F1): the incremental poll's memos belong to one fight
+  g_fact_memo.clear();
+  g_candidate_time_memo.clear();
+  g_declared_memo.clear();
+  g_count_memo.clear();
+  g_aura_memo.clear();
   g_candidate_block_table.clear();  // 230-04
   g_target_fact_snapshot_table.clear();  // 232-04 (OBS-02, R-T)
   g_chain_hop_stash.clear();  // 232-06 (RULE-02, R-Z)

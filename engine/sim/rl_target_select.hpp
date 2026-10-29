@@ -26,6 +26,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "sim/rl_policy_constants_select.h"
@@ -255,6 +256,39 @@ void check_header_health_gates( player_t* p );
 // that consumed it is gone from select() (score -> current target -> stable identity), and no
 // other field on enemy_fact ever depended on the action's own prior pick.
 enemy_fact build_enemy_fact( const action_t* a, player_t* candidate );
+
+// 261029-trp (S2-F1): THE INCREMENTAL POLL's fact memo (the contract is in solver_control.hpp, "THE INCREMENTAL POLL"). While a poll_memo_scope is
+// alive build_enemy_fact (and the two pure helpers under it: the declared-aura lookups and count_new_flame_shock_neighbours) answer from a memo
+// instead of rebuilding, and return the bit-identical value:
+//   - a fact is kept with the `epoch` it was built in (the count of engine events that can have changed the state it reads) and the sim time it was
+//     built at. Same epoch and same time: the stored fact is the answer. Same epoch, later time: only the clock-driven fields are recomputed
+//     (immunity_remaining, time_to_die, health_pct, the declared aura values), the rest (distance, reach, front, alive, immune, neighbours, the
+//     geometry counts) is the stored state's. A different epoch: rebuilt from scratch.
+//   - the fields that read per-decision scratch (chain_hop_count, is_current_target) and every class-plugin field are recomputed on every call.
+// Without a scope (an ordinary read, the dump, the post-press reads, a probe's full path) nothing here is consulted: the original code runs.
+bool poll_memo_active();  // true while a poll_memo_scope is alive
+
+class poll_memo_scope
+{
+public:
+  poll_memo_scope( const sim_t* sim, std::uint64_t epoch, bool enabled );
+  ~poll_memo_scope();
+  poll_memo_scope( const poll_memo_scope& ) = delete;
+  poll_memo_scope& operator=( const poll_memo_scope& ) = delete;
+
+private:
+  bool entered_;
+};
+
+// 261029-trp (S2-F1): the poll probe's view of the per-decision tables. Every targeted action of `p` contributes its stamped pick (the actor index, or -1) and
+// its captured candidate block (count, mask, the chosen / rules / observed slots and the features of every captured slot), as (label, value) pairs in a
+// fixed order, so two passes over the same state can be compared entry by entry and a difference named. Reads only.
+struct table_digest_entry
+{
+  std::string label;
+  double      value;
+};
+void decision_tables_digest( player_t* p, std::vector<table_digest_entry>& out );
 
 // tstl-sylvanas 260928-tb8: the observation-side "is this enemy a boss" bit. Non-boss mask for trash
 // pulls (fight_style=TrashPack reads 0 for every enemy); every other fight style reads the engine's
