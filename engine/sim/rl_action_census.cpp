@@ -539,11 +539,11 @@ std::string token_json( const token_t& t )
   return fmt::format(
       "{{\"token\":{},\"actionFound\":{},\"spellId\":{},\"rangeYards\":{},\"minRangeYards\":{},\"radiusYards\":{},"
       "\"multiTarget\":{},\"multiWhile\":{},\"nodes\":{},\"chosenNode\":{},\"disagreements\":{},\"gateClass\":{},"
-      "\"refusedWhileLocked\":{},\"needsMeleeReach\":{}}}",
+      "\"refusedWhileLocked\":{},\"needsMeleeReach\":{},\"travelSpeed\":{},\"travelDelay\":{},\"minTravelTime\":{}}}",
       esc( t.token ), t.found ? "true" : "false", t.spell_id, num( t.range ), num( t.min_range ), num( t.radius ),
       t.multi_target ? "true" : "false", t.has_multi_while ? widen_json( t.multi_while ) : std::string( "null" ), nodes,
       t.chosen_node, dis, esc( gate_class_name( t.gate_class ) ), t.refused_while_locked ? "true" : "false",
-      needs_melee_reach( t ) ? "true" : "false" );
+      needs_melee_reach( t ) ? "true" : "false", num( t.travel_speed ), num( t.travel_delay ), num( t.min_travel_time ) );
 }
 
 // What must agree between the init walk and the fight-end walk: structure, never live values
@@ -883,8 +883,14 @@ std::string table_json( player_t* p, const std::string& tokens, const std::strin
   for ( size_t i = 0; i < lock_auras.size(); ++i )
     lock_list += ( i ? "," : "" ) + std::to_string( lock_auras[ i ] );
   lock_list += "]";
-  return fmt::format( "{{\"schemaVersion\":2,\"actor\":{},\"initMatchesEnd\":{},\"lockAuraSpellIds\":{},\"tokens\":{},\"actions\":{}}}",
-                      esc( p->name_str ), init_matches_end ? "true" : "false", lock_list, tokens, actions );
+  // 261028-fzl (S5c-F3a, owner rulings 7 and 8): the actor's own clocks, from player_t's const members: the base and minimum global cooldown and
+  // the two weapon speeds (the swing timers' hard ceilings). A reader turns them into the GCD and swing-timer scales; nothing is typed.
+  const std::string timing = fmt::format( "{{\"baseGcdSeconds\":{},\"minGcdSeconds\":{},\"mainHandSwingSeconds\":{},\"offHandSwingSeconds\":{}}}",
+                                          num( p->base_gcd.total_seconds() ), num( p->min_gcd.total_seconds() ),
+                                          num( p->main_hand_weapon.swing_time.total_seconds() ),
+                                          num( p->off_hand_weapon.swing_time.total_seconds() ) );
+  return fmt::format( "{{\"schemaVersion\":2,\"actor\":{},\"initMatchesEnd\":{},\"lockAuraSpellIds\":{},\"timing\":{},\"tokens\":{},\"actions\":{}}}",
+                      esc( p->name_str ), init_matches_end ? "true" : "false", lock_list, timing, tokens, actions );
 }
 
 // Per-sim state the list mode keeps from the init walk (erased at combat end, research A2 item 3: a freed entry's address is reused).
@@ -1155,6 +1161,9 @@ std::vector<token_t> walk( player_t* p )
       t.min_range = root->data().min_range();
       t.radius    = root->radius;
       t.refused_while_locked = root->refused_while_channel_locked();
+      t.travel_speed         = root->travel_speed;
+      t.travel_delay         = root->travel_delay;
+      t.min_travel_time      = root->min_travel_time;
       std::set<const action_t*> seen;
       walk_node( root, "root", 0, p, seen, t.nodes );
     }

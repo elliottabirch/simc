@@ -257,6 +257,12 @@ struct token_t
   // Phase 271.6 plan 18 (G271.6-37): the engine's own answer to "does the channel lock refuse this button", read from the root
   // action's refused_while_channel_locked() in walk(). False for a token whose action was not found and for item uses.
   bool                 refused_while_locked = false;
+  // 261028-fzl (S5c-F3a, owner ruling 8): the root action's missile travel facts, read from action_t's own const members in walk(). A
+  // reader derives the in-flight ceiling of the action's `in_flight_remains` leaf from them (travel_delay + reach / travel_speed, never
+  // below min_travel_time); 0 where the action has no travel (instant) or was not found.
+  double               travel_speed = 0.0;
+  double               travel_delay = 0.0;
+  double               min_travel_time = 0.0;
 };
 
 // The ONE gate-class function (271.6-07, G271.6-28 as revised). The class the spell DATA gives a button: UNIT when any implicit
