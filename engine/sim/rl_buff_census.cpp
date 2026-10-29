@@ -37,6 +37,17 @@ namespace
 // Sim option storage. A global because adding a member to sim_t would rebuild every file; the RL rigs run one sim per process.
 std::string g_path;
 
+// 261028-fzl (S5c-F3a2): the actor's mastery value and damage versatility AT INIT, read at the end of sim_t::reset (on_reset_finished: every actor has
+// reset there, current = initial and no buff is up; a read at init-finished returned 0 for both, measured on the first B2-pre2 attempt) and written on the entry's line as statBudget.initialValues. A
+// process-level global like g_path: a fight list builds a fresh sim_t per entry and the hook runs before that entry's combat end (write_table returns
+// early when there is no census actor, the one case the stash is not set), so the stash always belongs to the entry the line is written for.
+struct init_values_t
+{
+  double mastery_value      = 0.0;
+  double damage_versatility = 0.0;
+};
+init_values_t g_init_values;
+
 struct row_t
 {
   std::string holder;  // "self" or "enemy"
@@ -386,19 +397,24 @@ std::string layout_json( const sim_t* sim, const player_t* actor )
 // ratings (composite_rating applies them); ratingPerPercent are the player's current.rating divisors exactly as the engine divides by them (crit,
 // haste and versatility: rating per 1.0 of the fraction; mastery: rating per mastery point, rating_t::init divides the table value by 100);
 // baseMasteryValue is current.mastery (mastery points at zero rating, 8 before talents) and baseVersatility current.versatility (the fraction at zero rating).
+// initialValues {masteryValue, damageVersatility} are the player's own mastery value and damage versatility AT INIT, read through the stat cache the
+// observation reads (rl_policy_obs.cpp: p->cache.mastery_value(), p->cache.damage_versatility()) at the end of reset, before any buff exists: the engine's
+// answer, diminishing returns and rating multipliers included, so a reader can prove its formula against it (never derived here from the fields above).
 std::string stat_budget_json( const player_t* actor )
 {
   return fmt::format(
       "{{\"initialRatings\":{{\"crit\":{},\"haste\":{},\"mastery\":{},\"versatility\":{}}},"
       "\"ratingMultipliers\":{{\"crit\":{},\"haste\":{},\"mastery\":{},\"versatility\":{}}},"
       "\"ratingPerPercent\":{{\"crit\":{},\"haste\":{},\"mastery\":{},\"versatility\":{}}},"
-      "\"masteryCoefficient\":{},\"baseMasteryValue\":{},\"baseVersatility\":{}}}",
+      "\"masteryCoefficient\":{},\"baseMasteryValue\":{},\"baseVersatility\":{},"
+      "\"initialValues\":{{\"masteryValue\":{},\"damageVersatility\":{}}}}}",
       num( actor->initial.stats.crit_rating ), num( actor->initial.stats.haste_rating ), num( actor->initial.stats.mastery_rating ),
       num( actor->initial.stats.versatility_rating ), num( actor->initial.rating_multiplier[ RATING_MELEE_CRIT ] ),
       num( actor->initial.rating_multiplier[ RATING_MELEE_HASTE ] ), num( actor->initial.rating_multiplier[ RATING_MASTERY ] ),
       num( actor->initial.rating_multiplier[ RATING_DAMAGE_VERSATILITY ] ), num( actor->current.rating.attack_crit ),
       num( actor->current.rating.attack_haste ), num( actor->current.rating.mastery ), num( actor->current.rating.damage_versatility ),
-      num( actor->mastery_coefficient() ), num( actor->current.mastery ), num( actor->current.versatility ) );
+      num( actor->mastery_coefficient() ), num( actor->current.mastery ), num( actor->current.versatility ),
+      num( g_init_values.mastery_value ), num( g_init_values.damage_versatility ) );
 }
 
 void write_table( sim_t* sim, bool fight_played )
@@ -528,6 +544,17 @@ void on_init_finished( sim_t* sim )
   if ( g_path.empty() )
     return;
   write_table( sim, false );
+}
+
+void on_reset_finished( sim_t* sim )
+{
+  if ( g_path.empty() )
+    return;
+  if ( player_t* actor = census_actor( sim ) )
+  {
+    g_init_values.mastery_value      = actor->cache.mastery_value();
+    g_init_values.damage_versatility = actor->cache.damage_versatility();
+  }
 }
 
 void on_combat_end( sim_t* sim )

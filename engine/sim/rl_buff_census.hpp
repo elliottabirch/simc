@@ -21,7 +21,7 @@
 //
 // Sim hooks (src: sim.cpp). No-ops unless the sim option rl_buff_census=<path> is set. The module only READS: it never calls
 // up() (that mutates benefit bookkeeping), never triggers, expires or rolls anything, and allocates nothing on the decision
-// path (the two hooks run once per fight, at init-finished and at combat end). It changes no decision, no random draw and no
+// path (the hooks run once per fight: init-finished, end of reset, combat end). It changes no decision, no random draw and no
 // damage. Enemies are walked from the simulator's actor list, not from its non-sleeping list, because every enemy has demised
 // by the combat-end hook.
 //
@@ -41,6 +41,9 @@ namespace rl_buff_census
 
 std::string& path_storage();
 void on_init_finished( sim_t* sim );
+// 261028-fzl (S5c-F3a2): end of sim_t::reset, after every actor has reset (current = initial, stat cache invalid, no buff up): stashes the actor's
+// mastery value and damage versatility at init for the entry line's statBudget.initialValues. A read of the stat cache only.
+void on_reset_finished( sim_t* sim );
 void on_combat_end( sim_t* sim );
 
 }  // namespace rl_buff_census

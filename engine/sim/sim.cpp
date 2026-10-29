@@ -2047,6 +2047,10 @@ void sim_t::reset()
   // raid_event_t::reset( this ) immediately above. A stale pick or stamp from a PRIOR iteration
   // must never leak into the next one.
   rl_target_select::reset( this );
+
+  // 261028-fzl (S5c-F3a2): every actor has reset (current = initial, no buff up): the buff census reads the actor's mastery value and damage
+  // versatility at init for its entry line. No-op unless rl_buff_census=<path>; a stat-cache read only.
+  rl_buff_census::on_reset_finished( this );
 }
 
 /// Start combat.
