@@ -389,6 +389,14 @@ struct candidate_block
   // (the dial and the head both overwrite it).
   std::uint8_t  rules_slot    = 0xFFu;
   std::uint8_t  observed_slot = 0xFFu;
+  // 261029-trp (S2-F2, fzl CONTEXT 2026-10-29 item 1): how many FLAGGED candidates follow the eligible ones. `features` holds
+  // `count` eligible slots (0 .. count - 1, the ones `mask` marks) and then `flagged_count` flagged slots (count .. count + flagged_count - 1):
+  // enemies that fail the reach, front, alive or immune gate of this action, their five facts (in_reach, in_range, in_front, alive,
+  // immune) set to what the gates found. Alive enemies first, then dead ones, nearest first in each; at most RL_TARGET_SLOTS - count of them.
+  // A flagged slot is never in `mask`, never counted in `count`, never the rules' slot, the head's slot or the chosen slot, and no
+  // aggregate reads it (they read the first `count` slots). The translog row does not carry this count: its flagged slots are the ones
+  // after `candidate_count` whose features are not all zero.
+  std::uint8_t  flagged_count = 0;
 };
 
 // Reads the candidate block stamped for `resolved` at the CURRENT decision. `*out_found` is

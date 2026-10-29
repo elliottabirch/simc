@@ -704,8 +704,12 @@ struct decision_record
                                //         decision, CAPTURED at the moment it scored it (never
                                //         recomputed -- see top-of-file version-7 comment).
                                //         Slot-major, RL_TARGET_FEATURE_NAMES's own order within
-                               //         each slot. Zero-filled for any slot candidate_mask does
-                               //         not mark real. Placed right after top_q (the point
+                               //         each slot. Zero-filled for any slot that is neither one
+                               //         candidate_mask marks real nor a FLAGGED slot (261029-trp
+                               //         S2-F2: the slots after candidate_count may hold enemies
+                               //         that fail the reach, front, alive or immune gate; see
+                               //         rl_target_select.hpp candidate_block::flagged_count).
+                               //         Placed right after top_q (the point
                                //         close_record's own zero12 array already ends at) so
                                //         close_record only needs a NEW trailing zero-fill, not a
                                //         split of its existing one.

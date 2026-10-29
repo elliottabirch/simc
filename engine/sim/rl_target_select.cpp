@@ -83,6 +83,13 @@ struct candidate_block_slot
   std::uint8_t           rules_slot    = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
   std::uint8_t           observed_slot = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
 
+  // 261029-trp (S2-F2, fzl CONTEXT 2026-10-29 item 1): the FLAGGED candidates of this decision -- enemies that fail one of the four
+  // generic gates (alive, immune, reach, front) for this action. Their facts sit in the slots right after the eligible ones
+  // (slots count .. count + flagged_count - 1 of `features`) and they are NOT in `mask`, `count` or `actors`: nothing that chooses or
+  // counts reads them. `flagged` keeps their identity for the poll probe's digest and the oracles; nothing else reads it.
+  std::uint8_t           flagged_count = 0;
+  std::vector<player_t*> flagged;
+
   // 240-05 (D1(a)): parallel per-slot actor identity, captured in LOCKSTEP with `features` above
   // by select()'s own per-candidate loop -- zero extra walk. Deliberately NOT part of the public
   // candidate_block struct or the transition log (an identity number as a scoring INPUT is
@@ -160,6 +167,15 @@ std::vector<player_t*> g_unpruned_candidate_buffer;
 // and reused across every select() call and every candidate within a call, mirroring
 // g_candidate_buffer's own reuse discipline (never reallocated once sized).
 std::vector<float> g_rules_feature_scratch;
+
+// 261029-trp (S2-F2): the flagged-candidate gather's scratch (rank, distance, enemy), reused across calls like the buffers above.
+struct flagged_entry_t
+{
+  int       rank;      // 0: a living enemy, 1: a dead one (alive first, see gather_flagged_candidates)
+  double    distance;
+  player_t* enemy;
+};
+std::vector<flagged_entry_t> g_flagged_scratch;
 
 // 260914-rbp Task 2c (ME-1 + ADD-2): keyed on (sim_t*, player_t*), not a bare `player_t*` -- a
 // bare-pointer key can collide across sim instances (a destroyed sim_t's player_t address reused
@@ -1733,6 +1749,44 @@ bool candidate_is_better( double score, player_t* c, double best_score, player_t
   return std::tie( c->actor_index, c->actor_spawn_index ) <
          std::tie( best->actor_index, best->actor_spawn_index );
 }
+
+// 261029-trp (S2-F2; fzl CONTEXT, owner 2026-10-29 (LOCKED) item 1): the FLAGGED candidates of one targeted action's table. The five
+// facts in_reach, in_range, in_front, alive and immune were constant on every row because the table held only the enemies that pass the
+// four generic gates; the table now also holds, after every eligible candidate, up to `room` enemies that fail one of the gates, with the
+// facts set to what the gates found. Nothing that chooses or counts reads them (select() below keeps its mask, count, actors, rules
+// pick and head pick on the eligible set only), so a flagged candidate never displaces an eligible one from the slots and is never chosen.
+//
+// Who is flagged: every enemy of the sim (the actor list, so sleeping adds are reachable) that is not a hazard or a bystander
+// (`is_untargetable_enemy`: never a target, never counted) and that FAILS generic_filter for this action -- one test, the selector's own,
+// so the flag and the gate cannot disagree. An enemy that passes generic_filter but is not in the table (the do-not-hit drop, the
+// target-health gate of a gated button, the pool's 16 cap) is not flagged: its five facts would read as an eligible enemy's.
+// A dead enemy (asleep) counts only if it was alive earlier in this fight (`iteration_fight_length` > 0): an add that has not spawned yet
+// is not a body. Order: living before dead, nearest first inside each (a stable sort over the actor list order, so ties are
+// deterministic). The first `room` of that order are kept.
+void gather_flagged_candidates( const action_t* a, bool harmful, std::size_t room, std::vector<player_t*>& out )
+{
+  out.clear();
+  if ( room == 0 )
+    return;
+  g_flagged_scratch.clear();
+  sim_t* const sim = a->sim;
+  for ( player_t* t : sim->actor_list )
+  {
+    if ( !t->is_enemy() || sim->is_untargetable_enemy( t ) )
+      continue;
+    const bool asleep = t->is_sleeping();
+    if ( asleep && !( t->iteration_fight_length > timespan_t::zero() ) )
+      continue;
+    if ( generic_filter( a, t, harmful ) )
+      continue;
+    g_flagged_scratch.push_back( flagged_entry_t{ asleep ? 1 : 0, a->player->get_player_distance( *t ), t } );
+  }
+  std::stable_sort( g_flagged_scratch.begin(), g_flagged_scratch.end(),
+                    []( const flagged_entry_t& l, const flagged_entry_t& r )
+                    { return l.rank != r.rank ? l.rank < r.rank : l.distance < r.distance; } );
+  for ( std::size_t k = 0; k < g_flagged_scratch.size() && k < room; ++k )
+    out.push_back( g_flagged_scratch[ k ].enemy );
+}
 } // anonymous namespace
 
 player_t* select( action_t* a, bool harmful, preference_fn pref )
@@ -1801,6 +1855,8 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
       std::fill( slot.actors.begin(), slot.actors.end(), nullptr );
     slot.mask        = 0;
     slot.count       = 0;
+    slot.flagged_count = 0;  // 261029-trp (S2-F2): filled after the eligible slots below, only where the eligible set is captured
+    slot.flagged.clear();
     slot.chosen_slot   = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
     slot.rules_slot    = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
     slot.observed_slot = rl_translog::CHOSEN_CANDIDATE_SLOT_SENTINEL_NO_PICK;
@@ -1924,6 +1980,25 @@ player_t* select( action_t* a, bool harmful, preference_fn pref )
       best_score = score;
       best_slot  = slot_index;
     }
+  }
+
+  // 261029-trp (S2-F2): the flagged candidates, after every eligible slot (see gather_flagged_candidates). Their facts are built exactly like an
+  // eligible candidate's (the same full builder, the same feature fill) and written into the slots count .. count + n - 1; the mask, the
+  // count, the actors array, the rules slot, the chosen slot and the pick are not touched by them. They are captured only where the
+  // eligible set is captured (capture_block) and only into slots the eligible ones left free, so the 16 slots are never exceeded.
+  if ( capture_block )
+  {
+    candidate_block_slot& flagged_slot = g_candidate_block_table[ a ];
+    std::vector<player_t*>& flagged    = flagged_slot.flagged;
+    gather_flagged_candidates( a, harmful, RL_TARGET_SLOTS - candidates.size(), flagged );
+    for ( std::size_t k = 0; k < flagged.size(); ++k )
+    {
+      enemy_fact flagged_fact = build_enemy_fact( a, flagged[ k ] );
+      fill_candidate_features( a, flagged_fact, g_rules_feature_scratch.data(), capture_gate );
+      std::memcpy( flagged_slot.features.data() + ( candidates.size() + k ) * RL_TARGET_FEATURES, g_rules_feature_scratch.data(),
+                   RL_TARGET_FEATURES * sizeof( float ) );
+    }
+    flagged_slot.flagged_count = static_cast<std::uint8_t>( flagged.size() );
   }
 
   // 233.1-03 (R6-13, OV-5): stamp the chosen slot on EVERY preference now -- the block itself is
@@ -2051,6 +2126,7 @@ candidate_block lookup_candidate_block( const action_t* resolved, bool* out_foun
   block.chosen_slot  = it->second.chosen_slot;
   block.rules_slot    = it->second.rules_slot;
   block.observed_slot = it->second.observed_slot;
+  block.flagged_count = it->second.flagged_count;
   return block;
 }
 
@@ -2253,12 +2329,24 @@ void decision_tables_digest( player_t* p, std::vector<table_digest_entry>& out )
     out.push_back( { base + ".block_chosen_slot", static_cast<double>( cb.chosen_slot ) } );
     out.push_back( { base + ".block_rules_slot", static_cast<double>( cb.rules_slot ) } );
     out.push_back( { base + ".block_observed_slot", static_cast<double>( cb.observed_slot ) } );
+    out.push_back( { base + ".block_flagged_count", static_cast<double>( cb.flagged_count ) } );
     for ( std::size_t slot = 0; slot < RL_TARGET_SLOTS; ++slot )
     {
       if ( ( cb.mask & ( 1u << slot ) ) == 0 )
         continue;
       for ( std::size_t f = 0; f < RL_TARGET_FEATURES; ++f )
         out.push_back( { fmt::format( "{}.block_slot{}.{}", base, slot, RL_TARGET_FEATURE_NAMES[ f ] ),
+                         static_cast<double>( cb.features[ slot * RL_TARGET_FEATURES + f ] ) } );
+    }
+    // 261029-trp (S2-F2): the flagged slots (right after the eligible ones) are part of the table too, so the poll probe compares them.
+    const auto flagged_it = g_candidate_block_table.find( a );
+    for ( std::size_t k = 0; k < cb.flagged_count; ++k )
+    {
+      const std::size_t slot = static_cast<std::size_t>( cb.count ) + k;
+      out.push_back( { fmt::format( "{}.block_flagged{}.actor", base, k ),
+                       k < flagged_it->second.flagged.size() ? static_cast<double>( flagged_it->second.flagged[ k ]->actor_index ) : -1.0 } );
+      for ( std::size_t f = 0; f < RL_TARGET_FEATURES; ++f )
+        out.push_back( { fmt::format( "{}.block_flagged{}.{}", base, k, RL_TARGET_FEATURE_NAMES[ f ] ),
                          static_cast<double>( cb.features[ slot * RL_TARGET_FEATURES + f ] ) } );
     }
   }
@@ -2347,6 +2435,7 @@ void clear_process_caches()
   g_candidate_buffer.clear();
   g_unpruned_candidate_buffer.clear();
   g_rules_feature_scratch.clear();
+  g_flagged_scratch.clear();
   g_actor_binding_cache.clear();
   g_aim_pool_cache.clear();
   g_aim_pool_scratch.clear();
@@ -2359,7 +2448,7 @@ std::size_t process_cache_entries()
   return g_decision_stamp.size() + g_pick_table.size() + g_candidate_block_table.size() +
          g_target_fact_snapshot_table.size() + g_chain_hop_stash.size() + g_vb_lava_lash_geometry_cache.size() +
          g_aim_fact_gate_cache.size() + g_candidate_buffer.size() + g_unpruned_candidate_buffer.size() +
-         g_rules_feature_scratch.size() + actor_binding_entries() + g_aim_pool_cache.size() + g_aim_pool_scratch.size() +
+         g_rules_feature_scratch.size() + g_flagged_scratch.size() + actor_binding_entries() + g_aim_pool_cache.size() + g_aim_pool_scratch.size() +
          ( ( g_reresolution_counts.kept_the_pick != 0 || g_reresolution_counts.fell_back_to_player_target != 0 ||
              g_reresolution_counts.left_no_op_boundary != 0 )
                ? 1u
