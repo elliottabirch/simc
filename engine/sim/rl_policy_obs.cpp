@@ -2131,6 +2131,11 @@ enum class target_fact_leaf_kind
   // fact.declared[ the bound row index ]. This one kind replaces the eight shaman aura leaf kinds (flame_shock_remaining,
   // burning_core_remaining, lightning_rod_*, venomfang_*, rune_of_unleashed_fire_lingering_remaining).
   declared,
+  // 261028-fzl (S5-F2, review finding 4): a class-plugin geometry fact (chain_hop_count, vb_new_flame_shocks_within_10yd,
+  // lava_lash_spread_within_12yd for the shaman). Read from the same enemy_fact build_enemy_fact completes with the plugin's own
+  // fill_class_fields, through the plugin's own getter: the function the aim scorer's candidate block calls for the same feature
+  // (rl_target_select.cpp, build_feature_sources), bound once here, never a second copy of the arithmetic.
+  geometry,
   // OBS-01 (232-02): the previous-pick boolean leaf is REMOVED (the tie-break that consumed it
   // is gone from select()). OBS-03 (232-02) collapsed the always-equal neighbour pair to one
   // leaf, renamed to name the rule it encodes.
@@ -2179,6 +2184,7 @@ struct slot_binding
   // decision.
   target_fact_leaf_kind target_fact_leaf = target_fact_leaf_kind::found;
   std::size_t target_fact_declared = 0;   // target_fact_leaf == declared: the index into RL_DECLARED_FACTS
+  double ( *target_fact_geometry )( const rl_target_select::enemy_fact& ) = nullptr;   // target_fact_leaf == geometry: the class plugin's getter
 
   // kind == shape_fact (228-11, D-16): which SHAPED action and which of its three descriptive
   // leaves -- both resolved ONCE at bind time from the member/leaf name, never re-parsed per
@@ -3302,6 +3308,12 @@ slot_binding resolve_target_fact_leaf( player_t* p, const std::string& engine_to
   else if ( leaf_name == "in_range" )                                     fk = target_fact_leaf_kind::in_range;
   else if ( leaf_name == "immunity_remaining" )                           fk = target_fact_leaf_kind::immunity_remaining;
   else if ( leaf_name == "neighbours_within_radius" )                     fk = target_fact_leaf_kind::neighbours_within_radius;
+  // 261028-fzl (S5-F2): a class geometry fact, by the feature's own name (the lookup the aim scorer's build_feature_sources does).
+  else if ( const rl_geometry_fact* g = rl_class_geometry_find( rl_class_plugin_for( p ), leaf_name.c_str() ) )
+  {
+    fk = target_fact_leaf_kind::geometry;
+    b.target_fact_geometry = g->get;
+  }
   else
   {
     b.kind = slot_binding_kind::unresolved;   // artifact/generator mismatch, not a runtime fact
@@ -4735,6 +4747,7 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
             // stack count exactly, so the raw value is the one the retired per-aura cases produced).
             case target_fact_leaf_kind::declared:                             raw = fact.declared[ b.target_fact_declared ]; break;
             case target_fact_leaf_kind::neighbours_within_radius:            raw = static_cast<double>( fact.neighbours_within_radius ); break;
+            case target_fact_leaf_kind::geometry:                            raw = b.target_fact_geometry( fact ); break;
             default:
               matched = false;
               break;
