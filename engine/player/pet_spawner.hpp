@@ -169,7 +169,7 @@ public:
   /// Total number of active and inactive pets of type T
   size_t n_pets() const;
   /// Maximum number of active pets
-  size_t max_pets() const;
+  size_t max_pets() const override;
   /// Default spawning duration
   timespan_t duration() const;
 

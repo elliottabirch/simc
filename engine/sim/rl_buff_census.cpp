@@ -12,6 +12,7 @@
 #include "fmt/format.h"
 #include "item/special_effect.hpp"
 #include "player/player.hpp"
+#include "player/spawner_base.hpp"
 #include "sim/cooldown.hpp"
 #include "sim/proc_rng.hpp"
 #include "sim/rl_census_lines.hpp"
@@ -218,9 +219,13 @@ std::string row_json( const row_t& r, bool with_reach_fields = true )
 // own; nothing here is selected or named by this module -- scripts/rl/proc_buff_selector.py reads them.
 //   callbacks[]    one per dbc_proc_callback_t of the actor: driverSpellId, driverName, hasRppm, rppmValue, ppm, procChance, cooldownSeconds,
 //                  procBuff / customBuff (a name or ""), buffs (names in the special effect's buff list)
-//   procObjects[]  one per entry of the actor's proc_rng_list: name, type (rng_type_e as an integer)
+//   procObjects[]  one per entry of the actor's proc_rng_list: name, type (rng_type_e as an integer); 261028-fzl (S5-F2, integer-counters walk,
+//                  owner rulings 7-8): a shuffled deck (type RNG_SHUFFLE) adds totalEntries (cards in the deck, shuffled_rng_t::entry_total) and
+//                  successEntries (its success cards, count_total( SUCCESS )), the engine's own deck sizes the deck counters' scales divide by
 //   cooldowns[]    one per entry of the actor's cooldown_list: name, durationSeconds, heldByAction (some action of the actor holds it),
 //                  heldByBuff (some buff of the actor holds it as its cooldown)
+//   spawners[]     261028-fzl (S5-F2, ruling 7): one per entry of the actor's spawners: name, maxPets (the engine cap on active pets of the
+//                  spawner; 0 is "unlimited", a dynamic spawner that sets no cap)
 std::string buff_name_of( const buff_t* b )
 {
   return b ? b->name_str : std::string();
@@ -259,7 +264,12 @@ std::string proc_objects_json( const player_t* actor )
   {
     if ( !r )
       continue;
-    o += ( first ? "" : "," ) + fmt::format( "{{\"name\":{},\"type\":{}}}", esc( std::string( r->name() ) ), static_cast<int>( r->type() ) );
+    std::string deck;
+    if ( r->type() == RNG_SHUFFLE )
+      if ( const auto* shuffled = dynamic_cast<const shuffled_rng_t*>( r ) )
+        deck = fmt::format( ",\"totalEntries\":{},\"successEntries\":{}", shuffled->entry_total(), shuffled->count_total( SUCCESS ) );
+    o += ( first ? "" : "," ) +
+         fmt::format( "{{\"name\":{},\"type\":{}{}}}", esc( std::string( r->name() ) ), static_cast<int>( r->type() ), deck );
     first = false;
   }
   std::set<const cooldown_t*> held_by_action;
@@ -280,6 +290,15 @@ std::string proc_objects_json( const player_t* actor )
          fmt::format( "{{\"name\":{},\"durationSeconds\":{},\"charges\":{},\"heldByAction\":{},\"heldByBuff\":{}}}", esc( c->name_str ),
                       num( c->duration.total_seconds() ), c->charges, held_by_action.count( c ) ? "true" : "false",
                       held_by_buff.count( c ) ? "true" : "false" );
+    first = false;
+  }
+  o += "],\"spawners\":[";
+  first = true;
+  for ( const spawner::base_actor_spawner_t* sp : actor->spawners )
+  {
+    if ( !sp )
+      continue;
+    o += ( first ? "" : "," ) + fmt::format( "{{\"name\":{},\"maxPets\":{}}}", esc( sp->name() ), sp->max_pets() );
     first = false;
   }
   return o + "]";

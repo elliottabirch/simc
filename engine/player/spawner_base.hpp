@@ -10,6 +10,7 @@
 #include "util/span.hpp"
 #include "util/string_view.hpp"
 
+#include <cstddef>
 #include <string>
 #include <memory>
 
@@ -47,6 +48,10 @@ namespace spawner
     }
 
     virtual void create_persistent_actors() = 0;
+
+    // 261028-fzl (S5-F2): the engine cap on active pets of this spawner (0: no cap -- a dynamic spawner that sets none). Read by the buff
+    // census (spawners[]), which is why the base class names it; pet_spawner_t is the one implementation.
+    virtual size_t max_pets() const = 0;
 
     // Data merging
     virtual void merge(base_actor_spawner_t* other) = 0;
