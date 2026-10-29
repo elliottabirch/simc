@@ -74,6 +74,38 @@ struct adds_event_t final : public raid_event_t
   double time_estimate_count_range() const override
   { return count_range; }
 
+  // 261028-fzl (S5c-F3a, owner ruling 4): an add stands at (spawn_x, spawn_y) + radius * (cos a, sin a), radius in [|min|, |max|], a in the spawn arc
+  // (the draws in _start below); with no spawn radius it stands on (spawn_x, spawn_y). The distance from a point to that region is largest at a corner
+  // of the sector or where the arc points away from the point, so the bound is the maximum over exactly those candidates.
+  double rl_max_spawn_distance_yards( double from_x, double from_y ) const override
+  {
+    const double cx = spawn_x_coord;
+    const double cy = spawn_y_coord;
+    const double r_max = std::fabs( spawn_radius_max );
+    const double r_min = std::fabs( spawn_radius_min );
+    if ( r_max <= 0.0 )
+      return std::hypot( cx - from_x, cy - from_y );
+    const double a_start = spawn_angle_start * ( m_pi / 180 );
+    const double a_end   = spawn_angle_end * ( m_pi / 180 );
+    const auto   distance_at = [ & ]( double radius, double angle ) {
+      return std::hypot( cx + radius * std::cos( angle ) - from_x, cy + radius * std::sin( angle ) - from_y );
+    };
+    double best = 0.0;
+    for ( double radius : { r_min, r_max } )
+      for ( double angle : { a_start, a_end } )
+        best = std::max( best, distance_at( radius, angle ) );
+    // The angle that points away from `from` through the sector's centre, in every turn that falls inside the arc.
+    const double away = std::atan2( cy - from_y, cx - from_x );
+    for ( int turn = -2; turn <= 2; ++turn )
+    {
+      const double angle = away + turn * 2.0 * m_pi;
+      if ( angle >= a_start && angle <= a_end )
+        for ( double radius : { r_min, r_max } )
+          best = std::max( best, distance_at( radius, angle ) );
+    }
+    return best;
+  }
+
   adds_event_t( sim_t* s, util::string_view options_str )
     : raid_event_t( s, "adds" ),
       count( 1 ),
@@ -1356,6 +1388,10 @@ struct move_enemy_t final : public raid_event_t
   double original_x;
   double original_y;
 
+  // 261028-fzl (S5c-F3a, owner ruling 4): the enemy is put on (x_coord, y_coord) while the event runs.
+  double rl_max_spawn_distance_yards( double from_x, double from_y ) const override
+  { return std::hypot( x_coord - from_x, y_coord - from_y ); }
+
   move_enemy_t( sim_t* s, util::string_view options_str )
     : raid_event_t( s, "move_enemy" ),
       x_coord( 0.0 ),
@@ -1654,6 +1690,24 @@ struct movement_event_t final : public raid_event_t
   bool retarget;
   player_t* target;
   std::string target_str;
+
+  // 261028-fzl (S5c-F3a, owner ruling 10): the largest `move` _start can draw. With a distance_range the draw is uniform in
+  // [move_distance - range, move_distance + range] and then clamped by move_distance_min / move_distance_max exactly as _start clamps it (a value below the
+  // minimum becomes the minimum, else a value above the maximum becomes the maximum), which is monotone in the draw, so the bound is that clamp of the
+  // top of the range; with only a min/max pair the draw is in [min, max]; otherwise it is move_distance.
+  double rl_max_move_yards() const override
+  {
+    if ( distance_range > 0 )
+    {
+      const double top = move_distance + distance_range;
+      if ( top < move_distance_min )
+        return move_distance_min;
+      return top > move_distance_max ? move_distance_max : top;
+    }
+    if ( move_distance_min > 0 || move_distance_max > 0 )
+      return move_distance_max;
+    return move_distance;
+  }
 
   movement_event_t( sim_t* s, util::string_view options_str )
     : raid_event_t( s, "movement" ),

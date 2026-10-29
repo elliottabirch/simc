@@ -98,6 +98,14 @@ public:
   // 261022-fuz F1c: the adds event's count_range (0 for every other event), read by the time-estimate refusal in sim_t::combat_begin.
   virtual double time_estimate_count_range() const
   { return 0.0; }
+  // 261028-fzl (S5c-F3a, owner rulings 4 and 10): the geometric bounds the buff census writes as the entry's `layout` (the RL scale rules read them
+  // instead of a typed ceiling). Both are const and exact for the event's own options; the base event moves and spawns nothing.
+  //   rl_max_spawn_distance_yards: the farthest, in yards from the point (from_x, from_y), that an enemy of this event can stand when it appears
+  //   rl_max_move_yards:           the farthest one run of this event can make the player move, in yards
+  virtual double rl_max_spawn_distance_yards( double /*from_x*/, double /*from_y*/ ) const
+  { return 0.0; }
+  virtual double rl_max_move_yards() const
+  { return 0.0; }
   void parse_options( util::string_view options_str );
   bool parse_timestamps( std::string_view );
 

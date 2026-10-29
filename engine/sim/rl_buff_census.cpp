@@ -15,6 +15,7 @@
 #include "player/spawner_base.hpp"
 #include "sim/cooldown.hpp"
 #include "sim/proc_rng.hpp"
+#include "sim/raid_event.hpp"
 #include "sim/rl_census_lines.hpp"
 #include "sim/sim.hpp"
 
@@ -322,6 +323,43 @@ void add_counted( std::map<key_t, row_t>& rows, std::map<key_t, int>& owner_coun
   ++owner_counts[ key_t( r.holder, r.kind, r.name ) ];
 }
 
+// 261028-fzl (S5c-F3a, owner rulings 4, 6, 8, 10): the entry's LAYOUT, written beside `reach` on the entry's line (never inside the signed table: it
+// differs between two entries of one build). Every field is read from the engine's own objects:
+//   fightLengthSeconds           sim->expected_iteration_time
+//   moveDistanceMaxYards         the largest run any raid event can make the player move (raid_event_t::rl_max_move_yards)
+//   enemySpawnDistanceMaxYards   the farthest, from the census actor's starting position, that an enemy can stand: the raid events'
+//                                rl_max_spawn_distance_yards and the starting (non-add) enemies' own starting positions
+//   enemyCombatReachMaxYards     the largest combat_reach over every enemy actor, adds included (they exist from init)
+//   enemyHeightMaxYards          the largest height over the same enemies
+std::string layout_json( const sim_t* sim, const player_t* actor )
+{
+  const double from_x = actor->default_x_position;
+  const double from_y = actor->default_y_position;
+  double       move_max = 0.0;
+  double       spawn_max = 0.0;
+  for ( const auto& event : sim->raid_events )
+  {
+    if ( !event )
+      continue;
+    move_max  = std::max( move_max, event->rl_max_move_yards() );
+    spawn_max = std::max( spawn_max, event->rl_max_spawn_distance_yards( from_x, from_y ) );
+  }
+  double reach_max = 0.0;
+  double height_max = 0.0;
+  for ( const player_t* e : sim->actor_list )
+  {
+    if ( !e || !e->is_enemy() )
+      continue;
+    reach_max  = std::max( reach_max, e->combat_reach );
+    height_max = std::max( height_max, e->height );
+    if ( !e->is_pet() )
+      spawn_max = std::max( spawn_max, std::hypot( e->default_x_position - from_x, e->default_y_position - from_y ) );
+  }
+  return fmt::format( "{{\"fightLengthSeconds\":{},\"moveDistanceMaxYards\":{},\"enemySpawnDistanceMaxYards\":{},"
+                      "\"enemyCombatReachMaxYards\":{},\"enemyHeightMaxYards\":{}}}",
+                      num( sim->expected_iteration_time.total_seconds() ), num( move_max ), num( spawn_max ), num( reach_max ), num( height_max ) );
+}
+
 void write_table( sim_t* sim, bool fight_played )
 {
   player_t* actor = census_actor( sim );
@@ -414,8 +452,9 @@ void write_table( sim_t* sim, bool fight_played )
     const std::string signature = rl_census_lines::sha256_hex( table );
     const bool        first     = rl_census_lines::first_time_signature( 1, signature );
     const std::string line =
-        fmt::format( "{{\"schemaVersion\":2,\"kind\":\"buff\",\"entry\":{},\"crc32\":{},\"signature\":\"{}\",\"table\":{},\"enemyRows\":{},\"reach\":{}}}\n",
-                     sim->rl_list_index, sim->rl_list_crc32, signature, first ? table : std::string( "null" ), enemy_rows, reach );
+        fmt::format( "{{\"schemaVersion\":2,\"kind\":\"buff\",\"entry\":{},\"crc32\":{},\"signature\":\"{}\",\"table\":{},\"enemyRows\":{},\"reach\":{},\"layout\":{}}}\n",
+                     sim->rl_list_index, sim->rl_list_crc32, signature, first ? table : std::string( "null" ), enemy_rows, reach,
+                     layout_json( sim, actor ) );
     if ( !rl_census_lines::write_text( g_path, line, "ab" ) )
       fmt::print( stderr, "rl_buff_census: cannot open '{}' for appending\n", g_path );
     return;
