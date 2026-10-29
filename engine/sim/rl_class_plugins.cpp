@@ -167,21 +167,18 @@ const rl_class_rule SHAMAN_RULES[] = {
   { "shaman.tempest", shaman_tempest },
 };
 
+// 261028-fzl (S5-F2, hard swap): the five hand providers that counted enemies hit are deleted (the header names generated census rows now); a
+// header that still names one is refused at bind by resolve_scalar_leaf ("does not provide"). The two D2 rows stay.
 const rl_class_hit_provider SHAMAN_HIT_PROVIDERS[] = {
-  { "shaman.chain_lightning", rl_hit_reading::chain_lightning },
-  { "shaman.tempest", rl_hit_reading::tempest },
-  { "shaman.crash_lightning", rl_hit_reading::crash_lightning },
   { "shaman.lava_lash_flame_shock_spread", rl_hit_reading::lava_lash_flame_shock_spread },
-  { "shaman.voltaic_blaze_cleave", rl_hit_reading::voltaic_blaze_cleave },
   { "shaman.voltaic_blaze_new_flame_shocks", rl_hit_reading::voltaic_blaze_new_flame_shocks },
-  { "shaman.fire_nova", rl_hit_reading::fire_nova },
 };
 
 // A zero-row table holds one all-null sentinel row (a zero-length array is not valid C++); readers
 // iterate by n_rules / n_geometry_facts, never by array size.
 const rl_class_rule    NO_RULES[]    = { { nullptr, nullptr } };
 const rl_geometry_fact NO_GEOMETRY[] = { { nullptr, nullptr } };
-const rl_class_hit_provider NO_HIT_PROVIDERS[] = { { nullptr, rl_hit_reading::chain_lightning } };
+const rl_class_hit_provider NO_HIT_PROVIDERS[] = { { nullptr, rl_hit_reading::lava_lash_flame_shock_spread } };
 
 const rl_class_plugin SHAMAN_PLUGIN = { "shaman",
                                         SHAMAN_RULES,

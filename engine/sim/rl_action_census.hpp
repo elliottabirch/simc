@@ -321,6 +321,16 @@ int count_engine_hits( const node_t& node, const player_t* centre );
 int count_target_set_hits( const node_t& n, const node_t& impact, const player_t* actor );
 int count_target_set_hits( const node_t& n, const player_t* actor );
 
+// 261028-fzl (S5-F2): the node of ONE named action object of a holder (the actor for a `census.action.<name>` hit row, a pet for a
+// `census.pet.<pet>.<name>` row), found in the same object set the table's `actions[]` array is written from (the holder's action list, then
+// what hangs off it through impact, execute, tick and child links to depth 3); the first object of that name. False when the holder has none
+// (a build without the talent): the row then reads 0, like a button the build cannot press. Reads only.
+bool find_holder_node( player_t* holder, const std::string& name, node_t& out );
+
+// The node of one action object, filled exactly as the table walk fills it (the impact node of a target-set node is resolved by the binder
+// once, through this). Reads only.
+void node_of_action( action_t* a, const char* via, player_t* holder, node_t& out );
+
 // 261028-fzl (D4): the cause tally of the action census, a pure observer. action_t::execute() calls note_execute for every execute while a census
 // path is set; `cause_class` is the stamp's class byte (rl_cause_class), `button` the owner of the bottom-most CAST frame of the actor's
 // rl_cause_stack (null when there is none). Only the buttons of the active header (RL_ACTIONS cast tokens) are counted in byButton. `decision_seq` is

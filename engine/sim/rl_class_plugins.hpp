@@ -53,15 +53,13 @@ using rl_fill_scoring_fields_fn = void ( * )( const action_t* a, player_t* candi
 // rl_policy_obs.cpp (they need the per-decision memo that file owns); this table is what makes a provider reachable only through
 // its own class's plugin. (Plan 268-05's three warrior readings were retired in 271-10: arms hit columns are generated
 // "census.<button>" rows that do not go through a class plugin.)
+// 261028-fzl (S5-F2): the five readings that counted enemies hit (chain_lightning, tempest, crash_lightning, voltaic_blaze_cleave, fire_nova)
+// are deleted: those columns are generated "census.<button>" / "census.action.<name>" rows now. The two that remain count NEW DoTs, not enemies
+// hit (owner decision D2), and have no census equivalent.
 enum class rl_hit_reading
 {
-  chain_lightning,
-  tempest,
-  crash_lightning,
   lava_lash_flame_shock_spread,
-  voltaic_blaze_cleave,
   voltaic_blaze_new_flame_shocks,
-  fire_nova,
 };
 
 struct rl_class_hit_provider

@@ -406,7 +406,12 @@ inline constexpr std::uint32_t RECORD_SIZE =
         4u * static_cast<std::uint32_t>( RL_TARGET_SLOTS ) * static_cast<std::uint32_t>( RL_TARGET_FEATURES ) + 7u + 4u + 7u ) / 8u ) * 8u +
     8u * rl_proc::COUNT + 8u * 2u * rl_credit::STREAM_COUNT + ( 16u + 8u * 2u * rl_credit::STREAM_COUNT );
 #else
-inline constexpr std::uint32_t RECORD_SIZE = 3672u;  // 290C6 (format 14 unchanged, 2026-10-20): 3568 -> 3672 at width 444
+inline constexpr std::uint32_t RECORD_SIZE = 4064u;  // 261028-fzl (S5-F2, format 16 unchanged): 3672 -> 4064 at width 510 and 25 target features
+                                                       // (the observation grew 444 -> 510 and the target block 23 -> 25 features):
+                                                       // roundup8(45 + 4*510 + 4*16*25 + 7 + 4 + 7) = roundup8(3691) = 3696,
+                                                       // + 160 proc + 96 credit = 3952, + 112 chosen = 4064. Only the width-derived row size
+                                                       // moves; a width-444 file (record_size 3672) is refused by its row size, by name.
+                                                       // 290C6 (format 14 unchanged, 2026-10-20): 3568 -> 3672 at width 444
                                                        // (419 + 25 `since_applied` columns, owner decisions 60 and 61):
                                                        // roundup8(45 + 4*444 + 4*16*23 + 7 + 7) = roundup8(3307) = 3304,
                                                        // + 160 proc + 96 credit = 3560, + 112 chosen = 3672. The format
@@ -548,9 +553,9 @@ inline constexpr std::uint32_t PROC_BLOCK_OFFSET =
                                      // (259-05: +5 was +4 -- observed_candidate_slot took one more byte)
 inline constexpr std::uint32_t PROC_BLOCK_SIZE = 8u * rl_proc::COUNT;
 #ifndef RL_SPEC_HEADER   // 268-06: enhancement's width pin; another spec's row size is the formula's value, checked below
-static_assert( PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE == 3464u,
+static_assert( PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE == 3856u,
                "PROC_BLOCK_OFFSET + PROC_BLOCK_SIZE must equal the version-14 pre-credit row size at "
-               "width 444 (RL_OBS_DIM=444) and 16 target slots (3464; was 3360 at width 419, 2984 at width 324/325, "
+               "width 510 (RL_OBS_DIM=510) and 16 target slots of 25 features (3856; was 3464 at width 444 and 23 features, 3360 at width 419, 2984 at width 324/325, "
                "version 12/13, 2960 at width 319, version 11, and 2224 at 8 slots and 260928-tb9's "
                "width, version 10) -- CREDIT_BLOCK_OFFSET below is pinned to that exact value" );
 #endif
@@ -571,9 +576,9 @@ static_assert( RECORD_SIZE == CHOSEN_BLOCK_OFFSET + CHOSEN_BLOCK_SIZE,
                "RECORD_SIZE must be roundup8(45 + 4*RL_OBS_DIM + 4*RL_TARGET_SLOTS*RL_TARGET_FEATURES + 7) + "
                "8*rl_proc::COUNT + 16*rl_credit::STREAM_COUNT + 16 + 16*rl_credit::STREAM_COUNT" );
 #ifndef RL_SPEC_HEADER   // 268-06: enhancement's width pin (see above)
-static_assert( RECORD_SIZE == 3672u && CHOSEN_BLOCK_OFFSET == 3560u && CHOSEN_BLOCK_SIZE == 112u,
-               "version 14 at width 444 and 16 target slots: RECORD_SIZE 3672 = 3560 + a 112-byte "
-               "chosen block at offset 3560 (290C6; was 3568 = 3456 + 112 at width 419, 261002-8rv)" );
+static_assert( RECORD_SIZE == 4064u && CHOSEN_BLOCK_OFFSET == 3952u && CHOSEN_BLOCK_SIZE == 112u,
+               "version 14 at width 510 and 16 target slots of 25 features: RECORD_SIZE 4064 = 3952 + a 112-byte "
+               "chosen block at offset 3952 (261028-fzl S5-F2; was 3672 = 3560 + 112 at width 444, 3568 = 3456 + 112 at width 419, 261002-8rv)" );
 #endif
 static_assert( RL_OBS_DIM >= 2, "footer_record's zero40[RL_OBS_DIM-1] needs at least one element" );
 inline constexpr std::uint32_t HEADER_SIZE = 272u;  // 266-01: 264 -> 272 (funnel_mode @264, chooser_state @268)

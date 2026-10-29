@@ -628,20 +628,28 @@ void link_children( action_t* a, int depth, std::unordered_map<const action_t*, 
     link( c, "child" );
 }
 
-void collect_holder( player_t* holder, const char* holder_kind, const std::string& pet_name, std::map<std::string, action_row_t>& rows,
-                     std::size_t& object_total )
+// Every action object of one holder, in the census order: the holder's own action list, then the objects reachable only through a child link
+// (impact, execute, tick, child; depth 3) in discovery order. `parent_of` records how each linked object was reached. One definition: the
+// census table's `actions[]` walk and the generic hit-row binder (find_holder_node) read the same set.
+void holder_objects( player_t* holder, std::unordered_map<const action_t*, child_link_t>& parent_of, std::vector<action_t*>& objects )
 {
-  std::unordered_map<const action_t*, child_link_t> parent_of;
-  std::vector<action_t*>                            extra;
-  std::vector<action_t*>                            objects( holder->action_list.begin(), holder->action_list.end() );
+  std::vector<action_t*> extra;
+  objects.assign( holder->action_list.begin(), holder->action_list.end() );
   for ( action_t* a : objects )
     link_children( a, 0, parent_of, extra );
-  // Objects reachable only through a child link (not in the holder's own list) follow the list, in discovery order.
-  std::map<std::string, int> objects_per_key;
   std::set<const action_t*> listed( objects.begin(), objects.end() );
   for ( action_t* c : extra )
     if ( listed.insert( c ).second )
       objects.push_back( c );
+}
+
+void collect_holder( player_t* holder, const char* holder_kind, const std::string& pet_name, std::map<std::string, action_row_t>& rows,
+                     std::size_t& object_total )
+{
+  std::unordered_map<const action_t*, child_link_t> parent_of;
+  std::vector<action_t*>                            objects;
+  holder_objects( holder, parent_of, objects );
+  std::map<std::string, int> objects_per_key;
 
   for ( action_t* a : objects )
   {
@@ -934,6 +942,30 @@ void append_list_line( sim_t* sim, player_t* p, const std::string& table, const 
 
 }  // namespace
 
+bool find_holder_node( player_t* holder, const std::string& name, node_t& out )
+{
+  if ( holder == nullptr )
+    return false;
+  std::unordered_map<const action_t*, child_link_t> parent_of;
+  std::vector<action_t*>                            objects;
+  holder_objects( holder, parent_of, objects );
+  for ( action_t* a : objects )
+  {
+    if ( a == nullptr || a->name_str != name )
+      continue;
+    const auto  link = parent_of.find( a );
+    const char* via  = link == parent_of.end() ? "list" : link->second.via;
+    fill_node( out, a, via, holder );
+    return true;
+  }
+  return false;
+}
+
+void node_of_action( action_t* a, const char* via, player_t* holder, node_t& out )
+{
+  fill_node( out, a, via, holder );
+}
+
 const char* shape_name( shape_t s )
 {
   switch ( s )
@@ -1139,6 +1171,25 @@ void check_header_gate_classes( const player_t* p, const std::vector<token_t>& w
     if ( std::strncmp( RL_HIT_PROVIDERS[ k ].provider, "census.", 7 ) != 0 )
       continue;
     const char* token = RL_HIT_PROVIDERS[ k ].provider + 7;
+    // 261028-fzl (S5-F2, D4): a row of a proc, a pet's action or a carrier sum (`census.action.<name>`, `census.pet.<pet>.<name>`) belongs to
+    // no button, so the spell data of no button classifies it: its class is PROC, the header's word alone, and it must say so (gate proc,
+    // needs no unit). A header that gives such a row another class, or a token row the class PROC, is refused by name.
+    const bool proc_row = std::strncmp( token, "action.", 7 ) == 0 || std::strncmp( token, "pet.", 4 ) == 0;
+    const rl_hit_gate header_gate = RL_HIT_PROVIDERS[ k ].gate;
+    if ( proc_row )
+    {
+      if ( header_gate != rl_hit_gate::proc || RL_HIT_ROW_NEEDS_UNIT[ k ] )
+        throw sc_runtime_error( fmt::format(
+            "rl_policy: registry '{}' header gives hit row '{}' (a proc, pet or carrier-sum row, no button) a class other than PROC "
+            "(bind-time refusal, player '{}')",
+            RL_REGISTRY_ID, token, p->name() ) );
+      continue;
+    }
+    if ( header_gate == rl_hit_gate::proc || header_gate != ( RL_HIT_ROW_NEEDS_UNIT[ k ] ? rl_hit_gate::unit : rl_hit_gate::shape ) )
+      throw sc_runtime_error( fmt::format(
+          "rl_policy: registry '{}' header gives button hit row '{}' a gate class that disagrees with its needs-a-unit table entry "
+          "(bind-time refusal, player '{}')",
+          RL_REGISTRY_ID, token, p->name() ) );
     for ( const token_t& t : walk )
     {
       if ( t.token != token || !t.found || t.nodes.empty() || t.nodes.front().action == nullptr )

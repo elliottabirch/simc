@@ -27,6 +27,7 @@
 #include "dbc/dbc.hpp"
 #include "dbc/trait_data.hpp"
 #include "player/consumable.hpp"
+#include "player/pet.hpp"
 #include "player/player.hpp"
 #include "player/set_bonus.hpp"
 #include "player/unique_gear.hpp"
@@ -100,21 +101,14 @@ inline bool reach_rule_allows( const player_t* p, const reach_gate_t& g, const p
   return g.radius < 0.0 || rl_action_census::any_enemy_in_player_shape( p, axis, g.filter, g.radius );
 }
 
-// 260914-rbp Task 2b (A3, perf; recommended by the plan, small): per-actor cache of the hits.*
-// family's OWN find_action() handles -- chain_lightning/tempest/lava_lash/voltaic_blaze/
-// fire_nova_explosion -- resolved at most once per actor (ACT-02 pattern, mirrors
-// rl_target_select.cpp's own resolve_vb_lava_lash_geometry per-actor cache), never once per
-// decision. Without this, five of the seven hits.* scalars each did their own p->find_action()
-// name scan every decision -- a linear scan over the action list, five times per decision.
-// hits.crash_lightning is not in this cache: it goes through compute_crash_lightning_shape(),
-// not find_action(), same as before this task.
+// 260914-rbp Task 2b (A3, perf; recommended by the plan, small): per-actor cache of the hits.* family's OWN find_action() handles, resolved at
+// most once per actor (ACT-02 pattern, mirrors rl_target_select.cpp's own resolve_vb_lava_lash_geometry per-actor cache), never once per
+// decision. 261028-fzl (S5-F2): only the two DoT-count providers (lava_lash.flame_shock_spread, voltaic_blaze.new_flame_shocks) are still
+// hand readings, so only their two buttons are cached; every other hits.* column is a generated census row.
 struct hits_action_handles_t
 {
-  action_t* chain_lightning     = nullptr;
-  action_t* tempest             = nullptr;
   action_t* lava_lash           = nullptr;
   action_t* voltaic_blaze       = nullptr;
-  action_t* fire_nova_explosion = nullptr;
   // (Plan 268-05's warrior handles were retired in 271-10 with the three hand-written warrior hit providers.)
 };
 std::unordered_map<const player_t*, hits_action_handles_t> g_hits_action_handle_cache;
@@ -126,11 +120,8 @@ const hits_action_handles_t& resolve_hits_action_handles( const player_t* p )
     return found->second;
 
   hits_action_handles_t handles;
-  handles.chain_lightning     = p->find_action( "chain_lightning" );
-  handles.tempest             = p->find_action( "tempest" );
   handles.lava_lash           = p->find_action( "lava_lash" );
   handles.voltaic_blaze       = p->find_action( "voltaic_blaze" );
-  handles.fire_nova_explosion = p->find_action( "fire_nova_explosion" );
   return g_hits_action_handle_cache.emplace( p, handles ).first->second;
 }
 
@@ -138,19 +129,42 @@ const hits_action_handles_t& resolve_hits_action_handles( const player_t* p )
 // provider "census.<button>"} is bound here, once per actor, to the button's node of the action discovery census
 // (rl_action_census::walk_classified: the same node classification the committed census file records as `chosenNode`), and read
 // per decision with rl_action_census::count_engine_hits. The walk runs at bind regardless of the rl_action_census=<path> option.
+// 261028-fzl (S5-F2, D4): a row that belongs to no button binds to an ACTION OBJECT of the census table's `actions[]` array instead:
+// `census.action.<name>` is the actor's own action of that name (a proc, an item proc, a carrier sum), `census.pet.<pet>.<name>` a
+// pet's action of that name (a totem pulse). Both are found by (holder, pet, name) in the object set the table's `actions[]` is written
+// from (rl_action_census::find_holder_node), and counted with the same count_engine_hits; a node with a target set (Fire Nova's carrier sum)
+// goes through count_target_set_hits. A pet does not exist when the first decision binds (the table's pet rows come from the fight-end
+// walk), so a pet row is resolved per decision against the pets of that name that are awake right now; no awake pet reads 0.
 // Lifetime: the same as the slot table that holds the indexes (g_slot_table_cache); both are emptied by clear_process_caches(),
 // never per iteration, because the slot table persists across a sim's iterations and so must the rows its bindings index.
 constexpr std::size_t CENSUS_HIT_ROWS_MAX = 32;   // the per-decision memo in build_obs is sized by this; bind refuses more
+enum class census_hit_source_t
+{
+  button,        // "census.<token>": a cast token of the header
+  self_action,   // "census.action.<name>": an action object of the actor
+  pet_action     // "census.pet.<pet>.<name>": an action object of a pet
+};
 struct census_hit_row_t
 {
-  rl_action_census::token_t census;          // the button's classified walk (nodes, chosen_node)
-  const action_t*           aimed = nullptr; // the resolved action of an AIMED button (its stamped pick is the centre), else null
+  census_hit_source_t source = census_hit_source_t::button;
+  rl_action_census::token_t census;          // button: the button's classified walk (nodes, chosen_node)
+  const action_t*           aimed = nullptr; // button: the resolved action of an AIMED button (its stamped pick is the centre), else null
   // 261013-aimx class B: the census node this row counts, by NAME (the header's RL_HIT_ROW_NODE entry): a button's own row counts its
   // unconditional node, a conditional row counts the button's proc node (what it would hit if it fires). Empty = the header names none (a
   // header cut before this table): the walk's own chosen_node, as before. node_index is the position of that name in the walk's nodes, -1
   // when this build's walk has no node of that name (a build without the proc talent), which reads 0 like a button the build cannot press.
   std::string node_name;
   int         node_index = -1;
+  // 261028-fzl (S5-F2): an action row (self_action, pet_action).
+  std::string                 pet_name;                   // pet_action: the pet's name_str
+  std::string                 action_name;                // the action object's name_str
+  bool                        node_found = false;         // self_action: this build's action list holds the object; node below is it
+  rl_action_census::node_t    node;                       // self_action: the object's node
+  rl_action_census::node_t    impact;                     // self_action with a target set: the impact node the carriers are counted with
+  std::unordered_map<const action_t*, rl_action_census::node_t> pet_nodes;  // pet_action: the nodes of the pet objects met so far
+  // The centre of an action row (the header's centre_action): the cast token whose stamped pick centres the count, resolved once. Null:
+  // the engine fallback (the chosen enemy, else the target), which is where the engine centres a timer, a DoT or a pet proc.
+  const action_t* centre_aimed = nullptr;
 };
 struct census_hit_actor_t
 {
@@ -159,19 +173,83 @@ struct census_hit_actor_t
 };
 std::unordered_map<const player_t*, census_hit_actor_t> g_census_hit_actors;
 
-std::size_t census_hit_row_for( player_t* p, const char* token, const char* node_name )
+// 261028-fzl (S5-F2): the aimed action whose stamped pick centres a proc row, or null (the row uses the engine fallback centre). A centre token
+// that is not an aimed button has no stamped pick to read: the fallback applies, exactly as for a button row that is not aimed.
+const action_t* census_centre_action( player_t* p, int centre_action, const char* provider )
 {
+  if ( centre_action < 0 )
+    return nullptr;
+  if ( static_cast<std::size_t>( centre_action ) >= RL_ACTION_DIM || RL_ACTIONS[ centre_action ].kind != rl_action_kind::cast ||
+       RL_ACTIONS[ centre_action ].token == nullptr )
+    throw sc_runtime_error( fmt::format(
+        "rl_policy::census_hit_row_for: registry '{}' hit provider '{}' names centre action {} which is not a cast token of the header "
+        "(bind-time refusal)",
+        RL_REGISTRY_ID, provider, centre_action ) );
+  const char* token = RL_ACTIONS[ centre_action ].token;
+  for ( std::size_t k = 0; k < RL_TARGETED_TOKEN_COUNT; ++k )
+    if ( std::strcmp( RL_TARGETED_TOKENS[ k ], token ) == 0 )
+      return solver_control::resolve_action( p, token );
+  return nullptr;
+}
+
+std::size_t census_hit_row_for( player_t* p, const rl_hit_provider& header_row, const char* node_name )
+{
+  const char* provider = header_row.provider;
   census_hit_actor_t& actor = g_census_hit_actors[ p ];
   if ( actor.walk.empty() )
     actor.walk = rl_action_census::walk_classified( p );
   const std::string wanted_node = node_name != nullptr ? node_name : "";
   for ( std::size_t k = 0; k < actor.rows.size(); ++k )
-    if ( actor.rows[ k ].census.token == token && actor.rows[ k ].node_name == wanted_node )
+  {
+    const census_hit_row_t& r = actor.rows[ k ];
+    const bool same = r.source == census_hit_source_t::button
+                          ? r.census.token == provider + 7 && r.node_name == wanted_node
+                          : ( r.source == census_hit_source_t::self_action ? "census.action." + r.action_name == provider
+                                                                           : "census.pet." + r.pet_name + "." + r.action_name == provider );
+    if ( same )
       return k;
+  }
   if ( actor.rows.size() >= CENSUS_HIT_ROWS_MAX )
     throw sc_runtime_error( fmt::format(
-        "rl_policy::census_hit_row_for: registry '{}' binds more than {} census hit columns on player '{}' (token '{}')",
-        RL_REGISTRY_ID, CENSUS_HIT_ROWS_MAX, p->name(), token ) );
+        "rl_policy::census_hit_row_for: registry '{}' binds more than {} census hit columns on player '{}' (provider '{}')",
+        RL_REGISTRY_ID, CENSUS_HIT_ROWS_MAX, p->name(), provider ) );
+  census_hit_row_t row;
+  if ( std::strncmp( provider, "census.action.", 14 ) == 0 || std::strncmp( provider, "census.pet.", 11 ) == 0 )
+  {
+    const bool pet_row = provider[ 7 ] == 'p';
+    if ( pet_row )
+    {
+      const char* pet_start = provider + 11;
+      const char* dot       = std::strchr( pet_start, '.' );
+      if ( dot == nullptr || dot == pet_start || dot[ 1 ] == '\0' )
+        throw sc_runtime_error( fmt::format(
+            "rl_policy::census_hit_row_for: registry '{}' hit provider '{}' is not spelled census.pet.<pet>.<action> (bind-time refusal)",
+            RL_REGISTRY_ID, provider ) );
+      row.source      = census_hit_source_t::pet_action;
+      row.pet_name    = std::string( pet_start, dot );
+      row.action_name = dot + 1;
+    }
+    else
+    {
+      row.source      = census_hit_source_t::self_action;
+      row.action_name = provider + 14;
+      row.node_found  = rl_action_census::find_holder_node( p, row.action_name, row.node );
+      if ( row.node_found && row.node.has_target_set )
+      {
+        if ( row.node.action == nullptr || row.node.action->impact_action == nullptr )
+          throw sc_runtime_error( fmt::format(
+              "rl_policy::census_hit_row_for: registry '{}' hit provider '{}' has a target set but action '{}' of player '{}' has no impact "
+              "action to count round each carrier (bind-time refusal)",
+              RL_REGISTRY_ID, provider, row.action_name, p->name() ) );
+        rl_action_census::node_of_action( row.node.action->impact_action, "impact", p, row.impact );
+      }
+    }
+    row.node_name    = row.action_name;
+    row.centre_aimed = census_centre_action( p, header_row.centre_action, provider );
+    actor.rows.push_back( std::move( row ) );
+    return actor.rows.size() - 1;
+  }
+  const char* token = provider + 7;
   const rl_action_census::token_t* found = nullptr;
   for ( const rl_action_census::token_t& t : actor.walk )
     if ( t.token == token )
@@ -184,7 +262,6 @@ std::size_t census_hit_row_for( player_t* p, const char* token, const char* node
         "rl_policy::census_hit_row_for: registry '{}' hit provider 'census.{}' names a button that is not a cast token of the "
         "header (player '{}') (bind-time refusal)",
         RL_REGISTRY_ID, token, p->name() ) );
-  census_hit_row_t row;
   row.census    = *found;
   row.node_name = wanted_node;
   if ( !wanted_node.empty() )
@@ -201,19 +278,85 @@ std::size_t census_hit_row_for( player_t* p, const char* token, const char* node
   return actor.rows.size() - 1;
 }
 
+// The enemy a hit count is centred on, for a row that is not an aimed button: the stamped pick of the row's centre token when it has one this
+// decision, else the engine fallback (the chosen enemy, else the current target). Null when the centre is no live enemy.
+const player_t* census_fallback_centre( const player_t* p )
+{
+  const player_t* centre = p->rl_chosen_enemy != nullptr ? p->rl_chosen_enemy : p->target;
+  if ( centre == nullptr || centre->is_sleeping() || !centre->is_enemy() || !rl_target_select::rl_counts_as_enemy( centre ) )
+    return nullptr;
+  return centre;
+}
+
+// The count of one node of an action row round `centre`: a target set (Fire Nova) is the sum over the carriers of the actor's own dot of the
+// impact node's count, every other node its own count_engine_hits.
+int census_action_node_hits( const player_t* p, const rl_action_census::node_t& node, const rl_action_census::node_t& impact, const player_t* centre )
+{
+  if ( node.has_target_set )
+    return rl_action_census::count_target_set_hits( node, impact, p );
+  return rl_action_census::count_engine_hits( node, centre );
+}
+
 // How many enemies the pressed button hits right now. Side-effect free: count_engine_hits reads positions, reach and the live
 // n_targets(), never target_list(), never a random draw. The centre is the enemy the press is aimed at: the stamped pick of an
 // aimed button (0 when it has none this decision), else the tag (the chosen enemy), else the current target. A button this
 // build cannot press reads 0; a button whose walk found no multi-target node hits its one target.
-double census_hit_count( const player_t* p, const census_hit_row_t& row )
+// 261028-fzl (S5-F2): an action row (a proc, an item proc, a pet pulse, a carrier sum) is the count of its own object: centred on the stamped
+// pick of its centre token when that token is aimed and has a pick this decision, else on the engine fallback centre; a target set is
+// centre-free (its centres are the carriers). A build whose action list holds no such object, and a pet row with no awake pet of that name,
+// read 0. Several awake pets of one name (the totems) read the largest of their counts: they stand at the same spot, so the counts agree,
+// and the maximum is the one that does not depend on pet-list order.
+double census_hit_count( const player_t* p, census_hit_row_t& row )
 {
+  if ( row.source != census_hit_source_t::button )
+  {
+    const player_t* centre = nullptr;
+    if ( row.centre_aimed != nullptr )
+    {
+      bool      found = false;
+      player_t* pick  = rl_target_select::lookup_pick( row.centre_aimed, &found );
+      if ( found && pick != nullptr && !pick->is_sleeping() && pick->is_enemy() && rl_target_select::rl_counts_as_enemy( pick ) )
+        centre = pick;
+    }
+    if ( centre == nullptr )
+      centre = census_fallback_centre( p );
+    if ( row.source == census_hit_source_t::self_action )
+    {
+      if ( !row.node_found || ( centre == nullptr && !row.node.has_target_set ) )
+        return 0.0;
+      return static_cast<double>( census_action_node_hits( p, row.node, row.impact, centre ) );
+    }
+    if ( centre == nullptr )
+      return 0.0;
+    int best = 0;
+    for ( auto* pet : p->pet_list )
+    {
+      if ( pet == nullptr || pet->is_sleeping() || pet->name_str != row.pet_name )
+        continue;
+      for ( action_t* a : pet->action_list )
+      {
+        if ( a == nullptr || a->name_str != row.action_name )
+          continue;
+        auto found_node = row.pet_nodes.find( a );
+        if ( found_node == row.pet_nodes.end() )
+        {
+          rl_action_census::node_t n;
+          rl_action_census::node_of_action( a, "list", pet, n );
+          found_node = row.pet_nodes.emplace( a, std::move( n ) ).first;
+        }
+        best = std::max( best, rl_action_census::count_engine_hits( found_node->second, centre ) );
+        break;
+      }
+    }
+    return static_cast<double>( best );
+  }
   if ( !row.census.found )
     return 0.0;
   const player_t* centre = nullptr;
   if ( row.aimed != nullptr )
   {
     bool      found = false;
-    player_t* pick  = rl_target_select::lookup_pick( row.aimed, &found );
+    player_t* pick = rl_target_select::lookup_pick( row.aimed, &found );
     centre          = found ? pick : nullptr;
   }
   else
@@ -1457,6 +1600,14 @@ void read_action_gate_bits( const player_t* p, std::uint8_t out_resolvable[ RL_A
                 "rl_policy: hit row '{}' is SHAPE class but player '{}' has no counted node for it (bind-time refusal, 271.6-07)",
                 a.token, p->name() ) );
           const rl_action_census::node_t& node = t.nodes[ static_cast<std::size_t>( t.chosen_node ) ];
+          // 261028-fzl (S5-F2, owner ruling 9 after S4): a SHAPE-class button whose counted node is centred on the TARGET (Primordial Storm: an
+          // aimed button, class SHAPE because its spell data carries no unit-target code, its node AROUND_TARGET) has a mask test already: the
+          // target it is pressed on is inside its own shape by construction (count_engine_hits never removes the centre), and every branch of the
+          // conjunct below already requires target_ready( target or pick ) -- alive, not immune, in range. Its reach rule is therefore "the
+          // target is valid", which adds no radius: the gate stays at -1 (no extra rule), by this reading and not by omission. Every other shape
+          // that is not centred on the player still refuses at bind below.
+          if ( node.underlying == rl_action_census::shape_t::AROUND_TARGET )
+            break;
           if ( node.underlying != rl_action_census::shape_t::AROUND_PLAYER || node.radius <= 0.0 )
             throw sc_runtime_error( fmt::format(
                 "rl_policy: hit row '{}' is SHAPE class but its counted node's shape '{}' has no mask test yet for player '{}' "
@@ -1891,9 +2042,9 @@ enum class direct_id
   // declared `rl_family` entries in rl_policy_constants.h, RL_OBS_FAMILIES -- so Task 2 must
   // either treat these seven source strings as opaque/bare despite the dot, or extend that split
   // function's own bare-name detection; this is Task 2's decision to make, not pre-empted here).
-  hits_chain_lightning, hits_tempest, hits_crash_lightning,
-  hits_lava_lash_flame_shock_spread, hits_voltaic_blaze_cleave, hits_voltaic_blaze_new_flame_shocks,
-  hits_fire_nova,
+  // 261028-fzl (S5-F2): five of the seven hand readings (chain_lightning, tempest, crash_lightning, voltaic_blaze_cleave, fire_nova) are gone: the
+  // generated census rows (hits_census) read them. The two that count new DoTs rather than enemies hit stay.
+  hits_lava_lash_flame_shock_spread, hits_voltaic_blaze_new_flame_shocks,
   // 271-10 (H-3): every generated "census.<button>" hit column (the slot's `census_row` names which); replaces plan 268-05's three
   // hand-written warrior providers.
   hits_census,
@@ -1996,7 +2147,7 @@ enum class target_fact_leaf_kind
 // targeted_picks, OR-2).
 // ---------------------------------------------------------------------------
 enum class shape_fact_action_kind { crash_lightning, sundering };
-enum class shape_fact_leaf_kind { enemies_hit, summed_remaining_life, long_lived_count };
+enum class shape_fact_leaf_kind { summed_remaining_life, long_lived_count };
 
 struct slot_binding
 {
@@ -2034,7 +2185,7 @@ struct slot_binding
   // leaves -- both resolved ONCE at bind time from the member/leaf name, never re-parsed per
   // decision.
   shape_fact_action_kind shape_fact_action = shape_fact_action_kind::crash_lightning;
-  shape_fact_leaf_kind shape_fact_leaf = shape_fact_leaf_kind::enemies_hit;
+  shape_fact_leaf_kind shape_fact_leaf = shape_fact_leaf_kind::summed_remaining_life;
 
   // kind == legality (260831-mk7, D-1/D-2): the action index this slot's
   // ordinal member name resolves to -- parsed ONCE at bind time from
@@ -2285,33 +2436,6 @@ slot_binding resolve_buff_leaf( buff_t* member_buff, const rl_leaf_desc& leaf )
   return b;
 }
 
-// 260914-rbp Task 2c (BL-2 fork half): a `hits.*` switch leaf carries the name
-// `<parent>.at_least_<k>` (Task 2's registry naming convention for the census `scalars[]` switch
-// rows) -- the PARENT'S plain name (e.g. "hits.chain_lightning") is what dispatches to a
-// direct_id below; the bucket/threshold encoding for a given `k` is applied by the per-slot
-// descriptor inside build_obs, never here. Stripping the suffix ONCE, in one helper, means every
-// `at_least_k` switch for these seven parents reuses the identical direct_id branches as its
-// magnitude sibling instead of 32 near-duplicate strcmp arms. Returns `leaf` unchanged (as a
-// std::string copy) when the suffix is absent, malformed, or non-numeric -- such a name falls
-// through to "unresolved" below exactly as it did before this task.
-std::string hits_switch_parent_name( const char* leaf )
-{
-  static constexpr char SUFFIX[] = ".at_least_";
-  std::string name( leaf );
-  auto pos = name.rfind( SUFFIX );
-  if ( pos == std::string::npos )
-    return name;
-  std::size_t k_pos = pos + ( sizeof( SUFFIX ) - 1 );
-  if ( k_pos >= name.size() )
-    return name;
-  for ( std::size_t i = k_pos; i < name.size(); ++i )
-  {
-    if ( !std::isdigit( static_cast<unsigned char>( name[ i ] ) ) )
-      return name;
-  }
-  return name.substr( 0, pos );
-}
-
 // rl_family_kind::scalar resolution (the `scalars` pseudo-family). Every
 // leaf this task resolves reads a value `build_obs` already has to hand
 // with NO per-decision engine lookup of its own: `active_enemies`/`t` come
@@ -2472,18 +2596,10 @@ slot_binding resolve_scalar_leaf( const player_t* p, const rl_leaf_desc& leaf )
   // actually asks for. This removal is its OWN commit (separately revertable from the rest of
   // this task, per the rulings' own conditional-keep clause: "inside SW1's seed spread -> drop;
   // worse on >= 2/3 seeds -> keep until R14's scalars replace them").
-  // 260914-rbp Task 1 (R5/R7/R9): the seven hits.* scalars -- see direct_id::hits_chain_lightning's
-  // own enum-declaration comment above for the naming note Task 2 (registry/generator) must
-  // resolve before these can be wired to a slot. Every case below is resolved fresh, once per
-  // decision, inside build_obs (never cached at bind time -- resolve_scalar_leaf has no player_t*
-  // to resolve a p->find_action()/find_talent_spell() call against; mirrors
-  // resolve_thorims_branch_geometry's own once-per-decision, never-per-candidate precedent,
-  // rl_target_select.cpp).
-  // 260914-rbp Task 2c (BL-2 fork half): dispatch on the PARENT name (hits_switch_parent_name
-  // strips a trailing `.at_least_<k>` once, above) so a switch row for any of these seven parents
-  // binds to the identical direct_id as its magnitude sibling -- the plain parent name (no
-  // suffix) keeps binding the magnitude row exactly as before.
-  const std::string hits_dispatch_name = hits_switch_parent_name( leaf.leaf );
+  // 260914-rbp Task 1 (R5/R7/R9): the hits.* scalars. Every class-provider case below is resolved fresh, once per decision, inside
+  // build_obs (never cached at bind time). 261028-fzl (S5-F2): the `.at_least_<k>` bucket switches are gone (owner 2026-10-28, decision 1), so
+  // a leaf is matched by its plain name only.
+  const std::string hits_dispatch_name = leaf.leaf;
   // Phase 268 plan 04 (G268-7, FORK-04): every `hits.<member>` scalar binds through the header's RL_HIT_PROVIDERS and the acting
   // player's class plugin. The row names the provider (spelled <class>.<name>); the plugin maps it to its reading. A provider
   // the plugin does not have is refused here, at bind, with the registry id, the leaf and the provider. A hits leaf with no
@@ -2500,9 +2616,9 @@ slot_binding resolve_scalar_leaf( const player_t* p, const rl_leaf_desc& leaf )
       b.direct     = direct_id::hits_census;
 #ifdef RL_HIT_ROW_NODE_DEFINED
       // 261013-aimx class B: the header names the census node each row counts (parallel to RL_HIT_PROVIDERS); a class-provider row reads null.
-      b.census_row = census_hit_row_for( const_cast<player_t*>( p ), row.provider + 7, RL_HIT_ROW_NODE[ k ] );
+      b.census_row = census_hit_row_for( const_cast<player_t*>( p ), row, RL_HIT_ROW_NODE[ k ] );
 #else
-      b.census_row = census_hit_row_for( const_cast<player_t*>( p ), row.provider + 7, nullptr );
+      b.census_row = census_hit_row_for( const_cast<player_t*>( p ), row, nullptr );
 #endif
       return b;
     }
@@ -2516,13 +2632,8 @@ slot_binding resolve_scalar_leaf( const player_t* p, const rl_leaf_desc& leaf )
     b.kind = slot_binding_kind::direct;
     switch ( provider->reading )
     {
-      case rl_hit_reading::chain_lightning:                  b.direct = direct_id::hits_chain_lightning; break;
-      case rl_hit_reading::tempest:                          b.direct = direct_id::hits_tempest; break;
-      case rl_hit_reading::crash_lightning:                  b.direct = direct_id::hits_crash_lightning; break;
       case rl_hit_reading::lava_lash_flame_shock_spread:     b.direct = direct_id::hits_lava_lash_flame_shock_spread; break;
-      case rl_hit_reading::voltaic_blaze_cleave:             b.direct = direct_id::hits_voltaic_blaze_cleave; break;
       case rl_hit_reading::voltaic_blaze_new_flame_shocks:   b.direct = direct_id::hits_voltaic_blaze_new_flame_shocks; break;
-      case rl_hit_reading::fire_nova:                        b.direct = direct_id::hits_fire_nova; break;
     }
     return b;
   }
@@ -3226,8 +3337,8 @@ slot_binding resolve_shape_fact_leaf( const std::string& engine_token, const rl_
 
   const std::string& leaf_name = leaf.leaf;
   shape_fact_leaf_kind fk;
-  if ( leaf_name == "enemies_hit" )                    fk = shape_fact_leaf_kind::enemies_hit;
-  else if ( leaf_name == "summed_remaining_life" )     fk = shape_fact_leaf_kind::summed_remaining_life;
+  // 261028-fzl (S5-F2): `enemies_hit` is no leaf any more (the header's hits.crash_lightning / hits.sundering columns count the same enemies).
+  if ( leaf_name == "summed_remaining_life" )          fk = shape_fact_leaf_kind::summed_remaining_life;
   else if ( leaf_name == "long_lived_count" )          fk = shape_fact_leaf_kind::long_lived_count;
   else
   {
@@ -3394,10 +3505,9 @@ const slot_table& bind_slots( player_t* p )
             // 260914-rbp Task 2c (ME-4 fork half): an `unresolved` binding for a `scalars`-family
             // leaf is FATAL, by name -- unlike a family with a legitimate "not present on this
             // profile" absence path (deck/pets/items), every `scalars` leaf name is a literal
-            // strcmp/name-equality dispatch inside resolve_scalar_leaf/hits_switch_parent_name
+            // strcmp/name-equality dispatch inside resolve_scalar_leaf
             // above; an unresolved one can only mean the census and this file's dispatch table
-            // have drifted (a typo'd leaf name, a removed direct_id case, a switch row whose
-            // `.at_least_<k>` suffix strip produced a name no branch matches) -- exactly the
+            // have drifted (a typo'd leaf name, a removed direct_id case) -- exactly the
             // silent-`missing`-for-the-life-of-a-schema failure mode ME-4 closes. Thrown here,
             // at bind time, rather than left to surface later as a quietly absent observation.
             //
@@ -3852,23 +3962,13 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
     return cl_shape;
   };
 
-  // 260914-rbp Task 2c (HI-1): the seven hits.* scalars, computed AT MOST ONCE per build_obs()
-  // call. Before this task, every slot bound to a hits.* direct_id repeated this action's own
-  // lookup_pick()/count_hits_within_radius() walk independently -- with the `at_least_k`
-  // switch rows (BL-2) there can be up to 38 such slots for these seven values in a single
-  // decision. This struct is filled once regardless of how many slots read from it this
-  // decision; every hits.* case below reads a field of it instead of recomputing.
-  // hits.crash_lightning reuses get_crash_lightning_shape() above rather than a second
-  // compute_crash_lightning_shape() call.
+  // 260914-rbp Task 2c (HI-1): the hand-read hits.* scalars, computed AT MOST ONCE per build_obs() call. 261028-fzl (S5-F2): only the two that
+  // count NEW DoTs (lava_lash.flame_shock_spread, voltaic_blaze.new_flame_shocks) are still hand readings; the enemies-hit counts are census
+  // rows (get_census_hit below).
   struct hits_values_t
   {
-    double chain_lightning                = 0.0;
-    double tempest                        = 0.0;
-    double crash_lightning                = 0.0;
     double lava_lash_flame_shock_spread   = 0.0;
-    double voltaic_blaze_cleave           = 0.0;
     double voltaic_blaze_new_flame_shocks = 0.0;
-    double fire_nova                      = 0.0;
   };
   bool hits_values_computed = false;
   hits_values_t hits_values;
@@ -3877,26 +3977,6 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
     if ( hits_values_computed )
       return hits_values;
     hits_values_computed = true;
-
-    if ( action_t* cl_action = resolve_hits_action_handles( p ).chain_lightning )
-    {
-      bool      found = false;
-      player_t* pick  = rl_target_select::lookup_pick( cl_action, &found );
-      if ( found && pick != nullptr )
-        hits_values.chain_lightning = static_cast<double>(
-            rl_target_select::chain_hop_count_for_start( cl_action, pick ) );
-    }
-
-    if ( action_t* tempest_action = resolve_hits_action_handles( p ).tempest )
-    {
-      bool      found = false;
-      player_t* pick  = rl_target_select::lookup_pick( tempest_action, &found );
-      if ( found && pick != nullptr )
-        hits_values.tempest = static_cast<double>( rl_target_select::count_hits_within_radius(
-            tempest_action->player, pick, tempest_action->radius ) );
-    }
-
-    hits_values.crash_lightning = static_cast<double>( get_crash_lightning_shape().enemies_hit );
 
     if ( action_t* lava_lash_action = resolve_hits_action_handles( p ).lava_lash )
     {
@@ -3920,39 +4000,9 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
       {
         const rl_target_select::vb_lava_lash_geometry_t& geo =
             rl_target_select::resolve_vb_lava_lash_geometry( vb_action->player );
-        const int hits = rl_target_select::count_hits_within_radius(
-            vb_action->player, pick, geo.vb_radius );
-        hits_values.voltaic_blaze_cleave =
-            static_cast<double>( geo.vb_cap > 0 ? std::min( geo.vb_cap, hits ) : 0 );
         hits_values.voltaic_blaze_new_flame_shocks = static_cast<double>(
             rl_target_select::count_new_flame_shock_neighbours(
                 vb_action->player, pick, geo.vb_radius, geo.vb_cap, true ) );
-      }
-    }
-
-    if ( action_t* explosion = resolve_hits_action_handles( p ).fire_nova_explosion )
-    {
-      const double radius = explosion->radius;
-      const int    cap    = explosion->aoe > 0 ? explosion->aoe : 0;
-      if ( radius > 0.0 && cap > 0 )
-      {
-        double    sum    = 0.0;
-        player_t* caster = explosion->player;
-        for ( player_t* carrier : caster->sim->target_non_sleeping_list )
-        {
-          if ( !carrier->is_enemy() || !rl_target_select::rl_counts_as_enemy( carrier ) )  // 262-04 (IN-02)
-            continue;
-          // Q6 (rulings, HIT-INPUTS-DESIGN.md §2.5): caster-filtered -- THIS actor's own Flame
-          // Shock, the SAME find_dot("flame_shock", caster) idiom build_enemy_fact's own
-          // flame_shock_remaining field already uses (WR-04).
-          dot_t* fs = carrier->find_dot( "flame_shock", caster );
-          if ( !fs || !fs->is_ticking() )
-            continue;
-          const int hits_from_this_carrier =
-              rl_target_select::count_hits_within_radius( caster, carrier, radius );
-          sum += static_cast<double>( std::min( cap, hits_from_this_carrier ) );
-        }
-        hits_values.fire_nova = sum;
       }
     }
 
@@ -4461,41 +4511,6 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
             // its cooldown-derived sibling) are REMOVED here -- see the resolve_scalar_leaf
             // removal comment above for the full rationale; this removal is its own commit.
 
-            // 260914-rbp Task 1 (R5, HIT-INPUTS-DESIGN.md §2.1): the stamped pick's own greedy
-            // chain-hop count (radius 10.0, cap 3/5, both resolved BY NAME through
-            // resolve_thorims_branch_geometry) -- read via the SAME per-decision stash
-            // preference_chain_lightning itself reads (rl_target_select::chain_hop_count_for_start),
-            // never a fresh walk. 0 when no pick is stamped for chain_lightning this decision.
-            // 260914-rbp Task 2c (HI-1): reads the per-decision memoised hits_values_t above --
-            // computed once regardless of how many switch/at_least_k slots bind to this direct_id.
-            case direct_id::hits_chain_lightning:
-              raw = get_hits_values().chain_lightning;
-              status = lookup_status::present;
-              break;
-
-            // 260914-rbp Task 1 (R6, rulings Q3); CORRECTED Task 2b (Q17 review, A2): 1 +
-            // live enemies within Tempest's own resolved radius (+ combat_reach) of the pick,
-            // UNCAPPED -- the pick itself is always hit (memo ss2.0's "a splash always hits its
-            // centre"), so this is NOT an alias of target_facts.tempest.neighbours_within_radius
-            // (that one-hop proxy family stays centre-excluded, untouched). Computed directly
-            // via count_hits_within_radius against tempest_action's OWN resolved radius,
-            // never through the full build_enemy_fact (which also walks three extra O(N) fields
-            // per call for nothing this scalar does not need). 0 when no pick is stamped for
-            // tempest this decision.
-            case direct_id::hits_tempest:
-              raw = get_hits_values().tempest;
-              status = lookup_status::present;
-              break;
-
-            // 260914-rbp Task 1 (R9, HIT-INPUTS-DESIGN.md §2.3): compute_crash_lightning_shape(p)
-            // .enemies_hit -- an ALIAS of what slot 163 (shapes.crash_lightning.enemies_hit)
-            // already reads today; never a pick-based read since Crash Lightning is a
-            // player-centred CONE, not a targeted pick (OR-2).
-            case direct_id::hits_crash_lightning:
-              raw = get_hits_values().crash_lightning;
-              status = lookup_status::present;
-              break;
-
             // 260914-rbp Task 1 (R7, HIT-INPUTS-DESIGN.md §2.3, rulings Q6): min(5, enemies
             // within 12 yd (+ reach) of the pick that LACK this actor's Flame Shock), 0 unless
             // talent.molten_assault.ok() -- radius/cap resolved BY NAME through
@@ -4507,48 +4522,16 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
               status = lookup_status::present;
               break;
 
-            // 260914-rbp Task 1 (R9, HIT-INPUTS-DESIGN.md §2.2a); CORRECTED Task 2b (Q17
-            // review, A2 -- memo ss2.0 lines 315-316: "a cleave always hits its target"):
-            // min(6, 1 + enemies within 10 yd (+ reach) of the pick) -- radius/cap resolved BY
-            // NAME off voltaic_blaze_damage's own resolved radius (R13, this task) / aoe (set by
-            // hand at that action's own ctor from Voltaic Blaze's effectN(4)). The +1 for the
-            // pick itself is now baked into count_hits_within_radius (it matches the
-            // engine's own `aoe=6` counting the primary target as one of the six). 0 when no
-            // pick is stamped for voltaic_blaze this decision.
-            case direct_id::hits_voltaic_blaze_cleave:
-              raw = get_hits_values().voltaic_blaze_cleave;
-              status = lookup_status::present;
-              break;
-
             // 260914-rbp Task 1 (R9, HIT-INPUTS-DESIGN.md §2.2b); CORRECTED Task 2b (Q17
             // review, A2): of the cleave hits (including the pick itself, A2's "cleave always
             // hits its target"), how many lack this actor's Flame Shock -- min(cap, (pick lacks
             // Flame Shock ? 1 : 0) + new-Flame-Shock neighbours), SAME radius/cap as
-            // hits_voltaic_blaze_cleave, via count_new_flame_shock_neighbours(include_pick=true)
+            // the voltaic blaze cleave (census.voltaic_blaze), via count_new_flame_shock_neighbours(include_pick=true)
             // (naturally bounded by the cleave count: the Flame-Shock filter only ever REMOVES
             // candidates from the identical hit set). 0 when no pick is stamped for
             // voltaic_blaze this decision.
             case direct_id::hits_voltaic_blaze_new_flame_shocks:
               raw = get_hits_values().voltaic_blaze_new_flame_shocks;
-              status = lookup_status::present;
-              break;
-
-            // 260914-rbp Task 1 (R9, HIT-INPUTS-DESIGN.md §2.2c, rulings Q2); CORRECTED
-            // Task 2b (Q17 review, A2 -- memo §A.6: "the explosion is centred ON the carrier and
-            // hits it", spell 333977 aoe 6 counts the centre): Σ over enemies carrying THIS
-            // actor's Flame Shock of min(6, 1 + enemies within 8 yd (+ reach) of that carrier) --
-            // the +1 for the carrier itself is baked into count_hits_within_radius, so a
-            // single Flame-Shocked carrier with zero neighbours now reads 1 (not 0), matching
-            // "single target with one carrier now reads 1" (A2). Double-counting across carriers
-            // is still allowed (a tight pack's overlap IS the value this leaf carries, never
-            // erased by de-duplicating). ONE GLOBAL scalar, not keyed on any stamped pick (Q2:
-            // Fire Nova is a 30% roll on every Voltaic Blaze cast that explodes on every CURRENT
-            // carrier, so its hit count is target-independent) -- radius/cap resolved BY NAME off
-            // fire_nova_explosion's own resolved radius/aoe (spell 333977, "8 yd radius" /
-            // "Max Targets 6"). 0 when the explosion action does not exist (Fire Nova untalented
-            // on this build).
-            case direct_id::hits_fire_nova:
-              raw = get_hits_values().fire_nova;
               status = lookup_status::present;
               break;
 
@@ -4808,7 +4791,6 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
                   : compute_sundering_shape( const_cast<player_t*>( p ) );
           switch ( b.shape_fact_leaf )
           {
-            case shape_fact_leaf_kind::enemies_hit:            raw = static_cast<double>( shape.enemies_hit ); break;
             case shape_fact_leaf_kind::summed_remaining_life:  raw = shape.summed_remaining_life; break;
             case shape_fact_leaf_kind::long_lived_count:       raw = static_cast<double>( shape.long_lived_count ); break;
           }

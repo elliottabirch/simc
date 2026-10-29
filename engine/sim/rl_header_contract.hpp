@@ -191,7 +191,7 @@ constexpr bool enhancement_targeted_tokens_unchanged()
 struct pinned_rule { const char* token; const char* rule; };
 struct pinned_fact { rl_fact_kind kind; const char* name; std::size_t slot; const char* feature; };
 struct pinned_wait { const char* label; rl_wait_kind kind; double threshold; };
-struct pinned_hit  { const char* family; const char* member; const char* provider; };
+struct pinned_hit  { const char* family; const char* member; const char* provider; int centre_action; rl_hit_gate gate; };
 
 constexpr bool enhancement_rule_prefs_unchanged()
 {
@@ -216,19 +216,23 @@ constexpr bool enhancement_rule_prefs_unchanged()
 
 constexpr bool enhancement_declared_facts_unchanged()
 {
-  constexpr pinned_fact today[ 8 ] = {
+  // 261028-fzl (S5-F2): ten facts (the header regenerated at S4/S4b: venomfang_remaining left, flametongue_attack, lashing_flames and
+  // marked_for_execution joined, every slot after the first four shifted with the 25-feature target block).
+  constexpr pinned_fact today[ 10 ] = {
     { rl_fact_kind::dot_remaining, "flame_shock",                      10, "flame_shock_remaining" },
     { rl_fact_kind::dot_remaining, "burning_core",                     13, "burning_core_remaining" },
     { rl_fact_kind::debuff_stacks, "lightning_rod",                    14, "lightning_rod_stacks" },
     { rl_fact_kind::dot_remaining, "lightning_rod",                    15, "lightning_rod_remaining" },
-    { rl_fact_kind::dot_remaining, "venomfang",                        16, "venomfang_remaining" },
-    { rl_fact_kind::debuff_stacks, "venomfang_debuff",                 17, "venomfang_debuff_stacks" },
-    { rl_fact_kind::dot_remaining, "venomfang_debuff",                 18, "venomfang_debuff_remaining" },
-    { rl_fact_kind::dot_remaining, "rune_of_unleashed_fire_lingering", 19, "rune_of_unleashed_fire_lingering_remaining" },
+    { rl_fact_kind::debuff_stacks, "venomfang_debuff",                 16, "venomfang_debuff_stacks" },
+    { rl_fact_kind::dot_remaining, "venomfang_debuff",                 17, "venomfang_debuff_remaining" },
+    { rl_fact_kind::dot_remaining, "rune_of_unleashed_fire_lingering", 18, "rune_of_unleashed_fire_lingering_remaining" },
+    { rl_fact_kind::dot_remaining, "flametongue_attack",               22, "flametongue_attack_remaining" },
+    { rl_fact_kind::dot_remaining, "lashing_flames",                   23, "lashing_flames_remaining" },
+    { rl_fact_kind::dot_remaining, "marked_for_execution",             24, "marked_for_execution_remaining" },
   };
-  if ( RL_DECLARED_FACT_COUNT != 8 )
+  if ( RL_DECLARED_FACT_COUNT != 10 )
     return false;
-  for ( std::size_t k = 0; k < 8; ++k )
+  for ( std::size_t k = 0; k < 10; ++k )
   {
     if ( RL_DECLARED_FACTS[ k ].kind != today[ k ].kind || !streq( RL_DECLARED_FACTS[ k ].name, today[ k ].name ) ||
          RL_DECLARED_FACTS[ k ].slot != today[ k ].slot )
@@ -258,20 +262,35 @@ constexpr bool enhancement_wait_defs_unchanged()
 
 constexpr bool enhancement_hit_providers_unchanged()
 {
-  constexpr pinned_hit today[ 7 ] = {
-    { "hits", "chain_lightning",                "shaman.chain_lightning" },
-    { "hits", "tempest",                        "shaman.tempest" },
-    { "hits", "crash_lightning",                "shaman.crash_lightning" },
-    { "hits", "lava_lash.flame_shock_spread",   "shaman.lava_lash_flame_shock_spread" },
-    { "hits", "voltaic_blaze.cleave",           "shaman.voltaic_blaze_cleave" },
-    { "hits", "voltaic_blaze.new_flame_shocks", "shaman.voltaic_blaze_new_flame_shocks" },
-    { "hits", "fire_nova",                      "shaman.fire_nova" },
+  // 261028-fzl (S5-F2): nineteen rows, every one a generated census row (a button, or a proc / pet / carrier-sum action; the header's
+  // centre token and gate class ride with them) except the two D2 rows that count new DoTs, which keep their shaman providers.
+  constexpr pinned_hit today[ 19 ] = {
+    { "hits", "chain_lightning",                "census.chain_lightning",                         2, rl_hit_gate::unit },
+    { "hits", "tempest",                        "census.tempest",                                 4, rl_hit_gate::unit },
+    { "hits", "crash_lightning",                "census.crash_lightning",                         6, rl_hit_gate::unit },
+    { "hits", "lava_lash",                      "census.lava_lash",                               7, rl_hit_gate::unit },
+    { "hits", "voltaic_blaze",                  "census.voltaic_blaze",                           8, rl_hit_gate::unit },
+    { "hits", "sundering",                      "census.sundering",                              17, rl_hit_gate::shape },
+    { "hits", "primordial_storm",               "census.primordial_storm",                       18, rl_hit_gate::shape },
+    { "hits", "ascendance_damage",              "census.action.ascendance_damage",                9, rl_hit_gate::proc },
+    { "hits", "chain_lightning_ps",             "census.action.chain_lightning_ps",              -1, rl_hit_gate::proc },
+    { "hits", "crash_lightning_proc",           "census.action.crash_lightning_proc",             0, rl_hit_gate::proc },
+    { "hits", "doom_winds_damage",              "census.action.doom_winds_damage",               -1, rl_hit_gate::proc },
+    { "hits", "fire_nova",                      "census.action.fire_nova",                        8, rl_hit_gate::proc },
+    { "hits", "flametongue_attack_imbuement_mastery", "census.action.flametongue_attack_imbuement_mastery", -1, rl_hit_gate::proc },
+    { "hits", "perfected_guillotine",           "census.action.perfected_guillotine",            -1, rl_hit_gate::proc },
+    { "hits", "searing_volley",                 "census.pet.searing_totem.searing_volley",       -1, rl_hit_gate::proc },
+    { "hits", "tremor",                         "census.pet.surging_totem.tremor",               -1, rl_hit_gate::proc },
+    { "hits", "venomfang_burst",                "census.action.venomfang_burst",                 -1, rl_hit_gate::proc },
+    { "hits", "lava_lash.flame_shock_spread",   "shaman.lava_lash_flame_shock_spread",           -1, rl_hit_gate::none },
+    { "hits", "voltaic_blaze.new_flame_shocks", "shaman.voltaic_blaze_new_flame_shocks",         -1, rl_hit_gate::none },
   };
-  if ( RL_HIT_PROVIDER_COUNT != 7 )
+  if ( RL_HIT_PROVIDER_COUNT != 19 )
     return false;
-  for ( std::size_t k = 0; k < 7; ++k )
+  for ( std::size_t k = 0; k < 19; ++k )
     if ( !streq( RL_HIT_PROVIDERS[ k ].family, today[ k ].family ) || !streq( RL_HIT_PROVIDERS[ k ].member, today[ k ].member ) ||
-         !streq( RL_HIT_PROVIDERS[ k ].provider, today[ k ].provider ) )
+         !streq( RL_HIT_PROVIDERS[ k ].provider, today[ k ].provider ) || RL_HIT_PROVIDERS[ k ].centre_action != today[ k ].centre_action ||
+         RL_HIT_PROVIDERS[ k ].gate != today[ k ].gate )
       return false;
   return true;
 }
@@ -292,9 +311,9 @@ constexpr bool enhancement_aimed_ranges_unchanged()
 static_assert( rl_contract::proc_names_equal_enum_names(), "enhancement: RL_PROC_NAMES must equal rl_proc::NAMES (P1 compares the sidecar that carries them)" );
 static_assert( rl_contract::enhancement_targeted_tokens_unchanged(), "enhancement: the nine targeted tokens, in today's order" );
 static_assert( rl_contract::enhancement_rule_prefs_unchanged(), "enhancement: the nine aiming rules (token -> rule), in today's order" );
-static_assert( rl_contract::enhancement_declared_facts_unchanged(), "enhancement: the eight declared facts (kind, engine name, slot, feature name at that slot)" );
+static_assert( rl_contract::enhancement_declared_facts_unchanged(), "enhancement: the ten declared facts (kind, engine name, slot, feature name at that slot)" );
 static_assert( rl_contract::enhancement_wait_defs_unchanged(), "enhancement: the four wait definitions (label, kind, threshold)" );
-static_assert( rl_contract::enhancement_hit_providers_unchanged(), "enhancement: the seven hit providers (family, member, provider)" );
+static_assert( rl_contract::enhancement_hit_providers_unchanged(), "enhancement: the nineteen hit providers (family, member, provider, centre action, gate class)" );
 static_assert( rl_contract::streq( RL_RESOURCE_NAME, "maelstrom" ), "enhancement: the resource scalar is maelstrom (maelstrom_weapon is a buff)" );
 static_assert( RL_COOLDOWN_ROW_ACTION_COUNT == 1 && rl_contract::streq( RL_COOLDOWN_ROW_ACTION[ 0 ].cooldown_row, "strike" ) &&
                    rl_contract::streq( RL_COOLDOWN_ROW_ACTION[ 0 ].action_token, "stormstrike" ),
