@@ -241,6 +241,19 @@ std::string header_json( const std::string& translog_base )
       json_escape( RL_REGISTRY_ID ), json_escape( RL_QUANT_TABLE_SHA256 ), json_escape( translog_base ), RL_OBS_DIM );
 }
 
+// The range text of a slot's class in the refusal line (shard.py: "[0,1]", "[0,255]", "[0,65535]", "[lo,hi]" with %.17g); built only when a value is refused.
+std::string range_text( const rl_quant_slot& slot )
+{
+  switch ( slot.cls )
+  {
+    case rl_quant_class::bit: return "[0,1]";
+    case rl_quant_class::u8_lattice: return "[0,255]";
+    case rl_quant_class::u16_lattice: return "[0,65535]";
+    case rl_quant_class::i16_fixed: break;
+  }
+  return "[" + g17( slot.lo ) + "," + g17( slot.hi ) + "]";
+}
+
 // The first slot of `obs` (slot order) outside its class, or false. On true `refusal` is the RL_SHARD_OUT_OF_CLASS line.
 // Encoding, identically in shard.Codec.encode_observation: bit v == 0 or 1; lattice k = rint(double(v) * div), 0 <= k <= max, lut[k] bitwise equal; fixed v finite in
 // [lo, hi], q = rint((double(v) - lo) * inv_step), stored int16 = q - 32768. Writes the packed observation to `out` (RL_QUANT_OBS_BYTES, zeroed by the caller).
@@ -251,7 +264,6 @@ bool encode_observation( const float* obs, unsigned char* out, std::string& refu
     const rl_quant_slot& slot = RL_QUANT_SLOTS[ k ];
     const float v = obs[ k ];
     bool ok = false;
-    std::string range;
     switch ( slot.cls )
     {
       case rl_quant_class::bit:
@@ -263,7 +275,6 @@ bool encode_observation( const float* obs, unsigned char* out, std::string& refu
           out[ slot.column / 8 ] = static_cast<unsigned char>( out[ slot.column / 8 ] | ( 1u << ( slot.column % 8 ) ) );
           ok = true;
         }
-        range = "[0,1]";
         break;
       }
       case rl_quant_class::u8_lattice:
@@ -295,7 +306,6 @@ bool encode_observation( const float* obs, unsigned char* out, std::string& refu
             }
           }
         }
-        range = wide ? "[0,65535]" : "[0,255]";
         break;
       }
       case rl_quant_class::i16_fixed:
@@ -311,13 +321,13 @@ bool encode_observation( const float* obs, unsigned char* out, std::string& refu
             ok = true;
           }
         }
-        range = "[" + g17( slot.lo ) + "," + g17( slot.hi ) + "]";
         break;
       }
     }
     if ( !ok )
     {
-      refusal = fmt::format( "RL_SHARD_OUT_OF_CLASS slot={}:{} value={} class={} range={}", k, RL_OBS_NAMES[ k ], c_hex_float( static_cast<double>( v ) ), class_name( slot.cls ), range );
+      refusal = fmt::format( "RL_SHARD_OUT_OF_CLASS slot={}:{} value={} class={} range={}", k, RL_OBS_NAMES[ k ], c_hex_float( static_cast<double>( v ) ), class_name( slot.cls ),
+                             range_text( slot ) );
       return false;
     }
   }
@@ -429,37 +439,41 @@ void close_fight( const sim_t*, const player_t* p, const rl_translog::close_reco
     return;
   }
   // Rows in seq order (shard_derive.derive_fights: a stable argsort of the file-order rows by seq).
-  std::stable_sort( s.rows.begin(), s.rows.end(), []( const buffered_row_t& a, const buffered_row_t& b ) { return a.seq < b.seq; } );
+  std::vector<std::uint32_t> order( n );
+  for ( std::size_t k = 0; k < n; ++k )
+    order[ k ] = static_cast<std::uint32_t>( k );
+  std::stable_sort( order.begin(), order.end(), [ &s ]( std::uint32_t a, std::uint32_t b ) { return s.rows[ a ].seq < s.rows[ b ].seq; } );
+  const auto at = [ &s, &order ]( std::size_t k ) -> const buffered_row_t& { return s.rows[ order[ k ] ]; };
 
   // The per-cause reward, translog.per_cause_rewards in its operation order.
   const double final_damage = close.final_damage_total;
   for ( std::size_t k = 0; k + 1 < n; ++k )
   {
-    if ( s.rows[ k + 1 ].damage < s.rows[ k ].damage )
+    if ( at( k + 1 ).damage < at( k ).damage )
     {
       abort_entry( s, fmt::format( "RL_SHARD_REWARD_INPUT entry={} boundary-damage readings are not monotone non-decreasing at index {}: readings[{}]={} > readings[{}]={}", s.entry_index,
-                                   k, k, g17( s.rows[ k ].damage ), k + 1, g17( s.rows[ k + 1 ].damage ) ) );
+                                   k, k, g17( at( k ).damage ), k + 1, g17( at( k + 1 ).damage ) ) );
       return;
     }
   }
-  const double last_reading = s.rows[ n - 1 ].damage;
+  const double last_reading = at( n - 1 ).damage;
   if ( last_reading > final_damage * ( 1.0 + 0.0 ) )
   {
     abort_entry( s, fmt::format( "RL_SHARD_REWARD_INPUT entry={} the last boundary-damage reading ({}) exceeds compound_dmg ({})", s.entry_index, g17( last_reading ), g17( final_damage ) ) );
     return;
   }
-  const double prefix = s.rows[ 0 ].damage;
+  const double prefix = at( 0 ).damage;
   const double close_background = close.credit_real[ CREDIT_BACKGROUND ] + close.credit_real[ CREDIT_ORPHAN ];
   const double falls_below = -1e-6 * std::max( 1.0, final_damage );
   std::vector<double> reward64( n );
   double reward_sum = 0.0;
   for ( std::size_t k = 0; k < n; ++k )
   {
-    const std::uint64_t seq = s.rows[ k ].seq;
+    const std::uint64_t seq = at( k ).seq;
     const std::size_t idx = static_cast<std::size_t>( seq - p->rl_fight_first_seq );
     const double own = idx < p->rl_own_real.size() ? p->rl_own_real[ idx ] : 0.0;
-    const double next = k + 1 < n ? s.rows[ k + 1 ].background : close_background;
-    double background = next - s.rows[ k ].background;
+    const double next = k + 1 < n ? at( k + 1 ).background : close_background;
+    double background = next - at( k ).background;
     if ( background < falls_below )
     {
       abort_entry( s, fmt::format( "RL_SHARD_REWARD_INPUT entry={} the background credit falls by {} at row {}", s.entry_index, g17( -background ), k ) );
@@ -483,7 +497,7 @@ void close_fight( const sim_t*, const player_t* p, const rl_translog::close_reco
   {
     unsigned char* row = frame.data() + FIGHT_HEADER_BYTES + k * RL_SHARD_ROW_BYTES;
     std::string refusal;
-    if ( !encode_observation( s.rows[ k ].obs, row, refusal ) )
+    if ( !encode_observation( at( k ).obs, row, refusal ) )
     {
       abort_entry( s, refusal );
       return;
@@ -496,14 +510,14 @@ void close_fight( const sim_t*, const player_t* p, const rl_translog::close_reco
   {
     running = k + 1 == n ? reward64[ k ] : running + reward64[ k ];
     unsigned char* row = frame.data() + FIGHT_HEADER_BYTES + k * RL_SHARD_ROW_BYTES;
-    row[ OFF_ACTION ] = s.rows[ k ].action;
-    put<std::uint32_t>( frame, FIGHT_HEADER_BYTES + k * RL_SHARD_ROW_BYTES + OFF_MASK, s.rows[ k ].mask );
-    put<std::uint16_t>( frame, FIGHT_HEADER_BYTES + k * RL_SHARD_ROW_BYTES + OFF_TARGET, s.rows[ k ].chosen_target );
-    row[ OFF_FLAGS ] = s.rows[ k ].flags;
+    row[ OFF_ACTION ] = at( k ).action;
+    put<std::uint32_t>( frame, FIGHT_HEADER_BYTES + k * RL_SHARD_ROW_BYTES + OFF_MASK, at( k ).mask );
+    put<std::uint16_t>( frame, FIGHT_HEADER_BYTES + k * RL_SHARD_ROW_BYTES + OFF_TARGET, at( k ).chosen_target );
+    row[ OFF_FLAGS ] = at( k ).flags;
     put<float>( frame, FIGHT_HEADER_BYTES + k * RL_SHARD_ROW_BYTES + OFF_REWARD, static_cast<float>( reward64[ k ] ) );
     put<float>( frame, FIGHT_HEADER_BYTES + k * RL_SHARD_ROW_BYTES + OFF_DAMAGE_TO_END, static_cast<float>( running ) );
-    put<float>( frame, FIGHT_HEADER_BYTES + k * RL_SHARD_ROW_BYTES + OFF_T, s.rows[ k ].t );
-    put<float>( frame, FIGHT_HEADER_BYTES + k * RL_SHARD_ROW_BYTES + OFF_T_DECIDED, s.rows[ k ].t_decided );
+    put<float>( frame, FIGHT_HEADER_BYTES + k * RL_SHARD_ROW_BYTES + OFF_T, at( k ).t );
+    put<float>( frame, FIGHT_HEADER_BYTES + k * RL_SHARD_ROW_BYTES + OFF_T_DECIDED, at( k ).t_decided );
   }
 
   // The fight header (shard.fight_payload): magic, entry_index, shape, setup, stat, slot, net_sha256, rows, final_damage, fight_length.
