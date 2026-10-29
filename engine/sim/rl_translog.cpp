@@ -847,6 +847,14 @@ void write_row( sim_t* sim, player_t* p, const decision_record& r, const char* a
     p->rl_fight_first_seq_set = true;
   }
 
+  // 261028-fzl (S5c-F3b, owner ruling 16): the close row's observerReachDisagreements word of a button is the number of ROWS of the fight that press
+  // that button illegal in their own recorded mask. Observer mode plays SimC's own pick and tolerates a pick masked only by a reach rule
+  // (solver_control.cpp checked, before the row was staged, that no legality bit masks it); the count is taken here, at the one place a decision row
+  // is written, so a staged pick that is discarded without a row (ready_cancelled, replaced, an interrupted queue) is never counted, and the
+  // reader's own tally of rows (learn/rows.py) is equal by construction.
+  if ( sim->solver_policy_observe_stock && r.action < RL_ACTION_DIM && ( ( r.mask >> r.action ) & 1u ) == 0 )
+    ++fight_census().n[ census_slot::OBSERVER_REACH_FIRST + r.action ];
+
   // Append only -- no flush. The fight's close row flushes the whole
   // fight at once (D-13).
   append_row( root, &r );

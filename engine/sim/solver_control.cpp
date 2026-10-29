@@ -2091,7 +2091,9 @@ action_t* choose( player_t* p, action_t* apl_choice, execute_type et )
             protocol_abort( fmt::format( "OBSERVE_STOCK_MASK_DISAGREES: seq={} t={:.3f} SimC's own pick '{}' (button {}) is masked "
                                          "illegal by the catalog", seq, sim->current_time().total_seconds(), apl_choice->name(),
                                          observe_idx ) );
-          ++rl_translog::fight_census().n[ rl_translog::census_slot::OBSERVER_REACH_FIRST + static_cast<std::uint32_t>( observe_idx ) ];
+          // Counted when the ROW is written (rl_translog::write_row), not here: a pick made at this boundary can be staged and then
+          // discarded (ready_cancelled, a replaced hold, an interrupted queue) and write no row, and the close row's word must equal the
+          // rows' own count.
         }
         sim->solver_observe_idle_open = false;
         sim->solver_control_last_reply_type = "cast";
