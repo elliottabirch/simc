@@ -421,8 +421,8 @@ bool clips_write( const std::string& path );
 
 // capability_effective_bit: capability `capability_index`'s EFFECTIVE bit (own detector AND every
 // required capability) for actor `p`, memoised per actor -- the same value the observation's
-// capability.<id> column and its governed-slot rebind read. Constant for the actor's whole
-// fight, so the candidate table's gating costs one lookup per fact, never a detector walk.
+// capability.<id> column reads. Constant for the actor's whole fight. 261028-fzl (S5-F2): its consumers are the capability.<id> input
+// columns and the action mask's governs.actions check; the governed-slot rebinding and the aim-fact gate are deleted.
 bool capability_effective_bit( player_t* p, std::size_t capability_index );
 
 // compute_aim_context_indicators (R6): the aim head's six context inputs for the CURRENT decision,

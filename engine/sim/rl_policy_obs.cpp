@@ -1281,9 +1281,8 @@ bool rl_capability_effective_value( player_t* p, std::size_t idx,
 // 259-07 (Q2, Q19, R3): capability `idx`'s effective bit for actor `p`, memoised for the actor's
 // whole run (the detectors read talents, gear and set bonuses -- all fixed once the actor is
 // initialised). Same single-sim/single-thread precondition as every other per-actor cache in
-// this file (g_slot_table_cache, g_action_handle_cache), asserted at the fill site. Read by the
-// candidate table's gating in rl_target_select.cpp so a capability-governed fact reads the fixed
-// value exactly when the observation's own governed slots do.
+// this file (g_slot_table_cache, g_action_handle_cache), asserted at the fill site. 261028-fzl (S5-F2): the candidate table's capability
+// gate that read this in rl_target_select.cpp is deleted; the action mask's governs.actions check still reads it.
 bool capability_effective_bit( player_t* p, std::size_t idx )
 {
   assert( p->sim->threads == 1 && p->sim->profileset_map.empty() &&
@@ -3708,40 +3707,15 @@ const slot_table& bind_slots( player_t* p )
         counter, RL_OBS_DIM ) );
   }
 
-  // 246.1-05 (CAP-02): for every capability whose EFFECTIVE value is 0, rebind every slot it
-  // governs to the fixed value -- ONCE per actor, before the table is cached, so there is no
-  // per-decision cost and no path by which a governed slot could ever read anything but the
-  // fixed value (research hazard 2: a non-Troll row must never record "Berserking ready").
-  // capability_effective_memo is already fully populated (every one of the 17 capability.<id>
-  // scalars was walked above -- census note "materialized LAST"); the call below is a memoized
-  // no-op for every capability already computed, and a defensive direct compute for any that
-  // were not (there are none by construction, but this pass must never silently skip one).
-  for ( std::size_t ci = 0; ci < RL_CAPABILITY_COUNT; ++ci )
-  {
-    if ( rl_capability_effective_value( p, ci, capability_effective_memo ) )
-      continue;
-    const rl_capability& cap = RL_CAPABILITIES[ ci ];
-    for ( std::size_t gi = 0; gi < cap.governed_slots_count; ++gi )
-    {
-      std::size_t slot = RL_CAPABILITY_GOVERNED_SLOTS[ cap.governed_slots_offset + gi ];
-      if ( slot >= table.bindings.size() )
-      {
-        throw sc_runtime_error( fmt::format(
-            "rl_policy::bind_slots: capability '{}' governs out-of-range slot {} (table has {} "
-            "slots)",
-            cap.id, slot, table.bindings.size() ) );
-      }
-      table.bindings[ slot ].kind          = slot_binding_kind::constant;
-      table.bindings[ slot ].constant_value = RL_CAPABILITY_FIXED_VALUE;
-    }
-  }
+  // 261028-fzl (S5-F2, owner ruling 2026-10-28 "capability gates that modify other observations are REMOVED"): the CAP-02 rebinding that used to
+  // stand here (every slot a zero-bit capability governs rebound to RL_CAPABILITY_FIXED_VALUE) is deleted. Every slot reads its real value on
+  // every build; the capability bits stay as plain inputs (the capability.<id> columns bound above) and the action mask still reads
+  // governs.actions (rl_capability_assert_no_governed_action_legal). The header's governed-slot list is empty for enhancement and is not read.
 
-  // 290-C3: the `since_applied` bind-time refusals that need the FINAL table. A since_applied slot a zero-bit
-  // capability governs has just been rebound to the fixed constant above (an untalented buff, a raid-event-gated
-  // buff), which is the one legitimate way for its buff handle to be absent. A slot that is STILL bound to a null
-  // buff here names a buff this build never created although nothing governs it away, and a since_applied leaf that
-  // no family resolved is a generator/engine mismatch: both throw by name, instead of reading `missing` for the
-  // life of the schema (research 2026-10-12, section 2.2 item 3; the Q17 refusal's style).
+  // 290-C3, changed by 261028-fzl (S5-F2): a `since_applied` leaf no family resolved is still a generator/engine mismatch and still throws by
+  // name. A slot whose buff handle is null (a buff this build never created: an untaken talent, a raid-event-gated buff) is no longer a refusal
+  // now that nothing governs it away: it reads the leaf's `missing` for the whole fight, and resolve_buff_leaf has already proved that value
+  // encodes to the saturated 1.0 (its raw `missing` equals the leaf's clipDiv), i.e. "never applied" at the cap.
   for ( std::size_t si = 0; si < table.bindings.size(); ++si )
   {
     const slot_binding& sb = table.bindings[ si ];
@@ -3752,14 +3726,6 @@ const slot_table& bind_slots( player_t* p )
       throw sc_runtime_error( fmt::format(
           "rl_policy::bind_slots: leaf 'since_applied' (slot {} '{}') resolved to unresolved -- no family resolves "
           "this leaf for that member; generator/engine mismatch",
-          si, table.composed_names[ si ] ) );
-    }
-    if ( sb.kind == slot_binding_kind::buff && sb.buff == nullptr )
-    {
-      throw sc_runtime_error( fmt::format(
-          "rl_policy::bind_slots: leaf 'since_applied' (slot {} '{}') is bound to a buff this build never created, "
-          "and no capability governs it away -- registry/build mismatch (a misspelt buff name, or a buff that needs "
-          "a capability governance entry)",
           si, table.composed_names[ si ] ) );
     }
   }
@@ -3861,8 +3827,8 @@ bool schema_has_since_applied()
 // 290-C3: one object, keyed by buff name, value = seconds since the buff's last successful application (the raw
 // number, uncapped, the SAME subtraction build_obs does) or null when it was never applied this fight. Down buffs
 // are included (the decision dump's "buffs" object lists only buffs that are up). Reads the bound table, so the
-// buffs listed are exactly the since_applied slots the observation reads (a slot a capability governs away is a
-// constant and is not listed).
+// buffs listed are exactly the since_applied slots the observation reads a live buff handle for (a buff this build never created reads the
+// saturated value, 261028-fzl, and is not listed).
 void write_since_applied_json( std::ostream& out, player_t* p )
 {
   const slot_table& t = bind_slots( p );
@@ -4082,9 +4048,9 @@ void build_obs( const player_t* p, const rl_state_t& s, const slot_table& t,
             // 290-C3: BEFORE the down-means-absent test below (that test would make this leaf useless: the
             // reading matters while the buff is down). seconds since the last successful application;
             // timespan_t::min() = never applied since the fight reset = absent = the leaf's `missing`, which
-            // the bind refused to accept unless it encodes to the saturated 1.0. buff is non-null here: the
-            // post-rebind pass in bind_slots refused a null handle by name.
-            const timespan_t last_applied = buff->last_trigger_time();
+            // the bind refused to accept unless it encodes to the saturated 1.0. 261028-fzl (S5-F2): a null handle (a buff this
+            // build never created) is absent for the whole fight, the same saturated reading, instead of a bind refusal.
+            const timespan_t last_applied = buff != nullptr ? buff->last_trigger_time() : timespan_t::min();
             if ( last_applied == timespan_t::min() )
             {
               status = lookup_status::absent;

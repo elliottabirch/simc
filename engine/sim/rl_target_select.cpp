@@ -1389,17 +1389,12 @@ void compute_chain_hop_counts( double radius, int cap, const std::vector<player_
   }
 }
 
-// 259-07 (Q2, Q19, R3, R4; fork B3/B4): which of the 23 declared facts read the capability fixed
-// value for THIS actor -- a fact whose governing capability's effective bit is 0 (venomfang
-// weapon, Unleashed Fire lingering rune, the tier 2-piece: RL_AIM_FACT_DESCS[i].capability).
-// Constant for the actor's whole fight (talents, gear and set bonuses are fixed once the actor
-// is initialised), so it is computed ONCE per actor, never per slot or per decision, from the
-// observation's own memoised capability bits (rl_policy::capability_effective_bit) -- the gated
-// facts and the observation's governed columns can therefore never disagree. select() looks the
-// gate up once per decision and hands it to every slot's fill.
+// 259-07 (Q2, Q19, R3, R4; fork B3/B4), changed by 261028-fzl (S5-F2): the per-actor holder of the candidate table's fact sources. The capability
+// gate that used to live here (a fact whose governing capability's effective bit is 0 read RL_CAPABILITY_FIXED_VALUE whatever its raw value)
+// is deleted with the CAP-02 rebinding of the observation (owner 2026-10-28: a capability gate on an input is removed; every fact reads its
+// real value on every build). select() looks the holder up once per decision and hands it to every slot's fill.
 struct aim_fact_gate
 {
-  std::array<bool, RL_TARGET_FEATURES> governed_off{};
   // Phase 268 plan 03: the per-index source of each fact, copied once per actor from the actor binding (built, and any unknown
   // feature refused, at the actor's arise). Lives here so the per-decision gate lookup also hands the fill its source table
   // without a second map lookup per candidate; cleared and counted with g_aim_fact_gate_cache.
@@ -1412,26 +1407,25 @@ const aim_fact_gate& aim_fact_gate_for( player_t* p )
   auto it = g_aim_fact_gate_cache.find( p );
   if ( it != g_aim_fact_gate_cache.end() )
     return it->second;
+  // Hard swap, no shim: a header that still gates an aim fact on a capability predates the governance removal, and the fork no longer
+  // implements that gate, so it is refused here by name instead of being read as ungated.
+  for ( std::size_t i = 0; i < RL_TARGET_FEATURES; ++i )
+    if ( RL_AIM_FACT_DESCS[ i ].capability >= 0 )
+      throw sc_runtime_error( fmt::format(
+          "rl_target_select: registry '{}' gates aim fact '{}' (index {}) on capability {}, but capability gates on inputs were removed "
+          "(261028-fzl, owner 2026-10-28); regenerate the header from a registry whose aim facts declare no capability (bind-time refusal)",
+          RL_REGISTRY_ID, RL_AIM_FACT_DESCS[ i ].name, i, RL_AIM_FACT_DESCS[ i ].capability ) );
   aim_fact_gate gate;
   gate.sources = actor_binding_for( p ).feature_sources;
-  for ( std::size_t i = 0; i < RL_TARGET_FEATURES; ++i )
-  {
-    const int capability = RL_AIM_FACT_DESCS[ i ].capability;
-    gate.governed_off[ i ] =
-        capability >= 0 && !rl_policy::capability_effective_bit( p, static_cast<std::size_t>( capability ) );
-  }
   return g_aim_fact_gate_cache.emplace( p, gate ).first->second;
 }
 
 // One fact, scaled and gated exactly as the registry declares (and as scripts/rl/
 // target_features.py's scale_fact/encode_fact_row do, bit for bit): the raw value rounded to
 // float32 (the value production logged), the observation's own arithmetic in float64
-// (rl_policy::apply_leaf_scale), the result rounded to float32; a fact whose capability bit is 0
-// reads RL_CAPABILITY_FIXED_VALUE whatever the raw value.
-float scaled_fact( float raw, std::size_t i, const aim_fact_gate& gate )
+// (rl_policy::apply_leaf_scale), the result rounded to float32. 261028-fzl (S5-F2): no capability gate any more.
+float scaled_fact( float raw, std::size_t i )
 {
-  if ( gate.governed_off[ i ] )
-    return static_cast<float>( RL_CAPABILITY_FIXED_VALUE );
   const rl_aim_fact_desc& d = RL_AIM_FACT_DESCS[ i ];
   return static_cast<float>( rl_policy::apply_leaf_scale( static_cast<double>( raw ), d.kind, d.has_div,
                                                           d.div, d.has_clip_div, d.clip_div ) );
@@ -1444,7 +1438,7 @@ float scaled_fact( float raw, std::size_t i, const aim_fact_gate& gate )
 // Phase 268 plan 03 (research Pitfall 6): the fill is BY INDEX from the actor's bind-time source table (gate.sources) -- the
 // registry's own declaration order, RL_TARGET_FEATURE_NAMES. Each fact is read as a double (a bool or an int widens exactly)
 // from its generic enemy_fact field, its declared value or its class geometry provider, then SCALED into the registry's
-// range and capability-gated (see scaled_fact above). The generated fact-list macro in the constants header is generated
+// range (see scaled_fact above). The generated fact-list macro in the constants header is generated
 // content and no code expands it any more. The rules never read this scaled block (they rank on `enemy_fact`'s raw values --
 // build_enemy_fact_for_scoring keeps the truth and its 600 s time-to-die cap; build_enemy_fact (this block) shows the fuzzed estimate, 261022-fuz).
 void fill_candidate_features( const action_t*, const enemy_fact& fact, float* out,
@@ -1466,7 +1460,7 @@ void fill_candidate_features( const action_t*, const enemy_fact& fact, float* ou
         value = src.geometry( fact );
         break;
     }
-    out[ i ] = scaled_fact( static_cast<float>( value ), i, gate );
+    out[ i ] = scaled_fact( static_cast<float>( value ), i );
   }
 }
 
